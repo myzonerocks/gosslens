@@ -96,6 +96,13 @@ object Gosslens {
     internal external fun nativeBrushVertices(session: Long, outBuffer: ByteBuffer, capacityFloats: Int): Int
     internal external fun nativeBrushSetMode(session: Long, mode: Int): Int
     internal external fun nativeBrushEraseAt(session: Long, x: Float, y: Float, radius: Float): Int
+    internal external fun nativeArBrushSetStyle(session: Long, r: Float, g: Float, b: Float, a: Float, width: Float): Int
+    internal external fun nativeArBrushSetMode(session: Long, mode: Int): Int
+    internal external fun nativeArBrushBegin(session: Long): Int
+    internal external fun nativeArBrushPoint(session: Long, x: Float, y: Float, z: Float): Int
+    internal external fun nativeArBrushEnd(session: Long): Int
+    internal external fun nativeArBrushUndo(session: Long): Int
+    internal external fun nativeArBrushClear(session: Long): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -707,6 +714,17 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
 
     /** Erases committed strokes within radius (normalized units) of the point; returns how many, or -1 on a bad session. */
     fun eraseStrokes(x: Float, y: Float, radius: Float): Int = Gosslens.nativeBrushEraseAt(handle, x, y, radius)
+
+    /** The world-anchored brush. Points are pushed in the world frame world tracking reports; the engine projects and draws them so a stroke stays fixed in the scene. */
+    fun setARBrushStyle(r: Float, g: Float, b: Float, a: Float, width: Float): Boolean =
+        Gosslens.nativeArBrushSetStyle(handle, r, g, b, a, width) == 0
+
+    fun setARBrushMode(mode: BrushMode): Boolean = Gosslens.nativeArBrushSetMode(handle, mode.raw) == 0
+    fun beginARStroke(): Boolean = Gosslens.nativeArBrushBegin(handle) == 0
+    fun addARStrokePoint(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeArBrushPoint(handle, x, y, z) == 0
+    fun endARStroke(): Boolean = Gosslens.nativeArBrushEnd(handle) == 0
+    fun undoARStroke(): Boolean = Gosslens.nativeArBrushUndo(handle) == 0
+    fun clearARStrokes(): Boolean = Gosslens.nativeArBrushClear(handle) == 0
 
     /** Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the renderer. */
     fun brushVertices(): FloatArray {

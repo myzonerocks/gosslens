@@ -610,6 +610,48 @@ export fn Java_com_gosslens_Gosslens_nativeBrushEraseAt(env: *JniEnv, cls: jobje
     return @intCast(removed);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeArBrushSetStyle(env: *JniEnv, cls: jobject, session: i64, r: f32, g: f32, b: f32, a: f32, width: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_ar_brush_set_style(sessionFromHandle(session), r, g, b, a, width));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeArBrushSetMode(env: *JniEnv, cls: jobject, session: i64, mode: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_ar_brush_set_mode(sessionFromHandle(session), @intCast(@max(mode, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeArBrushBegin(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_ar_brush_begin(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeArBrushPoint(env: *JniEnv, cls: jobject, session: i64, x: f32, y: f32, z: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_ar_brush_point(sessionFromHandle(session), x, y, z));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeArBrushEnd(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_ar_brush_end(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeArBrushUndo(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_ar_brush_undo(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeArBrushClear(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_ar_brush_clear(sessionFromHandle(session)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;
