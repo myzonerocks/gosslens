@@ -17,9 +17,9 @@ git hooks. The pinned compiler lives in `.zigversion`; `build.zig` rejects a
 different version, so the toolchain question has exactly one answer.
 
     tools/toolchain-sync
-    zig build test                 all unit tests
-    zig build gate -- --tree       the source gate over tracked files
-    zig build ci                   tests, source gate, abi, vendor check, provenance
+    zig build test               # all unit tests
+    zig build gate -- --tree     # the source gate over tracked files
+    zig build ci                 # tests, source gate, abi, vendor check, provenance
 
 `zig build ci` is the whole local bar in one command. Green here is green
 upstream, so never push and let CI find a failure the local run would have.
@@ -141,16 +141,16 @@ corresponding harness or device/browser proof.
 
 Watch a change run before a device is involved:
 
-    zig build harness       run a lens through the real graph, drawn on screen
-    zig build conformance   run a reference lens through the ABI twice, proving bit-stable output
+    zig build harness       # run a lens through the real graph, drawn on screen
+    zig build conformance   # run a reference lens through the ABI twice, proving bit-stable output
 
 Every engine feature that touches the ABI adds a conformance proof, and the run
 prints one PROOF line per capability it clears.
 
 Shaders and lenses:
 
-    zig build test -Dlens-shaders=true      compile every shader on all backends
-    zig build lens-validate -- <bundle>     validate one bundle
+    zig build test -Dlens-shaders=true    # compile every shader on all backends
+    zig build lens-validate -- <bundle>   # validate one bundle
 
 The shader build compiles each pass to Metal, SPIR-V, GLSL ES, and WGSL, so a
 shader that only builds on one backend fails here rather than on a device. The
