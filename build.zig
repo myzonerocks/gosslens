@@ -343,6 +343,15 @@ pub fn build(b: *std.Build) void {
     const composite_layout_tests = b.addTest(.{ .root_module = compositeLayoutModule(b, target, optimize) });
     const geo_tests = b.addTest(.{ .root_module = geoModule(b, target, optimize) });
     const stroke_tests = b.addTest(.{ .root_module = strokeModule(b, target, optimize) });
+    const world_board_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("core/stroke/world_board.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "math", .module = math_module },
+            .{ .name = "stroke", .module = strokeModule(b, target, optimize) },
+        },
+    }) });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
@@ -377,6 +386,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(composite_layout_tests).step);
     test_step.dependOn(&b.addRunArtifact(geo_tests).step);
     test_step.dependOn(&b.addRunArtifact(stroke_tests).step);
+    test_step.dependOn(&b.addRunArtifact(world_board_tests).step);
     if (have_jolt) {
         const physics_tests = b.addTest(.{ .root_module = physicsModule(b, target, optimize, true) });
         test_step.dependOn(&b.addRunArtifact(physics_tests).step);
