@@ -1,53 +1,47 @@
-//! World-anchored brush strokes: the AR-brush geometry. Points are pushed in
-//! world space and projected to screen each frame through the camera pose, then
-//! drawn by the same ribbon path as the screen brush. Bounded fixed storage, so
-//! a stroke allocates nothing and the frame path only reads finished points.
+//! World-anchored brush strokes: the AR-brush storage. Points are pushed in
+//! world space; the engine projects them to screen and draws them by the same
+//! ribbon path as the screen brush. Pure, bounded state, no allocation; the
+//! projection and mode bias live with the engine's math and renderer.
 const std = @import("std");
-const math = @import("math");
-const stroke = @import("stroke");
 
-pub const max_strokes = stroke.max_strokes;
-pub const max_points = stroke.max_points;
+pub const max_strokes = 64;
+pub const max_points = 256;
 
 pub const Point3 = struct { x: f32, y: f32, z: f32 };
 
+/// mode matches stroke.Mode's integer values (0 pen, 1 highlighter, 2 marker,
+/// 3 neon); the engine turns it back into the mode when it projects the stroke.
 pub const WorldStroke = struct {
     points: [max_points]Point3 = undefined,
     count: u16 = 0,
     color: [4]f32 = .{ 1, 1, 1, 1 },
-    width: f32 = 0.01, // half-width in normalized screen units
-    mode: stroke.Mode = .pen,
+    width: f32 = 0.01,
+    mode: u8 = 0,
 };
 
 /// A board of world-anchored strokes. begin/point/end build the current stroke
-/// in world space; project maps every finished stroke to a screen-space
-/// stroke.Board the renderer already knows how to draw. All bounded, no
-/// allocation.
+/// in world space; the engine reads finished strokes back to project and draw
+/// them. All bounded, no allocation.
 pub const WorldBoard = struct {
     strokes: [max_strokes]WorldStroke = undefined,
     count: u16 = 0,
     drawing: bool = false,
     style_color: [4]f32 = .{ 1, 1, 1, 1 },
     style_width: f32 = 0.01,
-    style_mode: stroke.Mode = .pen,
+    style_mode: u8 = 0,
 
     pub fn setStyle(self: *WorldBoard, color: [4]f32, width: f32) void {
         self.style_color = color;
         self.style_width = if (width > 0) width else 0.001;
     }
 
-    pub fn setMode(self: *WorldBoard, mode: stroke.Mode) void {
+    pub fn setMode(self: *WorldBoard, mode: u8) void {
         self.style_mode = mode;
     }
 
-    /// Opens a stroke with the current style biased by the current mode, the
-    /// same bias the screen brush applies, so a projected stroke looks the same.
     pub fn begin(self: *WorldBoard) void {
         if (self.count >= max_strokes) return;
-        const m = self.style_mode;
-        var color = self.style_color;
-        color[3] *= m.alphaScale();
-        self.strokes[self.count] = .{ .color = color, .width = self.style_width * m.widthScale(), .mode = m };
+        self.strokes[self.count] = .{ .color = self.style_color, .width = self.style_width, .mode = self.style_mode };
         self.drawing = true;
     }
 
@@ -74,35 +68,14 @@ pub const WorldBoard = struct {
         self.drawing = false;
     }
 
-    /// Whether world stroke i draws additively (its mode is neon), for the
-    /// projected board's per-stroke blend.
-    pub fn additiveOf(self: *const WorldBoard, i: u16) bool {
-        if (i >= self.count) return false;
-        return self.strokes[i].mode.additive();
+    pub fn strokeCount(self: *const WorldBoard) u16 {
+        return self.count;
     }
 
-    /// Projects every finished world stroke into `out`, a screen-space board the
-    /// renderer draws with its ribbon path. `view_proj` is the camera view and
-    /// projection combined. A point behind the camera is dropped, breaking the
-    /// ribbon rather than smearing it. `out` is cleared first, no allocation.
-    pub fn project(self: *const WorldBoard, view_proj: math.Mat4, out: *stroke.Board) void {
-        out.clear();
-        for (self.strokes[0..self.count]) |ws| {
-            if (ws.count < 2 or out.count >= max_strokes) continue;
-            const os = &out.strokes[out.count];
-            os.* = .{ .color = ws.color, .width = ws.width, .mode = ws.mode };
-            var n: u16 = 0;
-            for (ws.points[0..ws.count]) |p| {
-                const clip = view_proj.mulVec(.{ p.x, p.y, p.z, 1.0 });
-                if (clip[3] <= 1e-6) continue; // behind the camera
-                const ndc_x = clip[0] / clip[3];
-                const ndc_y = clip[1] / clip[3];
-                os.points[n] = .{ .x = ndc_x * 0.5 + 0.5, .y = 0.5 - ndc_y * 0.5 };
-                n += 1;
-            }
-            os.count = n;
-            if (n >= 2) out.count += 1;
-        }
+    /// The committed stroke at i, or null past the end.
+    pub fn get(self: *const WorldBoard, i: u16) ?*const WorldStroke {
+        if (i >= self.count) return null;
+        return &self.strokes[i];
     }
 };
 
@@ -119,43 +92,37 @@ test "a world stroke commits only with two or more points" {
     b.point(1, 1, -1);
     b.end();
     try t.expectEqual(@as(u16, 1), b.count);
+    try t.expectEqual(@as(u16, 2), b.get(0).?.count);
 }
 
-test "project maps world points to screen through the view-projection" {
+test "the style rides each opened stroke" {
     var b = WorldBoard{};
+    b.setStyle(.{ 1, 0.2, 0.4, 1 }, 0.02);
+    b.setMode(3); // neon
     b.begin();
-    b.point(0, 0, 0);
-    b.point(0.5, -0.5, 0);
+    b.point(0, 0, -1);
+    b.point(1, 0, -1);
     b.end();
-
-    var out = stroke.Board{};
-    b.project(math.Mat4.identity, &out);
-    try t.expectEqual(@as(u16, 1), out.count);
-    // (0,0,0) -> centre of the screen.
-    try t.expectApproxEqAbs(@as(f32, 0.5), out.strokes[0].points[0].x, 1e-6);
-    try t.expectApproxEqAbs(@as(f32, 0.5), out.strokes[0].points[0].y, 1e-6);
-    // (0.5,-0.5,0): ndc (0.5,-0.5) -> screen (0.75, 0.75) with y measured down.
-    try t.expectApproxEqAbs(@as(f32, 0.75), out.strokes[0].points[1].x, 1e-6);
-    try t.expectApproxEqAbs(@as(f32, 0.75), out.strokes[0].points[1].y, 1e-6);
-    // The style rides across the projection.
-    try t.expectEqual(stroke.Mode.pen, out.strokes[0].mode);
+    const s = b.get(0).?;
+    try t.expectEqual(@as(u8, 3), s.mode);
+    try t.expectApproxEqAbs(@as(f32, 0.02), s.width, 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.2), s.color[1], 1e-6);
 }
 
-test "a point behind the camera is dropped" {
+test "undo drops the last stroke and clear empties the board" {
     var b = WorldBoard{};
-    b.setMode(.neon);
     b.begin();
-    b.point(0, 0, 1); // in front once w flips via projection below
-    b.point(0, 0, 2);
+    b.point(0, 0, -1);
+    b.point(1, 1, -1);
     b.end();
-    // A projection that puts positive-z behind the camera (w = -z).
-    var vp = math.Mat4.identity;
-    vp.cols[2][3] = -1.0; // w = -z
-    vp.cols[3][3] = 0.0;
-    var out = stroke.Board{};
-    b.project(vp, &out);
-    // Both points have w <= 0, so nothing survives to draw.
-    try t.expectEqual(@as(u16, 0), out.count);
-    // Neon still rides the world stroke's own style.
-    try t.expect(b.additiveOf(0));
+    b.begin();
+    b.point(0, 1, -1);
+    b.point(1, 0, -1);
+    b.end();
+    try t.expectEqual(@as(u16, 2), b.strokeCount());
+    b.undo();
+    try t.expectEqual(@as(u16, 1), b.strokeCount());
+    b.clear();
+    try t.expectEqual(@as(u16, 0), b.strokeCount());
+    try t.expectEqual(@as(?*const WorldStroke, null), b.get(0));
 }

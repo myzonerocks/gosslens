@@ -27,6 +27,7 @@ const audio_mix = @import("audio_mix");
 const comp = @import("layout");
 const geo = @import("geo");
 const stroke = @import("stroke");
+const wboard = @import("world_board");
 const physics = @import("physics");
 const script = @import("script");
 const audio_playback = @import("audio_playback");
@@ -74,7 +75,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 26;
+pub const abi_minor: u16 = 27;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -488,6 +489,12 @@ pub const Session = struct {
     /// The draw and AR-brush board. The engine owns stroke state and undo/redo;
     /// goss_session_brush_vertices reads the finished ribbon for the renderer.
     brush: stroke.Board = .{},
+    /// World-anchored strokes and the screen-space board they project into each
+    /// frame. The AR brush stores points in world space; the render path
+    /// projects them through the camera pose and draws them like the screen
+    /// brush, so they stay put in the scene as the camera moves.
+    ar_board: wboard.WorldBoard = .{},
+    ar_projected: stroke.Board = .{},
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -974,28 +981,73 @@ fn brushDrawnInChain(s: *Session) bool {
     return false;
 }
 
-/// Draws every committed brush stroke over view_id. Each stroke draws on its own
-/// so neon blends additively while pen, highlighter, and marker blend on alpha.
-fn drawBrushStrokes(r: *render.Renderer, s: *Session, view_id: u8) void {
+/// Draws every committed stroke of `board` over view_id. Each stroke draws on
+/// its own so neon blends additively while pen, highlighter, and marker blend on
+/// alpha.
+fn drawBrushStrokes(r: *render.Renderer, board: *const stroke.Board, view_id: u8) void {
     // One stroke's worst-case ribbon: every segment expanded to six vertices.
     var buf: [(stroke.max_points - 1) * 6 * stroke.floats_per_vertex]f32 = undefined;
     var si: u16 = 0;
-    while (si < s.brush.strokeCount()) : (si += 1) {
-        const floats = s.brush.buildStroke(si, &buf);
+    while (si < board.strokeCount()) : (si += 1) {
+        const floats = board.buildStroke(si, &buf);
         if (floats == 0) continue;
-        r.submitBrush(view_id, &buf, @intCast(floats / stroke.floats_per_vertex), s.brush.strokeAdditive(si));
+        r.submitBrush(view_id, &buf, @intCast(floats / stroke.floats_per_vertex), board.strokeAdditive(si));
     }
 }
 
-/// Draws the brush board over the final composited image on its own view, so a
-/// stroke rides on top of the preview, captures, and recording alike. Stands
-/// down when a draw.board node already placed the board in the chain, or with no
-/// strokes to draw.
+/// Projects one world stroke into `out`, a screen-space stroke, through the
+/// combined view-projection, applying the stroke's mode bias the same way the
+/// screen brush does. A point behind the camera (w at or below zero) is dropped,
+/// breaking the ribbon rather than smearing it. Screen y is measured down.
+fn projectWorldStroke(view_proj: math.Mat4, ws: *const wboard.WorldStroke, out: *stroke.Stroke) void {
+    const mode = stroke.Mode.fromU32(ws.mode);
+    var col = ws.color;
+    col[3] *= mode.alphaScale();
+    out.* = .{ .color = col, .width = ws.width * mode.widthScale(), .mode = mode };
+    var n: u16 = 0;
+    var pi: u16 = 0;
+    while (pi < ws.count) : (pi += 1) {
+        const p = ws.points[pi];
+        const clip = view_proj.mulVec(.{ p.x, p.y, p.z, 1.0 });
+        if (clip[3] <= 1e-6) continue; // behind the camera
+        out.points[n] = .{ .x = clip[0] / clip[3] * 0.5 + 0.5, .y = 0.5 - clip[1] / clip[3] * 0.5 };
+        n += 1;
+    }
+    out.count = n;
+}
+
+/// Projects the world-anchored strokes into s.ar_projected using the camera view
+/// and projection. Nothing projects without active world tracking. Clears the
+/// projected board first, allocation-free.
+fn projectArBoard(s: *Session) void {
+    s.ar_projected.clear();
+    if (!s.world_engine_fed or s.world.state.tracking_state != 2) return;
+    const world_from_camera: math.Mat4 = .{ .cols = @bitCast(s.world.state.world_from_camera) };
+    const projection: math.Mat4 = .{ .cols = @bitCast(s.world.state.projection) };
+    const view_proj = projection.mul(world_from_camera.inverseRigid());
+    var si: u16 = 0;
+    while (si < s.ar_board.strokeCount()) : (si += 1) {
+        const ws = s.ar_board.get(si) orelse continue;
+        if (ws.count < 2 or s.ar_projected.count >= stroke.max_strokes) continue;
+        const os = &s.ar_projected.strokes[s.ar_projected.count];
+        projectWorldStroke(view_proj, ws, os);
+        if (os.count >= 2) s.ar_projected.count += 1;
+    }
+}
+
+/// Draws the brush over the final composited image on its own view. The screen
+/// board stands down when a draw.board node already placed it in the chain; the
+/// world-anchored board projects through the camera pose and draws whenever
+/// tracking is live.
 fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, width: u16, height: u16) void {
-    if (s.brush.strokeCount() == 0 or brushDrawnInChain(s)) return;
+    projectArBoard(s);
+    const draw_screen = s.brush.strokeCount() > 0 and !brushDrawnInChain(s);
+    const draw_ar = s.ar_projected.strokeCount() > 0;
+    if (!draw_screen and !draw_ar) return;
     render.Renderer.setViewTarget(view_id, finalTarget(e, s), width, height);
     r.tile = null;
-    drawBrushStrokes(r, s, view_id);
+    if (draw_screen) drawBrushStrokes(r, &s.brush, view_id);
+    if (draw_ar) drawBrushStrokes(r, &s.ar_projected, view_id);
 }
 
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
@@ -1238,7 +1290,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // The frame passes through whole, then the brush board draws its
                 // strokes over it at the node's own place in the chain.
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
-                drawBrushStrokes(r, s, view_id);
+                drawBrushStrokes(r, &s.brush, view_id);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2965,6 +3017,56 @@ pub export fn goss_session_brush_erase_at(session: ?*Session, x: f32, y: f32, ra
     const s = session orelse return .invalid_argument;
     const removed = s.brush.eraseAt(x, y, radius);
     if (out_removed) |o| o.* = removed;
+    return .ok;
+}
+
+/// Sets the color and half-width the next world-anchored stroke opens with. The
+/// width is in normalized screen units, applied after projection.
+pub export fn goss_session_ar_brush_set_style(session: ?*Session, r: f32, g: f32, b: f32, a: f32, width: f32) Status {
+    const s = session orelse return .invalid_argument;
+    s.ar_board.setStyle(.{ r, g, b, a }, width);
+    return .ok;
+}
+
+/// Selects the brush preset the next world stroke opens with: 0 pen, 1
+/// highlighter, 2 marker, 3 neon. Unknown values fall back to pen.
+pub export fn goss_session_ar_brush_set_mode(session: ?*Session, mode: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.ar_board.setMode(@intCast(@min(mode, 3)));
+    return .ok;
+}
+
+/// Opens a world-anchored stroke in the current style.
+pub export fn goss_session_ar_brush_begin(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.ar_board.begin();
+    return .ok;
+}
+
+/// Adds a point in world space (the same frame the platform world tracking
+/// reports poses in). The engine projects it to screen each frame.
+pub export fn goss_session_ar_brush_point(session: ?*Session, x: f32, y: f32, z: f32) Status {
+    const s = session orelse return .invalid_argument;
+    s.ar_board.point(x, y, z);
+    return .ok;
+}
+
+/// Commits the open world stroke. A stroke of fewer than two points is dropped.
+pub export fn goss_session_ar_brush_end(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.ar_board.end();
+    return .ok;
+}
+
+pub export fn goss_session_ar_brush_undo(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.ar_board.undo();
+    return .ok;
+}
+
+pub export fn goss_session_ar_brush_clear(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.ar_board.clear();
     return .ok;
 }
 
@@ -4882,4 +4984,32 @@ test "activating a lens with a blend.pass node loads its background image for re
 
     goss_session_deactivate_lens(session);
     try t.expectEqual(@as(usize, 0), session.blend_loaders.count());
+}
+
+test "the ar brush projects a world stroke to screen and drops points behind the camera" {
+    var ws = wboard.WorldStroke{ .count = 2, .mode = 3, .color = .{ 1, 1, 1, 1 }, .width = 0.02 };
+    ws.points[0] = .{ .x = 0, .y = 0, .z = 0 };
+    ws.points[1] = .{ .x = 0.5, .y = -0.5, .z = 0 };
+    var out: stroke.Stroke = undefined;
+    projectWorldStroke(math.Mat4.identity, &ws, &out);
+    try t.expectEqual(@as(u16, 2), out.count);
+    // (0,0,0) -> screen centre; (0.5,-0.5,0) -> (0.75, 0.75) with y measured down.
+    try t.expectApproxEqAbs(@as(f32, 0.5), out.points[0].x, 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.5), out.points[0].y, 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.75), out.points[1].x, 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.75), out.points[1].y, 1e-6);
+    // Neon mode biases the width and alpha the same way the screen brush does.
+    try t.expectApproxEqAbs(@as(f32, 0.04), out.width, 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.6), out.color[3], 1e-6);
+
+    // A projection that puts the points behind the camera drops them all.
+    var vp = math.Mat4.identity;
+    vp.cols[2][3] = -1.0; // w = -z
+    vp.cols[3][3] = 0.0;
+    var ws2 = wboard.WorldStroke{ .count = 2, .mode = 0, .color = .{ 1, 1, 1, 1 }, .width = 0.01 };
+    ws2.points[0] = .{ .x = 0, .y = 0, .z = 1 };
+    ws2.points[1] = .{ .x = 0, .y = 0, .z = 2 };
+    var out2: stroke.Stroke = undefined;
+    projectWorldStroke(vp, &ws2, &out2);
+    try t.expectEqual(@as(u16, 0), out2.count);
 }

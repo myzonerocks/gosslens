@@ -234,4 +234,18 @@ extension GossSession {
         }
         return out
     }
+
+    /// The world-anchored brush. Points are pushed in the world frame the
+    /// platform world tracking reports; the engine projects and draws them, so a
+    /// stroke stays fixed in the scene.
+    public func setARBrushStyle(red: Float, green: Float, blue: Float, alpha: Float, width: Float) throws {
+        try checked(goss_session_ar_brush_set_style(handle, red, green, blue, alpha, width))
+    }
+
+    public func setARBrushMode(_ mode: BrushMode) throws { try checked(goss_session_ar_brush_set_mode(handle, mode.rawValue)) }
+    public func beginARStroke() throws { try checked(goss_session_ar_brush_begin(handle)) }
+    public func addARStrokePoint(x: Float, y: Float, z: Float) throws { try checked(goss_session_ar_brush_point(handle, x, y, z)) }
+    public func endARStroke() throws { try checked(goss_session_ar_brush_end(handle)) }
+    public func undoARStroke() throws { try checked(goss_session_ar_brush_undo(handle)) }
+    public func clearARStrokes() throws { try checked(goss_session_ar_brush_clear(handle)) }
 }

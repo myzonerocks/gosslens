@@ -870,6 +870,37 @@ export class GossSession {
     return removed;
   }
 
+  /// The world-anchored brush. Points are pushed in the world frame world
+  /// tracking reports; the engine projects and draws them so a stroke stays
+  /// fixed in the scene. Nothing draws without live world tracking.
+  setARBrushStyle(r: number, g: number, b: number, a: number, width: number): void {
+    this.mod.ccall("goss_session_ar_brush_set_style", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, r, g, b, a, width]);
+  }
+
+  setARBrushMode(mode: number): void {
+    this.mod.ccall("goss_session_ar_brush_set_mode", "number", ["number", "number"], [this.handle, mode]);
+  }
+
+  beginARStroke(): void {
+    this.mod.ccall("goss_session_ar_brush_begin", "number", ["number"], [this.handle]);
+  }
+
+  addARStrokePoint(x: number, y: number, z: number): void {
+    this.mod.ccall("goss_session_ar_brush_point", "number", ["number", "number", "number", "number"], [this.handle, x, y, z]);
+  }
+
+  endARStroke(): void {
+    this.mod.ccall("goss_session_ar_brush_end", "number", ["number"], [this.handle]);
+  }
+
+  undoARStroke(): void {
+    this.mod.ccall("goss_session_ar_brush_undo", "number", ["number"], [this.handle]);
+  }
+
+  clearARStrokes(): void {
+    this.mod.ccall("goss_session_ar_brush_clear", "number", ["number"], [this.handle]);
+  }
+
   /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the
   /// renderer. Queries the float count, then reads it out of a scratch buffer.
   brushVertices(): Float32Array {
