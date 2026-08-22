@@ -12,13 +12,19 @@ build contracts, not suggestions.
 ## Start here
 
 Use the project toolchain. Do not substitute a global Zig installation.
+`tools/toolchain-sync` installs the pinned Zig into `.local/zig` and wires the
+git hooks. The pinned compiler lives in `.zigversion`; `build.zig` rejects a
+different version, so the toolchain question has exactly one answer.
 
     tools/toolchain-sync
-    zig build test
-    zig build gate -- --tree
+    zig build test                 all unit tests
+    zig build gate -- --tree       the source gate over tracked files
+    zig build ci                   tests, source gate, abi, vendor check, provenance
 
-The pinned compiler lives in `.zigversion`. `build.zig` rejects a different
-version.
+`zig build ci` is the whole local bar in one command. Green here is green
+upstream, so never push and let CI find a failure the local run would have.
+Regenerate the ABI baseline after an intended ABI change with
+`zig build abi -- --print > tools/abi-baseline.txt` and commit it with the code.
 
 ## Keep the structure
 
@@ -129,15 +135,40 @@ regression.
 
 Run the relevant unit, gate, harness, and platform tests for the change. A
 camera capability is proven on the target that uses it, not by a host-only
-compile.
+compile. At minimum `zig build ci` stays green, and changes that affect capture,
+rendering, tracking, lenses, media, ABI, or SDK behavior also need the
+corresponding harness or device/browser proof.
 
-At minimum, changes must leave these green:
+Watch a change run before a device is involved:
 
-    zig build test
-    zig build gate -- --tree
+    zig build harness       run a lens through the real graph, drawn on screen
+    zig build conformance   run a reference lens through the ABI twice, proving bit-stable output
 
-Changes that affect capture, rendering, tracking, lenses, media, ABI, or SDK
-behavior also need the corresponding harness or device/browser proof.
+Every engine feature that touches the ABI adds a conformance proof, and the run
+prints one PROOF line per capability it clears.
+
+Shaders and lenses:
+
+    zig build test -Dlens-shaders=true      compile every shader on all backends
+    zig build lens-validate -- <bundle>     validate one bundle
+
+The shader build compiles each pass to Metal, SPIR-V, GLSL ES, and WGSL, so a
+shader that only builds on one backend fails here rather than on a device. The
+bundle format the validator checks against is specified in
+[lenses/SPEC.md](lenses/SPEC.md).
+
+Per platform, [docs/PARITY.md](docs/PARITY.md) is the table of what is proven
+where:
+
+- iOS: `zig build ios` and `zig build ios-simulator`; the demo under
+  `sdk/swift/demo` runs it. See [docs/INTEGRATION-iOS.md](docs/INTEGRATION-iOS.md).
+- Android: `zig build android`; the demo under `sdk/kotlin/demo` runs it. See
+  [docs/INTEGRATION-ANDROID.md](docs/INTEGRATION-ANDROID.md).
+- Web: `zig build wasm`; the demo under `sdk/ts/demo` runs it. See
+  [docs/INTEGRATION-WEB.md](docs/INTEGRATION-WEB.md).
+
+When a capability moves from built to demonstrated on a platform, update its row
+in [docs/PARITY.md](docs/PARITY.md) in the same change.
 
 ## Git
 

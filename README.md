@@ -46,7 +46,7 @@ hooks. build.zig refuses any other compiler, so the toolchain question has
 exactly one answer. Toolchain decisions are logged in
 [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md). The full set of local tools, from the
 on-screen harness and the conformance proof to the per-device checks, is in
-[docs/DEVELOPING.md](docs/DEVELOPING.md).
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## SDKs
 
