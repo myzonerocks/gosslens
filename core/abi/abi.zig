@@ -966,6 +966,24 @@ fn tiledAspect(s: *Session, rect_w: u16, rect_h: u16) f32 {
     return @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
 }
 
+/// Draws the brush board over the final composited image on its own view, so a
+/// draw or AR-brush stroke rides on top of the preview, captures, and recording
+/// alike. Each stroke draws on its own so neon blends additively while pen,
+/// highlighter, and marker blend on alpha. A no-op with no strokes.
+fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, width: u16, height: u16) void {
+    if (s.brush.strokeCount() == 0) return;
+    render.Renderer.setViewTarget(view_id, finalTarget(e, s), width, height);
+    r.tile = null;
+    // One stroke's worst-case ribbon: every segment expanded to six vertices.
+    var buf: [(stroke.max_points - 1) * 6 * stroke.floats_per_vertex]f32 = undefined;
+    var si: u16 = 0;
+    while (si < s.brush.strokeCount()) : (si += 1) {
+        const floats = s.brush.buildStroke(si, &buf);
+        if (floats == 0) continue;
+        r.submitBrush(view_id, &buf, @intCast(floats / stroke.floats_per_vertex), s.brush.strokeAdditive(si));
+    }
+}
+
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
     // The tile is set per final full-screen pass below; every source-res
     // intermediate draw and every non-capture frame renders untiled.
@@ -1018,8 +1036,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         r.tile = s.capture_tile;
         render.Renderer.setViewTarget(0, finalTarget(e, s), preview_rect_w, preview_rect_h);
         r.submitPreview(0, current.preview, rotation * 90, mirror);
-        if (s.capture_requested) blitCaptureToSwapChain(e, r, 1);
-        blitRecordingToSwapChain(e, r, 1);
+        drawBrushOverlay(e, r, s, 1, preview_rect_w, preview_rect_h);
+        if (s.capture_requested) blitCaptureToSwapChain(e, r, 2);
+        blitRecordingToSwapChain(e, r, 2);
         return;
     }
 
@@ -1475,8 +1494,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         }
     }
 
-    if (s.capture_requested and ready_count > 0) blitCaptureToSwapChain(e, r, next_view_id);
-    if (ready_count > 0) blitRecordingToSwapChain(e, r, next_view_id + 1);
+    if (ready_count > 0) drawBrushOverlay(e, r, s, next_view_id, output_width, output_height);
+    if (s.capture_requested and ready_count > 0) blitCaptureToSwapChain(e, r, next_view_id + 1);
+    if (ready_count > 0) blitRecordingToSwapChain(e, r, next_view_id + 2);
 
     if (ready_count == 0) {
         // Either beauty or a multi-source layout produced input_texture as a
@@ -1485,8 +1505,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         // swap chain. The no-beauty, no-layout case already returned above.
         render.Renderer.setViewTarget(next_view_id, finalTarget(e, s), output_width, output_height);
         r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
-        if (s.capture_requested) blitCaptureToSwapChain(e, r, next_view_id + 1);
-        blitRecordingToSwapChain(e, r, next_view_id + 2);
+        drawBrushOverlay(e, r, s, next_view_id + 1, output_width, output_height);
+        if (s.capture_requested) blitCaptureToSwapChain(e, r, next_view_id + 2);
+        blitRecordingToSwapChain(e, r, next_view_id + 3);
     }
 }
 

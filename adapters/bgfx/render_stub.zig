@@ -211,6 +211,14 @@ pub const Renderer = struct {
         _ = mask_texture;
     }
 
+    pub fn submitBrush(r: *Renderer, view_id: u16, verts: [*]const f32, vertex_count: u32, additive: bool) void {
+        _ = r;
+        _ = view_id;
+        _ = verts;
+        _ = vertex_count;
+        _ = additive;
+    }
+
     pub fn submitLutPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, lut_texture: TextureHandle) void {
         _ = r;
         _ = view_id;

@@ -182,48 +182,76 @@ pub const Board = struct {
         return v;
     }
 
-    /// Expands every committed stroke into a triangle ribbon in `out`
-    /// (floats_per_vertex per vertex), returning the vertex count. Each segment
-    /// becomes a quad whose thickness is the stroke's half-width offset
-    /// perpendicular to the segment direction.
+    /// Expands every committed stroke into one flat triangle ribbon in `out`
+    /// (floats_per_vertex per vertex), returning the vertex float count. Used by
+    /// the SDK-side pull; the engine renderer draws per stroke so it can pick a
+    /// blend per mode.
     pub fn buildVertices(self: *const Board, out: []f32) usize {
         var v: usize = 0;
         for (self.strokes[0..self.count]) |s| {
-            if (s.count < 2) continue;
-            var i: u16 = 0;
-            while (i + 1 < s.count) : (i += 1) {
-                const a = s.points[i];
-                const b = s.points[i + 1];
-                var dx = b.x - a.x;
-                var dy = b.y - a.y;
-                const len = @sqrt(dx * dx + dy * dy);
-                if (len < 1e-6) continue;
-                dx /= len;
-                dy /= len;
-                const nx = -dy * s.width; // perpendicular offset
-                const ny = dx * s.width;
-                const corners = [4][2]f32{
-                    .{ a.x + nx, a.y + ny },
-                    .{ a.x - nx, a.y - ny },
-                    .{ b.x - nx, b.y - ny },
-                    .{ b.x + nx, b.y + ny },
-                };
-                const tri = [6]usize{ 0, 1, 2, 0, 2, 3 };
-                for (tri) |c| {
-                    if (v + floats_per_vertex > out.len) return v;
-                    out[v + 0] = corners[c][0];
-                    out[v + 1] = corners[c][1];
-                    out[v + 2] = s.color[0];
-                    out[v + 3] = s.color[1];
-                    out[v + 4] = s.color[2];
-                    out[v + 5] = s.color[3];
-                    v += floats_per_vertex;
-                }
-            }
+            v += strokeRibbon(s, out[v..]);
         }
         return v;
     }
+
+    /// The number of committed strokes, so a caller can draw each on its own and
+    /// choose the blend its mode asks for.
+    pub fn strokeCount(self: *const Board) u16 {
+        return self.count;
+    }
+
+    /// Whether committed stroke i draws additively (its mode is neon).
+    pub fn strokeAdditive(self: *const Board, i: u16) bool {
+        if (i >= self.count) return false;
+        return self.strokes[i].mode.additive();
+    }
+
+    /// Builds one committed stroke's ribbon into `out` and returns the vertex
+    /// float count, or zero for an out-of-range index.
+    pub fn buildStroke(self: *const Board, i: u16, out: []f32) usize {
+        if (i >= self.count) return 0;
+        return strokeRibbon(self.strokes[i], out);
+    }
 };
+
+/// Expands one stroke into a per-segment triangle ribbon in `out`, returning the
+/// vertex float count. Each segment becomes a quad whose thickness is the
+/// stroke's half-width offset perpendicular to the segment direction.
+fn strokeRibbon(s: Stroke, out: []f32) usize {
+    if (s.count < 2) return 0;
+    var v: usize = 0;
+    var i: u16 = 0;
+    while (i + 1 < s.count) : (i += 1) {
+        const a = s.points[i];
+        const b = s.points[i + 1];
+        var dx = b.x - a.x;
+        var dy = b.y - a.y;
+        const len = @sqrt(dx * dx + dy * dy);
+        if (len < 1e-6) continue;
+        dx /= len;
+        dy /= len;
+        const nx = -dy * s.width; // perpendicular offset
+        const ny = dx * s.width;
+        const corners = [4][2]f32{
+            .{ a.x + nx, a.y + ny },
+            .{ a.x - nx, a.y - ny },
+            .{ b.x - nx, b.y - ny },
+            .{ b.x + nx, b.y + ny },
+        };
+        const tri = [6]usize{ 0, 1, 2, 0, 2, 3 };
+        for (tri) |c| {
+            if (v + floats_per_vertex > out.len) return v;
+            out[v + 0] = corners[c][0];
+            out[v + 1] = corners[c][1];
+            out[v + 2] = s.color[0];
+            out[v + 3] = s.color[1];
+            out[v + 4] = s.color[2];
+            out[v + 5] = s.color[3];
+            v += floats_per_vertex;
+        }
+    }
+    return v;
+}
 
 /// True when any segment of the stroke passes within the squared radius of the
 /// point. A one-point stroke tests the point itself.
@@ -343,6 +371,29 @@ test "eraseAt drops strokes it crosses and keeps the rest" {
     try t.expectEqual(@as(usize, 0), b.eraseAt(0.5, 0.4, 0.05));
     b.begin();
     try t.expectEqual(@as(usize, 0), b.eraseAt(0.5, 0.8, 0.2));
+}
+
+test "per-stroke access mirrors the flat ribbon" {
+    var b = Board{};
+    b.setMode(.neon);
+    b.begin();
+    b.point(0, 0);
+    b.point(1, 0);
+    b.end();
+    b.setMode(.pen);
+    b.begin();
+    b.point(0, 1);
+    b.point(1, 1);
+    b.end();
+    try t.expectEqual(@as(u16, 2), b.strokeCount());
+    try t.expect(b.strokeAdditive(0)); // neon
+    try t.expect(!b.strokeAdditive(1)); // pen
+    var one: [6 * floats_per_vertex]f32 = undefined;
+    try t.expectEqual(@as(usize, 6 * floats_per_vertex), b.buildStroke(0, &one));
+    try t.expectEqual(@as(usize, 0), b.buildStroke(9, &one)); // out of range
+    // The two per-stroke ribbons sum to the flat ribbon.
+    var flat: [max_vertices]f32 = undefined;
+    try t.expectEqual(@as(usize, 2 * 6 * floats_per_vertex), b.buildVertices(&flat));
 }
 
 test "clear drops everything" {
