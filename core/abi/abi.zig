@@ -74,7 +74,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 25;
+pub const abi_minor: u16 = 26;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -2889,6 +2889,26 @@ pub export fn goss_session_brush_vertices(session: ?*Session, out: ?[*]f32, capa
         return .ok;
     };
     count.* = s.brush.buildVertices(dst[0..capacity_floats]);
+    return .ok;
+}
+
+/// Selects the brush preset the next stroke opens with: 0 pen, 1 highlighter,
+/// 2 marker, 3 neon. An unknown value falls back to pen. The preset biases the
+/// stroke's width and alpha; the renderer reads mode 3 to draw the ribbon
+/// additively for the neon glow.
+pub export fn goss_session_brush_set_mode(session: ?*Session, mode: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.setMode(stroke.Mode.fromU32(mode));
+    return .ok;
+}
+
+/// Erases every committed stroke whose ribbon passes within radius (normalized
+/// units) of (x, y) and reports how many through out_removed. Refuses while a
+/// stroke is open. Allocation-free; compacts the stroke array in place.
+pub export fn goss_session_brush_erase_at(session: ?*Session, x: f32, y: f32, radius: f32, out_removed: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const removed = s.brush.eraseAt(x, y, radius);
+    if (out_removed) |o| o.* = removed;
     return .ok;
 }
 

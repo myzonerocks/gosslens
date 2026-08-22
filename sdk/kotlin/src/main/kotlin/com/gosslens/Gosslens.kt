@@ -94,6 +94,8 @@ object Gosslens {
     internal external fun nativeBrushClear(session: Long): Int
     internal external fun nativeBrushVertexCount(session: Long): Int
     internal external fun nativeBrushVertices(session: Long, outBuffer: ByteBuffer, capacityFloats: Int): Int
+    internal external fun nativeBrushSetMode(session: Long, mode: Int): Int
+    internal external fun nativeBrushEraseAt(session: Long, x: Float, y: Float, radius: Float): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -697,6 +699,14 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     fun undoStroke(): Boolean = Gosslens.nativeBrushUndo(handle) == 0
     fun redoStroke(): Boolean = Gosslens.nativeBrushRedo(handle) == 0
     fun clearStrokes(): Boolean = Gosslens.nativeBrushClear(handle) == 0
+
+    /** The brush preset the next stroke opens with. */
+    enum class BrushMode(val raw: Int) { PEN(0), HIGHLIGHTER(1), MARKER(2), NEON(3) }
+
+    fun setBrushMode(mode: BrushMode): Boolean = Gosslens.nativeBrushSetMode(handle, mode.raw) == 0
+
+    /** Erases committed strokes within radius (normalized units) of the point; returns how many, or -1 on a bad session. */
+    fun eraseStrokes(x: Float, y: Float, radius: Float): Int = Gosslens.nativeBrushEraseAt(handle, x, y, radius)
 
     /** Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the renderer. */
     fun brushVertices(): FloatArray {
