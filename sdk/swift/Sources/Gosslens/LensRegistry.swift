@@ -207,6 +207,20 @@ extension GossSession {
     public func redoStroke() throws { try checked(goss_session_brush_redo(handle)) }
     public func clearStrokes() throws { try checked(goss_session_brush_clear(handle)) }
 
+    /// The brush preset the next stroke opens with.
+    public enum BrushMode: UInt32 { case pen = 0, highlighter = 1, marker = 2, neon = 3 }
+
+    public func setBrushMode(_ mode: BrushMode) throws { try checked(goss_session_brush_set_mode(handle, mode.rawValue)) }
+
+    /// Erases committed strokes within `radius` (normalized units) of the point
+    /// and returns how many were removed.
+    @discardableResult
+    public func eraseStrokes(x: Float, y: Float, radius: Float) throws -> Int {
+        var removed = 0
+        try checked(goss_session_brush_erase_at(handle, x, y, radius, &removed))
+        return removed
+    }
+
     /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the
     /// renderer to draw. Queries the float count first, then fills a buffer.
     public func brushVertices() throws -> [Float] {

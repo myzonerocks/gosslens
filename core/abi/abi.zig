@@ -74,7 +74,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 25;
+pub const abi_minor: u16 = 26;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -966,6 +966,38 @@ fn tiledAspect(s: *Session, rect_w: u16, rect_h: u16) f32 {
     return @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
 }
 
+/// True when the active lens carries a draw.board node, which draws the board
+/// at its own place in the chain. The end-overlay stands down then so the board
+/// is not drawn twice.
+fn brushDrawnInChain(s: *Session) bool {
+    for (s.chain_order) |entry| if (entry.kind == .draw_board) return true;
+    return false;
+}
+
+/// Draws every committed brush stroke over view_id. Each stroke draws on its own
+/// so neon blends additively while pen, highlighter, and marker blend on alpha.
+fn drawBrushStrokes(r: *render.Renderer, s: *Session, view_id: u8) void {
+    // One stroke's worst-case ribbon: every segment expanded to six vertices.
+    var buf: [(stroke.max_points - 1) * 6 * stroke.floats_per_vertex]f32 = undefined;
+    var si: u16 = 0;
+    while (si < s.brush.strokeCount()) : (si += 1) {
+        const floats = s.brush.buildStroke(si, &buf);
+        if (floats == 0) continue;
+        r.submitBrush(view_id, &buf, @intCast(floats / stroke.floats_per_vertex), s.brush.strokeAdditive(si));
+    }
+}
+
+/// Draws the brush board over the final composited image on its own view, so a
+/// stroke rides on top of the preview, captures, and recording alike. Stands
+/// down when a draw.board node already placed the board in the chain, or with no
+/// strokes to draw.
+fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, width: u16, height: u16) void {
+    if (s.brush.strokeCount() == 0 or brushDrawnInChain(s)) return;
+    render.Renderer.setViewTarget(view_id, finalTarget(e, s), width, height);
+    r.tile = null;
+    drawBrushStrokes(r, s, view_id);
+}
+
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
     // The tile is set per final full-screen pass below; every source-res
     // intermediate draw and every non-capture frame renders untiled.
@@ -993,6 +1025,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // absence degrades (no draw), never blocks the chain.
             .mesh => s.mesh_face_textures.contains(entry.graph_index),
             .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index),
+            // The draw board carries no loaded asset: it passes the frame
+            // through and draws the session's brush strokes over it, so it is
+            // always ready.
+            .draw_board => true,
         };
         if (ready) ready_count += 1;
     }
@@ -1018,8 +1054,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         r.tile = s.capture_tile;
         render.Renderer.setViewTarget(0, finalTarget(e, s), preview_rect_w, preview_rect_h);
         r.submitPreview(0, current.preview, rotation * 90, mirror);
-        if (s.capture_requested) blitCaptureToSwapChain(e, r, 1);
-        blitRecordingToSwapChain(e, r, 1);
+        drawBrushOverlay(e, r, s, 1, preview_rect_w, preview_rect_h);
+        if (s.capture_requested) blitCaptureToSwapChain(e, r, 2);
+        blitRecordingToSwapChain(e, r, 2);
         return;
     }
 
@@ -1185,6 +1222,23 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .draw_board => {
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The frame passes through whole, then the brush board draws its
+                // strokes over it at the node's own place in the chain.
+                r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                drawBrushStrokes(r, s, view_id);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -1475,8 +1529,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         }
     }
 
-    if (s.capture_requested and ready_count > 0) blitCaptureToSwapChain(e, r, next_view_id);
-    if (ready_count > 0) blitRecordingToSwapChain(e, r, next_view_id + 1);
+    if (ready_count > 0) drawBrushOverlay(e, r, s, next_view_id, output_width, output_height);
+    if (s.capture_requested and ready_count > 0) blitCaptureToSwapChain(e, r, next_view_id + 1);
+    if (ready_count > 0) blitRecordingToSwapChain(e, r, next_view_id + 2);
 
     if (ready_count == 0) {
         // Either beauty or a multi-source layout produced input_texture as a
@@ -1485,8 +1540,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         // swap chain. The no-beauty, no-layout case already returned above.
         render.Renderer.setViewTarget(next_view_id, finalTarget(e, s), output_width, output_height);
         r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
-        if (s.capture_requested) blitCaptureToSwapChain(e, r, next_view_id + 1);
-        blitRecordingToSwapChain(e, r, next_view_id + 2);
+        drawBrushOverlay(e, r, s, next_view_id + 1, output_width, output_height);
+        if (s.capture_requested) blitCaptureToSwapChain(e, r, next_view_id + 2);
+        blitRecordingToSwapChain(e, r, next_view_id + 3);
     }
 }
 
@@ -2889,6 +2945,26 @@ pub export fn goss_session_brush_vertices(session: ?*Session, out: ?[*]f32, capa
         return .ok;
     };
     count.* = s.brush.buildVertices(dst[0..capacity_floats]);
+    return .ok;
+}
+
+/// Selects the brush preset the next stroke opens with: 0 pen, 1 highlighter,
+/// 2 marker, 3 neon. An unknown value falls back to pen. The preset biases the
+/// stroke's width and alpha; the renderer reads mode 3 to draw the ribbon
+/// additively for the neon glow.
+pub export fn goss_session_brush_set_mode(session: ?*Session, mode: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.setMode(stroke.Mode.fromU32(mode));
+    return .ok;
+}
+
+/// Erases every committed stroke whose ribbon passes within radius (normalized
+/// units) of (x, y) and reports how many through out_removed. Refuses while a
+/// stroke is open. Allocation-free; compacts the stroke array in place.
+pub export fn goss_session_brush_erase_at(session: ?*Session, x: f32, y: f32, radius: f32, out_removed: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const removed = s.brush.eraseAt(x, y, radius);
+    if (out_removed) |o| o.* = removed;
     return .ok;
 }
 

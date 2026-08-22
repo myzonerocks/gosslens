@@ -55,6 +55,8 @@ const abi_functions = [_][]const u8{
     "goss_status goss_session_brush_redo(goss_session *session)",
     "goss_status goss_session_brush_clear(goss_session *session)",
     "goss_status goss_session_brush_vertices(goss_session *session, float *out, size_t capacity_floats, size_t *out_count)",
+    "goss_status goss_session_brush_set_mode(goss_session *session, uint32_t mode)",
+    "goss_status goss_session_brush_erase_at(goss_session *session, float x, float y, float radius, size_t *out_removed)",
     "goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)",
     "goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)",
     "goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",

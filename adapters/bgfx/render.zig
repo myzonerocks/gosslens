@@ -97,6 +97,7 @@ pub const Renderer = struct {
     height: u32,
     layout: c.bgfx_vertex_layout_t,
     billboard_layout: c.bgfx_vertex_layout_t,
+    brush_layout: c.bgfx_vertex_layout_t,
     rgba_program: c.bgfx_program_handle_t,
     nv12_program: c.bgfx_program_handle_t,
     lut_program: c.bgfx_program_handle_t,
@@ -110,6 +111,7 @@ pub const Renderer = struct {
     makeup_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
     billboard_program: c.bgfx_program_handle_t,
+    brush_program: c.bgfx_program_handle_t,
     /// The 176-triangle face-makeup mesh's fixed index buffer -
     /// makeup_mesh.triangle_indices, uploaded once, never changes.
     makeup_index_buffer: c.bgfx_index_buffer_handle_t,
@@ -293,6 +295,14 @@ pub const Renderer = struct {
         const makeup_program = try loadMakeupProgram();
         const model_program = try loadModelProgram();
         const billboard_program = try loadBillboardProgram();
+        const brush_program = try loadBrushProgram();
+
+        // The brush ribbon vertex: a screen-space point and its stroke color.
+        var brush_layout: c.bgfx_vertex_layout_t = undefined;
+        _ = c.bgfx_vertex_layout_begin(&brush_layout, c.BGFX_RENDERER_TYPE_NOOP);
+        _ = c.bgfx_vertex_layout_add(&brush_layout, c.BGFX_ATTRIB_POSITION, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        _ = c.bgfx_vertex_layout_add(&brush_layout, c.BGFX_ATTRIB_COLOR0, 4, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        c.bgfx_vertex_layout_end(&brush_layout);
 
         var makeup_position_layout: c.bgfx_vertex_layout_t = undefined;
         _ = c.bgfx_vertex_layout_begin(&makeup_position_layout, c.BGFX_RENDERER_TYPE_NOOP);
@@ -339,6 +349,7 @@ pub const Renderer = struct {
             .height = options.height,
             .layout = layout,
             .billboard_layout = billboard_layout,
+            .brush_layout = brush_layout,
             .rgba_program = rgba_program,
             .nv12_program = nv12_program,
             .lut_program = lut_program,
@@ -352,6 +363,7 @@ pub const Renderer = struct {
             .makeup_program = makeup_program,
             .model_program = model_program,
             .billboard_program = billboard_program,
+            .brush_program = brush_program,
             .makeup_index_buffer = makeup_index_buffer,
             .face_mesh_index_buffer = face_mesh_index_buffer,
             .face_mesh_uv_buffer = face_mesh_uv_buffer,
@@ -566,6 +578,18 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_billboard_spirv, blobs.fs_billboard_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_billboard_essl, blobs.fs_billboard_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_billboard_wgsl, blobs.fs_billboard_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// draw.board's flat per-vertex color program: the brush ribbon in screen
+    /// space, kit-authored like the billboard program above.
+    pub fn loadBrushProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_brush_metal, blobs.fs_brush_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_brush_spirv, blobs.fs_brush_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_brush_essl, blobs.fs_brush_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_brush_wgsl, blobs.fs_brush_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -944,6 +968,36 @@ pub const Renderer = struct {
     /// view_id: input_texture through the s_texColor sampler every lens
     /// fragment shader is authored against, and the node's named mask
     /// channel (or the all-foreground default) through s_texMask.
+    /// bgfx blend state from BGFX_STATE_BLEND_FUNC(src, dst): the pre-shifted
+    /// factor constants pack as f = src | (dst << 4), state = f | (f << 8).
+    fn blendFunc(src: u64, dst: u64) u64 {
+        const f = src | (dst << 4);
+        return f | (f << 8);
+    }
+
+    /// Draws one brush stroke's ribbon over view_id, blending over whatever the
+    /// view holds. `verts` is x, y in screen space then r, g, b, a per vertex.
+    /// Neon passes additive for a glow, the rest blend on alpha. Uses a
+    /// transient buffer, so it allocates nothing past the frame.
+    pub fn submitBrush(r: *Renderer, view_id: c.bgfx_view_id_t, verts: [*]const f32, vertex_count: u32, additive: bool) void {
+        if (vertex_count == 0) return;
+        if (c.bgfx_get_avail_transient_vertex_buffer(vertex_count, &r.brush_layout) < vertex_count) return;
+        var tvb: c.bgfx_transient_vertex_buffer_t = undefined;
+        c.bgfx_alloc_transient_vertex_buffer(&tvb, vertex_count, &r.brush_layout);
+        const floats = vertex_count * 6; // x, y, r, g, b, a
+        const dst: [*]f32 = @ptrCast(@alignCast(tvb.data));
+        @memcpy(dst[0..floats], verts[0..floats]);
+        c.bgfx_set_transient_vertex_buffer(0, &tvb, 0, vertex_count);
+        const src_alpha: u64 = c.BGFX_STATE_BLEND_SRC_ALPHA;
+        const blend = if (additive)
+            blendFunc(src_alpha, c.BGFX_STATE_BLEND_ONE)
+        else
+            blendFunc(src_alpha, c.BGFX_STATE_BLEND_INV_SRC_ALPHA);
+        const state: u64 = @as(u64, c.BGFX_STATE_WRITE_RGB) | @as(u64, c.BGFX_STATE_WRITE_A) | blend;
+        c.bgfx_set_state(state, 0);
+        c.bgfx_submit(view_id, r.brush_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     pub fn submitShaderPass(r: *Renderer, view_id: c.bgfx_view_id_t, program: c.bgfx_program_handle_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));

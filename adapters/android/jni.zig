@@ -595,6 +595,21 @@ export fn Java_com_gosslens_Gosslens_nativeBrushVertices(env: *JniEnv, cls: jobj
     return @intCast(written);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeBrushSetMode(env: *JniEnv, cls: jobject, session: i64, mode: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_brush_set_mode(sessionFromHandle(session), @intCast(@max(mode, 0))));
+}
+
+/// Returns the number of strokes erased, or -1 on a bad session.
+export fn Java_com_gosslens_Gosslens_nativeBrushEraseAt(env: *JniEnv, cls: jobject, session: i64, x: f32, y: f32, radius: f32) i32 {
+    _ = env;
+    _ = cls;
+    var removed: usize = 0;
+    if (abi.goss_session_brush_erase_at(sessionFromHandle(session), x, y, radius, &removed) != .ok) return -1;
+    return @intCast(removed);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;

@@ -855,6 +855,21 @@ export class GossSession {
     this.mod.ccall("goss_session_brush_clear", "number", ["number"], [this.handle]);
   }
 
+  /// The brush preset the next stroke opens with: 0 pen, 1 highlighter, 2 marker, 3 neon.
+  setBrushMode(mode: number): void {
+    this.mod.ccall("goss_session_brush_set_mode", "number", ["number", "number"], [this.handle, mode]);
+  }
+
+  /// Erases committed strokes within `radius` (normalized units) of the point
+  /// and returns how many were removed.
+  eraseStrokes(x: number, y: number, radius: number): number {
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    this.mod.ccall("goss_session_brush_erase_at", "number", ["number", "number", "number", "number", "number"], [this.handle, x, y, radius, outPtr]);
+    const removed = this.mod.HEAP32[outPtr >> 2]!;
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 4]);
+    return removed;
+  }
+
   /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the
   /// renderer. Queries the float count, then reads it out of a scratch buffer.
   brushVertices(): Float32Array {

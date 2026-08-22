@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 25u
+#define GOSS_ABI_MINOR 26u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -591,6 +591,11 @@ goss_status goss_session_brush_undo(goss_session *session);
 goss_status goss_session_brush_redo(goss_session *session);
 goss_status goss_session_brush_clear(goss_session *session);
 goss_status goss_session_brush_vertices(goss_session *session, float *out, size_t capacity_floats, size_t *out_count);
+/* Brush preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon
+ * (drawn additively). Erase removes committed strokes within radius of a point,
+ * refusing mid-stroke, and reports the count. */
+goss_status goss_session_brush_set_mode(goss_session *session, uint32_t mode);
+goss_status goss_session_brush_erase_at(goss_session *session, float x, float y, float radius, size_t *out_removed);
 
 /* Graph thread. Runs the beauty chain over one RGBA frame on the calling
  * thread, reading the newest tracking result for the landmark driven

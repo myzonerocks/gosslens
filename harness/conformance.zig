@@ -1390,7 +1390,35 @@ fn proveBrushStroke(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         std.debug.print("conformance: FAIL brush undo/redo/clear did not track the ribbon ({d}/{d}/{d})\n", .{ after_undo, after_redo, after_clear });
         return false;
     }
-    std.debug.print("conformance: PROOF a brush stroke builds a bounded triangle ribbon the renderer can pull, with undo, redo, and clear tracking it, allocation-free\n", .{});
+
+    // Highlighter mode biases the opened stroke: half the pen alpha rides its vertices.
+    _ = abi.goss_session_brush_set_style(session, 1.0, 1.0, 1.0, 1.0, 0.01);
+    _ = abi.goss_session_brush_set_mode(session, 1); // highlighter
+    _ = abi.goss_session_brush_begin(session);
+    _ = abi.goss_session_brush_point(session, 0.0, 0.5);
+    _ = abi.goss_session_brush_point(session, 1.0, 0.5);
+    _ = abi.goss_session_brush_end(session);
+    var hi: [6]f32 = undefined;
+    var hic: usize = 0;
+    _ = abi.goss_session_brush_vertices(session, &hi, hi.len, &hic);
+    if (hic != 6 or hi[5] > 0.5) {
+        std.debug.print("conformance: FAIL highlighter mode did not lower the ribbon alpha ({d})\n", .{hi[5]});
+        return false;
+    }
+
+    // Erase across that stroke drops it; a miss leaves it.
+    var missed: usize = 1;
+    _ = abi.goss_session_brush_erase_at(session, 0.5, 0.9, 0.05, &missed);
+    var erased: usize = 0;
+    _ = abi.goss_session_brush_erase_at(session, 0.5, 0.5, 0.05, &erased);
+    var left: usize = 1;
+    _ = abi.goss_session_brush_vertices(session, null, 0, &left);
+    if (missed != 0 or erased != 1 or left != 0) {
+        std.debug.print("conformance: FAIL brush erase did not hit the crossed stroke only ({d}/{d}/{d})\n", .{ missed, erased, left });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a brush stroke builds a bounded triangle ribbon the renderer can pull, with modes, erase, undo, redo, and clear tracking it, allocation-free\n", .{});
     return true;
 }
 
