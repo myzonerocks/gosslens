@@ -226,6 +226,13 @@ over the frame scaled by `intensity`, so bright areas bleed a soft halo.
 Both fields are optional with engine defaults. Like `blur.pass` and
 `grade.pass` it ships no asset and is always ready.
 
+A `"draw.board"` node draws the session's brush board at its own place in the
+chain: the frame passes through, then every committed stroke draws over it, neon
+strokes additively and the rest on alpha. It ships no asset, carries no params,
+and is always ready, since the strokes come from the host's draw input, not the
+bundle. Without a `draw.board` node the board still draws as a final overlay; the
+node only lets a lens place it earlier so later passes act on the drawing too.
+
 A `"script"` node carries an inline `"source"` string of JavaScript that
 defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
@@ -246,7 +253,7 @@ The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
 passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing,
-and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
+the draw board, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
 the bottom; without a tracked face the node draws nothing, the standard
 capability degradation).

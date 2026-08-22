@@ -966,14 +966,17 @@ fn tiledAspect(s: *Session, rect_w: u16, rect_h: u16) f32 {
     return @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
 }
 
-/// Draws the brush board over the final composited image on its own view, so a
-/// draw or AR-brush stroke rides on top of the preview, captures, and recording
-/// alike. Each stroke draws on its own so neon blends additively while pen,
-/// highlighter, and marker blend on alpha. A no-op with no strokes.
-fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, width: u16, height: u16) void {
-    if (s.brush.strokeCount() == 0) return;
-    render.Renderer.setViewTarget(view_id, finalTarget(e, s), width, height);
-    r.tile = null;
+/// True when the active lens carries a draw.board node, which draws the board
+/// at its own place in the chain. The end-overlay stands down then so the board
+/// is not drawn twice.
+fn brushDrawnInChain(s: *Session) bool {
+    for (s.chain_order) |entry| if (entry.kind == .draw_board) return true;
+    return false;
+}
+
+/// Draws every committed brush stroke over view_id. Each stroke draws on its own
+/// so neon blends additively while pen, highlighter, and marker blend on alpha.
+fn drawBrushStrokes(r: *render.Renderer, s: *Session, view_id: u8) void {
     // One stroke's worst-case ribbon: every segment expanded to six vertices.
     var buf: [(stroke.max_points - 1) * 6 * stroke.floats_per_vertex]f32 = undefined;
     var si: u16 = 0;
@@ -982,6 +985,17 @@ fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, w
         if (floats == 0) continue;
         r.submitBrush(view_id, &buf, @intCast(floats / stroke.floats_per_vertex), s.brush.strokeAdditive(si));
     }
+}
+
+/// Draws the brush board over the final composited image on its own view, so a
+/// stroke rides on top of the preview, captures, and recording alike. Stands
+/// down when a draw.board node already placed the board in the chain, or with no
+/// strokes to draw.
+fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, width: u16, height: u16) void {
+    if (s.brush.strokeCount() == 0 or brushDrawnInChain(s)) return;
+    render.Renderer.setViewTarget(view_id, finalTarget(e, s), width, height);
+    r.tile = null;
+    drawBrushStrokes(r, s, view_id);
 }
 
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
@@ -1011,6 +1025,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // absence degrades (no draw), never blocks the chain.
             .mesh => s.mesh_face_textures.contains(entry.graph_index),
             .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index),
+            // The draw board carries no loaded asset: it passes the frame
+            // through and draws the session's brush strokes over it, so it is
+            // always ready.
+            .draw_board => true,
         };
         if (ready) ready_count += 1;
     }
@@ -1204,6 +1222,23 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .draw_board => {
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The frame passes through whole, then the brush board draws its
+                // strokes over it at the node's own place in the chain.
+                r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                drawBrushStrokes(r, s, view_id);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;

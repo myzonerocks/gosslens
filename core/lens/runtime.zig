@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, model_gltf, mesh_face };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, model_gltf, mesh_face, draw_board };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -51,6 +51,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "grade.pass")) return .grade_pass;
     if (std.mem.eql(u8, type_str, "bloom.pass")) return .bloom_pass;
     if (std.mem.eql(u8, type_str, "model.gltf")) return .model_gltf;
+    if (std.mem.eql(u8, type_str, "draw.board")) return .draw_board;
     return null;
 }
 
@@ -74,7 +75,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .model_gltf, .mesh_face => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .model_gltf, .mesh_face, .draw_board => &.{},
     };
 }
 
@@ -182,7 +183,7 @@ pub const BloomPassNode = struct {
     bloom: [4]f32,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, model, mesh };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, model, mesh, draw_board };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -387,6 +388,7 @@ pub const Lens = struct {
                 .bloom_pass => .bloom,
                 .model_gltf => .model,
                 .mesh_face => .mesh,
+                .draw_board => .draw_board,
                 else => continue,
             };
             try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
@@ -1022,6 +1024,35 @@ test "compositePassNodes interleaves both kinds in one real draw-order sequence"
     try t.expectEqual(lens.nodes[0].graph_index, chain[0].graph_index);
     try t.expectEqual(lens.nodes[1].graph_index, chain[1].graph_index);
     try t.expectEqual(lens.nodes[2].graph_index, chain[2].graph_index);
+}
+
+const draw_board_chain_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.drawboard", "version": "1.0.0", "display_name": "Draw Board",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "tint", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}},
+    \\    {"id": "sketch", "type": "draw.board", "inputs": {"frame": "tint"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a draw.board node becomes a draw_board pass in the chain" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, draw_board_chain_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const chain = try lens.compositePassNodes(t.allocator, &g);
+    defer t.allocator.free(chain);
+    try t.expectEqual(@as(usize, 2), chain.len);
+    try t.expectEqual(PassKind.shader, chain[0].kind);
+    try t.expectEqual(PassKind.draw_board, chain[1].kind);
 }
 
 const three_way_chain_manifest =
