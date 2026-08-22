@@ -75,7 +75,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 27;
+pub const abi_minor: u16 = 28;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -283,6 +283,23 @@ const CurrentFrame = struct {
     owns_textures: bool = true,
 };
 
+/// The active geofilter region: a circle, an axis-aligned box, or a polygon
+/// ring the app derives from a lens's intended place. The engine tests a
+/// submitted location against it on-device and only the boolean crosses.
+pub const GeoRegion = union(enum) {
+    circle: geo.Circle,
+    bbox: geo.BBox,
+    polygon: struct { verts: [geo.max_polygon_verts][2]f64, count: usize },
+
+    fn contains(self: GeoRegion, lat: f64, lon: f64) bool {
+        return switch (self) {
+            .circle => |c| geo.withinCircle(lat, lon, c.lat, c.lon, c.radius_m),
+            .bbox => |b| geo.withinBBox(lat, lon, b.min_lat, b.min_lon, b.max_lat, b.max_lon),
+            .polygon => |p| geo.withinPolygon(lat, lon, p.verts[0..p.count]),
+        };
+    }
+};
+
 pub const Session = struct {
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
     /// once fed, its level and beat outrank the host's tick value.
@@ -484,8 +501,12 @@ pub const Session = struct {
     /// never crosses back over the ABI.
     location_lat: f64 = 0,
     location_lon: f64 = 0,
+    location_accuracy_m: f32 = 0,
     location_engine_fed: bool = false,
-    geofence: ?geo.Circle = null,
+    geofence: ?GeoRegion = null,
+    /// The worst fix accuracy that still counts as inside a region. Zero means no
+    /// gate: any fix is trusted. A fix reporting a larger radius reads outside.
+    geo_required_accuracy_m: f32 = 0,
     /// The draw and AR-brush board. The engine owns stroke state and undo/redo;
     /// goss_session_brush_vertices reads the finished ribbon for the renderer.
     brush: stroke.Board = .{},
@@ -2909,11 +2930,11 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
 /// only the boolean does. Overwrites in place, no allocation.
 pub export fn goss_session_submit_location(session: ?*Session, latitude: f64, longitude: f64, horizontal_accuracy_m: f32, timestamp_us: i64) Status {
     const s = session orelse return .invalid_argument;
-    _ = horizontal_accuracy_m;
     _ = timestamp_us;
     if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180) return .invalid_argument;
     s.location_lat = latitude;
     s.location_lon = longitude;
+    s.location_accuracy_m = if (horizontal_accuracy_m > 0) horizontal_accuracy_m else 0;
     s.location_engine_fed = true;
     return .ok;
 }
@@ -2924,7 +2945,44 @@ pub export fn goss_session_submit_location(session: ?*Session, latitude: f64, lo
 pub export fn goss_session_set_geofence(session: ?*Session, latitude: f64, longitude: f64, radius_m: f64) Status {
     const s = session orelse return .invalid_argument;
     if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180 or !(radius_m > 0)) return .invalid_argument;
-    s.geofence = .{ .lat = latitude, .lon = longitude, .radius_m = radius_m };
+    s.geofence = .{ .circle = .{ .lat = latitude, .lon = longitude, .radius_m = radius_m } };
+    return .ok;
+}
+
+/// Sets the geofence to an axis-aligned lat/lon box. geo.in_region reads true
+/// when a submitted location falls inside it.
+pub export fn goss_session_set_geofence_bbox(session: ?*Session, min_lat: f64, min_lon: f64, max_lat: f64, max_lon: f64) Status {
+    const s = session orelse return .invalid_argument;
+    if (min_lat < -90 or max_lat > 90 or min_lon < -180 or max_lon > 180 or min_lat > max_lat or min_lon > max_lon) return .invalid_argument;
+    s.geofence = .{ .bbox = .{ .min_lat = min_lat, .min_lon = min_lon, .max_lat = max_lat, .max_lon = max_lon } };
+    return .ok;
+}
+
+/// Sets the geofence to a polygon ring: vertex_count pairs of lat, lon read from
+/// coords (lat, lon, lat, lon, ...). A ring of three to max_polygon_verts
+/// vertices; geo.in_region reads true when a location is inside it.
+pub export fn goss_session_set_geofence_polygon(session: ?*Session, coords: ?[*]const f64, vertex_count: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const src = coords orelse return .invalid_argument;
+    if (vertex_count < 3 or vertex_count > geo.max_polygon_verts) return .invalid_argument;
+    var poly: @FieldType(GeoRegion, "polygon") = .{ .verts = undefined, .count = vertex_count };
+    var i: usize = 0;
+    while (i < vertex_count) : (i += 1) {
+        const lat = src[i * 2];
+        const lon = src[i * 2 + 1];
+        if (lat < -90 or lat > 90 or lon < -180 or lon > 180) return .invalid_argument;
+        poly.verts[i] = .{ lat, lon };
+    }
+    s.geofence = .{ .polygon = poly };
+    return .ok;
+}
+
+/// Sets the worst fix accuracy (meters) that still counts as inside a region.
+/// Zero clears the gate. A location whose reported accuracy is larger reads
+/// outside, so a lens does not fire on a vague fix.
+pub export fn goss_session_set_geo_accuracy(session: ?*Session, max_accuracy_m: f32) Status {
+    const s = session orelse return .invalid_argument;
+    s.geo_required_accuracy_m = if (max_accuracy_m > 0) max_accuracy_m else 0;
     return .ok;
 }
 
@@ -4553,8 +4611,12 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
     }
     if (s.location_engine_fed) {
-        if (s.geofence) |fence| {
-            live_signals.geo_in_region = geo.withinCircle(s.location_lat, s.location_lon, fence.lat, fence.lon, fence.radius_m);
+        if (s.geofence) |region| {
+            // An accuracy gate, when set, refuses a fix vaguer than it asks for,
+            // so a lens does not fire on a location the device is unsure of.
+            const accurate = s.geo_required_accuracy_m == 0 or
+                (s.location_accuracy_m > 0 and s.location_accuracy_m <= s.geo_required_accuracy_m);
+            live_signals.geo_in_region = accurate and region.contains(s.location_lat, s.location_lon);
         }
     }
     // The events fired since the last tick reach the triggers for this tick

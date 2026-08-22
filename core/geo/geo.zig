@@ -29,9 +29,38 @@ pub fn withinCircle(lat: f64, lon: f64, c_lat: f64, c_lon: f64, radius_m: f64) b
     return distanceMeters(lat, lon, c_lat, c_lon) <= radius_m;
 }
 
+/// An axis-aligned lat/lon box.
+pub const BBox = struct { min_lat: f64, min_lon: f64, max_lat: f64, max_lon: f64 };
+
+/// The most vertices a geofilter polygon may carry.
+pub const max_polygon_verts = 64;
+
 /// Whether (lat, lon) is inside the axis-aligned lat/lon box.
 pub fn withinBBox(lat: f64, lon: f64, min_lat: f64, min_lon: f64, max_lat: f64, max_lon: f64) bool {
     return lat >= min_lat and lat <= max_lat and lon >= min_lon and lon <= max_lon;
+}
+
+/// Whether (lat, lon) is inside the polygon, by the even-odd rule: count how many
+/// edges a ray heading east crosses, odd means inside. Each vertex is
+/// `.{ lat, lon }`; longitude is x and latitude is y. The ring needs at least
+/// three vertices and need not repeat the first at the end.
+pub fn withinPolygon(lat: f64, lon: f64, verts: []const [2]f64) bool {
+    if (verts.len < 3) return false;
+    var inside = false;
+    var j: usize = verts.len - 1;
+    var i: usize = 0;
+    while (i < verts.len) : (i += 1) {
+        const yi = verts[i][0];
+        const xi = verts[i][1];
+        const yj = verts[j][0];
+        const xj = verts[j][1];
+        if ((yi > lat) != (yj > lat)) {
+            const x_cross = (xj - xi) * (lat - yi) / (yj - yi) + xi;
+            if (lon < x_cross) inside = !inside;
+        }
+        j = i;
+    }
+    return inside;
 }
 
 const t = std.testing;
@@ -56,4 +85,19 @@ test "bbox membership" {
     try t.expect(withinBBox(10, 20, 0, 0, 30, 30));
     try t.expect(!withinBBox(40, 20, 0, 0, 30, 30));
     try t.expect(!withinBBox(10, 40, 0, 0, 30, 30));
+}
+
+test "polygon membership by the even-odd rule" {
+    // A square from (0,0) to (10,10) in lat/lon.
+    const square = [_][2]f64{ .{ 0, 0 }, .{ 0, 10 }, .{ 10, 10 }, .{ 10, 0 } };
+    try t.expect(withinPolygon(5, 5, &square)); // centre
+    try t.expect(!withinPolygon(5, 15, &square)); // east of the square
+    try t.expect(!withinPolygon(15, 5, &square)); // north of the square
+    try t.expect(!withinPolygon(-1, 5, &square)); // south of the square
+    // A rectangle with a triangular notch cut up from the bottom edge, so a
+    // naive bbox would be wrong: a point in the notch is outside.
+    const notched = [_][2]f64{ .{ 0, 0 }, .{ 4, 5 }, .{ 0, 10 }, .{ 10, 10 }, .{ 10, 0 } };
+    try t.expect(withinPolygon(8, 5, &notched)); // upper centre, inside
+    try t.expect(!withinPolygon(1, 5, &notched)); // down in the notch, outside
+    try t.expect(!withinPolygon(5, 5, &[_][2]f64{ .{ 0, 0 }, .{ 1, 1 } })); // too few vertices
 }

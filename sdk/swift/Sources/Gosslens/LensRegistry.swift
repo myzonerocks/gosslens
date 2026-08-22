@@ -189,6 +189,28 @@ extension GossSession {
         try checked(goss_session_clear_geofence(handle))
     }
 
+    /// Sets the geofence to an axis-aligned lat/lon box.
+    public func setGeofenceBBox(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double) throws {
+        try checked(goss_session_set_geofence_bbox(handle, minLat, minLon, maxLat, maxLon))
+    }
+
+    /// Sets the geofence to a polygon ring of `[latitude, longitude]` pairs,
+    /// three to 64 vertices.
+    public func setGeofencePolygon(_ vertices: [(latitude: Double, longitude: Double)]) throws {
+        var coords = [Double]()
+        coords.reserveCapacity(vertices.count * 2)
+        for v in vertices { coords.append(v.latitude); coords.append(v.longitude) }
+        try coords.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_set_geofence_polygon(handle, buffer.baseAddress, vertices.count))
+        }
+    }
+
+    /// Sets the worst fix accuracy (meters) that still counts as inside a region;
+    /// zero clears the gate.
+    public func setGeoAccuracy(maxAccuracyM: Float) throws {
+        try checked(goss_session_set_geo_accuracy(handle, maxAccuracyM))
+    }
+
     /// Sets the color and half-width (normalized units) the next stroke opens with.
     public func setBrushStyle(red: Float, green: Float, blue: Float, alpha: Float, width: Float) throws {
         try checked(goss_session_brush_set_style(handle, red, green, blue, alpha, width))

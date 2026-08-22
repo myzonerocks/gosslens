@@ -533,6 +533,26 @@ export fn Java_com_gosslens_Gosslens_nativeClearGeofence(env: *JniEnv, cls: jobj
     return @intFromEnum(abi.goss_session_clear_geofence(sessionFromHandle(session)));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSetGeofenceBbox(env: *JniEnv, cls: jobject, session: i64, min_lat: f64, min_lon: f64, max_lat: f64, max_lon: f64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_set_geofence_bbox(sessionFromHandle(session), min_lat, min_lon, max_lat, max_lon));
+}
+
+/// coords_buffer is a direct double buffer of vertex_count lat, lon pairs.
+export fn Java_com_gosslens_Gosslens_nativeSetGeofencePolygon(env: *JniEnv, cls: jobject, session: i64, coords_buffer: jobject, vertex_count: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, coords_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const coords: [*]const f64 = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_set_geofence_polygon(sessionFromHandle(session), coords, @intCast(@max(vertex_count, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSetGeoAccuracy(env: *JniEnv, cls: jobject, session: i64, max_accuracy_m: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_set_geo_accuracy(sessionFromHandle(session), max_accuracy_m));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeBrushSetStyle(env: *JniEnv, cls: jobject, session: i64, r: f32, g: f32, b: f32, a: f32, width: f32) i32 {
     _ = env;
     _ = cls;
