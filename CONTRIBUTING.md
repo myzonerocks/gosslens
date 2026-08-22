@@ -1,143 +1,81 @@
 # Contributing
 
-Gosslens is a low-level camera engine. Changes are expected to preserve the
-architecture, the ABI, the API contract, the performance model, and the
-dependency policy. A feature is not complete because it compiles.
-
-Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing structure or
-adding a dependency. Read [docs/API.md](docs/API.md) before changing
-`include/gosslens.h` or any Swift, Kotlin, or TypeScript wrapper. These are
-build contracts, not suggestions.
+This is how to build a change, prove it, and submit it. The contracts a change
+must respect live elsewhere and come first: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+for the structure, ownership, dependency policy, ABI, and performance model, and
+[docs/API.md](docs/API.md) for the public SDK naming and parameter contract. A
+feature is not complete because it compiles.
 
 ## Start here
 
 Use the project toolchain. Do not substitute a global Zig installation.
+`tools/toolchain-sync` installs the pinned Zig into `.local/zig` and wires the
+git hooks. The pinned compiler lives in `.zigversion`; `build.zig` rejects a
+different version, so the toolchain question has exactly one answer.
 
     tools/toolchain-sync
-    zig build test
-    zig build gate -- --tree
+    zig build test               # all unit tests
+    zig build gate -- --tree     # the source gate over tracked files
+    zig build ci                 # tests, source gate, abi, vendor check, provenance
 
-The pinned compiler lives in `.zigversion`. `build.zig` rejects a different
-version.
+`zig build ci` is the whole local bar in one command. Green here is green
+upstream, so never push and let CI find a failure the local run would have.
+Regenerate the ABI baseline after an intended ABI change with
+`zig build abi -- --print > tools/abi-baseline.txt` and commit it with the code.
 
-## Keep the structure
+## Watch it draw
 
-Work in the boundary that already owns the feature.
+    zig build harness       # run a lens through the real graph, drawn on screen
+    zig build conformance   # run a reference lens through the ABI twice, proving bit-stable output
 
-- tracking work stays in `core/tracking/` and `adapters/tracking/`
-- beauty work stays in `adapters/beauty/` and the existing shader paths
-- rendering work stays in `adapters/bgfx/`
-- CPU image conversion stays behind `adapters/image/`
-- portable media backends stay behind `adapters/media/`
-- engine-owned media contracts stay in `core/media/`
-- platform-only code stays under the matching SDK
+The harness runs a lens through the real graph and draws it on screen, the same
+pipeline the SDKs drive, the fastest way to see an effect move before a device
+is involved. Conformance runs a reference lens through the real ABI twice and
+proves the output is bit for bit stable. Every engine feature that touches the
+ABI adds a proof here, and the run prints one PROOF line per capability it
+clears.
 
-Do not create a parallel subsystem because a dependency has a convenient name.
-There is no `adapters/libyuv/`; libyuv belongs to `adapters/image/`. There is no
-FFmpeg adapter.
+## Shaders and lenses
 
-Do not move working code as part of unrelated work. If a structural change is
-actually required, make it a separate change and explain the defect it fixes.
+    zig build test -Dlens-shaders=true    # compile every shader on all backends
+    zig build lens-validate -- <bundle>   # validate one bundle
 
-## Dependencies
+The shader build compiles each pass to Metal, SPIR-V, GLSL ES, and WGSL, so a
+shader that only builds on one backend fails here rather than on a device. The
+bundle format the validator checks against is specified in
+[lenses/SPEC.md](lenses/SPEC.md).
 
-New dependencies must be necessary, narrow, pinned, and permissively licensed.
-The default allowlist is MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, and Zlib.
-An equivalent permissive license requires explicit project approval before the
-dependency lands.
+## Per platform
 
-GPL, AGPL, LGPL, SSPL/source-available, non-commercial, research-only,
-binary-only, and unknown/custom dependencies are not accepted.
+Every capability ships on all three platforms or it does not ship, and
+[docs/PARITY.md](docs/PARITY.md) is the table of what is proven where.
 
-FFmpeg, libav, and GStreamer are explicitly excluded. Do not introduce them by
-static link, dynamic link, runtime loading, subprocess, package dependency, or
-transitive dependency.
+- iOS: `zig build ios` and `zig build ios-simulator`; the demo under
+  `sdk/swift/demo` runs it. See [docs/INTEGRATION-iOS.md](docs/INTEGRATION-iOS.md).
+- Android: `zig build android`; the demo under `sdk/kotlin/demo` runs it. See
+  [docs/INTEGRATION-ANDROID.md](docs/INTEGRATION-ANDROID.md).
+- Web: `zig build wasm`; the demo under `sdk/ts/demo` runs it. See
+  [docs/INTEGRATION-WEB.md](docs/INTEGRATION-WEB.md).
 
-A dependency change must include:
+When a capability moves from built to demonstrated on a platform, update its row
+in [docs/PARITY.md](docs/PARITY.md) in the same change.
 
-- exact upstream revision or release
-- integrity digest
-- upstream license files
-- NOTICE or patent material where required
-- only the features and backends Gosslens actually ships
-- build integration through the existing project build
-- tests or conformance coverage for the capability it adds
+## Adding a feature
 
-The license gate must stay green. "Only used on one platform" is not a license
-exception.
+A capability is not one commit in one place. It reaches the core, the C ABI, the
+baseline, all three SDKs, and a proof, or it is unfinished.
 
-## C and C++
-
-Zig owns the engine. C and C++ dependencies stay behind adapters.
-
-Use a direct C binding when the upstream API is C-compatible. Use a small
-`extern "C"` shim when a C++ API requires one. Do not expose C++ classes,
-templates, exceptions, STL types, vendor allocators, or vendor lifecycle across
-an adapter boundary.
-
-The C ABI in `include/gosslens.h` contains Gosslens-owned types only.
-
-## Frames and memory
-
-Do not add avoidable copies or frame-path allocations.
-
-Native/GPU zero-copy paths are preferred. libyuv is the canonical CPU fallback,
-not a mandatory stage. A new CPU pixel consumer must use the existing image
-adapter rather than implementing its own YUV/RGB conversion.
-
-Every allocation has an owner and a release path. Error paths are release paths
-too. Pools are bounded. Steady-state frame execution allocates nothing after
-warmup.
-
-## Public API
-
-`include/gosslens.h` is the engine ABI. [docs/API.md](docs/API.md) is the
-tracked public SDK naming and parameter contract.
-
-Do not name a wrapper independently on each platform. A new public `goss_*`
-operation must add its owning type, canonical method name, complete parameter
-shape, and platform scope to `docs/API.md` in the same change that adds the ABI
-operation. SDK wrappers come after that decision, not before it.
-
-Swift, Kotlin, and TypeScript use the same canonical camelCase operation name.
-Only the narrow exceptions documented in `docs/API.md` are allowed. Future SDKs
-mechanically re-case the canonical name; they do not redesign it.
-
-Do not expose an unresolved API. If the public parameter contract is not frozen,
-the wrapper does not ship. Do not hide missing parameters by hardcoding them in
-one SDK.
-
-Portable engine behavior belongs in the core. Platform and vendor types do not
-belong in the public API.
-
-## API changes
-
-A public API change must answer all of these in the PR:
-
-- which `goss_*` ABI operation it adds or changes
-- which public type owns it
-- the canonical SDK operation name and parameters
-- which platforms support it and how unsupported capability degrades
-- whether the change is additive within the current ABI major
-- which conformance tests prove parity
-
-A C ABI addition without the matching `docs/API.md` entry is incomplete. An SDK
-wrapper whose name or parameter shape differs from the public contract is a
-regression.
-
-## Tests and proof
-
-Run the relevant unit, gate, harness, and platform tests for the change. A
-camera capability is proven on the target that uses it, not by a host-only
-compile.
-
-At minimum, changes must leave these green:
-
-    zig build test
-    zig build gate -- --tree
-
-Changes that affect capture, rendering, tracking, lenses, media, ABI, or SDK
-behavior also need the corresponding harness or device/browser proof.
+1. Build it in the boundary that already owns it (see
+   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+2. Add the C op to `include/gosslens.h`, register it in `tools/abi_dump.zig`,
+   and bump the ABI minor.
+3. Regenerate `tools/abi-baseline.txt`.
+4. Decide the canonical operation name and parameters in
+   [docs/API.md](docs/API.md) first, then wire the Swift, Kotlin, and TypeScript
+   SDKs and the Android JNI binding to that one name.
+5. Add a conformance proof, and a harness path when the feature draws.
+6. Update [docs/PARITY.md](docs/PARITY.md) and run `zig build ci` green before
+   push.
 
 ## Git
 
@@ -159,9 +97,9 @@ A pull request should answer five things plainly:
 
 - what capability or defect it changes
 - which architectural boundary owns the change
-- what ABI/API surface, if any, it changes
-- what dependency, if any, it introduces
+- what ABI or API surface it changes, if any, with its `docs/API.md` entry
+- what dependency it introduces, if any
 - what executed proof shows the behavior works
 
-If a change weakens the architecture, API contract, or license policy, it is
-not ready for review.
+If a change weakens the architecture, API contract, or license policy, it is not
+ready for review.
