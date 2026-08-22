@@ -1,10 +1,11 @@
 # Developing
 
 This is the working guide for building a feature and proving it. Read
-[CONTRIBUTING.md](../CONTRIBUTING.md) for what a change must preserve, and
-[docs/API.md](API.md) for the operation contract the three SDKs share. This doc
-is about the tools: how to run what CI runs, watch the engine draw, and check a
-capability on each platform.
+[CONTRIBUTING.md](../CONTRIBUTING.md) for what a change must preserve,
+[docs/ARCHITECTURE.md](ARCHITECTURE.md) for the structure and dependency policy
+it works within, and [docs/API.md](API.md) for the operation contract the three
+SDKs share. This doc is about the tools: how to run what CI runs, watch the
+engine draw, and check a capability on each platform.
 
 ## Setup
 
@@ -50,7 +51,9 @@ proof here, and the run prints one PROOF line per capability it clears.
     zig build lens-validate-reference       validate every reference bundle
 
 The shader build compiles each pass to Metal, SPIR-V, GLSL ES, and WGSL, so a
-shader that only builds on one backend fails here rather than on a device.
+shader that only builds on one backend fails here rather than on a device. The
+bundle format the validator checks against is specified in
+[lenses/SPEC.md](../lenses/SPEC.md).
 
 ## Per platform
 
