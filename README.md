@@ -43,7 +43,19 @@ parameter contract lives in [docs/API.md](docs/API.md).
 
 toolchain-sync installs the pinned Zig into .local/zig and wires the git
 hooks. build.zig refuses any other compiler, so the toolchain question has
-exactly one answer. Toolchain decisions are logged in docs/TOOLCHAIN.md.
+exactly one answer. Toolchain decisions are logged in
+[docs/TOOLCHAIN.md](docs/TOOLCHAIN.md). The full set of local tools, from the
+on-screen harness and the conformance proof to the per-device checks, is in
+[docs/DEVELOPING.md](docs/DEVELOPING.md).
+
+## SDKs
+
+Each SDK is a thin package over the same C ABI and holds one operation contract
+across all three ([docs/API.md](docs/API.md)).
+
+- Swift, for iOS: [sdk/swift](sdk/swift), integrated per [docs/INTEGRATION-iOS.md](docs/INTEGRATION-iOS.md)
+- Kotlin, for Android: [sdk/kotlin](sdk/kotlin), integrated per [docs/INTEGRATION-ANDROID.md](docs/INTEGRATION-ANDROID.md)
+- TypeScript, for the web: [sdk/ts](sdk/ts), integrated per [docs/INTEGRATION-WEB.md](docs/INTEGRATION-WEB.md)
 
 ## Contributing
 
