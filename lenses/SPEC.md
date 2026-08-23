@@ -394,6 +394,49 @@ user-authored effects, and a bundle that fails to compile is caught at
 package time by the same validator a lens author already runs, not
 discovered by an end user's device.
 
+### 7.1 Material graphs
+
+Instead of writing a fragment shader by hand, a `shader.pass` node may
+carry a `material` block: a node graph the engine lowers to a fragment
+shader and compiles at package time, exactly like an authored one. The
+block is an `output` index and a `nodes` array. Each node is an object
+with a `kind` and, as its kind needs, `inputs` (indices into the array),
+`params` (up to four numbers), a `name` (a texture or uniform binding),
+and a `type` (the value type of a `constant` or `uniform`: `float`,
+`vec2`, `vec3`, `vec4`):
+
+```json
+{"type": "shader.pass", "inputs": {"frame": "camera"},
+ "material": {"output": 4, "nodes": [
+   {"kind": "uv"},
+   {"kind": "texture", "name": "texColor"},
+   {"kind": "sample", "inputs": [1, 0]},
+   {"kind": "constant", "type": "vec4", "params": [1.0, 0.5, 0.2, 1.0]},
+   {"kind": "multiply", "inputs": [2, 3]},
+   {"kind": "output", "inputs": [4]}]}}
+```
+
+The graph is a typed DAG. Sources take no inputs: `uv` (the frame
+coordinate), `time`, `constant`, `uniform` (host-set by name), and
+`texture` (a sampler bound by name, `texColor` being the frame itself).
+`sample` reads a texture at a coordinate. Arithmetic (`add`, `subtract`,
+`multiply`, `divide`, `power`, `min`, `max`, `mod`) and the vector and
+scalar functions (`dot`, `normalize`, `length`, `saturate`, `abs`,
+`floor`, `fract`, `sin`, `cos`, `clamp`, `step`, `smoothstep`, `mix`)
+carry their operands' types through. `split` takes one channel out of a
+vector, `combine3`/`combine4` build a vector from floats, and `lambert`
+and `fresnel` shade from a normal, light, or view. The single `output`
+node takes a `vec4` and is the graph's root.
+
+Validation rejects a graph with a cycle, a dangling input, a wrong
+argument count, or a type mismatch, naming the offending node. A valid
+graph lowers to the same GLSL contract as an authored shader and
+compiles to every profile the same way, so a material a lens authors is
+a real compiled shader on the device, not an interpreter. A vignette,
+posterize, or pixelate effect is a material graph with no dedicated
+shader; see the `material-tint`, `material-vignette`, `material-posterize`,
+and `material-pixelate` reference lenses.
+
 glTF/GLB assets bind through the engine's existing cgltf adapter: the same
 allocator-bridged parse, the same refusal of external file references (a glTF
 asset inside a bundle may not reference textures or buffers outside that
