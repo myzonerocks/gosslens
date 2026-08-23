@@ -146,6 +146,102 @@ fn outputType(node: Node, out_types: []const ValueType) Error!ValueType {
     }
 }
 
+fn glType(value: ValueType) []const u8 {
+    return switch (value) {
+        .float => "float",
+        .vec2 => "vec2",
+        .vec3 => "vec3",
+        .vec4 => "vec4",
+        .sampler => "sampler2D",
+    };
+}
+
+/// The swizzle that narrows a vec4 uniform down to a smaller type, since
+/// bgfx carries every uniform as a vec4.
+fn swizzle(value: ValueType) []const u8 {
+    return switch (value) {
+        .float => ".x",
+        .vec2 => ".xy",
+        .vec3 => ".xyz",
+        else => "",
+    };
+}
+
+fn emitConstant(node: Node, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    const p = node.params;
+    switch (node.value_type) {
+        .float => try writer.print("{d}", .{p[0]}),
+        .vec2 => try writer.print("vec2({d}, {d})", .{ p[0], p[1] }),
+        .vec3 => try writer.print("vec3({d}, {d}, {d})", .{ p[0], p[1], p[2] }),
+        .vec4, .sampler => try writer.print("vec4({d}, {d}, {d}, {d})", .{ p[0], p[1], p[2], p[3] }),
+    }
+}
+
+/// Appends the nodes reachable from the root in dependency order, inputs
+/// before the nodes that read them, using the DFS post-order.
+fn topoOrder(gpa: std.mem.Allocator, graph: Graph, index: u32, seen: []bool, order: *std.ArrayList(u32)) error{OutOfMemory}!void {
+    if (seen[index]) return;
+    seen[index] = true;
+    for (graph.nodes[index].inputs) |in| try topoOrder(gpa, graph, in, seen, order);
+    try order.append(gpa, index);
+}
+
+fn emitStatement(graph: Graph, types: []const ValueType, index: u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    const node = graph.nodes[index];
+    const in = node.inputs;
+    try writer.print("\t{s} n{d} = ", .{ glType(types[index]), index });
+    switch (node.kind) {
+        .uv => try writer.writeAll("v_texcoord0"),
+        .time => try writer.writeAll("u_time.x"),
+        .constant => try emitConstant(node, writer),
+        .uniform => try writer.print("u_{s}{s}", .{ node.name, swizzle(node.value_type) }),
+        .sample => try writer.print("texture2D(s_{s}, n{d})", .{ graph.nodes[in[0]].name, in[1] }),
+        .add => try writer.print("n{d} + n{d}", .{ in[0], in[1] }),
+        .multiply => try writer.print("n{d} * n{d}", .{ in[0], in[1] }),
+        .mix => try writer.print("mix(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
+        .saturate => try writer.print("clamp(n{d}, 0.0, 1.0)", .{in[0]}),
+        .texture, .output => unreachable,
+    }
+    try writer.writeAll(";\n");
+}
+
+/// Lowers a validated graph to a bgfx fragment shader. `types` is the
+/// resolved output type per node that validate() filled. Samplers and
+/// uniforms are declared up front, then the reachable nodes emit in
+/// dependency order and the output writes gl_FragColor.
+pub fn emitFragment(gpa: std.mem.Allocator, graph: Graph, types: []const ValueType, writer: *std.Io.Writer) error{OutOfMemory}!void {
+    writer.writeAll("$input v_texcoord0\n\n#include <bgfx_shader.sh>\n\n") catch return error.OutOfMemory;
+    var next_sampler: u32 = 0;
+    var uses_time = false;
+    for (graph.nodes) |node| {
+        switch (node.kind) {
+            .texture => {
+                writer.print("SAMPLER2D(s_{s}, {d});\n", .{ node.name, next_sampler }) catch return error.OutOfMemory;
+                next_sampler += 1;
+            },
+            .uniform => writer.print("uniform vec4 u_{s};\n", .{node.name}) catch return error.OutOfMemory,
+            .time => uses_time = true,
+            else => {},
+        }
+    }
+    if (uses_time) writer.writeAll("uniform vec4 u_time;\n") catch return error.OutOfMemory;
+
+    writer.writeAll("\nvoid main()\n{\n") catch return error.OutOfMemory;
+    const seen = try gpa.alloc(bool, graph.nodes.len);
+    defer gpa.free(seen);
+    @memset(seen, false);
+    var order: std.ArrayList(u32) = .empty;
+    defer order.deinit(gpa);
+    try topoOrder(gpa, graph, graph.root, seen, &order);
+    for (order.items) |index| {
+        switch (graph.nodes[index].kind) {
+            .texture, .output => {},
+            else => emitStatement(graph, types, index, writer) catch return error.OutOfMemory,
+        }
+    }
+    writer.print("\tgl_FragColor = n{d};\n}}\n", .{graph.nodes[graph.root].inputs[0]}) catch return error.OutOfMemory;
+}
+
 const t = std.testing;
 
 fn expectValid(nodes: []const Node, root: u32) !void {
@@ -222,4 +318,31 @@ test "exactly one output node is allowed" {
         .{ .kind = .output, .inputs = &.{0} }, // 2
     };
     try expectError(&two, 1, error.MultipleOutputs);
+}
+
+test "the graph lowers to a bgfx fragment shader" {
+    // uv -> sample(albedo) -> multiply(tint) -> output
+    const nodes = [_]Node{
+        .{ .kind = .uv }, // 0
+        .{ .kind = .texture, .name = "albedo" }, // 1
+        .{ .kind = .sample, .inputs = &.{ 1, 0 } }, // 2
+        .{ .kind = .constant, .value_type = .vec4, .params = .{ 1, 0.5, 0.2, 1 } }, // 3
+        .{ .kind = .multiply, .inputs = &.{ 2, 3 } }, // 4
+        .{ .kind = .output, .inputs = &.{4} }, // 5
+    };
+    const graph: Graph = .{ .nodes = &nodes, .root = 5 };
+    var types: [nodes.len]ValueType = undefined;
+    try validate(t.allocator, graph, &types);
+
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try emitFragment(t.allocator, graph, &types, &out.writer);
+    const src = out.writer.buffered();
+
+    try t.expect(std.mem.indexOf(u8, src, "$input v_texcoord0") != null);
+    try t.expect(std.mem.indexOf(u8, src, "SAMPLER2D(s_albedo, 0);") != null);
+    try t.expect(std.mem.indexOf(u8, src, "vec2 n0 = v_texcoord0;") != null);
+    try t.expect(std.mem.indexOf(u8, src, "vec4 n2 = texture2D(s_albedo, n0);") != null);
+    try t.expect(std.mem.indexOf(u8, src, "vec4 n4 = n2 * n3;") != null);
+    try t.expect(std.mem.indexOf(u8, src, "gl_FragColor = n4;") != null);
 }
