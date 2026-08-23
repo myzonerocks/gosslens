@@ -3,114 +3,16 @@
 //! exported layout or symbol shows up in review as a diff to
 //! tools/abi-baseline.txt, and an unintended change fails the gate.
 //!
-//!   abi_dump --print            write the current surface to stdout
-//!   abi_dump --check <baseline> exit 1 if the surface differs from the file
+//!   abi_dump --print                       write the current surface to stdout
+//!   abi_dump --check <baseline>            exit 1 if the surface or header minor drift
+//!   abi_dump --update <baseline> <header>  rewrite both from the derived surface
 
 const std = @import("std");
 const abi = @import("abi");
 
-const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.SessionConfig, abi.RendererDesc, abi.FramePlanes, abi.FaceResult, abi.HandResult, abi.PoseResult, abi.LensSignals, abi.CameraControls, abi.RecordingPolicy, abi.CaptureUiIntent };
+const abi_types = abi.abi_surface_types;
 
-// Exported functions with their frozen C signatures. Kept next to the type
-// manifest so a new export without a manifest entry is caught in review.
-const abi_functions = [_][]const u8{
-    "uint32_t goss_abi_version(void)",
-    "void *goss_alloc(size_t size)",
-    "void goss_free(void *ptr, size_t size)",
-    "goss_status goss_engine_create(const goss_engine_config *config, goss_engine **out_engine)",
-    "void goss_engine_destroy(goss_engine *engine)",
-    "goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session)",
-    "void goss_session_destroy(goss_session *session)",
-    "goss_status goss_engine_init_renderer(goss_engine *engine, const goss_renderer_desc *desc)",
-    "void goss_engine_resize(goss_engine *engine, uint32_t width, uint32_t height)",
-    "goss_status goss_engine_render_frame(goss_engine *engine, goss_session *session)",
-    "goss_status goss_engine_request_screenshot(goss_engine *engine, const uint8_t *path, size_t path_len)",
-    "goss_status goss_engine_capture_frame(goss_engine *engine, goss_session *session, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)",
-    "goss_status goss_engine_capture_photo(goss_engine *engine, goss_session *session, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
-    "goss_status goss_engine_capture_photo_as(goss_engine *engine, goss_session *session, uint32_t format, uint32_t quality, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
-    "goss_status goss_engine_recording_start(goss_engine *engine, goss_session *session, const uint8_t *path, size_t path_len, const goss_recording_config *config)",
-    "goss_status goss_engine_recording_stop(goss_engine *engine)",
-    "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
-    "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
-    "goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
-    "goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)",
-    "goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)",
-    "goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
-    "goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)",
-    "goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)",
-    "goss_status goss_session_set_recording_policy(goss_session *session, const goss_recording_policy *policy)",
-    "goss_status goss_session_recording_policy(goss_session *session, goss_recording_policy *out)",
-    "goss_status goss_session_set_capture_ui(goss_session *session, const goss_capture_ui *ui)",
-    "goss_status goss_session_capture_ui(goss_session *session, goss_capture_ui *out)",
-    "goss_status goss_session_fire_event(goss_session *session, const uint8_t *name, size_t name_len)",
-    "goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len)",
-    "goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len)",
-    "goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
-    "goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement)",
-    "goss_status goss_session_clear_layout(goss_session *session)",
-    "goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity)",
-    "goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len)",
-    "goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us)",
-    "goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m)",
-    "goss_status goss_session_clear_geofence(goss_session *session)",
-    "goss_status goss_session_set_geofence_bbox(goss_session *session, double min_lat, double min_lon, double max_lat, double max_lon)",
-    "goss_status goss_session_set_geofence_polygon(goss_session *session, const double *coords, size_t vertex_count)",
-    "goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m)",
-    "goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)",
-    "goss_status goss_session_brush_begin(goss_session *session)",
-    "goss_status goss_session_brush_point(goss_session *session, float x, float y)",
-    "goss_status goss_session_brush_end(goss_session *session)",
-    "goss_status goss_session_brush_undo(goss_session *session)",
-    "goss_status goss_session_brush_redo(goss_session *session)",
-    "goss_status goss_session_brush_clear(goss_session *session)",
-    "goss_status goss_session_brush_vertices(goss_session *session, float *out, size_t capacity_floats, size_t *out_count)",
-    "goss_status goss_session_brush_set_mode(goss_session *session, uint32_t mode)",
-    "goss_status goss_session_brush_erase_at(goss_session *session, float x, float y, float radius, size_t *out_removed)",
-    "goss_status goss_session_ar_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)",
-    "goss_status goss_session_ar_brush_set_mode(goss_session *session, uint32_t mode)",
-    "goss_status goss_session_ar_brush_begin(goss_session *session)",
-    "goss_status goss_session_ar_brush_point(goss_session *session, float x, float y, float z)",
-    "goss_status goss_session_ar_brush_end(goss_session *session)",
-    "goss_status goss_session_ar_brush_undo(goss_session *session)",
-    "goss_status goss_session_ar_brush_clear(goss_session *session)",
-    "goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)",
-    "goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)",
-    "goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
-    "goss_degrade_level goss_session_report_frame(goss_session *session, uint32_t frame_time_us, goss_thermal thermal)",
-    "goss_degrade_level goss_session_degrade_level(const goss_session *session)",
-    "goss_status goss_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix)",
-    "goss_status goss_session_enable_face_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
-    "void goss_session_disable_face_tracking(goss_session *session)",
-    "goss_status goss_session_enable_hand_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
-    "void goss_session_disable_hand_tracking(goss_session *session)",
-    "goss_status goss_session_hand_result(goss_session *session, goss_hand_result *out_result)",
-    "goss_status goss_session_hand_joint(goss_session *session, uint32_t hand_index, uint32_t joint, float *out_xyz)",
-    "goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
-    "void goss_session_disable_pose_tracking(goss_session *session)",
-    "goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result)",
-    "goss_status goss_session_body_joint(goss_session *session, uint32_t joint, float *out_xyz)",
-    "goss_status goss_session_face_pose(goss_session *session, float *out_matrix)",
-    "goss_status goss_session_face_region(goss_session *session, uint32_t region, float *out_xyz)",
-    "goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)",
-    "void goss_session_disable_segmentation(goss_session *session)",
-    "goss_status goss_session_track_frame(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
-    "goss_status goss_session_face_result(goss_session *session, goss_face_result *out_result)",
-    "goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count)",
-    "goss_status goss_session_face_count(goss_session *session, uint32_t *out_count)",
-    "goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result)",
-    "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
-    "void goss_session_disable_beauty(goss_session *session)",
-    "goss_status goss_session_set_beauty(goss_session *session, int32_t effect, float value)",
-    "goss_status goss_session_set_beauty_lut(goss_session *session, int32_t slot, const uint8_t *rgba, uint32_t width, uint32_t height)",
-    "goss_status goss_session_set_beauty_makeup_texture(goss_session *session, int32_t effect, const uint8_t *rgba, uint32_t width, uint32_t height)",
-    "goss_status goss_session_set_face_landmarks(goss_session *session, const float *points, uint32_t point_count)",
-    "goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
-    "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
-    "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
-    "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
-    "void goss_session_deactivate_lens(goss_session *session)",
-    "goss_status goss_session_tick_lens(goss_session *session, uint32_t dt_us, const goss_lens_signals *signals)",
-};
+const abi_functions = abi.abi_functions;
 
 fn writeSurface(w: anytype) !void {
     try w.print("abi {d}.{d}\n", .{ abi.abi_major, abi.abi_minor });
@@ -123,6 +25,39 @@ fn writeSurface(w: anytype) !void {
     for (abi_functions) |f| {
         try w.print("fn {s}\n", .{f});
     }
+}
+
+const minor_key = "#define GOSS_ABI_MINOR";
+
+// Reads the minor the header currently declares, so the check can prove the
+// public contract matches the derived surface.
+fn headerMinor(text: []const u8) ?u16 {
+    const at = std.mem.indexOf(u8, text, minor_key) orelse return null;
+    var i = at + minor_key.len;
+    while (i < text.len and !std.ascii.isDigit(text[i])) i += 1;
+    var v: u16 = 0;
+    var saw = false;
+    while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {
+        v = v * 10 + (text[i] - '0');
+        saw = true;
+    }
+    return if (saw) v else null;
+}
+
+// Splices the derived minor into the header in place of whatever digits the
+// define currently holds, leaving the trailing u and the rest untouched.
+fn stampHeaderMinor(arena: std.mem.Allocator, text: []const u8, minor: u16) ![]const u8 {
+    const at = std.mem.indexOf(u8, text, minor_key) orelse return error.MinorNotFound;
+    var ds = at + minor_key.len;
+    while (ds < text.len and !std.ascii.isDigit(text[ds])) ds += 1;
+    var de = ds;
+    while (de < text.len and std.ascii.isDigit(text[de])) de += 1;
+    if (de == ds) return error.MinorNotFound;
+    var buf: std.Io.Writer.Allocating = .init(arena);
+    try buf.writer.writeAll(text[0..ds]);
+    try buf.writer.print("{d}", .{minor});
+    try buf.writer.writeAll(text[de..]);
+    return buf.writer.buffered();
 }
 
 pub fn main(init: std.process.Init) !u8 {
@@ -160,6 +95,40 @@ pub fn main(init: std.process.Init) !u8 {
             std.debug.print("An intended change must update the baseline in the same PR.\n", .{});
             return 1;
         }
+        const declared = headerMinor(header_text) orelse {
+            std.debug.print("abi_dump: {s} not found in the header\n", .{minor_key});
+            return 1;
+        };
+        if (declared != abi.abi_minor) {
+            std.debug.print("abi_dump: header GOSS_ABI_MINOR is {d} but the derived surface is {d}; run zig build abi-update\n", .{ declared, abi.abi_minor });
+            return 1;
+        }
+        for (abi_functions) |f| {
+            const name = functionName(f);
+            if (std.mem.indexOf(u8, header_text, name) == null) {
+                std.debug.print("abi_dump: {s} is exported but not declared in the header\n", .{name});
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    if (std.mem.eql(u8, mode, "--update")) {
+        const baseline_path = args.next() orelse "tools/abi-baseline.txt";
+        const header_path = args.next() orelse "include/gosslens.h";
+        // Read and stamp the header before writing anything, so a header that
+        // cannot be stamped leaves neither file half-written.
+        const header = std.Io.Dir.cwd().readFileAlloc(init.io, header_path, arena, .limited(1 << 20)) catch |err| {
+            std.debug.print("abi_dump: cannot read {s}: {t}\n", .{ header_path, err });
+            return 1;
+        };
+        const stamped = stampHeaderMinor(arena, header, abi.abi_minor) catch {
+            std.debug.print("abi_dump: {s} not found in {s}\n", .{ minor_key, header_path });
+            return 1;
+        };
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = baseline_path, .data = current });
+        try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = header_path, .data = stamped });
+        std.debug.print("abi-update: wrote {s} and stamped GOSS_ABI_MINOR={d} in {s}\n", .{ baseline_path, abi.abi_minor, header_path });
         return 0;
     }
 
@@ -170,10 +139,9 @@ pub fn main(init: std.process.Init) !u8 {
 const build_options = @import("build_options");
 const header_text = build_options.gosslens_header;
 
-// The manifest above is hand-maintained next to the frozen header on
-// purpose (a symbol only in one of the two is a build break, not a silent
-// drift); this test is the enforcement so an export never goes undeclared
-// in the header an SDK actually compiles against.
+// abi.abi_functions and the frozen header are kept in step by this test: a
+// symbol exported but never declared in the header an SDK compiles against
+// is a build break here, not a silent drift.
 fn functionName(signature: []const u8) []const u8 {
     const paren = std.mem.indexOfScalar(u8, signature, '(') orelse unreachable;
     var start = paren;

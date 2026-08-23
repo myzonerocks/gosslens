@@ -109,9 +109,15 @@ pub fn build(b: *std.Build) void {
     const abi_check = b.addRunArtifact(abi_dump_exe);
     abi_check.setCwd(b.path("."));
     if (b.args) |args| abi_check.addArgs(args) else abi_check.addArgs(&.{ "--check", "tools/abi-baseline.txt" });
-    const abi_step = b.step("abi", "Check the ABI surface against the baseline (-- --print to regenerate)");
+    const abi_step = b.step("abi", "Check the ABI surface and header minor against the baseline (zig build abi-update regenerates both)");
     abi_step.dependOn(&abi_check.step);
     ci_step.dependOn(abi_step);
+
+    const abi_update = b.addRunArtifact(abi_dump_exe);
+    abi_update.setCwd(b.path("."));
+    abi_update.addArgs(&.{ "--update", "tools/abi-baseline.txt", "include/gosslens.h" });
+    const abi_update_step = b.step("abi-update", "Regenerate the ABI baseline and stamp GOSS_ABI_MINOR from the derived surface");
+    abi_update_step.dependOn(&abi_update.step);
 
     // A bare header is not a translation unit, so the compile check goes
     // through a generated file that includes it. C99 proves the header stays
