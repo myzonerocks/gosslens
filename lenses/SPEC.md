@@ -310,6 +310,8 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   bend angle in radians at a named bone: left_elbow, right_elbow, left_knee,
   right_knee, left_shoulder, right_shoulder, left_hip, right_hip; zero folded,
   pi straight, and zero with no body, so gate with `body.present`),
+  `body.jump` / `body.wave` (true for one tick when a hop or a raised-hand wave
+  completes), `body.dance` (true while rhythmic whole-body motion lasts),
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `tap`, `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a

@@ -37,11 +37,14 @@ pub const SignalKind = enum {
     hand_pinch,
     body_present,
     bone_angle,
+    body_jump,
+    body_wave,
+    body_dance,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch, .body_present => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance => true,
         .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle => false,
     };
 }
@@ -138,6 +141,12 @@ pub const Signals = struct {
     /// from the pose landmarks, or null with no body. A lens compares one by
     /// name (`body.bone_angle('left_elbow') < 1.5`).
     bone_angles: ?*const [pose.bone_count]f32 = null,
+    /// One-tick pulses set the tick a jump (a hop up and back) or a wave (a
+    /// raised hand swinging sideways) completes; body_dance stays true while
+    /// rhythmic whole-body motion lasts. Detected on-device from the pose ring.
+    body_jump: bool = false,
+    body_wave: bool = false,
+    body_dance: bool = false,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -199,6 +208,9 @@ fn readBool(s: Signal, signals: Signals) bool {
         .hand_gesture => signals.hand_gesture == s.gesture_index,
         .hand_pinch => signals.hand_pinch,
         .body_present => signals.body_present,
+        .body_jump => signals.body_jump,
+        .body_wave => signals.body_wave,
+        .body_dance => signals.body_dance,
         else => unreachable,
     };
 }
@@ -636,6 +648,15 @@ const Parser = struct {
             };
             return .{ .kind = .bone_angle, .bone_index = index };
         }
+        if (std.mem.eql(u8, head, "body") and std.mem.eql(u8, tail, "jump")) {
+            return .{ .kind = .body_jump };
+        }
+        if (std.mem.eql(u8, head, "body") and std.mem.eql(u8, tail, "wave")) {
+            return .{ .kind = .body_wave };
+        }
+        if (std.mem.eql(u8, head, "body") and std.mem.eql(u8, tail, "dance")) {
+            return .{ .kind = .body_dance };
+        }
         if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "tilt")) {
             return .{ .kind = .head_tilt };
         }
@@ -808,6 +829,15 @@ test "body.bone_angle compares the fed bend of a named bone" {
     const err = try compileFails("body.bone_angle('nope')");
     defer t.allocator.free(err.message);
     try t.expect(std.mem.indexOf(u8, err.message, "unknown bone") != null);
+}
+
+test "body.jump, wave, and dance read the fed action pulses" {
+    var expr = try compileOk("body.jump || body.wave || body.dance");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .body_jump = true }));
+    try t.expect(evaluate(expr.root, .{ .body_wave = true }));
+    try t.expect(evaluate(expr.root, .{ .body_dance = true }));
 }
 
 test "an unknown parameter name fails to compile" {

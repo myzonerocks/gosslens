@@ -609,6 +609,13 @@ pub const Session = struct {
     head_clock_us: i64 = 0,
     head_nod_refractory_us: i64 = 0,
     head_shake_refractory_us: i64 = 0,
+    /// Recent body-motion samples for the jump/wave/dance detectors, a fixed
+    /// ring fed at tick from the tracked pose; only the action edges reach a lens.
+    body_samples: [body_history]BodySample = @splat(.{}),
+    body_write: usize = 0,
+    body_clock_us: i64 = 0,
+    body_jump_refractory_us: i64 = 0,
+    body_wave_refractory_us: i64 = 0,
     /// The current bone bend angles, filled at tick from the pose worker so a
     /// lens can compare one by name; the signal points here until the next tick.
     bone_angles: [pose.bone_count]f32 = @splat(0),
@@ -5227,6 +5234,150 @@ fn currentPose(s: *Session) ?pose.Result {
     return result;
 }
 
+const body_history = 64;
+const body_window_us: i64 = 1_200_000;
+const body_jump_amplitude: f32 = 0.18;
+const body_wave_amplitude: f32 = 0.15;
+const body_wave_reversals: u32 = 2;
+const body_move_eps: f32 = 0.01;
+const body_action_refractory_us: i64 = 700_000;
+const body_dance_energy: f32 = 0.6;
+const body_dance_reversals: u32 = 3;
+
+/// One body-motion reading in the action detector's ring: torso-normalized
+/// features plus the session clock, so detection is free of scale and distance.
+const BodySample = struct {
+    hip_y: f32 = 0,
+    lwrist_x: f32 = 0,
+    rwrist_x: f32 = 0,
+    lwrist_up: bool = false,
+    rwrist_up: bool = false,
+    t_us: i64 = 0,
+    valid: bool = false,
+};
+
+/// Derives the torso-normalized motion features from a pose, or null if the
+/// torso is degenerate, so a bad frame is skipped rather than dividing by zero.
+fn bodySampleFrom(landmarks: *const [pose.landmark_count * 3]f32, t_us: i64) ?BodySample {
+    const at = struct {
+        fn p(l: *const [pose.landmark_count * 3]f32, i: usize) [2]f32 {
+            return .{ l[i * 3], l[i * 3 + 1] };
+        }
+    }.p;
+    const lsh = at(landmarks, 11);
+    const rsh = at(landmarks, 12);
+    const lhip = at(landmarks, 23);
+    const rhip = at(landmarks, 24);
+    const lwr = at(landmarks, 15);
+    const rwr = at(landmarks, 16);
+    const sh_cx = (lsh[0] + rsh[0]) * 0.5;
+    const sh_cy = (lsh[1] + rsh[1]) * 0.5;
+    const hip_cx = (lhip[0] + rhip[0]) * 0.5;
+    const hip_cy = (lhip[1] + rhip[1]) * 0.5;
+    const dxt = sh_cx - hip_cx;
+    const dyt = sh_cy - hip_cy;
+    const torso = @sqrt(dxt * dxt + dyt * dyt);
+    if (torso <= 0) return null;
+    return .{
+        .hip_y = hip_cy / torso,
+        .lwrist_x = (lwr[0] - sh_cx) / torso,
+        .rwrist_x = (rwr[0] - sh_cx) / torso,
+        .lwrist_up = lwr[1] < lsh[1],
+        .rwrist_up = rwr[1] < rsh[1],
+        .t_us = t_us,
+        .valid = true,
+    };
+}
+
+fn pushBodySample(s: *Session, sample: BodySample) void {
+    s.body_samples[s.body_write] = sample;
+    s.body_write = (s.body_write + 1) % body_history;
+}
+
+/// Copies the recent in-window samples into buf, oldest first, and returns how
+/// many there were.
+fn recentBodySamples(s: *Session, buf: *[body_history]BodySample) usize {
+    var n: usize = 0;
+    const now = s.body_clock_us;
+    var idx: usize = s.body_write;
+    for (0..body_history) |_| {
+        idx = (idx + body_history - 1) % body_history;
+        const smp = s.body_samples[idx];
+        if (!smp.valid or now - smp.t_us > body_window_us) break;
+        buf[n] = smp;
+        n += 1;
+    }
+    std.mem.reverse(BodySample, buf[0..n]);
+    return n;
+}
+
+/// True if one hand is raised through most of the window and swings sideways
+/// past the amplitude with enough reversals, the shape of a wave.
+fn waveOn(buf: []const BodySample, left: bool) bool {
+    var up_count: usize = 0;
+    var reversals: u32 = 0;
+    var dir: i2 = 0;
+    var x_min = if (left) buf[0].lwrist_x else buf[0].rwrist_x;
+    var x_max = x_min;
+    for (buf, 0..) |smp, i| {
+        if (if (left) smp.lwrist_up else smp.rwrist_up) up_count += 1;
+        const x = if (left) smp.lwrist_x else smp.rwrist_x;
+        x_min = @min(x_min, x);
+        x_max = @max(x_max, x);
+        if (i > 0) {
+            const prev = if (left) buf[i - 1].lwrist_x else buf[i - 1].rwrist_x;
+            const d: i2 = if (x - prev > body_move_eps) 1 else if (x - prev < -body_move_eps) -1 else 0;
+            if (d != 0 and dir != 0 and d != dir) reversals += 1;
+            if (d != 0) dir = d;
+        }
+    }
+    return up_count * 2 >= buf.len and reversals >= body_wave_reversals and (x_max - x_min) > body_wave_amplitude;
+}
+
+/// A jump is an upward hip excursion that returns, a wave a raised hand
+/// swinging sideways, a dance sustained rhythmic motion. Each edge fires once
+/// per refractory window; dance is a level held while the motion lasts.
+fn detectBodyActions(s: *Session) struct { jump: bool, wave: bool, dance: bool } {
+    var buf: [body_history]BodySample = undefined;
+    const n = recentBodySamples(s, &buf);
+    if (n < 4) return .{ .jump = false, .wave = false, .dance = false };
+    const now = s.body_clock_us;
+
+    // The highest point (smallest y, since y grows down) must sit a jump above
+    // both ends: the body rose and came back, not just drifted.
+    var hip_min = buf[0].hip_y;
+    for (buf[0..n]) |smp| hip_min = @min(hip_min, smp.hip_y);
+    const jumped = (@min(buf[0].hip_y, buf[n - 1].hip_y) - hip_min) > body_jump_amplitude;
+
+    const waved = waveOn(buf[0..n], true) or waveOn(buf[0..n], false);
+
+    // Sustained rhythmic motion: total travel past the energy floor with
+    // several hip-direction reversals over the window.
+    var energy: f32 = 0;
+    var reversals: u32 = 0;
+    var dir: i2 = 0;
+    for (1..n) |i| {
+        const dh = buf[i].hip_y - buf[i - 1].hip_y;
+        energy += @abs(dh) + @abs(buf[i].lwrist_x - buf[i - 1].lwrist_x);
+        const d: i2 = if (dh > body_move_eps) 1 else if (dh < -body_move_eps) -1 else 0;
+        if (d != 0 and dir != 0 and d != dir) reversals += 1;
+        if (d != 0) dir = d;
+    }
+    const dancing = energy > body_dance_energy and reversals >= body_dance_reversals;
+
+    var jump = false;
+    var wave = false;
+    if (jumped and now >= s.body_jump_refractory_us) {
+        jump = true;
+        s.body_jump_refractory_us = now + body_action_refractory_us;
+    }
+    if (waved and now >= s.body_wave_refractory_us) {
+        wave = true;
+        s.body_wave_refractory_us = now + body_action_refractory_us;
+    }
+    return .{ .jump = jump, .wave = wave, .dance = dancing };
+}
+
 pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
@@ -5268,12 +5419,21 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
             }
         }
     }
-    // Body presence and bone angles ride the pose worker, so a lens fires on
-    // body.present or compares a joint bend, body.bone_angle('left_elbow').
+    // Body presence, bone angles, and action edges ride the pose worker, so a
+    // lens fires on body.present, a joint bend, or body.jump/wave/dance. The
+    // raw pose is scanned on-device; only these signals reach a lens.
+    s.body_clock_us += @as(i64, dt_us);
     if (currentPose(s)) |body| {
         live_signals.body_present = true;
         pose.fillBoneAngles(&body.landmarks, &s.bone_angles);
         live_signals.bone_angles = &s.bone_angles;
+        if (bodySampleFrom(&body.landmarks, s.body_clock_us)) |sample| {
+            pushBodySample(s, sample);
+            const actions = detectBodyActions(s);
+            live_signals.body_jump = actions.jump;
+            live_signals.body_wave = actions.wave;
+            live_signals.body_dance = actions.dance;
+        }
     }
     if (s.audio_engine_fed) {
         live_signals.audio_level = s.audio.level;
@@ -5669,6 +5829,49 @@ test "head euler decomposes identity to zero and the detector separates nod from
     const shake = detectHeadGestures(session);
     try t.expect(shake.shake);
     try t.expect(!shake.nod);
+}
+
+test "body action detectors separate a jump, a wave, sustained motion, and stillness" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const feed = struct {
+        fn push(sess: *Session, hip_y: f32, lx: f32, up: bool) void {
+            sess.body_clock_us += 33_000;
+            pushBodySample(sess, .{ .hip_y = hip_y, .lwrist_x = lx, .lwrist_up = up, .t_us = sess.body_clock_us, .valid = true });
+        }
+    };
+
+    // A hop: the hip rises past the amplitude (smaller y is higher) and returns.
+    const hop = [_]f32{ 3.0, 3.0, 2.8, 2.6, 2.75, 2.9, 3.0, 3.0 };
+    for (hop) |y| feed.push(session, y, 0.0, false);
+    const j = detectBodyActions(session);
+    try t.expect(j.jump);
+    try t.expect(!j.dance);
+
+    // A raised hand swinging side to side, the hip holding still.
+    session.body_clock_us += 2_000_000;
+    const xs = [_]f32{ 0.2, 0.45, 0.2, 0.45, 0.2, 0.45, 0.2 };
+    for (xs) |x| feed.push(session, 3.0, x, true);
+    const w = detectBodyActions(session);
+    try t.expect(w.wave);
+    try t.expect(!w.jump);
+
+    // Sustained hip oscillation reads as dancing, not a single jump.
+    session.body_clock_us += 2_000_000;
+    const osc = [_]f32{ 3.0, 3.3, 3.0, 3.3, 3.0, 3.3, 3.0, 3.3 };
+    for (osc) |y| feed.push(session, y, 0.0, false);
+    const d = detectBodyActions(session);
+    try t.expect(d.dance);
+    try t.expect(!d.jump);
+
+    // A still body is none of the three.
+    session.body_clock_us += 2_000_000;
+    for (0..8) |_| feed.push(session, 3.0, 0.2, false);
+    const still = detectBodyActions(session);
+    try t.expect(!still.jump and !still.wave and !still.dance);
 }
 
 test "beauty on a build without the effects engine refuses" {
