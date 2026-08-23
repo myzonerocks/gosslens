@@ -795,6 +795,10 @@ const LoadedModel = struct {
     base_color: [4]f32,
     animations: []gltf.DecodedAnimation,
     rig: ?SkinnedRig = null,
+    /// Per-vertex position deltas, one array per morph target, kept so a
+    /// lens can blend them into the mesh by weight. Empty for a mesh with
+    /// no blendshapes.
+    morph_targets: []const []const [3]f32 = &.{},
 };
 
 /// The model node's local matrix this frame: the weighted blend of its
@@ -4736,6 +4740,7 @@ fn destroyModelState(session: *Session) void {
     while (mesh_it.next()) |loaded| {
         render.Renderer.destroyModelMesh(loaded.mesh);
         gltf.freeAnimations(session.engine.gpa, loaded.animations);
+        gltf.freeMorphTargets(session.engine.gpa, loaded.morph_targets);
         if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
     session.model_meshes.clearRetainingCapacity();
@@ -5430,6 +5435,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 gpa.free(decoded.indices);
                 gltf.freeAnimations(gpa, decoded.animations);
                 if (decoded.skin) |*sk| gltf.freeSkin(gpa, sk);
+                gltf.freeMorphTargets(gpa, decoded.morph_targets);
                 finished.append(gpa, entry.key_ptr.*) catch {};
                 continue;
             };
@@ -5447,6 +5453,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 .base_color = decoded.base_color,
                 .animations = decoded.animations,
                 .rig = rig,
+                .morph_targets = decoded.morph_targets,
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
                 if (rig) |rg| {
@@ -5454,6 +5461,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                     destroySkinnedRig(gpa, &owned);
                 }
                 gltf.freeAnimations(gpa, decoded.animations);
+                gltf.freeMorphTargets(gpa, decoded.morph_targets);
             };
             finished.append(gpa, entry.key_ptr.*) catch {};
         } else if (loader.hasFailed()) {

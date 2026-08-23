@@ -130,6 +130,33 @@ pub const Primitive = struct {
         return count;
     }
 
+    /// How many morph targets this primitive carries (blendshapes: each
+    /// is a set of per-vertex position deltas added in by its weight).
+    pub fn morphTargetCount(p: Primitive) usize {
+        return p.raw.targets_count;
+    }
+
+    /// Reads morph target `index`'s POSITION deltas into `out`, one vec3
+    /// per vertex, returning how many were read. A target without a
+    /// POSITION attribute reads nothing.
+    pub fn readMorphTargetPositions(p: Primitive, index: usize, out: [][3]f32) Error!usize {
+        if (index >= p.raw.targets_count) return 0;
+        const target = p.raw.targets[index];
+        var accessor: ?*const c.cgltf_accessor = null;
+        for (target.attributes[0..target.attributes_count]) |attr| {
+            if (attr.type == c.cgltf_attribute_type_position) {
+                accessor = attr.data;
+                break;
+            }
+        }
+        const acc = accessor orelse return 0;
+        const count = @min(acc.*.count, out.len);
+        const floats: [*]f32 = @ptrCast(out.ptr);
+        const unpacked = c.cgltf_accessor_unpack_floats(acc, floats, count * 3);
+        if (unpacked != count * 3) return error.MalformedAsset;
+        return count;
+    }
+
     /// The four joint indices skinning each vertex (JOINTS_0). glTF
     /// stores them as bytes or shorts; read as uints and narrow, since a
     /// skeleton never carries more joints than a u16 holds.
@@ -528,6 +555,11 @@ pub const DecodedModel = struct {
     /// Present only when the mesh's node carries a glTF skin; a static
     /// model leaves it null and renders on its rigid anchor matrix.
     skin: ?DecodedSkin = null,
+    /// One entry per morph target (blendshape), each a per-vertex POSITION
+    /// delta the same length as `positions`. Empty when the mesh has none.
+    /// A weighted sum of these added to the base positions is the morphed
+    /// mesh; the weights come from the lens.
+    morph_targets: []const []const [3]f32 = &.{},
 };
 
 /// Parses a .glb/.gltf's bytes into a plain-data model: the first
@@ -593,7 +625,19 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         if (tn.raw.skin) |skin_raw| decoded_skin = try decodeSkin(gpa, skin_raw, prim, vertex_count);
     }
 
-    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animations = try animations.toOwnedSlice(gpa), .skin = decoded_skin };
+    var morph_targets: std.ArrayList([]const [3]f32) = .empty;
+    errdefer {
+        for (morph_targets.items) |m| gpa.free(m);
+        morph_targets.deinit(gpa);
+    }
+    for (0..prim.morphTargetCount()) |mi| {
+        const deltas = try gpa.alloc([3]f32, vertex_count);
+        errdefer gpa.free(deltas);
+        if (try prim.readMorphTargetPositions(mi, deltas) != vertex_count) return error.MalformedAsset;
+        try morph_targets.append(gpa, deltas);
+    }
+
+    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animations = try animations.toOwnedSlice(gpa), .skin = decoded_skin, .morph_targets = try morph_targets.toOwnedSlice(gpa) };
 }
 
 /// Reads a glTF skin into owned arrays. A vertex joint index past the
@@ -710,11 +754,18 @@ pub fn freeAnimations(gpa: std.mem.Allocator, anims: []DecodedAnimation) void {
     gpa.free(anims);
 }
 
+/// Frees a decoded morph target list and each target's delta array.
+pub fn freeMorphTargets(gpa: std.mem.Allocator, targets: []const []const [3]f32) void {
+    for (targets) |m| gpa.free(m);
+    gpa.free(targets);
+}
+
 pub fn freeDecodedModel(gpa: std.mem.Allocator, model: DecodedModel) void {
     gpa.free(model.positions);
     gpa.free(model.indices);
     freeAnimations(gpa, model.animations);
     if (model.skin) |*sk| freeSkin(gpa, sk);
+    freeMorphTargets(gpa, model.morph_targets);
 }
 
 const t = std.testing;
@@ -1090,6 +1141,86 @@ test "a static mesh with no animation surfaces an empty clip list" {
     const model = try decodeModel(t.allocator, glb);
     defer freeDecodedModel(t.allocator, model);
     try t.expectEqual(@as(usize, 0), model.animations.len);
+}
+
+// Builds a GLB whose triangle carries one morph target: per-vertex
+// POSITION deltas that push two of the three vertices out.
+fn buildMorphGlb(gpa: std.mem.Allocator) ![]u8 {
+    const positions = [3][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 } };
+    const indices = [3]u16{ 0, 1, 2 };
+    const deltas = [3][3]f32{ .{ 0, 0, 0 }, .{ 0.5, 0, 0 }, .{ 0, 0.5, 0 } };
+
+    var bin: std.ArrayList(u8) = .empty;
+    defer bin.deinit(gpa);
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&positions)); // 0..36
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&indices)); // 36..42
+    while (bin.items.len % 4 != 0) try bin.append(gpa, 0); // pad to 44
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&deltas)); // 44..80
+
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{"asset":{{"version":"2.0"}},
+        \\"buffers":[{{"byteLength":{d}}}],
+        \\"bufferViews":[
+        \\{{"buffer":0,"byteOffset":0,"byteLength":36}},
+        \\{{"buffer":0,"byteOffset":36,"byteLength":6}},
+        \\{{"buffer":0,"byteOffset":44,"byteLength":36}}],
+        \\"accessors":[
+        \\{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+        \\{{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}},
+        \\{{"bufferView":2,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[0.5,0.5,0]}}],
+        \\"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"targets":[{{"POSITION":2}}]}}]}}],
+        \\"nodes":[{{"mesh":0,"name":"tri"}}],
+        \\"scenes":[{{"nodes":[0]}}],"scene":0}}
+    , .{bin.items.len});
+    defer gpa.free(json);
+
+    var json_padded: std.ArrayList(u8) = .empty;
+    defer json_padded.deinit(gpa);
+    try json_padded.appendSlice(gpa, json);
+    while (json_padded.items.len % 4 != 0) try json_padded.append(gpa, ' ');
+
+    var glb: std.ArrayList(u8) = .empty;
+    errdefer glb.deinit(gpa);
+    const total: u32 = @intCast(12 + 8 + json_padded.items.len + 8 + bin.items.len);
+    var scratch: [4]u8 = undefined;
+    std.mem.writeInt(u32, &scratch, 0x46546C67, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 2, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, total, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, @intCast(json_padded.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x4E4F534A, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, json_padded.items);
+    std.mem.writeInt(u32, &scratch, @intCast(bin.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x004E4942, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, bin.items);
+    return glb.toOwnedSlice(gpa);
+}
+
+test "decodeModel surfaces morph target position deltas" {
+    const glb = try buildMorphGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 1), model.morph_targets.len);
+    try t.expectEqual(@as(usize, 3), model.morph_targets[0].len);
+    // Vertex 0 holds, vertices 1 and 2 push out along x and y.
+    try t.expectEqual([3]f32{ 0, 0, 0 }, model.morph_targets[0][0]);
+    try t.expectApproxEqAbs(@as(f32, 0.5), model.morph_targets[0][1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), model.morph_targets[0][2][1], 0.001);
+}
+
+test "a mesh with no morph targets surfaces an empty list" {
+    const glb = try buildTriangleGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 0), model.morph_targets.len);
 }
 
 // Builds a GLB with a two-joint skin over the triangle: JOINTS_0,
