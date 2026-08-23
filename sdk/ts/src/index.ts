@@ -122,6 +122,24 @@ export interface GossFaceOut {
   blendshapes: Float32Array;
 }
 
+/// A named attach point on the tracked face mesh, for faceRegion. The
+/// left/right labels are the subject's own.
+export enum GossFaceRegion {
+  Forehead = 0,
+  Glabella = 1,
+  NoseTip = 2,
+  Chin = 3,
+  LeftEye = 4,
+  RightEye = 5,
+  LeftCheek = 6,
+  RightCheek = 7,
+  LeftEar = 8,
+  RightEar = 9,
+  MouthCenter = 10,
+  LeftMouthCorner = 11,
+  RightMouthCorner = 12,
+}
+
 /// The segmentation mask channels a lens can name, in the engine's frozen
 /// order: the derived person mask, then the multiclass model's own labels.
 /// Index 0 (person) rides the subject mask; the rest upload as class masks.
@@ -1160,6 +1178,21 @@ export class GossSession {
       blendshapes: this.mod.HEAPF32.slice(bsStart, bsStart + GOSS_FACE_BLENDSHAPE_COUNT),
     };
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, FACE_RESULT_BYTES]);
+    return out;
+  }
+
+  /// The tracked point (x, y in frame pixels, z in the same scale) of a named
+  /// face region, or null until a face is tracked.
+  faceRegion(region: GossFaceRegion): [number, number, number] | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const status = this.mod.ccall("goss_session_face_region", "number", ["number", "number", "number"], [this.handle, region, ptr]) as number;
+    if (status !== 0) {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
+      return null;
+    }
+    const w = ptr >> 2;
+    const out: [number, number, number] = [this.mod.HEAPF32[w], this.mod.HEAPF32[w + 1], this.mod.HEAPF32[w + 2]];
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
     return out;
   }
 

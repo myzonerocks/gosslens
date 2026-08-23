@@ -313,6 +313,13 @@ export fn Java_com_gosslens_Gosslens_nativeFacePose(env: *JniEnv, cls: jobject, 
     return @intFromEnum(abi.goss_session_face_pose(sessionFromHandle(session), matrix));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeFaceRegion(env: *JniEnv, cls: jobject, session: i64, region: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: *[3]f32 = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_face_region(sessionFromHandle(session), @intCast(region), out));
+}
+
 /// info_buffer receives {encoded_len: u64, width: u32, height: u32};
 /// a too-small data buffer still fills it, so the caller can retry
 /// with the exact size (the ABI's own probe contract).

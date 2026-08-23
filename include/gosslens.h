@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 31u
+#define GOSS_ABI_MINOR 32u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -546,6 +546,28 @@ goss_status goss_session_pose_result(goss_session *session, goss_pose_result *ou
  * (centimeters) into frame pixels - as a column-major 4x4. Reports
  * GOSS_AGAIN until a face is tracked or while the fit is degenerate. */
 goss_status goss_session_face_pose(goss_session *session, float *out_matrix);
+
+/* Named attach points on the tracked face mesh for goss_session_face_region.
+ * The left/right labels are the subject's own. */
+#define GOSS_FACE_REGION_FOREHEAD 0u
+#define GOSS_FACE_REGION_GLABELLA 1u
+#define GOSS_FACE_REGION_NOSE_TIP 2u
+#define GOSS_FACE_REGION_CHIN 3u
+#define GOSS_FACE_REGION_LEFT_EYE 4u
+#define GOSS_FACE_REGION_RIGHT_EYE 5u
+#define GOSS_FACE_REGION_LEFT_CHEEK 6u
+#define GOSS_FACE_REGION_RIGHT_CHEEK 7u
+#define GOSS_FACE_REGION_LEFT_EAR 8u
+#define GOSS_FACE_REGION_RIGHT_EAR 9u
+#define GOSS_FACE_REGION_MOUTH_CENTER 10u
+#define GOSS_FACE_REGION_LEFT_MOUTH_CORNER 11u
+#define GOSS_FACE_REGION_RIGHT_MOUTH_CORNER 12u
+
+/* Graph thread. Writes the newest tracked face's named region point (x, y in
+ * frame pixels, z in the same scale) into out_xyz, so a lens pins content to
+ * the forehead, a cheek, or the chin. GOSS_ERROR_INVALID_ARGUMENT on an
+ * unknown region; GOSS_AGAIN with no face or presence below threshold. */
+goss_status goss_session_face_region(goss_session *session, uint32_t region, float *out_xyz);
 
 /* Effect identifiers for goss_session_set_beauty. Values clamp to zero and
  * one; zero disables the effect. */

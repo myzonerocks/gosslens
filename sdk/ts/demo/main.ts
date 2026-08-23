@@ -1,4 +1,4 @@
-import { GossPreviewSession, pickEngineUrl } from "../src/index.ts";
+import { GossFaceRegion, GossPreviewSession, pickEngineUrl } from "../src/index.ts";
 import { GOSS_FACE_LANDMARK_COUNT } from "../src/tracking.ts";
 
 const status = document.getElementById("status")!;
@@ -124,6 +124,24 @@ async function startTracking(preview: GossPreviewSession): Promise<void> {
         analysisWidth,
         analysisHeight,
       );
+      // Mark the nose-tip attach point over the landmarks, exercising the
+      // face-region readout. The point comes back in engine-frame pixels
+      // (the video's own resolution), scaled here into the overlay.
+      const nose = preview.session.faceRegion(GossFaceRegion.NoseTip);
+      const videoWidth = preview.video.videoWidth;
+      if (nose && videoWidth > 0) {
+        const ctx = overlay.getContext("2d")!;
+        ctx.fillStyle = "#0ff";
+        ctx.beginPath();
+        ctx.arc(
+          (nose[0] * overlay.width) / videoWidth,
+          (nose[1] * overlay.height) / preview.video.videoHeight,
+          6,
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+      }
       if (!trackingAnnounced) {
         trackingAnnounced = true;
         console.log(`GOSSWEB tracking running: serial results flowing, presence ${reply.presence.toFixed(3)}`);

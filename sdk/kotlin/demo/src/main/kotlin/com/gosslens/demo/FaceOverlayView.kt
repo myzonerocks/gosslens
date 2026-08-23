@@ -46,6 +46,16 @@ class FaceOverlayView(context: Context) : View(context) {
     private val handPoints = FloatArray(com.gosslens.Gosslens.HAND_MAX * com.gosslens.Gosslens.HAND_LANDMARK_COUNT * 2)
     private val posePoints = FloatArray(com.gosslens.Gosslens.POSE_LANDMARK_COUNT * 2)
 
+    // A named attach point (the nose tip) drawn distinct from the raw
+    // landmarks, so the demo exercises the face-region readout.
+    private var noseRegion: FloatArray? = null
+    private val regionPoint = FloatArray(2)
+    private val regionPaint = Paint().apply {
+        color = Color.CYAN
+        strokeWidth = 12f
+        strokeCap = Paint.Cap.ROUND
+    }
+
     fun frameGeometry(width: Int, height: Int, rotation: Int, mirror: Boolean) {
         frameWidth = width
         frameHeight = height
@@ -60,6 +70,7 @@ class FaceOverlayView(context: Context) : View(context) {
             lastSerial = result.frameSerial
             hasResult = true
             fresh = true
+            noseRegion = session.faceRegion(com.gosslens.Gosslens.FACE_REGION_NOSE_TIP)
         }
         if (session.handResult(hands) && hands.frameSerial != lastHandSerial) {
             lastHandSerial = hands.frameSerial
@@ -102,6 +113,12 @@ class FaceOverlayView(context: Context) : View(context) {
                 write += 2
             }
             canvas.drawPoints(points, 0, write, pointPaint)
+
+            // The nose-tip attach point, mapped through the same transform.
+            noseRegion?.let { nose ->
+                mapPoint(nose[0], nose[1], quarterTurns, scaleX, scaleY, regionPoint, 0)
+                canvas.drawPoints(regionPoint, 0, 2, regionPaint)
+            }
         }
 
         if (hands.handCount > 0) {

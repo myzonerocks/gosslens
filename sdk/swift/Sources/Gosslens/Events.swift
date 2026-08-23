@@ -47,6 +47,24 @@ public enum GossGesture: UInt32 {
     case iLoveYou = 7
 }
 
+/// A named attach point on the tracked face mesh, for `faceRegion`. The
+/// left/right labels are the subject's own.
+public enum GossFaceRegion: UInt32 {
+    case forehead = 0
+    case glabella = 1
+    case noseTip = 2
+    case chin = 3
+    case leftEye = 4
+    case rightEye = 5
+    case leftCheek = 6
+    case rightCheek = 7
+    case leftEar = 8
+    case rightEar = 9
+    case mouthCenter = 10
+    case leftMouthCorner = 11
+    case rightMouthCorner = 12
+}
+
 /// One reusable hand tracking readout, up to two hands per frame.
 /// handedness is the model's score that the hand is a right hand; hand
 /// h's point p sits at (h * landmarkCount + p) * 3 in landmarks.
@@ -196,6 +214,17 @@ extension GossSession {
         try matrix.withUnsafeMutableBufferPointer { buffer in
             try checked(goss_session_face_pose(handle, buffer.baseAddress))
         }
+    }
+
+    /// The tracked point (x, y in frame pixels, z in the same scale) of a
+    /// named face region, so a lens pins content to the forehead, a cheek, or
+    /// the chin. Throws .again until a face is tracked.
+    public func faceRegion(_ region: GossFaceRegion) throws -> (x: Float, y: Float, z: Float) {
+        var xyz: [Float] = [0, 0, 0]
+        try xyz.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_face_region(handle, region.rawValue, buffer.baseAddress))
+        }
+        return (xyz[0], xyz[1], xyz[2])
     }
 
     /// The degradation level currently in effect.

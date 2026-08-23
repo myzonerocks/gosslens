@@ -552,7 +552,6 @@ fn proveMultiFaceFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         std.debug.print("conformance: FAIL multi-face lens activation\n", .{});
         return false;
     }
-
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
     const planes = try rgbaToNv12(gpa, corpus.frame);
@@ -656,6 +655,89 @@ fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const
     }
 }
 
+/// Proves the named face regions land on the right anatomy of a real face:
+/// the nose sits between forehead and chin, the four left regions all fall on
+/// one side of the nose and the four right regions on the other, and the ears
+/// are the widest points. This catches a swapped landmark or a left/right mix.
+fn proveFaceRegions(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL face-region tracking enable\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+    var result: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &result) == .again) {
+        std.Thread.yield() catch {};
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+
+    var p: [13][3]f32 = undefined;
+    var region: u32 = 0;
+    while (region < 13) : (region += 1) {
+        if (abi.goss_session_face_region(session, region, &p[region]) != .ok) {
+            std.debug.print("conformance: FAIL face region {d} not read\n", .{region});
+            return false;
+        }
+    }
+    const forehead = p[0];
+    const nose = p[2];
+    const chin = p[3];
+    const cx = nose[0];
+    // The nose sits between forehead and chin along the vertical axis.
+    if ((nose[1] - forehead[1]) * (chin[1] - nose[1]) <= 0) {
+        std.debug.print("conformance: FAIL nose not between forehead and chin (y {d:.1} {d:.1} {d:.1})\n", .{ forehead[1], nose[1], chin[1] });
+        return false;
+    }
+    // Every left region on one side of the nose, every right on the other.
+    const left = [_]usize{ 4, 6, 8, 11 };
+    const right = [_]usize{ 5, 7, 9, 12 };
+    const left_positive = p[left[0]][0] > cx;
+    for (left) |i| {
+        if ((p[i][0] > cx) != left_positive) {
+            std.debug.print("conformance: FAIL left region {d} on the wrong side of the nose\n", .{i});
+            return false;
+        }
+    }
+    for (right) |i| {
+        if ((p[i][0] > cx) == left_positive) {
+            std.debug.print("conformance: FAIL right region {d} on the wrong side of the nose\n", .{i});
+            return false;
+        }
+    }
+    // The ears are wider apart than the eyes.
+    const ear_span = @abs(p[8][0] - p[9][0]);
+    const eye_span = @abs(p[4][0] - p[5][0]);
+    if (ear_span <= eye_span) {
+        std.debug.print("conformance: FAIL ears not wider than eyes ({d:.1} <= {d:.1})\n", .{ ear_span, eye_span });
+        return false;
+    }
+    std.debug.print("conformance: PROOF named face regions land on the right anatomy (ear span {d:.1}, eye span {d:.1})\n", .{ ear_span, eye_span });
+    return true;
+}
 /// Proves lens physics end to end: a dropped marker settles onto the
 /// slab across advancing frame timestamps, the settled frame differs
 /// from the falling frame, and two runs land bit-identical.
@@ -3553,6 +3635,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try provePlatformPhotos(gpa, engine)) return 1;
     if (!try proveWorldAnchor(gpa, engine)) return 1;
     if (!try proveMultiFaceFanOut(gpa, engine)) return 1;
+    if (!try proveFaceRegions(gpa, engine)) return 1;
     if (!try provePhysicsDrop(gpa, engine)) return 1;
     if (!try provePhysicsChain(gpa, engine)) return 1;
     if (!try proveClothFlag(gpa, engine)) return 1;

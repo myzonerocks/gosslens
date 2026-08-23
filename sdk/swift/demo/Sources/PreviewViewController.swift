@@ -17,6 +17,7 @@ final class PreviewViewController: UIViewController {
     private let switchCameraButton = UIButton(type: .system)
     private let beautyStack = UIStackView()
     private let faceLayer = CAShapeLayer()
+    private let faceRegionLayer = CAShapeLayer()
     private let handLayer = CAShapeLayer()
     private let trackedFace = GossFaceResult()
     private let trackedHands = GossHandResult()
@@ -85,6 +86,12 @@ final class PreviewViewController: UIViewController {
         faceLayer.fillColor = UIColor.white.cgColor
         faceLayer.strokeColor = nil
         view.layer.addSublayer(faceLayer)
+
+        // A named attach point (the nose tip) drawn distinct from the raw
+        // landmarks, so the demo exercises the face-region readout.
+        faceRegionLayer.fillColor = UIColor.systemTeal.cgColor
+        faceRegionLayer.strokeColor = nil
+        view.layer.addSublayer(faceRegionLayer)
 
         handLayer.fillColor = UIColor.white.withAlphaComponent(0.8).cgColor
         handLayer.strokeColor = nil
@@ -232,6 +239,7 @@ final class PreviewViewController: UIViewController {
         lastFaceSerial = trackedFace.frameSerial
         guard trackedFace.landmarkCount > 0, trackedFace.presence >= 0.5 else {
             faceLayer.path = nil
+            faceRegionLayer.path = nil
             return
         }
 
@@ -253,6 +261,18 @@ final class PreviewViewController: UIViewController {
             }
             let viewY = x * scaleY
             path.addEllipse(in: CGRect(x: viewX - 1.5, y: viewY - 1.5, width: 3, height: 3))
+        }
+        // The nose-tip attach point, mapped through the same sensor-to-screen
+        // transform the landmarks use above.
+        if let nose = try? session.faceRegion(.noseTip) {
+            var regionX = (sensorHeight - CGFloat(nose.y)) * scaleX
+            if camera.mirrored { regionX = bounds.width - regionX }
+            let regionY = CGFloat(nose.x) * scaleY
+            let regionPath = CGMutablePath()
+            regionPath.addEllipse(in: CGRect(x: regionX - 4, y: regionY - 4, width: 8, height: 8))
+            faceRegionLayer.path = regionPath
+        } else {
+            faceRegionLayer.path = nil
         }
         faceLayer.path = path
     }

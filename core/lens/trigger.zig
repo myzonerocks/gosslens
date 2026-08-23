@@ -25,12 +25,18 @@ pub const SignalKind = enum {
     camera_zoom,
     camera_focus,
     camera_exposure,
+    gaze_x,
+    gaze_y,
+    looking_at_camera,
+    head_nod,
+    head_shake,
+    head_tilt,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure => true,
-        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom => false,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake => true,
+        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt => false,
     };
 }
 
@@ -102,6 +108,15 @@ pub const Signals = struct {
     /// the camera controls, a one-tick pulse an edge-triggered action reads once.
     camera_focus: bool = false,
     camera_exposure: bool = false,
+    /// One-tick pulses set the tick a nod (pitch oscillation) or shake (yaw
+    /// oscillation) completes, detected on-device from the head-pose history;
+    /// the raw pose never crosses the ABI, only these edges do. A refractory
+    /// window makes each completed gesture fire exactly once.
+    head_nod: bool = false,
+    head_shake: bool = false,
+    /// Current head roll (radians, positive tipping to the person's left), a
+    /// sustained level a lens compares (`head.tilt > 0.3`). Zero is upright.
+    head_tilt: f64 = 0,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -112,6 +127,30 @@ pub fn evaluate(node: *const Node, signals: Signals) bool {
         .and_ => |b| evaluate(b.lhs, signals) and evaluate(b.rhs, signals),
         .or_ => |b| evaluate(b.lhs, signals) or evaluate(b.rhs, signals),
     };
+}
+
+// The eye-gaze signals ride the eyeLook blendshapes the face model already
+// produces, so gaze needs no new tracker output and never crosses the ABI.
+const bs_look_in_left = face.blendshapeIndex("eyeLookInLeft").?;
+const bs_look_in_right = face.blendshapeIndex("eyeLookInRight").?;
+const bs_look_out_left = face.blendshapeIndex("eyeLookOutLeft").?;
+const bs_look_out_right = face.blendshapeIndex("eyeLookOutRight").?;
+const bs_look_up_left = face.blendshapeIndex("eyeLookUpLeft").?;
+const bs_look_up_right = face.blendshapeIndex("eyeLookUpRight").?;
+const bs_look_down_left = face.blendshapeIndex("eyeLookDownLeft").?;
+const bs_look_down_right = face.blendshapeIndex("eyeLookDownRight").?;
+
+/// How near centre gaze must be to count as looking at the camera.
+const gaze_center_threshold = 0.2;
+
+/// Horizontal (x, positive toward the subject's left) and vertical (y,
+/// positive up) eye gaze in roughly [-1, 1], averaged over both eyes from
+/// the eyeLook blendshapes. No face reads as centred (zero).
+fn gazeXY(signals: Signals) [2]f64 {
+    const bs = signals.blendshapes orelse return .{ 0, 0 };
+    const x = 0.5 * ((bs[bs_look_out_left] + bs[bs_look_in_right]) - (bs[bs_look_in_left] + bs[bs_look_out_right]));
+    const y = 0.5 * ((bs[bs_look_up_left] + bs[bs_look_up_right]) - (bs[bs_look_down_left] + bs[bs_look_down_right]));
+    return .{ x, y };
 }
 
 fn readBool(s: Signal, signals: Signals) bool {
@@ -129,6 +168,13 @@ fn readBool(s: Signal, signals: Signals) bool {
         .geo_in_region => signals.geo_in_region,
         .camera_focus => signals.camera_focus,
         .camera_exposure => signals.camera_exposure,
+        .looking_at_camera => {
+            if (signals.blendshapes == null) return false;
+            const g = gazeXY(signals);
+            return @abs(g[0]) < gaze_center_threshold and @abs(g[1]) < gaze_center_threshold;
+        },
+        .head_nod => signals.head_nod,
+        .head_shake => signals.head_shake,
         else => unreachable,
     };
 }
@@ -146,6 +192,9 @@ fn readNumber(s: Signal, signals: Signals) f64 {
         },
         .param => if (s.param_index < signals.params.len) signals.params[s.param_index] else 0,
         .camera_zoom => signals.camera_zoom,
+        .gaze_x => gazeXY(signals)[0],
+        .gaze_y => gazeXY(signals)[1],
+        .head_tilt => signals.head_tilt,
         else => unreachable,
     };
 }
@@ -527,6 +576,24 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "camera") and std.mem.eql(u8, tail, "exposure")) {
             return .{ .kind = .camera_exposure };
         }
+        if (std.mem.eql(u8, head, "gaze") and std.mem.eql(u8, tail, "x")) {
+            return .{ .kind = .gaze_x };
+        }
+        if (std.mem.eql(u8, head, "gaze") and std.mem.eql(u8, tail, "y")) {
+            return .{ .kind = .gaze_y };
+        }
+        if (std.mem.eql(u8, head, "gaze") and std.mem.eql(u8, tail, "at_camera")) {
+            return .{ .kind = .looking_at_camera };
+        }
+        if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "nod")) {
+            return .{ .kind = .head_nod };
+        }
+        if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "shake")) {
+            return .{ .kind = .head_shake };
+        }
+        if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "tilt")) {
+            return .{ .kind = .head_tilt };
+        }
         return self.fail("unknown signal '{s}.{s}'", .{ head, tail });
     }
 };
@@ -732,4 +799,40 @@ test "camera.focus and camera.exposure read the one-tick change pulses" {
     defer e.deinit();
     try t.expect(!evaluate(e.root, .{}));
     try t.expect(evaluate(e.root, .{ .camera_exposure = true }));
+}
+
+test "gaze reads from the eyeLook blendshapes and centres with no face" {
+    var shapes = [_]f32{0} ** face.blendshape_count;
+    // Both eyes turned to the subject's left: left eye out, right eye in.
+    shapes[face.blendshapeIndex("eyeLookOutLeft").?] = 0.8;
+    shapes[face.blendshapeIndex("eyeLookInRight").?] = 0.8;
+
+    var gx = try compileOk("gaze.x > 0.3");
+    defer gx.deinit();
+    try t.expect(!evaluate(gx.root, .{})); // no face reads centred, not past 0.3
+    try t.expect(evaluate(gx.root, .{ .blendshapes = &shapes }));
+
+    var at = try compileOk("gaze.at_camera");
+    defer at.deinit();
+    try t.expect(!evaluate(at.root, .{})); // no face is not looking at the camera
+    var centred = [_]f32{0} ** face.blendshape_count;
+    try t.expect(evaluate(at.root, .{ .blendshapes = &centred })); // neutral eyes
+    try t.expect(!evaluate(at.root, .{ .blendshapes = &shapes })); // gaze off to the side
+}
+
+test "head nod, shake, and tilt read the fed pose gestures" {
+    var nod = try compileOk("head.nod");
+    defer nod.deinit();
+    try t.expect(!evaluate(nod.root, .{}));
+    try t.expect(evaluate(nod.root, .{ .head_nod = true }));
+
+    var shake = try compileOk("head.shake");
+    defer shake.deinit();
+    try t.expect(!evaluate(shake.root, .{}));
+    try t.expect(evaluate(shake.root, .{ .head_shake = true }));
+
+    var tilt = try compileOk("head.tilt > 0.3");
+    defer tilt.deinit();
+    try t.expect(!evaluate(tilt.root, .{})); // upright is not past 0.3
+    try t.expect(evaluate(tilt.root, .{ .head_tilt = 0.5 }));
 }
