@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 27u
+#define GOSS_ABI_MINOR 28u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -578,6 +578,13 @@ goss_status goss_session_clear_layout(goss_session *session);
 goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us);
 goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m);
 goss_status goss_session_clear_geofence(goss_session *session);
+/* A geofence may instead be an axis-aligned box or a polygon ring (vertex_count
+ * lat, lon pairs, three to 64 vertices). An accuracy gate refuses a fix vaguer
+ * than max_accuracy_m so a lens does not fire on an uncertain location; zero
+ * clears the gate. */
+goss_status goss_session_set_geofence_bbox(goss_session *session, double min_lat, double min_lon, double max_lat, double max_lon);
+goss_status goss_session_set_geofence_polygon(goss_session *session, const double *coords, size_t vertex_count);
+goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m);
 
 /* Brush board. The engine owns stroke state and the undo/redo stacks; the app
  * feeds points in normalized screen space and pulls the finished triangle

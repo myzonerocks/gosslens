@@ -85,6 +85,9 @@ object Gosslens {
     internal external fun nativeSubmitLocation(session: Long, latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Int
     internal external fun nativeSetGeofence(session: Long, latitude: Double, longitude: Double, radiusM: Double): Int
     internal external fun nativeClearGeofence(session: Long): Int
+    internal external fun nativeSetGeofenceBbox(session: Long, minLat: Double, minLon: Double, maxLat: Double, maxLon: Double): Int
+    internal external fun nativeSetGeofencePolygon(session: Long, coordsBuffer: ByteBuffer, vertexCount: Int): Int
+    internal external fun nativeSetGeoAccuracy(session: Long, maxAccuracyM: Float): Int
     internal external fun nativeBrushSetStyle(session: Long, r: Float, g: Float, b: Float, a: Float, width: Float): Int
     internal external fun nativeBrushBegin(session: Long): Int
     internal external fun nativeBrushPoint(session: Long, x: Float, y: Float): Int
@@ -689,6 +692,21 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         Gosslens.nativeSetGeofence(handle, latitude, longitude, radiusM) == 0
 
     fun clearGeofence(): Boolean = Gosslens.nativeClearGeofence(handle) == 0
+
+    /** Sets the geofence to an axis-aligned lat/lon box. */
+    fun setGeofenceBBox(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double): Boolean =
+        Gosslens.nativeSetGeofenceBbox(handle, minLat, minLon, maxLat, maxLon) == 0
+
+    /** Sets the geofence to a polygon ring of (lat, lon) pairs, three to 64 vertices. */
+    fun setGeofencePolygon(vertices: List<Pair<Double, Double>>): Boolean {
+        val buffer = ByteBuffer.allocateDirect(vertices.size * 2 * 8).order(ByteOrder.nativeOrder())
+        val doubles = buffer.asDoubleBuffer()
+        for (v in vertices) { doubles.put(v.first); doubles.put(v.second) }
+        return Gosslens.nativeSetGeofencePolygon(handle, buffer, vertices.size) == 0
+    }
+
+    /** Sets the worst fix accuracy (meters) that still counts as inside a region; zero clears the gate. */
+    fun setGeoAccuracy(maxAccuracyM: Float): Boolean = Gosslens.nativeSetGeoAccuracy(handle, maxAccuracyM) == 0
 
     /** Sets the color and half-width (normalized units) the next stroke opens with. */
     fun setBrushStyle(r: Float, g: Float, b: Float, a: Float, width: Float): Boolean =

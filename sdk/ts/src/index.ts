@@ -127,6 +127,7 @@ interface EngineModule {
   HEAP16: Int16Array;
   HEAP32: Int32Array;
   HEAPF32: Float32Array;
+  HEAPF64: Float64Array;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[], opts: { async: true }): Promise<number>;
   getValue(ptr: number, type: string): number;
@@ -821,6 +822,31 @@ export class GossSession {
 
   clearGeofence(): void {
     this.mod.ccall("goss_session_clear_geofence", "number", ["number"], [this.handle]);
+  }
+
+  /// Sets the geofence to an axis-aligned lat/lon box.
+  setGeofenceBBox(minLat: number, minLon: number, maxLat: number, maxLon: number): void {
+    this.mod.ccall("goss_session_set_geofence_bbox", "number", ["number", "number", "number", "number", "number"], [this.handle, minLat, minLon, maxLat, maxLon]);
+  }
+
+  /// Sets the geofence to a polygon ring of [latitude, longitude] pairs, three
+  /// to 64 vertices.
+  setGeofencePolygon(vertices: [number, number][]): void {
+    const bytes = vertices.length * 2 * 8;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const base = ptr >> 3;
+    for (let i = 0; i < vertices.length; i += 1) {
+      this.mod.HEAPF64[base + i * 2] = vertices[i]![0];
+      this.mod.HEAPF64[base + i * 2 + 1] = vertices[i]![1];
+    }
+    this.mod.ccall("goss_session_set_geofence_polygon", "number", ["number", "number", "number"], [this.handle, ptr, vertices.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+  }
+
+  /// Sets the worst fix accuracy (meters) that still counts as inside a region;
+  /// zero clears the gate.
+  setGeoAccuracy(maxAccuracyM: number): void {
+    this.mod.ccall("goss_session_set_geo_accuracy", "number", ["number", "number"], [this.handle, maxAccuracyM]);
   }
 
   /// Sets the color and half-width (normalized units) the next stroke opens with.

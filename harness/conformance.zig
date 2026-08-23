@@ -1305,17 +1305,29 @@ fn proveGeofilter(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const c_lon: f64 = -122.4194;
 
     const S = struct {
-        fn run(e: *abi.Engine, m: []const u8, clat: f64, clon: f64, lat: f64) !f32 {
+        fn start(e: *abi.Engine, m: []const u8) !*abi.Session {
             const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
-            defer abi.destroySession(session);
-            if (abi.goss_session_activate_lens(session, m.ptr, m.len) != .ok) return error.Activate;
-            if (abi.goss_session_set_geofence(session, clat, clon, 100) != .ok) return error.Geofence;
-            if (abi.goss_session_submit_location(session, lat, clon, 5.0, 1000) != .ok) return error.Location;
+            if (abi.goss_session_activate_lens(session, m.ptr, m.len) != .ok) {
+                abi.destroySession(session);
+                return error.Activate;
+            }
+            return session;
+        }
+
+        fn read(session: *abi.Session, lat: f64, lon: f64, acc: f32) f32 {
+            _ = abi.goss_session_submit_location(session, lat, lon, acc, 1000);
             var sig = std.mem.zeroes(abi.LensSignals);
             _ = abi.goss_session_tick_lens(session, 16000, &sig);
             var v: f32 = -1;
             _ = abi.goss_session_parameter_value(session, "intensity", "intensity".len, &v);
             return v;
+        }
+
+        fn run(e: *abi.Engine, m: []const u8, clat: f64, clon: f64, lat: f64) !f32 {
+            const session = try start(e, m);
+            defer abi.destroySession(session);
+            if (abi.goss_session_set_geofence(session, clat, clon, 100) != .ok) return error.Geofence;
+            return read(session, lat, clon, 5.0);
         }
     };
 
@@ -1335,7 +1347,71 @@ fn proveGeofilter(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         std.debug.print("conformance: FAIL geofilter is not deterministic across runs\n", .{});
         return false;
     }
-    std.debug.print("conformance: PROOF a geo.in_region trigger fires inside its geofence and not outside, deterministically, with the location never leaving the engine\n", .{});
+
+    // A bbox region: inside the box fires, outside does not.
+    {
+        const session = S.start(engine, manifest) catch return false;
+        defer abi.destroySession(session);
+        if (abi.goss_session_set_geofence_bbox(session, c_lat - 0.001, c_lon - 0.001, c_lat + 0.001, c_lon + 0.001) != .ok) return false;
+        if (S.read(session, c_lat, c_lon, 5.0) != 1.0) {
+            std.debug.print("conformance: FAIL bbox in_region did not fire inside\n", .{});
+            return false;
+        }
+    }
+    {
+        const session = S.start(engine, manifest) catch return false;
+        defer abi.destroySession(session);
+        if (abi.goss_session_set_geofence_bbox(session, c_lat - 0.001, c_lon - 0.001, c_lat + 0.001, c_lon + 0.001) != .ok) return false;
+        if (S.read(session, c_lat + 0.01, c_lon, 5.0) != 0.0) {
+            std.debug.print("conformance: FAIL bbox in_region fired outside\n", .{});
+            return false;
+        }
+    }
+
+    // A polygon region: a small diamond around the center.
+    const diamond = [_]f64{ c_lat + 0.001, c_lon, c_lat, c_lon + 0.001, c_lat - 0.001, c_lon, c_lat, c_lon - 0.001 };
+    {
+        const session = S.start(engine, manifest) catch return false;
+        defer abi.destroySession(session);
+        if (abi.goss_session_set_geofence_polygon(session, &diamond, 4) != .ok) return false;
+        if (S.read(session, c_lat, c_lon, 5.0) != 1.0) {
+            std.debug.print("conformance: FAIL polygon in_region did not fire inside\n", .{});
+            return false;
+        }
+    }
+    {
+        const session = S.start(engine, manifest) catch return false;
+        defer abi.destroySession(session);
+        if (abi.goss_session_set_geofence_polygon(session, &diamond, 4) != .ok) return false;
+        if (S.read(session, c_lat + 0.01, c_lon, 5.0) != 0.0) {
+            std.debug.print("conformance: FAIL polygon in_region fired outside\n", .{});
+            return false;
+        }
+    }
+
+    // An accuracy gate: an accurate fix inside fires, a vague one does not.
+    {
+        const session = S.start(engine, manifest) catch return false;
+        defer abi.destroySession(session);
+        if (abi.goss_session_set_geofence(session, c_lat, c_lon, 100) != .ok) return false;
+        if (abi.goss_session_set_geo_accuracy(session, 20.0) != .ok) return false;
+        if (S.read(session, c_lat + 0.0001, c_lon, 5.0) != 1.0) {
+            std.debug.print("conformance: FAIL accurate fix inside the region did not fire\n", .{});
+            return false;
+        }
+    }
+    {
+        const session = S.start(engine, manifest) catch return false;
+        defer abi.destroySession(session);
+        if (abi.goss_session_set_geofence(session, c_lat, c_lon, 100) != .ok) return false;
+        if (abi.goss_session_set_geo_accuracy(session, 20.0) != .ok) return false;
+        if (S.read(session, c_lat + 0.0001, c_lon, 80.0) != 0.0) {
+            std.debug.print("conformance: FAIL a fix vaguer than the accuracy gate fired\n", .{});
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF geo.in_region fires inside a circle, box, or polygon region and not outside, an accuracy gate refuses a vague fix, deterministically, with the location never leaving the engine\n", .{});
     return true;
 }
 
