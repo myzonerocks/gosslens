@@ -39,6 +39,9 @@ pub const NodeKind = enum {
     combine4, // (float, float, float, float) -> vec4
     lambert, // (vecN normal, vecN light) -> float, clamped n dot l
     fresnel, // (vecN normal, vecN view, float f0) -> float, Schlick
+    step, // (T edge, T x) -> T
+    smoothstep, // (float edge0, float edge1, T x) -> T
+    mod, // (T, T) -> T
     mix, // (T, T, float) -> T
     output, // (vec4) -> the material colour, the graph root
 };
@@ -84,8 +87,8 @@ fn arity(kind: NodeKind) usize {
     return switch (kind) {
         .uv, .time, .constant, .uniform, .texture => 0,
         .saturate, .normalize, .length, .abs, .floor, .fract, .sin, .cos, .split, .output => 1,
-        .sample, .add, .subtract, .multiply, .divide, .power, .min, .max, .dot, .lambert => 2,
-        .mix, .combine3, .clamp, .fresnel => 3,
+        .sample, .add, .subtract, .multiply, .divide, .power, .min, .max, .dot, .lambert, .step, .mod => 2,
+        .mix, .combine3, .clamp, .fresnel, .smoothstep => 3,
         .combine4 => 4,
     };
 }
@@ -163,10 +166,16 @@ fn outputType(node: Node, out_types: []const ValueType) Error!ValueType {
             if (a == .sampler or a != out_types[in[1]] or a != out_types[in[2]]) return error.TypeMismatch;
             return a;
         },
-        .add, .subtract, .multiply, .divide, .power, .min, .max => {
+        .add, .subtract, .multiply, .divide, .power, .min, .max, .step, .mod => {
             const a = out_types[in[0]];
             if (a == .sampler or a != out_types[in[1]]) return error.TypeMismatch;
             return a;
+        },
+        .smoothstep => {
+            if (out_types[in[0]] != .float or out_types[in[1]] != .float) return error.TypeMismatch;
+            const x = out_types[in[2]];
+            if (x == .sampler) return error.TypeMismatch;
+            return x;
         },
         .dot => {
             const a = out_types[in[0]];
@@ -276,6 +285,9 @@ fn emitStatement(graph: Graph, types: []const ValueType, index: u32, writer: *st
         .power => try writer.print("pow(n{d}, n{d})", .{ in[0], in[1] }),
         .min => try writer.print("min(n{d}, n{d})", .{ in[0], in[1] }),
         .max => try writer.print("max(n{d}, n{d})", .{ in[0], in[1] }),
+        .step => try writer.print("step(n{d}, n{d})", .{ in[0], in[1] }),
+        .smoothstep => try writer.print("smoothstep(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
+        .mod => try writer.print("mod(n{d}, n{d})", .{ in[0], in[1] }),
         .dot => try writer.print("dot(n{d}, n{d})", .{ in[0], in[1] }),
         .lambert => try writer.print("max(dot(normalize(n{d}), normalize(n{d})), 0.0)", .{ in[0], in[1] }),
         .fresnel => try writer.print("(n{d} + (1.0 - n{d}) * pow(1.0 - max(dot(normalize(n{d}), normalize(n{d})), 0.0), 5.0))", .{ in[2], in[2], in[0], in[1] }),
@@ -594,6 +606,33 @@ test "lighting nodes compute directional shading" {
     const src = out.writer.buffered();
     try t.expect(std.mem.indexOf(u8, src, "max(dot(normalize(n0), normalize(n1)), 0.0)") != null);
     try t.expect(std.mem.indexOf(u8, src, "pow(1.0 - max(dot(normalize(n0), normalize(n2)), 0.0), 5.0)") != null);
+}
+
+test "post-fx primitives validate and lower" {
+    const nodes = [_]Node{
+        .{ .kind = .uv }, // 0 vec2
+        .{ .kind = .length, .inputs = &.{0} }, // 1 float
+        .{ .kind = .constant, .value_type = .float, .params = .{ 0.2, 0, 0, 0 } }, // 2 e0
+        .{ .kind = .constant, .value_type = .float, .params = .{ 0.8, 0, 0, 0 } }, // 3 e1
+        .{ .kind = .smoothstep, .inputs = &.{ 2, 3, 1 } }, // 4 float
+        .{ .kind = .constant, .value_type = .float, .params = .{ 0.5, 0, 0, 0 } }, // 5
+        .{ .kind = .step, .inputs = &.{ 5, 4 } }, // 6 float
+        .{ .kind = .mod, .inputs = &.{ 4, 5 } }, // 7 float
+        .{ .kind = .combine4, .inputs = &.{ 4, 6, 7, 4 } }, // 8 vec4
+        .{ .kind = .output, .inputs = &.{8} }, // 9
+    };
+    const graph: Graph = .{ .nodes = &nodes, .root = 9 };
+    var types: [nodes.len]ValueType = undefined;
+    try validate(t.allocator, graph, &types);
+    try t.expectEqual(ValueType.float, types[4]); // smoothstep over a float x stays float
+
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try emitFragment(t.allocator, graph, &types, &out.writer);
+    const src = out.writer.buffered();
+    try t.expect(std.mem.indexOf(u8, src, "smoothstep(n2, n3, n1)") != null);
+    try t.expect(std.mem.indexOf(u8, src, "step(n5, n4)") != null);
+    try t.expect(std.mem.indexOf(u8, src, "mod(n4, n5)") != null);
 }
 
 test "a material block parses into a graph and validates" {
