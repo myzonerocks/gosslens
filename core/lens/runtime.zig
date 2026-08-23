@@ -103,6 +103,7 @@ const LensNode = struct {
     mask_channel: ?u8 = null,
     /// .model_gltf only: the node anchors to the tracked face.
     face_anchor: bool = false,
+    body_anchor: bool = false,
     world_anchor: bool = false,
     physics: ?manifest.PhysicsBody = null,
     cloth: ?manifest.ClothField = null,
@@ -157,6 +158,7 @@ pub const ModelNode = struct {
     /// chain naming its anchor) resolve at draw setup.
     node_id: []const u8,
     face_anchor: bool = false,
+    body_anchor: bool = false,
     world_anchor: bool = false,
     physics: ?manifest.PhysicsBody = null,
     cloth: ?manifest.ClothField = null,
@@ -353,7 +355,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .model_gltf) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .hair = node.hair, .particles = node.particles });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .body_anchor = node.body_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .hair = node.hair, .particles = node.particles });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -559,6 +561,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
             .face_anchor = node_type == .model_gltf and node.face_anchor,
+            .body_anchor = node_type == .model_gltf and node.body_anchor,
             .world_anchor = node_type == .model_gltf and node.world_anchor,
             .physics = if (node_type == .model_gltf) node.physics else null,
             .cloth = if (node_type == .model_gltf) node.cloth else null,

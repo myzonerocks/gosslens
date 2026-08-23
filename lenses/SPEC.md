@@ -141,12 +141,17 @@ the live landmarks and poses the model with that transform, so model
 space is the canonical face's centimeter space (origin between the eyes,
 x toward the subject's left, y up, z out of the face). Without a tracked
 face the node draws nothing, the standard capability degradation.
+`"anchor": "body"` pins the model to every tracked body: the runtime places
+one instance at each submitted body's torso, scaled by torso length and
+rolled by its tilt, so a body-anchored model fans out across a crowd (or
+rides the single tracked figure when the host submits none). Without a
+tracked body the node draws nothing.
 `"anchor": "world"` pins the model to the tracked world instead: model
 space is world meters at the first submitted world anchor (or the world
 origin without one), drawn from the platform camera's own pose and
 projection; while tracking is anything but full, the node draws
-nothing. `anchor` is rejected on every other node type, and `"face"`
-and `"world"` are the only anchors GLF 1.0 defines.
+nothing. `anchor` is rejected on every other node type, and `"face"`,
+`"body"`, and `"world"` are the only anchors GLF 1.0 defines.
 
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
 pose drives the model matrix once simulation starts. `body` is `box`

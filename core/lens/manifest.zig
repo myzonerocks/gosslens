@@ -187,6 +187,8 @@ pub const Node = struct {
     mask_channel: ?u8 = null,
     /// True when a model.gltf node anchors to the tracked face.
     face_anchor: bool = false,
+    /// True when a model.gltf node anchors to every tracked body.
+    body_anchor: bool = false,
     /// True when a model.gltf node anchors to the tracked world.
     world_anchor: bool = false,
     /// Set when the manifest gives the node a rigid body.
@@ -763,6 +765,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         }
 
         var face_anchor = false;
+        var body_anchor = false;
         var world_anchor = false;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
@@ -1053,6 +1056,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     try diags.add(path.slice(), "anchor is a model.gltf field, found it on '{s}'", .{node_type});
                 } else if (std.mem.eql(u8, anchor_name, "face")) {
                     face_anchor = true;
+                } else if (std.mem.eql(u8, anchor_name, "body")) {
+                    body_anchor = true;
                 } else if (std.mem.eql(u8, anchor_name, "world")) {
                     world_anchor = true;
                 } else {
@@ -1097,6 +1102,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .params = try params.toOwnedSlice(arena),
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
+            .body_anchor = body_anchor,
             .world_anchor = world_anchor,
             .physics = physics_body,
             .cloth = cloth_field,
@@ -1594,6 +1600,19 @@ test "a face anchor parses on a model node and only there" {
     var manifest = try parseOk(source);
     defer manifest.deinit();
     try t.expect(manifest.nodes[0].face_anchor);
+}
+
+test "a body anchor parses on a model node" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": ["face"], "parameters": [], "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "body"}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expect(manifest.nodes[0].body_anchor);
+    try t.expect(!manifest.nodes[0].face_anchor);
 }
 
 test "an anchor on a non-model node is rejected" {
