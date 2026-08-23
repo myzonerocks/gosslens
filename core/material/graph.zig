@@ -37,6 +37,8 @@ pub const NodeKind = enum {
     split, // (vecN) -> float, channel in params[0] (0..3)
     combine3, // (float, float, float) -> vec3
     combine4, // (float, float, float, float) -> vec4
+    lambert, // (vecN normal, vecN light) -> float, clamped n dot l
+    fresnel, // (vecN normal, vecN view, float f0) -> float, Schlick
     mix, // (T, T, float) -> T
     output, // (vec4) -> the material colour, the graph root
 };
@@ -82,8 +84,8 @@ fn arity(kind: NodeKind) usize {
     return switch (kind) {
         .uv, .time, .constant, .uniform, .texture => 0,
         .saturate, .normalize, .length, .abs, .floor, .fract, .sin, .cos, .split, .output => 1,
-        .sample, .add, .subtract, .multiply, .divide, .power, .min, .max, .dot => 2,
-        .mix, .combine3, .clamp => 3,
+        .sample, .add, .subtract, .multiply, .divide, .power, .min, .max, .dot, .lambert => 2,
+        .mix, .combine3, .clamp, .fresnel => 3,
         .combine4 => 4,
     };
 }
@@ -171,6 +173,16 @@ fn outputType(node: Node, out_types: []const ValueType) Error!ValueType {
             if (!isVector(a) or a != out_types[in[1]]) return error.TypeMismatch;
             return .float;
         },
+        .lambert => {
+            const a = out_types[in[0]];
+            if (!isVector(a) or a != out_types[in[1]]) return error.TypeMismatch;
+            return .float;
+        },
+        .fresnel => {
+            const a = out_types[in[0]];
+            if (!isVector(a) or a != out_types[in[1]] or out_types[in[2]] != .float) return error.TypeMismatch;
+            return .float;
+        },
         .split => {
             if (!isVector(out_types[in[0]])) return error.TypeMismatch;
             return .float;
@@ -250,6 +262,8 @@ fn emitStatement(graph: Graph, types: []const ValueType, index: u32, writer: *st
         .min => try writer.print("min(n{d}, n{d})", .{ in[0], in[1] }),
         .max => try writer.print("max(n{d}, n{d})", .{ in[0], in[1] }),
         .dot => try writer.print("dot(n{d}, n{d})", .{ in[0], in[1] }),
+        .lambert => try writer.print("max(dot(normalize(n{d}), normalize(n{d})), 0.0)", .{ in[0], in[1] }),
+        .fresnel => try writer.print("(n{d} + (1.0 - n{d}) * pow(1.0 - max(dot(normalize(n{d}), normalize(n{d})), 0.0), 5.0))", .{ in[2], in[2], in[0], in[1] }),
         .normalize => try writer.print("normalize(n{d})", .{in[0]}),
         .length => try writer.print("length(n{d})", .{in[0]}),
         .abs => try writer.print("abs(n{d})", .{in[0]}),
@@ -538,6 +552,31 @@ test "scalar math nodes validate and lower" {
     try t.expect(std.mem.indexOf(u8, src, "abs(n1)") != null);
     try t.expect(std.mem.indexOf(u8, src, "length(n3)") != null);
     try t.expect(std.mem.indexOf(u8, src, "clamp(n4, n5, n6)") != null);
+}
+
+test "lighting nodes compute directional shading" {
+    const nodes = [_]Node{
+        .{ .kind = .uniform, .value_type = .vec3, .name = "normal" }, // 0
+        .{ .kind = .uniform, .value_type = .vec3, .name = "light" }, // 1
+        .{ .kind = .uniform, .value_type = .vec3, .name = "view" }, // 2
+        .{ .kind = .constant, .value_type = .float, .params = .{ 0.04, 0, 0, 0 } }, // 3 f0
+        .{ .kind = .lambert, .inputs = &.{ 0, 1 } }, // 4 float
+        .{ .kind = .fresnel, .inputs = &.{ 0, 2, 3 } }, // 5 float
+        .{ .kind = .combine4, .inputs = &.{ 4, 5, 4, 5 } }, // 6 vec4
+        .{ .kind = .output, .inputs = &.{6} }, // 7
+    };
+    const graph: Graph = .{ .nodes = &nodes, .root = 7 };
+    var types: [nodes.len]ValueType = undefined;
+    try validate(t.allocator, graph, &types);
+    try t.expectEqual(ValueType.float, types[4]); // lambert collapses to a scalar
+    try t.expectEqual(ValueType.float, types[5]); // fresnel too
+
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try emitFragment(t.allocator, graph, &types, &out.writer);
+    const src = out.writer.buffered();
+    try t.expect(std.mem.indexOf(u8, src, "max(dot(normalize(n0), normalize(n1)), 0.0)") != null);
+    try t.expect(std.mem.indexOf(u8, src, "pow(1.0 - max(dot(normalize(n0), normalize(n2)), 0.0), 5.0)") != null);
 }
 
 test "a material block parses into a graph and validates" {
