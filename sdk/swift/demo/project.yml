@@ -38,6 +38,10 @@ targets:
         type: folder
         buildPhase: resources
         optional: true
+      - path: ../../../.lens-packages/material-tint
+        type: folder
+        buildPhase: resources
+        optional: true
     dependencies:
       - package: Gosslens
     settings:
