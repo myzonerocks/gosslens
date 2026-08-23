@@ -294,6 +294,9 @@ small closed grammar, parsed once at load time into a typed expression tree
 (no runtime parsing, no `eval`):
 
 - Signal reads: `face.blendshape('name')`, `face.present`, `hands.present`,
+  `hands.gesture('name')` (true while a tracked hand shows the named canned
+  gesture: None, Closed_Fist, Open_Palm, Pointing_Up, Thumb_Down, Thumb_Up,
+  Victory, ILoveYou; an unknown name is a compile error),
   `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
 onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   `camera.focus`, `camera.exposure` (true for one tick after the app changes

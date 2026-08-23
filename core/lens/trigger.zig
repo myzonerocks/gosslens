@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const face = @import("face");
+const hand = @import("hand");
 
 pub const max_depth = 8;
 
@@ -31,11 +32,12 @@ pub const SignalKind = enum {
     head_nod,
     head_shake,
     head_tilt,
+    hand_gesture,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture => true,
         .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt => false,
     };
 }
@@ -43,6 +45,7 @@ fn signalIsBoolean(kind: SignalKind) bool {
 pub const Signal = struct {
     kind: SignalKind,
     blendshape_index: u8 = 0,
+    gesture_index: u8 = 0,
     param_index: u16 = 0,
     timer_name: []const u8 = "",
     event_name: []const u8 = "",
@@ -117,6 +120,10 @@ pub const Signals = struct {
     /// Current head roll (radians, positive tipping to the person's left), a
     /// sustained level a lens compares (`head.tilt > 0.3`). Zero is upright.
     head_tilt: f64 = 0,
+    /// The gesture a tracked hand is showing, an index into the canned
+    /// gesture classes, engine-fed at tick from the hand worker. Zero is the
+    /// no-gesture class, the resting value with no hand or no gesture.
+    hand_gesture: u32 = 0,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -175,6 +182,7 @@ fn readBool(s: Signal, signals: Signals) bool {
         },
         .head_nod => signals.head_nod,
         .head_shake => signals.head_shake,
+        .hand_gesture => signals.hand_gesture == s.gesture_index,
         else => unreachable,
     };
 }
@@ -555,6 +563,13 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "hands") and std.mem.eql(u8, tail, "present")) {
             return .{ .kind = .hands_present };
         }
+        if (std.mem.eql(u8, head, "hands") and std.mem.eql(u8, tail, "gesture")) {
+            const name = try self.parseCall();
+            const index = hand.gestureIndex(name) orelse {
+                return self.fail("unknown gesture '{s}'", .{name});
+            };
+            return .{ .kind = .hand_gesture, .gesture_index = index };
+        }
         if (std.mem.eql(u8, head, "world") and std.mem.eql(u8, tail, "tracking_state")) {
             return .{ .kind = .world_tracking_state };
         }
@@ -722,6 +737,18 @@ test "an unknown blendshape name fails to compile" {
     const err = try compileFails("face.blendshape('not_real') > 0.5");
     defer t.allocator.free(err.message);
     try t.expect(std.mem.indexOf(u8, err.message, "unknown blendshape") != null);
+}
+
+test "hands.gesture matches the tracked gesture class by name" {
+    var expr = try compileOk("hands.gesture('Thumb_Up')");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{})); // resting None gesture
+    try t.expect(!evaluate(expr.root, .{ .hand_gesture = hand.gestureIndex("Open_Palm").? }));
+    try t.expect(evaluate(expr.root, .{ .hand_gesture = hand.gestureIndex("Thumb_Up").? }));
+
+    const err = try compileFails("hands.gesture('Nope')");
+    defer t.allocator.free(err.message);
+    try t.expect(std.mem.indexOf(u8, err.message, "unknown gesture") != null);
 }
 
 test "an unknown parameter name fails to compile" {
