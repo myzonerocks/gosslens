@@ -127,6 +127,15 @@ export fn Java_com_gosslens_Gosslens_nativeYuvToRgb(env: *JniEnv, cls: jobject, 
     return @intFromEnum(abi.goss_color_yuv_to_rgb(@intCast(standard), @intCast(range), matrix));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSolveTwoBoneIk(env: *JniEnv, cls: jobject, in_buffer: jobject, upper_len: f32, lower_len: f32, out_buffer: jobject) i32 {
+    _ = cls;
+    const in_bytes = getDirectBufferAddress(env, in_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const in_f: *[9]f32 = @ptrCast(@alignCast(in_bytes));
+    const out_f: *[6]f32 = @ptrCast(@alignCast(out_bytes));
+    return @intFromEnum(abi.goss_solve_two_bone_ik(in_f[0..3], upper_len, lower_len, in_f[3..6], in_f[6..9], out_f[0..3], out_f[3..6]));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeActivateLensFromDirectory(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

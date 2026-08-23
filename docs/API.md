@@ -129,6 +129,7 @@ file must move together.
 |---|---|---|
 | `goss_abi_version` | `Gosslens.abiVersion()` | all SDKs |
 | `goss_color_yuv_to_rgb` | `Gosslens.yuvToRgb(colorStandard, colorRange)`, returning the conversion matrix | all SDKs |
+| `goss_solve_two_bone_ik` | `Gosslens.solveTwoBoneIk(root, upperLen, lowerLen, target, pole)`, analytic two-bone IK returning the mid joint and end positions; an out-of-reach target extends the limb straight at it | all SDKs |
 | `goss_alloc` | ABI buffer plumbing for the wasm boundary; no public SDK operation | web internal |
 | `goss_free` | ABI buffer plumbing for the wasm boundary; no public SDK operation | web internal |
 

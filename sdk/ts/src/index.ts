@@ -360,6 +360,27 @@ export class Gosslens {
     return out;
   }
 
+  /// Analytic two-bone inverse kinematics for a limb: root, the upper and lower
+  /// bone lengths, target, and pole (each [x, y, z]); returns the mid joint and
+  /// end. An out-of-reach target extends the limb straight at it.
+  solveTwoBoneIk(root: [number, number, number], upperLen: number, lowerLen: number, target: [number, number, number], pole: [number, number, number]): { mid: [number, number, number]; end: [number, number, number] } {
+    const rp = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const tp = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const pp = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const mp = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const ep = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    this.mod.HEAPF32.set(root, rp >> 2);
+    this.mod.HEAPF32.set(target, tp >> 2);
+    this.mod.HEAPF32.set(pole, pp >> 2);
+    this.mod.ccall("goss_solve_two_bone_ik", "number", ["number", "number", "number", "number", "number", "number", "number"], [rp, upperLen, lowerLen, tp, pp, mp, ep]);
+    const mw = mp >> 2;
+    const ew = ep >> 2;
+    const mid: [number, number, number] = [this.mod.HEAPF32[mw]!, this.mod.HEAPF32[mw + 1]!, this.mod.HEAPF32[mw + 2]!];
+    const end: [number, number, number] = [this.mod.HEAPF32[ew]!, this.mod.HEAPF32[ew + 1]!, this.mod.HEAPF32[ew + 2]!];
+    for (const p of [rp, tp, pp, mp, ep]) this.mod.ccall("goss_free", null, ["number", "number"], [p, 12]);
+    return { mid, end };
+  }
+
   /// @internal - GossEngine/GossSession need the raw module to reach the ABI;
   /// nothing outside this file should call ccall directly.
   get module(): EngineModule {

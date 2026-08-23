@@ -148,6 +148,7 @@ pub const abi_functions = [_][]const u8{
     "goss_degrade_level goss_session_report_frame(goss_session *session, uint32_t frame_time_us, goss_thermal thermal)",
     "goss_degrade_level goss_session_degrade_level(const goss_session *session)",
     "goss_status goss_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix)",
+    "goss_status goss_solve_two_bone_ik(const float *root, float upper_len, float lower_len, const float *target, const float *pole, float *out_mid, float *out_end)",
     "goss_status goss_session_enable_face_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
     "void goss_session_disable_face_tracking(goss_session *session)",
     "goss_status goss_session_enable_hand_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
@@ -3647,6 +3648,74 @@ pub export fn goss_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_m
     return .ok;
 }
 
+/// A unit vector perpendicular to dir built from a reference axis, so a limb
+/// whose pole runs parallel to it still bends somewhere sensible.
+fn orthoFrom(dir: [3]f32, ref: [3]f32) [3]f32 {
+    const cx = dir[1] * ref[2] - dir[2] * ref[1];
+    const cy = dir[2] * ref[0] - dir[0] * ref[2];
+    const cz = dir[0] * ref[1] - dir[1] * ref[0];
+    const l = @sqrt(cx * cx + cy * cy + cz * cz);
+    return if (l > 1e-6) .{ cx / l, cy / l, cz / l } else .{ 0, 1, 0 };
+}
+
+/// Analytic two-bone inverse kinematics: given a root, the two bone lengths, a
+/// target for the end effector, and a pole the joint bends toward, returns the
+/// mid joint and end. An out-of-reach target extends the limb straight at it; a
+/// too-close one folds to the nearest it can reach.
+fn solveTwoBoneIk(root: [3]f32, upper: f32, lower: f32, target: [3]f32, pole: [3]f32) struct { mid: [3]f32, end: [3]f32 } {
+    const tx = target[0] - root[0];
+    const ty = target[1] - root[1];
+    const tz = target[2] - root[2];
+    const d_raw = @sqrt(tx * tx + ty * ty + tz * tz);
+    const total = upper + lower;
+    const dir: [3]f32 = if (d_raw > 1e-6) .{ tx / d_raw, ty / d_raw, tz / d_raw } else .{ 1, 0, 0 };
+    if (d_raw >= total) {
+        return .{
+            .mid = .{ root[0] + dir[0] * upper, root[1] + dir[1] * upper, root[2] + dir[2] * upper },
+            .end = .{ root[0] + dir[0] * total, root[1] + dir[1] * total, root[2] + dir[2] * total },
+        };
+    }
+    const d = @max(d_raw, @max(@abs(upper - lower), 1e-6));
+    const proj = (upper * upper + d * d - lower * lower) / (2.0 * d);
+    const h2 = upper * upper - proj * proj;
+    const height = if (h2 > 0) @sqrt(h2) else 0;
+    const px = pole[0] - root[0];
+    const py = pole[1] - root[1];
+    const pz = pole[2] - root[2];
+    const pdotd = px * dir[0] + py * dir[1] + pz * dir[2];
+    var perp: [3]f32 = .{ px - dir[0] * pdotd, py - dir[1] * pdotd, pz - dir[2] * pdotd };
+    const plen = @sqrt(perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]);
+    if (plen > 1e-6) {
+        perp = .{ perp[0] / plen, perp[1] / plen, perp[2] / plen };
+    } else {
+        perp = if (@abs(dir[0]) < 0.9) orthoFrom(dir, .{ 1, 0, 0 }) else orthoFrom(dir, .{ 0, 1, 0 });
+    }
+    return .{
+        .mid = .{
+            root[0] + dir[0] * proj + perp[0] * height,
+            root[1] + dir[1] * proj + perp[1] * height,
+            root[2] + dir[2] * proj + perp[2] * height,
+        },
+        .end = .{ root[0] + dir[0] * d, root[1] + dir[1] * d, root[2] + dir[2] * d },
+    };
+}
+
+/// Solves two-bone IK for a limb: root, the upper and lower bone lengths, the
+/// target the end reaches for, and the pole the joint bends toward, writing the
+/// mid joint and end (x, y, z each). Lengths must be positive.
+pub export fn goss_solve_two_bone_ik(root: ?*const [3]f32, upper_len: f32, lower_len: f32, target: ?*const [3]f32, pole: ?*const [3]f32, out_mid: ?*[3]f32, out_end: ?*[3]f32) Status {
+    const r = root orelse return .invalid_argument;
+    const tgt = target orelse return .invalid_argument;
+    const pl = pole orelse return .invalid_argument;
+    const om = out_mid orelse return .invalid_argument;
+    const oe = out_end orelse return .invalid_argument;
+    if (!(upper_len > 0) or !(lower_len > 0)) return .invalid_argument;
+    const sol = solveTwoBoneIk(r.*, upper_len, lower_len, tgt.*, pl.*);
+    om.* = sol.mid;
+    oe.* = sol.end;
+    return .ok;
+}
+
 /// Copies NV12 planes into pooled textures. The stated CPU path: an SDK
 /// uses it only where the zero-copy import is not wired yet, and the copy
 /// is counted so the budget report shows it.
@@ -5834,6 +5903,38 @@ test "color conversion export writes the homogeneous matrix" {
     try t.expectEqual(direct.cols[3][2], out[14]);
     try t.expectEqual(Status.invalid_argument, goss_color_yuv_to_rgb(9, 0, &out));
     try t.expectEqual(Status.invalid_argument, goss_color_yuv_to_rgb(0, 9, null));
+}
+
+test "two-bone ik reaches a target, keeps bone lengths, and extends when out of reach" {
+    const root = [3]f32{ 0, 0, 0 };
+    const pole = [3]f32{ 0, 1, 0 };
+    var mid: [3]f32 = undefined;
+    var end: [3]f32 = undefined;
+
+    // Reachable: unit bones, target 1.5 along +x, pole +y.
+    const target = [3]f32{ 1.5, 0, 0 };
+    try t.expectEqual(Status.ok, goss_solve_two_bone_ik(&root, 1.0, 1.0, &target, &pole, &mid, &end));
+    try t.expectApproxEqAbs(@as(f32, 1.5), end[0], 0.001); // the end reaches the target
+    try t.expectApproxEqAbs(@as(f32, 0), end[1], 0.001);
+    try t.expect(mid[1] > 0.1); // the joint bends toward the pole
+    const upper = @sqrt(mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2]);
+    try t.expectApproxEqAbs(@as(f32, 1.0), upper, 0.001); // upper bone length held
+    const lx = end[0] - mid[0];
+    const ly = end[1] - mid[1];
+    const lz = end[2] - mid[2];
+    try t.expectApproxEqAbs(@as(f32, 1.0), @sqrt(lx * lx + ly * ly + lz * lz), 0.001);
+
+    // Out of reach: target 3 along +x, total reach 2 -> straight and extended.
+    const far = [3]f32{ 3, 0, 0 };
+    try t.expectEqual(Status.ok, goss_solve_two_bone_ik(&root, 1.0, 1.0, &far, &pole, &mid, &end));
+    try t.expectApproxEqAbs(@as(f32, 2.0), end[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 1.0), mid[0], 0.001);
+    try t.expect(@abs(mid[1]) < 0.001);
+
+    // Guards: null pointers and non-positive lengths.
+    try t.expectEqual(Status.invalid_argument, goss_solve_two_bone_ik(null, 1, 1, &target, &pole, &mid, &end));
+    try t.expectEqual(Status.invalid_argument, goss_solve_two_bone_ik(&root, 0, 1, &target, &pole, &mid, &end));
+    try t.expectEqual(Status.invalid_argument, goss_solve_two_bone_ik(&root, 1, 1, &target, &pole, null, &end));
 }
 
 test "rotation and mirror decode from the flags field" {

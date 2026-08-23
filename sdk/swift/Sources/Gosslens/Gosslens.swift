@@ -18,4 +18,18 @@ public enum Gosslens {
         }
         return matrix
     }
+
+    /// Analytic two-bone inverse kinematics for a limb. root, target, and pole
+    /// are (x, y, z); returns the mid joint and end positions. An out-of-reach
+    /// target extends the limb straight at it.
+    public static func solveTwoBoneIk(root: [Float], upperLen: Float, lowerLen: Float, target: [Float], pole: [Float]) throws -> (mid: [Float], end: [Float]) {
+        var mid = [Float](repeating: 0, count: 3)
+        var end = [Float](repeating: 0, count: 3)
+        try mid.withUnsafeMutableBufferPointer { m in
+            try end.withUnsafeMutableBufferPointer { e in
+                try checked(goss_solve_two_bone_ik(root, upperLen, lowerLen, target, pole, m.baseAddress, e.baseAddress))
+            }
+        }
+        return (mid, end)
+    }
 }

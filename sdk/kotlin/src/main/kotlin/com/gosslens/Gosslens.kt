@@ -133,6 +133,7 @@ object Gosslens {
     ): Int
     internal external fun nativeDegradeLevel(session: Long): Int
     internal external fun nativeYuvToRgb(standard: Int, range: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativeSolveTwoBoneIk(inBuffer: ByteBuffer, upperLen: Float, lowerLen: Float, outBuffer: ByteBuffer): Int
     internal external fun nativeActivateLensFromDirectory(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
 
     const val COLOR_BT601 = 0
@@ -211,6 +212,19 @@ object Gosslens {
         val matrix = FloatArray(16)
         buffer.asFloatBuffer().get(matrix)
         return matrix
+    }
+
+    /** Analytic two-bone inverse kinematics for a limb: root, the upper and
+     * lower bone lengths, target, and pole (each xyz); returns the mid joint
+     * then the end. An out-of-reach target extends the limb straight at it. */
+    fun solveTwoBoneIk(root: FloatArray, upperLen: Float, lowerLen: Float, target: FloatArray, pole: FloatArray): Pair<FloatArray, FloatArray> {
+        val inBuf = ByteBuffer.allocateDirect(9 * 4).order(java.nio.ByteOrder.nativeOrder())
+        inBuf.asFloatBuffer().apply { put(root); put(target); put(pole) }
+        val outBuf = ByteBuffer.allocateDirect(6 * 4).order(java.nio.ByteOrder.nativeOrder())
+        check(nativeSolveTwoBoneIk(inBuf, upperLen, lowerLen, outBuf) == 0) { "invalid ik arguments" }
+        val out = FloatArray(6)
+        outBuf.asFloatBuffer().get(out)
+        return Pair(out.copyOfRange(0, 3), out.copyOfRange(3, 6))
     }
 
     fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int {
