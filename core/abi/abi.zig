@@ -480,6 +480,12 @@ pub const Session = struct {
     /// The caller's normalized camera-hardware intent (validated at set-time);
     /// the SDK reads it back and drives the platform camera. Inline POD.
     camera_controls: CameraControls = .{},
+    /// One-tick pulses set when set_camera_controls changes the focus or
+    /// exposure, so a lens fires once on the change. Cleared every tick, on both
+    /// the active-lens and no-lens paths, so a change made before a lens loads
+    /// does not fire a stale trigger on the first tick after it does.
+    cam_focus_pulse: bool = false,
+    cam_exposure_pulse: bool = false,
     /// Host-fired event names buffered until the next tick, where they reach
     /// the trigger rail for exactly one tick and then clear. Fixed-size, so
     /// firing an event allocates nothing.
@@ -2800,7 +2806,20 @@ fn normalizeCameraControls(c: CameraControls) CameraControls {
 pub export fn goss_session_set_camera_controls(session: ?*Session, controls: ?*const CameraControls) Status {
     const s = session orelse return .invalid_argument;
     const c = controls orelse return .invalid_argument;
-    s.camera_controls = normalizeCameraControls(c.*);
+    const next = normalizeCameraControls(c.*);
+    const prev = s.camera_controls;
+    // A focus or exposure change pulses the matching trigger for one tick. Both
+    // operands are normalized, so re-sending identical controls fires nothing.
+    if (next.focus_mode != prev.focus_mode or next.focus_point_x != prev.focus_point_x or next.focus_point_y != prev.focus_point_y) {
+        s.cam_focus_pulse = true;
+    }
+    if (next.exposure_mode != prev.exposure_mode or next.exposure_linked != prev.exposure_linked or
+        next.exposure_point_x != prev.exposure_point_x or next.exposure_point_y != prev.exposure_point_y or
+        next.exposure_bias_ev != prev.exposure_bias_ev)
+    {
+        s.cam_exposure_pulse = true;
+    }
+    s.camera_controls = next;
     return .ok;
 }
 
@@ -4749,13 +4768,21 @@ pub export fn goss_session_fire_event(session: ?*Session, name: ?[*]const u8, na
 pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
-    if (s.active_lens == null) return .again;
+    if (s.active_lens == null) {
+        // Consume any camera focus/exposure change even with no lens, so it does
+        // not fire a stale trigger on the first tick after a lens loads.
+        s.cam_focus_pulse = false;
+        s.cam_exposure_pulse = false;
+        return .again;
+    }
     // Borrowed from the lens's own activation-sized storage, valid
     // until the next tick - nothing to free, nothing allocated.
     var live_signals = toTriggerSignals(sig);
     // The camera zoom rides the stored controls; normalizeCameraControls clamps
     // it to at least one, and one is the resting value before any control is set.
     live_signals.camera_zoom = @max(s.camera_controls.zoom_factor, 1);
+    live_signals.camera_focus = s.cam_focus_pulse;
+    live_signals.camera_exposure = s.cam_exposure_pulse;
     if (s.audio_engine_fed) {
         live_signals.audio_level = s.audio.level;
         live_signals.audio_beat = s.audio.beat;
@@ -4785,6 +4812,8 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     applyLensEffects(s, effects);
     playFiredSounds(s);
     s.pending_event_count = 0;
+    s.cam_focus_pulse = false;
+    s.cam_exposure_pulse = false;
     return .ok;
 }
 
