@@ -1,4 +1,4 @@
-abi 0.34
+abi 0.39
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -111,6 +111,8 @@ fn goss_status goss_engine_recording_stop(goss_engine *engine)
 fn goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)
 fn goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)
 fn goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)
+fn goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)
+fn goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_session *session, uint64_t native_handle, uint32_t width, uint32_t height)
 fn goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)
 fn goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)
 fn goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)
@@ -171,6 +173,9 @@ fn goss_status goss_session_face_pose(goss_session *session, float *out_matrix)
 fn goss_status goss_session_face_region(goss_session *session, uint32_t region, float *out_xyz)
 fn goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)
 fn void goss_session_disable_segmentation(goss_session *session)
+fn goss_status goss_session_set_segmentation_mask(goss_session *session, const float *mask, uint32_t mask_len)
+fn uint32_t goss_session_segmentation_channels(goss_session *session)
+fn goss_status goss_session_set_segmentation_class_mask(goss_session *session, uint32_t channel, const float *mask, uint32_t mask_len)
 fn goss_status goss_session_track_frame(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)
 fn goss_status goss_session_face_result(goss_session *session, goss_face_result *out_result)
 fn goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count)
