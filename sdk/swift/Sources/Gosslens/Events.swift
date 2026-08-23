@@ -146,6 +146,34 @@ extension GossSession {
         result.parse()
     }
 
+    /// Submits the faces tracked this frame for the multi-face path, so a
+    /// lens can instance effects across every face and the face-anchor
+    /// render fans out. An empty array clears the path back to the single
+    /// internal tracker. Faces past GOSS_FACE_MAX are ignored.
+    public func submitFaces(_ faces: [GossFaceResult]) throws {
+        if faces.isEmpty {
+            try checked(goss_session_submit_faces(handle, nil, 0))
+            return
+        }
+        var raws = faces.map { $0.raw }
+        try checked(goss_session_submit_faces(handle, &raws, UInt32(raws.count)))
+    }
+
+    /// The number of faces the last submitFaces kept, zero to GOSS_FACE_MAX.
+    public func faceCount() throws -> Int {
+        var count: UInt32 = 0
+        try checked(goss_session_face_count(handle, &count))
+        return Int(count)
+    }
+
+    /// Fills result with the index-th submitted face. Throws
+    /// .invalidArgument once index reaches faceCount, so a caller loops zero
+    /// to faceCount to visit every face.
+    public func faceResult(at index: Int, into result: GossFaceResult) throws {
+        try checked(goss_session_face_result_at(handle, UInt32(index), &result.raw))
+        result.parse()
+    }
+
     /// Fills result with the newest hand tracking output. Throws .again
     /// until the hand worker has published its first result.
     public func handResult(_ result: GossHandResult) throws {

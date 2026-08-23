@@ -97,7 +97,30 @@ const FRAME_ROTATION_SHIFT = 8;
 const LENS_SIGNALS_BYTES = 232;
 const GOSS_FACE_BLENDSHAPE_COUNT = 52;
 export const GOSS_FACE_LANDMARK_COUNT = 478;
+export const GOSS_FACE_MAX = 4;
+const FACE_RESULT_BYTES = 5968;
 export const GOSS_SEGMENTATION_MASK_SIDE = 256;
+
+/// A face handed to submitFaces for the multi-face path. landmarks are frame
+/// pixels, GOSS_FACE_LANDMARK_COUNT * 3 floats; presence defaults to 1 and a
+/// face below the tracked threshold is dropped by the engine.
+export interface GossFaceInput {
+  landmarks: Float32Array;
+  presence?: number;
+  blendshapes?: Float32Array;
+  frameSerial?: number;
+  timestampUs?: bigint;
+}
+
+/// One face read back from faceResultAt, the frozen goss_face_result laid out.
+export interface GossFaceOut {
+  frameSerial: bigint;
+  timestampUs: bigint;
+  presence: number;
+  landmarkCount: number;
+  landmarks: Float32Array;
+  blendshapes: Float32Array;
+}
 
 /// The segmentation mask channels a lens can name, in the engine's frozen
 /// order: the derived person mask, then the multiclass model's own labels.
@@ -1075,6 +1098,69 @@ export class GossSession {
       ["number", "number", "number"],
       [this.handle, this.landmarksPtr, pointCount],
     );
+  }
+
+  /// Submits the faces tracked this frame for the multi-face path. landmarks
+  /// are frame pixels, GOSS_FACE_LANDMARK_COUNT * 3 floats; presence defaults
+  /// to 1. An empty array clears the path; faces past GOSS_FACE_MAX or below
+  /// the tracked presence are dropped.
+  submitFaces(faces: GossFaceInput[]): void {
+    if (faces.length === 0) {
+      this.mod.ccall("goss_session_submit_faces", "number", ["number", "number", "number"], [this.handle, 0, 0]);
+      return;
+    }
+    const bytes = faces.length * FACE_RESULT_BYTES;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const dv = new DataView(this.mod.HEAPU8.buffer, ptr, bytes);
+    for (let i = 0; i < faces.length; i += 1) {
+      const off = i * FACE_RESULT_BYTES;
+      const base = ptr + off;
+      const f = faces[i]!;
+      const count = f.landmarks.length / 3;
+      dv.setBigUint64(off, BigInt(f.frameSerial ?? 0), true);
+      dv.setBigInt64(off + 8, BigInt(f.timestampUs ?? 0), true);
+      dv.setFloat32(off + 16, f.presence ?? 1, true);
+      dv.setUint32(off + 20, count, true);
+      this.mod.HEAPF32.set(f.landmarks, (base + 24) >> 2);
+      const bsStart = (base + 24 + GOSS_FACE_LANDMARK_COUNT * 3 * 4) >> 2;
+      this.mod.HEAPF32.fill(0, bsStart, bsStart + GOSS_FACE_BLENDSHAPE_COUNT);
+      if (f.blendshapes) this.mod.HEAPF32.set(f.blendshapes, bsStart);
+    }
+    this.mod.ccall("goss_session_submit_faces", "number", ["number", "number", "number"], [this.handle, ptr, faces.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+  }
+
+  /// The number of faces the last submitFaces kept, zero to GOSS_FACE_MAX.
+  faceCount(): number {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    this.mod.ccall("goss_session_face_count", "number", ["number", "number"], [this.handle, ptr]);
+    const count = this.mod.HEAP32[ptr >> 2]!;
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 4]);
+    return count;
+  }
+
+  /// Reads the index-th submitted face, or null once index reaches faceCount,
+  /// so a caller loops zero to faceCount to visit every face.
+  faceResultAt(index: number): GossFaceOut | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [FACE_RESULT_BYTES]) as number;
+    const status = this.mod.ccall("goss_session_face_result_at", "number", ["number", "number", "number"], [this.handle, index, ptr]) as number;
+    if (status !== 0) {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, FACE_RESULT_BYTES]);
+      return null;
+    }
+    const dv = new DataView(this.mod.HEAPU8.buffer, ptr, FACE_RESULT_BYTES);
+    const lmStart = (ptr + 24) >> 2;
+    const bsStart = lmStart + GOSS_FACE_LANDMARK_COUNT * 3;
+    const out: GossFaceOut = {
+      frameSerial: dv.getBigUint64(0, true),
+      timestampUs: dv.getBigInt64(8, true),
+      presence: dv.getFloat32(16, true),
+      landmarkCount: dv.getUint32(20, true),
+      landmarks: this.mod.HEAPF32.slice(lmStart, bsStart),
+      blendshapes: this.mod.HEAPF32.slice(bsStart, bsStart + GOSS_FACE_BLENDSHAPE_COUNT),
+    };
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, FACE_RESULT_BYTES]);
+    return out;
   }
 
   /// Feeds a segmentation mask (GOSS_SEGMENTATION_MASK_SIDE squared floats,

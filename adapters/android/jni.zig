@@ -245,6 +245,29 @@ export fn Java_com_gosslens_Gosslens_nativeFaceResult(env: *JniEnv, cls: jobject
     return @intFromEnum(abi.goss_session_face_result(sessionFromHandle(session), result));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitFaces(env: *JniEnv, cls: jobject, session: i64, faces_buffer: jobject, count: i32) i32 {
+    _ = cls;
+    if (count == 0) return @intFromEnum(abi.goss_session_submit_faces(sessionFromHandle(session), null, 0));
+    const bytes = getDirectBufferAddress(env, faces_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const faces: [*]const abi.FaceResult = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_submit_faces(sessionFromHandle(session), faces, @intCast(count)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeFaceCount(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    var count: u32 = 0;
+    if (abi.goss_session_face_count(sessionFromHandle(session), &count) != .ok) return -1;
+    return @intCast(count);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeFaceResultAt(env: *JniEnv, cls: jobject, session: i64, index: i32, result_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, result_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const result: *abi.FaceResult = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_face_result_at(sessionFromHandle(session), @intCast(index), result));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeEnableHandTracking(env: *JniEnv, cls: jobject, session: i64, task_buffer: jobject, task_len: i32, threads: i32) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, task_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
