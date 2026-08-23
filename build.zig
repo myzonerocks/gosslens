@@ -55,6 +55,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const material_module = b.createModule(.{
+        .root_source_file = b.path("core/material/graph.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const particles_module = b.createModule(.{
         .root_source_file = b.path("core/particles/particles.zig"),
         .target = target,
@@ -340,6 +346,7 @@ pub fn build(b: *std.Build) void {
     const segment_tests = b.addTest(.{ .root_module = segment_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
+    const material_tests = b.addTest(.{ .root_module = material_module });
     const fit_module = b.createModule(.{ .root_source_file = b.path("core/math/fit.zig"), .target = target, .optimize = optimize });
     const fit_tests = b.addTest(.{ .root_module = fit_module });
     const png_tests = b.addTest(.{ .root_module = pngModule(b, target, optimize) });
@@ -375,6 +382,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(segment_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
+    test_step.dependOn(&b.addRunArtifact(material_tests).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particles_module })).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
