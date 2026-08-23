@@ -942,6 +942,81 @@ fn proveSkinnedBodyMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveDepthOcclusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    // A blend.pass lens with no segmentation model: the submitted depth
+    // alone drives its subject mask.
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/background-swap", ".lens-packages/background-swap".len) != .ok) {
+        std.debug.print("conformance: FAIL depth-occlusion lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, body_corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    // Range 0.1..5.0 puts the occlusion plane at 2.55 m. The left half of
+    // the near map sits in front of it, the right half and the far map behind.
+    const dw = 64;
+    const dh = 48;
+    var near_map: [dw * dh]f32 = undefined;
+    var far_map: [dw * dh]f32 = undefined;
+    for (0..dh) |y| {
+        for (0..dw) |x| {
+            near_map[y * dw + x] = if (x < dw / 2) 0.5 else 3.0;
+            far_map[y * dw + x] = 3.0;
+        }
+    }
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_near = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_near);
+    const shot_near2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_near2);
+    const shot_far = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_far);
+    var wn: u32 = 0;
+    var hn: u32 = 0;
+    var wn2: u32 = 0;
+    var hn2: u32 = 0;
+    var wf: u32 = 0;
+    var hf: u32 = 0;
+    try renderWithDepth(engine, session, &desc, planes, &near_map, dw, dh, 0.1, 5.0, shot_near, &wn, &hn);
+    try renderWithDepth(engine, session, &desc, planes, &near_map, dw, dh, 0.1, 5.0, shot_near2, &wn2, &hn2);
+    try renderWithDepth(engine, session, &desc, planes, &far_map, dw, dh, 0.1, 5.0, shot_far, &wf, &hf);
+    if (wn == 0 or wn != wf or hn != hf or wn != wn2 or hn != hn2) {
+        std.debug.print("conformance: FAIL depth-occlusion capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_near[0 .. wn * hn * 4], shot_near2[0 .. wn * hn * 4])) {
+        std.debug.print("conformance: FAIL depth occlusion is not deterministic across runs\n", .{});
+        return false;
+    }
+    var changed: usize = 0;
+    for (0..wn * hn) |i| {
+        if (!std.mem.eql(u8, shot_near[i * 4 .. i * 4 + 4], shot_far[i * 4 .. i * 4 + 4])) changed += 1;
+    }
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL the near depth patch did not change the composite\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF submitted depth drives occlusion: a near patch pokes the camera frame through the composite ({d} pixels changed), deterministically\n", .{changed});
+    return true;
+}
+
 /// Submits one frame with a set of faces, renders it settled, and captures.
 fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, faces: []const abi.FaceResult, shot: []u8, out_w: *u32, out_h: *u32) !void {
     const half_w = (planes.width + 1) / 2;
@@ -961,6 +1036,21 @@ fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const
 fn renderSubmittedBodies(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, bodies: []const abi.PoseResult, shot: []u8, out_w: *u32, out_h: *u32) !void {
     const half_w = (planes.width + 1) / 2;
     if (abi.goss_session_submit_bodies(session, bodies.ptr, @intCast(bodies.len)) != .ok) return error.SubmitBodiesFailed;
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) {
+        return error.CaptureFailed;
+    }
+}
+
+fn renderWithDepth(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, depth: []const f32, dw: u32, dh: u32, near: f32, far: f32, shot: []u8, out_w: *u32, out_h: *u32) !void {
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_depth(session, depth.ptr, dw, dh, near, far) != .ok) return error.SubmitDepthFailed;
     for (0..5) |_| {
         if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
             return error.SubmitFailed;
@@ -4151,6 +4241,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("skeleton rig");
     if (!try proveSkinnedBodyMesh(gpa, engine)) return 1;
     watchHold("skinned body mesh");
+    if (!try proveDepthOcclusion(gpa, engine)) return 1;
+    watchHold("depth occlusion");
     if (!try proveFaceRegions(gpa, engine)) return 1;
     watchHold("face regions");
     if (!try proveBodyJoints(gpa, engine)) return 1;

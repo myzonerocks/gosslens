@@ -2362,6 +2362,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollMeshFaceLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
+        pollDepthOcclusion(s);
         if (e.recording != null and e.recording_session == s and !s.capture_requested) {
             if (s.current) |current| {
                 recording_frame = prepareRecordingFrame(e, r);
@@ -2446,6 +2447,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollBlendLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollDepthOcclusion(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
         const mirror = resolveMirror(s, current.desc.flags);
@@ -2557,6 +2559,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollBlendLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollDepthOcclusion(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
         const mirror = resolveMirror(s, current.desc.flags);
@@ -4601,6 +4604,29 @@ fn pollSegmentationMask(session: *Session) void {
         if (!segmentation.readClassMask(worker, @intCast(channel - 1), &mask)) continue;
         session.segmentation_class_textures[channel] = maskToTexture(&mask);
     }
+}
+
+/// When the host submits depth and no in-engine segmenter runs, the depth
+/// doubles as the subject mask: geometry nearer than the submitted range's
+/// midpoint reads as foreground, so a blend.pass lens shows the camera
+/// frame through it and hides content behind it.
+fn pollDepthOcclusion(session: *Session) void {
+    if (session.segmentation_worker != null) return;
+    if (session.depth_data.len == 0) return;
+    const plane = (session.depth_near + session.depth_far) * 0.5;
+    const bias: f32 = 0.02;
+    const side = segmentation.mask_side;
+    var mask: [segmentation.mask_len]f32 = undefined;
+    for (0..side) |y| {
+        for (0..side) |x| {
+            const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(side));
+            const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(side));
+            const scene = depthAt(session, u, v) orelse 0;
+            mask[y * side + x] = if (scene > 0 and scene < plane - bias) 1 else 0;
+        }
+    }
+    destroySegmentationTexture(session);
+    session.segmentation_texture = maskToTexture(&mask);
 }
 
 fn destroyLutState(session: *Session) void {
