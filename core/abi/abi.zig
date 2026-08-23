@@ -609,6 +609,9 @@ pub const Session = struct {
     head_clock_us: i64 = 0,
     head_nod_refractory_us: i64 = 0,
     head_shake_refractory_us: i64 = 0,
+    /// The current bone bend angles, filled at tick from the pose worker so a
+    /// lens can compare one by name; the signal points here until the next tick.
+    bone_angles: [pose.bone_count]f32 = @splat(0),
     /// The recording policy and capture-UI intent the SDK applies: the engine
     /// validates and stores them, never touching the recorder or drawing the UI.
     recording_policy: RecordingPolicy = .{},
@@ -5215,6 +5218,15 @@ fn currentHeadPose(s: *Session) ?math.Mat4 {
     return face_geometry.estimateHeadPose(&result.landmarks);
 }
 
+/// The newest tracked pose landmarks, or null with no body.
+fn currentPose(s: *Session) ?pose.Result {
+    const worker = s.pose_tracking orelse return null;
+    var result: pose.Result = undefined;
+    if (!tracking.pose_worker.readResult(worker, &result)) return null;
+    if (result.landmark_count_out == 0 or result.presence < 0.5) return null;
+    return result;
+}
+
 pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
@@ -5255,6 +5267,13 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
                 if (hand.isPinching(&h.landmarks)) live_signals.hand_pinch = true;
             }
         }
+    }
+    // Body presence and bone angles ride the pose worker, so a lens fires on
+    // body.present or compares a joint bend, body.bone_angle('left_elbow').
+    if (currentPose(s)) |body| {
+        live_signals.body_present = true;
+        pose.fillBoneAngles(&body.landmarks, &s.bone_angles);
+        live_signals.bone_angles = &s.bone_angles;
     }
     if (s.audio_engine_fed) {
         live_signals.audio_level = s.audio.level;

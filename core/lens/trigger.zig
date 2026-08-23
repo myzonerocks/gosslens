@@ -8,6 +8,7 @@
 const std = @import("std");
 const face = @import("face");
 const hand = @import("hand");
+const pose = @import("pose");
 
 pub const max_depth = 8;
 
@@ -34,12 +35,14 @@ pub const SignalKind = enum {
     head_tilt,
     hand_gesture,
     hand_pinch,
+    body_present,
+    bone_angle,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch => true,
-        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt => false,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch, .body_present => true,
+        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle => false,
     };
 }
 
@@ -47,6 +50,7 @@ pub const Signal = struct {
     kind: SignalKind,
     blendshape_index: u8 = 0,
     gesture_index: u8 = 0,
+    bone_index: u8 = 0,
     param_index: u16 = 0,
     timer_name: []const u8 = "",
     event_name: []const u8 = "",
@@ -128,6 +132,12 @@ pub const Signals = struct {
     /// True while a tracked hand's thumb and index tips are pinched together,
     /// engine-fed at tick from the hand landmarks. False with no hand.
     hand_pinch: bool = false,
+    /// True while a body is tracked, engine-fed at tick from the pose worker.
+    body_present: bool = false,
+    /// Each tracked bone's current bend angle in radians, engine-fed at tick
+    /// from the pose landmarks, or null with no body. A lens compares one by
+    /// name (`body.bone_angle('left_elbow') < 1.5`).
+    bone_angles: ?*const [pose.bone_count]f32 = null,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -188,6 +198,7 @@ fn readBool(s: Signal, signals: Signals) bool {
         .head_shake => signals.head_shake,
         .hand_gesture => signals.hand_gesture == s.gesture_index,
         .hand_pinch => signals.hand_pinch,
+        .body_present => signals.body_present,
         else => unreachable,
     };
 }
@@ -208,6 +219,7 @@ fn readNumber(s: Signal, signals: Signals) f64 {
         .gaze_x => gazeXY(signals)[0],
         .gaze_y => gazeXY(signals)[1],
         .head_tilt => signals.head_tilt,
+        .bone_angle => if (signals.bone_angles) |a| a[s.bone_index] else 0,
         else => unreachable,
     };
 }
@@ -614,6 +626,16 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "shake")) {
             return .{ .kind = .head_shake };
         }
+        if (std.mem.eql(u8, head, "body") and std.mem.eql(u8, tail, "present")) {
+            return .{ .kind = .body_present };
+        }
+        if (std.mem.eql(u8, head, "body") and std.mem.eql(u8, tail, "bone_angle")) {
+            const name = try self.parseCall();
+            const index = pose.boneIndex(name) orelse {
+                return self.fail("unknown bone '{s}'", .{name});
+            };
+            return .{ .kind = .bone_angle, .bone_index = index };
+        }
         if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "tilt")) {
             return .{ .kind = .head_tilt };
         }
@@ -764,6 +786,28 @@ test "hands.pinch reads the fed pinch state" {
     defer expr.deinit();
     try t.expect(!evaluate(expr.root, .{}));
     try t.expect(evaluate(expr.root, .{ .hand_pinch = true }));
+}
+
+test "body.present reads the fed pose presence" {
+    var expr = try compileOk("body.present");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .body_present = true }));
+}
+
+test "body.bone_angle compares the fed bend of a named bone" {
+    var expr = try compileOk("body.bone_angle('right_knee') > 2.0");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{})); // no body reads zero, not straight
+    var angles: [pose.bone_count]f32 = @splat(0);
+    angles[pose.boneIndex("right_knee").?] = 2.8; // a nearly straight knee
+    try t.expect(evaluate(expr.root, .{ .bone_angles = &angles }));
+    angles[pose.boneIndex("right_knee").?] = 1.0; // deeply bent
+    try t.expect(!evaluate(expr.root, .{ .bone_angles = &angles }));
+
+    const err = try compileFails("body.bone_angle('nope')");
+    defer t.allocator.free(err.message);
+    try t.expect(std.mem.indexOf(u8, err.message, "unknown bone") != null);
 }
 
 test "an unknown parameter name fails to compile" {

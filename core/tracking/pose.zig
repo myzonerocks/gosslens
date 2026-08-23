@@ -85,6 +85,85 @@ pub fn jointPoint(landmarks: *const [landmark_count * 3]f32, joint: Joint) [3]f3
     return .{ landmarks[base], landmarks[base + 1], landmarks[base + 2] };
 }
 
+/// A named bone a lens can trigger on by its bend angle: the angle at the
+/// middle joint of a three-point limb chain. Zero is fully folded, pi is
+/// straight. The left/right labels are the subject's own.
+pub const Bone = enum(u8) {
+    left_elbow = 0,
+    right_elbow = 1,
+    left_knee = 2,
+    right_knee = 3,
+    left_shoulder = 4,
+    right_shoulder = 5,
+    left_hip = 6,
+    right_hip = 7,
+
+    pub fn fromU8(value: u8) ?Bone {
+        return switch (value) {
+            0...7 => @enumFromInt(value),
+            else => null,
+        };
+    }
+};
+
+pub const bone_count = 8;
+
+/// Each bone is the landmark triple (endpoint, vertex, endpoint); the angle
+/// is measured at the vertex between the two endpoints.
+const bone_joints = [bone_count][3]u16{
+    .{ 11, 13, 15 },
+    .{ 12, 14, 16 },
+    .{ 23, 25, 27 },
+    .{ 24, 26, 28 },
+    .{ 13, 11, 23 },
+    .{ 14, 12, 24 },
+    .{ 11, 23, 25 },
+    .{ 12, 24, 26 },
+};
+
+const bone_names = [bone_count][]const u8{
+    "left_elbow",    "right_elbow", "left_knee", "right_knee",
+    "left_shoulder", "right_shoulder", "left_hip", "right_hip",
+};
+
+/// The index of a bone by name, for the trigger grammar; null if unknown.
+pub fn boneIndex(name: []const u8) ?u8 {
+    for (bone_names, 0..) |candidate, i| {
+        if (std.mem.eql(u8, candidate, name)) return @intCast(i);
+    }
+    return null;
+}
+
+fn landmarkPoint(landmarks: *const [landmark_count * 3]f32, index: u16) [3]f32 {
+    const base = @as(usize, index) * 3;
+    return .{ landmarks[base], landmarks[base + 1], landmarks[base + 2] };
+}
+
+/// The bend angle at a bone's vertex, in radians [0, pi]. A degenerate limb
+/// with a zero-length segment reads zero rather than a NaN.
+pub fn boneAngle(landmarks: *const [landmark_count * 3]f32, bone: Bone) f32 {
+    const j = bone_joints[@intFromEnum(bone)];
+    const a = landmarkPoint(landmarks, j[0]);
+    const v = landmarkPoint(landmarks, j[1]);
+    const b = landmarkPoint(landmarks, j[2]);
+    const va = [3]f32{ a[0] - v[0], a[1] - v[1], a[2] - v[2] };
+    const vb = [3]f32{ b[0] - v[0], b[1] - v[1], b[2] - v[2] };
+    const dot = va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2];
+    const la = @sqrt(va[0] * va[0] + va[1] * va[1] + va[2] * va[2]);
+    const lb = @sqrt(vb[0] * vb[0] + vb[1] * vb[1] + vb[2] * vb[2]);
+    if (la == 0 or lb == 0) return 0;
+    const cosang = std.math.clamp(dot / (la * lb), -1.0, 1.0);
+    return std.math.acos(cosang);
+}
+
+/// Fills out with every bone's current bend angle, in Bone order.
+pub fn fillBoneAngles(landmarks: *const [landmark_count * 3]f32, out: *[bone_count]f32) void {
+    var i: u8 = 0;
+    while (i < bone_count) : (i += 1) {
+        out[i] = boneAngle(landmarks, @enumFromInt(i));
+    }
+}
+
 fn handUpRotation(dx: f32, dy: f32) f32 {
     return normalizeRadians(target_angle - std.math.atan2(-dy, dx));
 }
@@ -177,6 +256,35 @@ test "every body joint maps to an in-range landmark and reads its point" {
     }
     try t.expectEqual(Joint.right_ankle, Joint.fromU32(12).?);
     try t.expectEqual(@as(?Joint, null), Joint.fromU32(13));
+}
+
+test "boneAngle measures the bend at the vertex and bone names resolve" {
+    const set = struct {
+        fn p(l: *[landmark_count * 3]f32, i: usize, x: f32, y: f32, z: f32) void {
+            l[i * 3] = x;
+            l[i * 3 + 1] = y;
+            l[i * 3 + 2] = z;
+        }
+    }.p;
+    var lm: [landmark_count * 3]f32 = @splat(0);
+    // left_elbow is (11 shoulder, 13 elbow, 15 wrist); a right angle at the
+    // elbow: shoulder straight up, wrist out to the side.
+    set(&lm, 11, 0, 1, 0);
+    set(&lm, 13, 0, 0, 0);
+    set(&lm, 15, 1, 0, 0);
+    try t.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), boneAngle(&lm, .left_elbow), 0.001);
+    // Straightening the arm (wrist opposite the shoulder) reads pi.
+    set(&lm, 15, 0, -1, 0);
+    try t.expectApproxEqAbs(@as(f32, std.math.pi), boneAngle(&lm, .left_elbow), 0.001);
+
+    try t.expectEqual(@as(?u8, 0), boneIndex("left_elbow"));
+    try t.expectEqual(@as(?u8, null), boneIndex("nope"));
+    try t.expect(bone_names.len == bone_count);
+    try t.expectEqual(Bone.right_hip, Bone.fromU8(7).?);
+    try t.expectEqual(@as(?Bone, null), Bone.fromU8(8));
+    var out: [bone_count]f32 = undefined;
+    fillBoneAngles(&lm, &out);
+    try t.expectEqual(boneAngle(&lm, .left_elbow), out[0]);
 }
 
 test "an upright detection produces an unrotated crop of double the alignment distance" {

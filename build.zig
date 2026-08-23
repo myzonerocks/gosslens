@@ -252,7 +252,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "face", .module = face_module }, .{ .name = "hand", .module = hand_core_module } },
+        .imports = &.{ .{ .name = "face", .module = face_module }, .{ .name = "hand", .module = hand_core_module }, .{ .name = "pose", .module = pose_core_module } },
     });
     const lens_animation_module = b.createModule(.{
         .root_source_file = b.path("core/lens/animation.zig"),
@@ -927,7 +927,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("core/lens/trigger.zig"),
             .target = wasm_target,
             .optimize = .ReleaseSmall,
-            .imports = &.{ .{ .name = "face", .module = tracking_cores_wasm.face }, .{ .name = "hand", .module = tracking_cores_wasm.hand } },
+            .imports = &.{ .{ .name = "face", .module = tracking_cores_wasm.face }, .{ .name = "hand", .module = tracking_cores_wasm.hand }, .{ .name = "pose", .module = tracking_cores_wasm.pose } },
         });
         const lens_animation_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/animation.zig"),
@@ -1409,7 +1409,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = android_target,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "face", .module = tracking_cores_android.face }, .{ .name = "hand", .module = tracking_cores_android.hand } },
+        .imports = &.{ .{ .name = "face", .module = tracking_cores_android.face }, .{ .name = "hand", .module = tracking_cores_android.hand }, .{ .name = "pose", .module = tracking_cores_android.pose } },
     });
     const lens_animation_android = b.createModule(.{
         .root_source_file = b.path("core/lens/animation.zig"),
@@ -3388,7 +3388,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = ios_target,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "face", .module = tracking_cores_ios.face }, .{ .name = "hand", .module = tracking_cores_ios.hand } },
+        .imports = &.{ .{ .name = "face", .module = tracking_cores_ios.face }, .{ .name = "hand", .module = tracking_cores_ios.hand }, .{ .name = "pose", .module = tracking_cores_ios.pose } },
     });
     const lens_animation_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/animation.zig"),
@@ -3952,7 +3952,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = em_target,
         .optimize = .ReleaseSmall,
-        .imports = &.{ .{ .name = "face", .module = tracking_cores_em.face }, .{ .name = "hand", .module = tracking_cores_em.hand } },
+        .imports = &.{ .{ .name = "face", .module = tracking_cores_em.face }, .{ .name = "hand", .module = tracking_cores_em.hand }, .{ .name = "pose", .module = tracking_cores_em.pose } },
     });
     const lens_animation_em = b.createModule(.{ .root_source_file = b.path("core/lens/animation.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const lens_runtime_em = b.createModule(.{
