@@ -861,6 +861,87 @@ fn proveSkeletonRig(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveSkinnedBodyMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const pose_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, pose_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(pose_bytes);
+    if (abi.goss_session_enable_pose_tracking(session, pose_bytes.ptr, pose_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL skinned-body tracking enable\n", .{});
+        return false;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/skinned-body", ".lens-packages/skinned-body".len) != .ok) {
+        std.debug.print("conformance: FAIL skinned-body lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, body_corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+    var base: abi.PoseResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_pose_result(session, &base) == .again or base.landmark_count_out == 0) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.PoseResultTimedOut;
+    }
+
+    // Move only the left wrist (landmark 15); the shoulders and hips that
+    // set the body anchor stay put. A rigid mesh renders identically, so
+    // any change proves the hand skinned to follow the wrist.
+    var moved = base;
+    const shift = @as(f32, @floatFromInt(planes.width)) * 0.15;
+    moved.landmarks[15 * 3] += shift;
+    moved.landmarks[15 * 3 + 1] -= shift;
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_rest = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_rest);
+    const shot_bent = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_bent);
+    const rest = [_]abi.PoseResult{base};
+    const bent = [_]abi.PoseResult{moved};
+    var wr: u32 = 0;
+    var hr: u32 = 0;
+    var wb: u32 = 0;
+    var hb: u32 = 0;
+    try renderSubmittedBodies(engine, session, &desc, planes, &rest, shot_rest, &wr, &hr);
+    try renderSubmittedBodies(engine, session, &desc, planes, &bent, shot_bent, &wb, &hb);
+    if (wr == 0 or wr != wb or hr != hb) {
+        std.debug.print("conformance: FAIL skinned-body capture size {d}x{d} vs {d}x{d}\n", .{ wr, hr, wb, hb });
+        return false;
+    }
+
+    var changed: usize = 0;
+    for (0..wr * hr) |i| {
+        if (!std.mem.eql(u8, shot_rest[i * 4 .. i * 4 + 4], shot_bent[i * 4 .. i * 4 + 4])) changed += 1;
+    }
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL moving the wrist did not deform the skinned mesh\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a skinned body mesh bends to follow a moved wrist while its body anchor holds ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
 /// Submits one frame with a set of faces, renders it settled, and captures.
 fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, faces: []const abi.FaceResult, shot: []u8, out_w: *u32, out_h: *u32) !void {
     const half_w = (planes.width + 1) / 2;
@@ -4068,6 +4149,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;
     watchHold("skeleton rig");
+    if (!try proveSkinnedBodyMesh(gpa, engine)) return 1;
+    watchHold("skinned body mesh");
     if (!try proveFaceRegions(gpa, engine)) return 1;
     watchHold("face regions");
     if (!try proveBodyJoints(gpa, engine)) return 1;
