@@ -1,0 +1,23 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.material-posterize",
+  "version": "1.0.0",
+  "display_name": "Material Posterize",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "post", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {},
+     "material": {"output": 7, "nodes": [
+       {"kind": "uv"},
+       {"kind": "texture", "name": "texColor"},
+       {"kind": "sample", "inputs": [1, 0]},
+       {"kind": "constant", "type": "vec4", "params": [4.0, 4.0, 4.0, 4.0]},
+       {"kind": "multiply", "inputs": [2, 3]},
+       {"kind": "floor", "inputs": [4]},
+       {"kind": "divide", "inputs": [5, 3]},
+       {"kind": "output", "inputs": [6]}
+     ]}}
+  ],
+  "triggers": []
+}
