@@ -3890,6 +3890,36 @@ fn proveMaskDegradation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // material-tint authors its shader as a node graph; packaging lowered
+    // and compiled it. Render it twice: it must load, run, and draw real
+    // tinted content deterministically.
+    try renderOnce(gpa, engine, ".lens-packages/material-tint", "zig-out/conformance-material-a", null);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/material-tint", "zig-out/conformance-material-b", null);
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-material-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-material-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL a material-graph shader is not deterministic\n", .{});
+        return false;
+    }
+    var lo: u8 = 255;
+    var hi: u8 = 0;
+    for (a[18..]) |byte| {
+        lo = @min(lo, byte);
+        hi = @max(hi, byte);
+    }
+    if (hi - lo < 10) {
+        std.debug.print("conformance: FAIL the material shader drew a flat frame, it never sampled the input\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a lens-authored material graph compiles, loads, and renders real content deterministically\n", .{});
+    return true;
+}
+
 fn proveSceneSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // The deeplab scene segmenter infers 21 classes at 257 x 257 - both
     // past the portrait segmenters' shape. It must load, resample onto
@@ -4225,6 +4255,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;
     watchHold("mask degradation");
+    if (!try proveMaterialGraph(gpa, engine)) return 1;
+    watchHold("material graph");
     if (!try proveSceneSegmentation(gpa, engine)) return 1;
     watchHold("scene segmentation");
     if (!try proveVideoRecording(gpa, engine)) return 1;
