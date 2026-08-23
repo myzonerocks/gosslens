@@ -1295,6 +1295,22 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
+  /// Submits one frame's depth map from the host AR backend (WebXR depth-
+  /// sensing): width by height metres per pixel, row major, with the near and
+  /// far metres that bound it. An empty array clears it. Kept for depth
+  /// occlusion against the rendered content.
+  submitDepth(depth: Float32Array, width: number, height: number, near: number, far: number): void {
+    if (depth.length === 0) {
+      this.mod.ccall("goss_session_submit_depth", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, 0, 0, 0, 0, 0]);
+      return;
+    }
+    const bytes = depth.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    this.mod.HEAPF32.set(depth, ptr >> 2);
+    this.mod.ccall("goss_session_submit_depth", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, width, height, near, far]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+  }
+
   /// The number of bodies the last submitBodies kept, zero to GOSS_BODY_MAX.
   bodyCount(): number {
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;

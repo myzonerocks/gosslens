@@ -285,6 +285,14 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitBodies(env: *JniEnv, cls: jobje
     return @intFromEnum(abi.goss_session_submit_bodies(sessionFromHandle(session), bodies, @intCast(count)));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitDepth(env: *JniEnv, cls: jobject, session: i64, depth_buffer: jobject, width: i32, height: i32, near: f32, far: f32) i32 {
+    _ = cls;
+    if (width == 0 or height == 0) return @intFromEnum(abi.goss_session_submit_depth(sessionFromHandle(session), null, 0, 0, 0, 0));
+    const bytes = getDirectBufferAddress(env, depth_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const depth: [*]const f32 = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_submit_depth(sessionFromHandle(session), depth, @intCast(width), @intCast(height), near, far));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeBodyCount(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;

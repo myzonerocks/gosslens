@@ -234,6 +234,20 @@ extension GossSession {
         try checked(goss_session_submit_bodies(handle, &raws, UInt32(raws.count)))
     }
 
+    /// Submits one frame's depth map from the host AR backend (ARKit scene
+    /// depth): width by height metres per pixel, row major, with the near and
+    /// far metres that bound it. An empty array clears it. Kept for depth
+    /// occlusion against the rendered content.
+    public func submitDepth(_ depth: [Float], width: UInt32, height: UInt32, near: Float, far: Float) throws {
+        if depth.isEmpty {
+            try checked(goss_session_submit_depth(handle, nil, 0, 0, 0, 0))
+            return
+        }
+        try depth.withUnsafeBufferPointer { buf in
+            try checked(goss_session_submit_depth(handle, buf.baseAddress, width, height, near, far))
+        }
+    }
+
     /// The number of bodies the last submitBodies kept, zero to GOSS_BODY_MAX.
     public func bodyCount() throws -> Int {
         var count: UInt32 = 0

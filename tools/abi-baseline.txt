@@ -1,4 +1,4 @@
-abi 0.44
+abi 0.45
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -186,6 +186,7 @@ fn goss_status goss_session_face_result_at(goss_session *session, uint32_t index
 fn goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count)
 fn goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)
 fn goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)
+fn goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)
 fn goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)
 fn void goss_session_disable_beauty(goss_session *session)
 fn goss_status goss_session_set_beauty(goss_session *session, int32_t effect, float value)

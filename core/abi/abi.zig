@@ -175,6 +175,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count)",
     "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
+    "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
     "void goss_session_disable_beauty(goss_session *session)",
     "goss_status goss_session_set_beauty(goss_session *session, int32_t effect, float value)",
@@ -590,6 +591,14 @@ pub const Session = struct {
     face_count: u32 = 0,
     body_results: [pose.max_bodies]pose.Result = @splat(std.mem.zeroes(pose.Result)),
     body_count: u32 = 0,
+    /// The most recent host-submitted depth map (metres per pixel, row
+    /// major) with its plane size and near/far range, kept for depth
+    /// occlusion. Empty until a frame arrives.
+    depth_data: []f32 = &.{},
+    depth_width: u32 = 0,
+    depth_height: u32 = 0,
+    depth_near: f32 = 0,
+    depth_far: f32 = 0,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -2056,6 +2065,7 @@ pub fn destroySession(session: *Session) void {
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
+    if (session.depth_data.len != 0) session.engine.gpa.free(session.depth_data);
     destroyChainOrder(session);
     if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
     session.active_lens = null;
@@ -4133,6 +4143,51 @@ pub export fn goss_session_body_result_at(session: ?*Session, index: u32, out_re
     if (index >= s.body_count) return .invalid_argument;
     out.* = s.body_results[index];
     return .ok;
+}
+
+/// Submits one frame's depth map from the host AR backend (ARKit scene
+/// depth, ARCore Depth API, WebXR depth-sensing): width*height metres
+/// per pixel, row major, with the near and far metres that bound it. A
+/// zero size clears it. Kept for depth occlusion against the content.
+pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32, width: u32, height: u32, near: f32, far: f32) Status {
+    const s = session orelse return .invalid_argument;
+    const gpa = s.engine.gpa;
+    const count = @as(usize, width) * height;
+    if (count == 0) {
+        if (s.depth_data.len != 0) gpa.free(s.depth_data);
+        s.depth_data = &.{};
+        s.depth_width = 0;
+        s.depth_height = 0;
+        return .ok;
+    }
+    const src = depth orelse return .invalid_argument;
+    if (s.depth_data.len != count) {
+        if (s.depth_data.len != 0) gpa.free(s.depth_data);
+        s.depth_data = gpa.alloc(f32, count) catch {
+            s.depth_data = &.{};
+            s.depth_width = 0;
+            s.depth_height = 0;
+            return .out_of_memory;
+        };
+    }
+    @memcpy(s.depth_data, src[0..count]);
+    s.depth_width = width;
+    s.depth_height = height;
+    s.depth_near = near;
+    s.depth_far = far;
+    return .ok;
+}
+
+/// The depth (metres) at a normalized frame coordinate, nearest sample,
+/// or null when no depth has been submitted. The occlusion pass reads
+/// this to tell whether real geometry sits in front of the content.
+fn depthAt(s: *const Session, u: f32, v: f32) ?f32 {
+    if (s.depth_data.len == 0) return null;
+    const fx = std.math.clamp(u, 0, 1) * @as(f32, @floatFromInt(s.depth_width - 1));
+    const fy = std.math.clamp(v, 0, 1) * @as(f32, @floatFromInt(s.depth_height - 1));
+    const x: usize = @intFromFloat(fx);
+    const y: usize = @intFromFloat(fy);
+    return s.depth_data[y * s.depth_width + x];
 }
 
 /// Reads the newest hand tracking result into caller memory. Reports
@@ -6418,6 +6473,32 @@ test "submitted bodies round-trip by index and drop the ones no real body fills"
     try t.expectEqual(Status.invalid_argument, goss_session_submit_bodies(session, null, 3));
     try t.expectEqual(Status.invalid_argument, goss_session_body_count(session, null));
     try t.expectEqual(Status.invalid_argument, goss_session_body_result_at(session, 0, null));
+}
+
+test "submitted depth stores the map, resamples on resize, and clears" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    try t.expect(depthAt(session, 0.5, 0.5) == null);
+    const depth = [_]f32{ 1.0, 2.0, 3.0, 4.0 }; // 2x2 metres, row major
+    try t.expectEqual(Status.ok, goss_session_submit_depth(session, &depth, 2, 2, 0.1, 5.0));
+    try t.expectEqual(@as(u32, 2), session.depth_width);
+    try t.expectApproxEqAbs(@as(f32, 1.0), depthAt(session, 0.0, 0.0).?, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 4.0), depthAt(session, 1.0, 1.0).?, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 5.0), session.depth_far, 0.001);
+
+    // A differently sized frame reallocates rather than reading stale data.
+    const wide = [_]f32{ 7.0, 8.0, 9.0 };
+    try t.expectEqual(Status.ok, goss_session_submit_depth(session, &wide, 3, 1, 0.1, 5.0));
+    try t.expectEqual(@as(u32, 3), session.depth_width);
+    try t.expectApproxEqAbs(@as(f32, 9.0), depthAt(session, 1.0, 0.0).?, 0.001);
+
+    // Zero size clears; a null buffer with a real size is rejected.
+    try t.expectEqual(Status.ok, goss_session_submit_depth(session, null, 0, 0, 0, 0));
+    try t.expect(depthAt(session, 0.5, 0.5) == null);
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_depth(session, null, 4, 4, 0, 1));
 }
 
 test "face region guards its arguments and refuses with no tracked face" {
