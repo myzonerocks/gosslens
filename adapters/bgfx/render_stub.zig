@@ -351,6 +351,15 @@ pub const Renderer = struct {
         _ = aspect_ratio;
     }
 
+    pub fn drawModelMesh(r: *Renderer, mesh_view: u8, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = mesh_view;
+        _ = mesh;
+        _ = model_matrix;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
     pub fn uploadNv12(r: *Renderer, width: u16, height: u16, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) !Nv12Textures {
         _ = r;
         _ = width;

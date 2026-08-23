@@ -1595,26 +1595,48 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
                 var anchored_without_face = false;
                 if (s.model_face_anchors.contains(entry.graph_index)) {
+                    // The head transform lands in source-frame pixels, stretched
+                    // by the preview blit to fill a rect whose z=0 plane spans
+                    // 4*tan(22.5) world units vertically.
+                    const world_height: f32 = 1.6568542;
+                    const rect_aspect = tiledAspect(s, rect_width, rect_height);
+                    const sx = world_height * rect_aspect / @as(f32, @floatFromInt(width));
+                    const sy = world_height / @as(f32, @floatFromInt(height));
+                    const pixel_to_world: math.Mat4 = .{ .cols = .{
+                        .{ sx, 0, 0, 0 },
+                        .{ 0, -sy, 0, 0 },
+                        .{ 0, 0, -sy, 0 },
+                        .{ -0.5 * world_height * rect_aspect, 0.5 * world_height, 0, 1 },
+                    } };
+                    const base_model_matrix = model_matrix;
+                    if (s.face_count > 0) {
+                        // The host's submitted faces drive one model per face:
+                        // blit the frame once through the first, draw the rest
+                        // of the meshes over it.
+                        var drawn_face = false;
+                        for (s.face_results[0..s.face_count]) |*fr| {
+                            const head = face_geometry.estimateHeadPose(&fr.landmarks) orelse continue;
+                            const m = pixel_to_world.mul(head).mul(base_model_matrix);
+                            if (!drawn_face) {
+                                r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, m, loaded.base_color, rect_aspect);
+                                drawn_face = true;
+                            } else {
+                                r.drawModelMesh(mesh_view, loaded.mesh, m, loaded.base_color, rect_aspect);
+                            }
+                        }
+                        if (!drawn_face) r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                        if (output) |target| {
+                            input_texture = target.texture;
+                            if (!is_final) next_slot += 1;
+                        }
+                        continue;
+                    }
                     anchored_without_face = true;
                     if (s.face_tracking) |worker| {
                         var tracked: face.Result = undefined;
                         if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
                             if (face_geometry.estimateHeadPose(&tracked.landmarks)) |head| {
-                                // The head transform lands in source-frame
-                                // pixels, stretched by the preview blit to
-                                // fill a rect whose z=0 plane spans
-                                // 4*tan(22.5) world units vertically.
-                                const world_height: f32 = 1.6568542;
-                                const rect_aspect = tiledAspect(s, rect_width, rect_height);
-                                const sx = world_height * rect_aspect / @as(f32, @floatFromInt(width));
-                                const sy = world_height / @as(f32, @floatFromInt(height));
-                                const pixel_to_world: math.Mat4 = .{ .cols = .{
-                                    .{ sx, 0, 0, 0 },
-                                    .{ 0, -sy, 0, 0 },
-                                    .{ 0, 0, -sy, 0 },
-                                    .{ -0.5 * world_height * rect_aspect, 0.5 * world_height, 0, 1 },
-                                } };
-                                model_matrix = pixel_to_world.mul(head).mul(model_matrix);
+                                model_matrix = pixel_to_world.mul(head).mul(base_model_matrix);
                                 anchored_without_face = false;
                             }
                         }
