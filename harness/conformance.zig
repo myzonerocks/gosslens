@@ -45,6 +45,8 @@ const corpus_path = ".models/corpus/face_frontal_b.jpg";
 const face_bundle_path = ".models/face_landmarker.task";
 const body_corpus_path = ".models/corpus/body_standing.jpg";
 const pose_bundle_path = ".models/pose_landmarker_full.task";
+const hand_corpus_path = ".models/corpus/hand_raised.jpg";
+const hand_bundle_path = ".models/hand_landmarker.task";
 const multiclass_model_path = ".models/selfie_multiclass.tflite";
 const single_class_model_path = ".models/selfie_segmenter.tflite";
 const beauty_resource_path = ".vendor/gpupixel/src";
@@ -800,6 +802,75 @@ fn proveBodyJoints(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF named body joints land on the right anatomy (head {d:.1} to ankle {d:.1})\n", .{ head_y, ankle_y });
+    return true;
+}
+
+/// Proves the named hand joints land on the right anatomy of a real raised
+/// hand: the seven joints are distinct and every fingertip sits above the
+/// wrist, so a swapped landmark or a mis-indexed joint would fail.
+fn proveHandJoints(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const hand_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, hand_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(hand_bytes);
+    if (abi.goss_session_enable_hand_tracking(session, hand_bytes.ptr, hand_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL hand-joint tracking enable\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, hand_corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+    var result: abi.HandResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_hand_result(session, &result) == .again or result.hand_count == 0) {
+        std.Thread.yield() catch {};
+        polls += 1;
+        if (polls > 100_000_000) return error.HandResultTimedOut;
+    }
+
+    var p: [7][3]f32 = undefined;
+    var joint: u32 = 0;
+    while (joint < 7) : (joint += 1) {
+        if (abi.goss_session_hand_joint(session, 0, joint, &p[joint]) != .ok) {
+            std.debug.print("conformance: FAIL hand joint {d} not read\n", .{joint});
+            return false;
+        }
+    }
+    const wrist = p[0];
+    // The five fingertips must be distinct points, not one collapsed spot.
+    for (1..6) |i| {
+        for (i + 1..6) |k| {
+            if (p[i][0] == p[k][0] and p[i][1] == p[k][1]) {
+                std.debug.print("conformance: FAIL fingertips {d} and {d} share a point\n", .{ i, k });
+                return false;
+            }
+        }
+    }
+    // A raised hand points its fingers up: every fingertip sits above the
+    // wrist, a smaller y in image space.
+    for (1..6) |i| {
+        if (p[i][1] >= wrist[1]) {
+            std.debug.print("conformance: FAIL fingertip {d} not above the wrist (y {d:.1} vs {d:.1})\n", .{ i, p[i][1], wrist[1] });
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF named hand joints land on the right anatomy (wrist y {d:.1}, middle tip y {d:.1})\n", .{ wrist[1], p[3][1] });
     return true;
 }
 
@@ -3702,6 +3773,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveMultiFaceFanOut(gpa, engine)) return 1;
     if (!try proveFaceRegions(gpa, engine)) return 1;
     if (!try proveBodyJoints(gpa, engine)) return 1;
+    if (!try proveHandJoints(gpa, engine)) return 1;
     if (!try provePhysicsDrop(gpa, engine)) return 1;
     if (!try provePhysicsChain(gpa, engine)) return 1;
     if (!try proveClothFlag(gpa, engine)) return 1;

@@ -50,6 +50,57 @@ pub fn isPinching(landmarks: *const [landmark_count * 3]f32) bool {
     return palm > 0 and pinch < palm * 0.4;
 }
 
+/// Named attach points on the tracked hand, so a lens can pin content to a
+/// fingertip or the wrist without knowing the mesh indices.
+pub const Joint = enum(u32) {
+    wrist = 0,
+    thumb_tip = 1,
+    index_tip = 2,
+    middle_tip = 3,
+    ring_tip = 4,
+    pinky_tip = 5,
+    palm = 6,
+
+    pub fn fromU32(value: u32) ?Joint {
+        return switch (value) {
+            0...6 => @enumFromInt(value),
+            else => null,
+        };
+    }
+};
+
+/// The mesh landmark each joint resolves to, in the model's own index order
+/// (palm is the middle-finger knuckle, a stable palm-centre proxy).
+const joint_landmark = [_]u16{ 0, 4, 8, 12, 16, 20, 9 };
+
+/// The tracked point for a joint: x, y in frame pixels and z in the same
+/// scale, read straight from the hand landmarks (the flat [count*3] array a
+/// hand result carries).
+pub fn jointPoint(landmarks: *const [landmark_count * 3]f32, joint: Joint) [3]f32 {
+    const base = @as(usize, joint_landmark[@intFromEnum(joint)]) * 3;
+    return .{ landmarks[base], landmarks[base + 1], landmarks[base + 2] };
+}
+
+test "every hand joint maps to an in-range landmark and reads its point" {
+    var landmarks: [landmark_count * 3]f32 = undefined;
+    for (0..landmark_count) |i| {
+        landmarks[i * 3] = @floatFromInt(i);
+        landmarks[i * 3 + 1] = @floatFromInt(i * 2);
+        landmarks[i * 3 + 2] = @floatFromInt(i * 3);
+    }
+    inline for (std.meta.fields(Joint)) |field| {
+        const joint: Joint = @enumFromInt(field.value);
+        const idx = joint_landmark[field.value];
+        try t.expect(idx < landmark_count);
+        const p = jointPoint(&landmarks, joint);
+        try t.expectEqual(@as(f32, @floatFromInt(idx)), p[0]);
+        try t.expectEqual(@as(f32, @floatFromInt(idx * 2)), p[1]);
+        try t.expectEqual(@as(f32, @floatFromInt(idx * 3)), p[2]);
+    }
+    try t.expectEqual(Joint.pinky_tip, Joint.fromU32(5).?);
+    try t.expectEqual(@as(?Joint, null), Joint.fromU32(7));
+}
+
 /// The crop points the hand up: the steering segment's target angle is a
 /// quarter turn, where the face pipeline levels its segment to zero.
 const target_angle = std.math.pi * 0.5;

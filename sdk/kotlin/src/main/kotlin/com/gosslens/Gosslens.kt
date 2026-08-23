@@ -53,6 +53,7 @@ object Gosslens {
     internal external fun nativeFacePose(session: Long, matrixBuffer: ByteBuffer): Int
     internal external fun nativeFaceRegion(session: Long, region: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeBodyJoint(session: Long, joint: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativeHandJoint(session: Long, handIndex: Int, joint: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeTrackFrame(
         session: Long,
         yBuffer: ByteBuffer,
@@ -172,6 +173,14 @@ object Gosslens {
     const val BODY_JOINT_RIGHT_KNEE = 10
     const val BODY_JOINT_LEFT_ANKLE = 11
     const val BODY_JOINT_RIGHT_ANKLE = 12
+    // Named attach points on a tracked hand for handJoint; palm is the knuckle.
+    const val HAND_JOINT_WRIST = 0
+    const val HAND_JOINT_THUMB_TIP = 1
+    const val HAND_JOINT_INDEX_TIP = 2
+    const val HAND_JOINT_MIDDLE_TIP = 3
+    const val HAND_JOINT_RING_TIP = 4
+    const val HAND_JOINT_PINKY_TIP = 5
+    const val HAND_JOINT_PALM = 6
     const val HAND_LANDMARK_COUNT = 21
     const val HAND_MAX = 2
     const val HAND_RESULT_BYTES = 560
@@ -596,6 +605,17 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * named BODY_JOINT_*, or null until a body is tracked. */
     fun bodyJoint(joint: Int): FloatArray? {
         if (Gosslens.nativeBodyJoint(handle, joint, faceRegionBuffer) != 0) return null
+        faceRegionBuffer.rewind()
+        val out = FloatArray(3)
+        faceRegionBuffer.asFloatBuffer().get(out, 0, 3)
+        return out
+    }
+
+    /** The tracked point (x, y in frame pixels, z in the same scale) of a
+     * named HAND_JOINT_* on the [handIndex]-th hand, or null until that hand
+     * is tracked. */
+    fun handJoint(joint: Int, handIndex: Int = 0): FloatArray? {
+        if (Gosslens.nativeHandJoint(handle, handIndex, joint, faceRegionBuffer) != 0) return null
         faceRegionBuffer.rewind()
         val out = FloatArray(3)
         faceRegionBuffer.asFloatBuffer().get(out, 0, 3)

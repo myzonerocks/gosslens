@@ -75,7 +75,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 33;
+pub const abi_minor: u16 = 34;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -3754,6 +3754,24 @@ pub export fn goss_session_hand_result(session: ?*Session, out_result: ?*hand.Re
     return .ok;
 }
 
+/// Writes the hand_index-th tracked hand's named joint point (x, y in frame
+/// pixels, z in the same scale) into out_xyz, so a lens pins content to a
+/// fingertip or the wrist. invalid_argument on an unknown joint or a hand
+/// index past the tracked count; again with no worker or a faint hand.
+pub export fn goss_session_hand_joint(session: ?*Session, hand_index: u32, joint: u32, out_xyz: ?*[3]f32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_xyz orelse return .invalid_argument;
+    const j = hand.Joint.fromU32(joint) orelse return .invalid_argument;
+    const worker = s.hand_tracking orelse return .again;
+    var result: hand.Result = undefined;
+    if (!tracking.hand_worker.readResult(worker, &result)) return .again;
+    if (hand_index >= result.hand_count or hand_index >= hand.max_hands) return .invalid_argument;
+    const h = &result.hands[hand_index];
+    if (h.presence < 0.5) return .again;
+    out.* = hand.jointPoint(&h.landmarks, j);
+    return .ok;
+}
+
 /// Reads the newest pose tracking result into caller memory. Reports
 /// again until the worker has published its first result.
 pub export fn goss_session_pose_result(session: ?*Session, out_result: ?*pose.Result) Status {
@@ -5476,6 +5494,21 @@ test "body joint guards its arguments and refuses with no tracked body" {
     try t.expectEqual(Status.invalid_argument, goss_session_body_joint(session, 99, &out));
     // A valid joint with no worker reports again, never a stale point.
     try t.expectEqual(Status.again, goss_session_body_joint(session, 0, &out));
+}
+
+test "hand joint guards its arguments and refuses with no tracked hand" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var out: [3]f32 = undefined;
+    // Null session/out and an unknown joint are rejected, not crashes.
+    try t.expectEqual(Status.invalid_argument, goss_session_hand_joint(null, 0, 0, &out));
+    try t.expectEqual(Status.invalid_argument, goss_session_hand_joint(session, 0, 0, null));
+    try t.expectEqual(Status.invalid_argument, goss_session_hand_joint(session, 0, 99, &out));
+    // A valid joint with no worker reports again, never a stale point.
+    try t.expectEqual(Status.again, goss_session_hand_joint(session, 0, 0, &out));
 }
 
 test "head euler decomposes identity to zero and the detector separates nod from shake" {

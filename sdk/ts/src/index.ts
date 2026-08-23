@@ -158,6 +158,18 @@ export enum GossBodyJoint {
   RightAnkle = 12,
 }
 
+/// A named attach point on a tracked hand, for handJoint. Palm is the
+/// middle-finger knuckle, a stable palm-centre proxy.
+export enum GossHandJoint {
+  Wrist = 0,
+  ThumbTip = 1,
+  IndexTip = 2,
+  MiddleTip = 3,
+  RingTip = 4,
+  PinkyTip = 5,
+  Palm = 6,
+}
+
 /// The segmentation mask channels a lens can name, in the engine's frozen
 /// order: the derived person mask, then the multiclass model's own labels.
 /// Index 0 (person) rides the subject mask; the rest upload as class masks.
@@ -1219,6 +1231,21 @@ export class GossSession {
   bodyJoint(joint: GossBodyJoint): [number, number, number] | null {
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
     const status = this.mod.ccall("goss_session_body_joint", "number", ["number", "number", "number"], [this.handle, joint, ptr]) as number;
+    if (status !== 0) {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
+      return null;
+    }
+    const w = ptr >> 2;
+    const out: [number, number, number] = [this.mod.HEAPF32[w], this.mod.HEAPF32[w + 1], this.mod.HEAPF32[w + 2]];
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
+    return out;
+  }
+
+  /// The tracked point (x, y in frame pixels, z in the same scale) of a named
+  /// joint on the handIndex-th tracked hand, or null until that hand is tracked.
+  handJoint(joint: GossHandJoint, handIndex = 0): [number, number, number] | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const status = this.mod.ccall("goss_session_hand_joint", "number", ["number", "number", "number", "number"], [this.handle, handIndex, joint, ptr]) as number;
     if (status !== 0) {
       this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
       return null;

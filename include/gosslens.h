@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 33u
+#define GOSS_ABI_MINOR 34u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -535,6 +535,22 @@ goss_status goss_session_face_result_at(goss_session *session, uint32_t index, g
  * memory. Reports GOSS_AGAIN until the worker has published its first
  * result. */
 goss_status goss_session_hand_result(goss_session *session, goss_hand_result *out_result);
+
+/* Named attach points on a tracked hand for goss_session_hand_joint. */
+#define GOSS_HAND_JOINT_WRIST 0u
+#define GOSS_HAND_JOINT_THUMB_TIP 1u
+#define GOSS_HAND_JOINT_INDEX_TIP 2u
+#define GOSS_HAND_JOINT_MIDDLE_TIP 3u
+#define GOSS_HAND_JOINT_RING_TIP 4u
+#define GOSS_HAND_JOINT_PINKY_TIP 5u
+#define GOSS_HAND_JOINT_PALM 6u
+
+/* Graph thread. Writes the hand_index-th tracked hand's named joint point
+ * (x, y in frame pixels, z in the same scale) into out_xyz, so a lens pins
+ * content to a fingertip or the wrist. GOSS_ERROR_INVALID_ARGUMENT on an
+ * unknown joint or a hand index past the tracked count; GOSS_AGAIN with no
+ * hand or a faint one. */
+goss_status goss_session_hand_joint(goss_session *session, uint32_t hand_index, uint32_t joint, float *out_xyz);
 
 /* Graph thread. Reads the newest pose tracking result into caller
  * memory. Reports GOSS_AGAIN until the worker has published its first
