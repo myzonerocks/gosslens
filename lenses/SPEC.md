@@ -306,6 +306,10 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   `gaze.at_camera` (true when gaze is near centre; a lost face reads false),
   `head.nod` / `head.shake` (true for one tick when a nod or shake completes),
   `head.tilt` (head roll in radians, positive tipping to the subject's left),
+  `body.present` (true while a body is tracked), `body.bone_angle('name')` (the
+  bend angle in radians at a named bone: left_elbow, right_elbow, left_knee,
+  right_knee, left_shoulder, right_shoulder, left_hip, right_hip; zero folded,
+  pi straight, and zero with no body, so gate with `body.present`),
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `tap`, `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
