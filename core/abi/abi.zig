@@ -798,18 +798,20 @@ const LoadedModel = struct {
 };
 
 /// The model node's local matrix this frame: the weighted blend of its
-/// clips' sampled poses. With no weight source bound the first clip
-/// carries full weight, so a single-clip model plays exactly as a lone
-/// clip did; a model with no clips draws on its rest transform.
-fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32) math.Mat4 {
+/// clips' sampled poses. A lens can bind each clip's weight to a live
+/// parameter (clip_weights); with none bound the first clip carries full
+/// weight, so a single-clip model plays exactly as a lone clip did. A
+/// model with no clips draws on its rest transform.
+fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
     if (loaded.animations.len == 0) return math.Mat4.identity;
-    if (loaded.animations.len == 1) return loaded.animations[0].sample(elapsed_seconds);
+    const bound = if (lens) |l| l.bindsClipWeights(graph_index) else false;
+    if (!bound and loaded.animations.len == 1) return loaded.animations[0].sample(elapsed_seconds);
     var poses: [max_blend_clips]gltf.Components = undefined;
     var weights: [max_blend_clips]f32 = undefined;
     const n = @min(loaded.animations.len, max_blend_clips);
     for (0..n) |ci| {
         poses[ci] = loaded.animations[ci].sampleComponents(elapsed_seconds);
-        weights[ci] = if (ci == 0) 1.0 else 0.0;
+        weights[ci] = if (bound) (lens.?.clipWeight(graph_index, ci) orelse 0) else (if (ci == 0) @as(f32, 1.0) else 0.0);
     }
     return gltf.blendComponents(poses[0..n], weights[0..n]).toMatrix();
 }
@@ -1757,9 +1759,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
                     render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
                 }
-                const elapsed_us = if (s.active_lens) |*lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
+                const active_lens: ?*const runtime.Lens = if (s.active_lens) |*lens| lens else null;
+                const elapsed_us = if (active_lens) |lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
                 const elapsed_seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0;
-                var model_matrix = modelPoseMatrix(loaded, elapsed_seconds);
+                var model_matrix = modelPoseMatrix(loaded, elapsed_seconds, active_lens, entry.graph_index);
                 if (s.physics_bodies.get(entry.graph_index)) |body_id| {
                     if (s.physics_world) |world| {
                         if (world.bodyPose(body_id)) |body_pose| {

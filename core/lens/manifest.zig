@@ -202,6 +202,11 @@ pub const Node = struct {
     hair: ?HairField = null,
     /// Set when the node is a particle fountain instead of a glb.
     particles: ?ParticleField = null,
+    /// model.gltf only: a parameter name per animation clip, in clip
+    /// order, whose live value is that clip's blend weight. Empty means
+    /// the node plays its first clip at full weight. A clip past this
+    /// list weighs nothing.
+    clip_weights: []const []const u8 = &.{},
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
     /// Set only on a shader.pass node that authors a material node graph
@@ -1098,6 +1103,25 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             path.pop(anchor_mark);
         }
 
+        var clip_weights: []const []const u8 = &.{};
+        if (getField(object, "clip_weights")) |cw_value| {
+            const cw_mark = path.push("clip_weights");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "clip_weights is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (try expectArray(diags, path, cw_value)) |cw_array| {
+                var names: std.ArrayList([]const u8) = .empty;
+                for (cw_array.items, 0..) |name_value, ci| {
+                    const name_mark = path.pushIndex(ci);
+                    if (try expectString(diags, path, name_value)) |name| {
+                        try names.append(arena, try arena.dupe(u8, name));
+                    }
+                    path.pop(name_mark);
+                }
+                clip_weights = try names.toOwnedSlice(arena);
+            }
+            path.pop(cw_mark);
+        }
+
         var mask_channel: ?u8 = null;
         if (getField(object, "mask")) |mask_value| {
             const mask_mark = path.push("mask");
@@ -1140,6 +1164,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .cloth = cloth_field,
             .hair = hair_field,
             .particles = particle_field,
+            .clip_weights = clip_weights,
             .grade = grade_field,
             .material = material_field,
             .bloom = bloom_field,
@@ -1398,6 +1423,15 @@ fn crossReference(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocato
             }
         }
         path.pop(params_mark);
+        const cw_mark = path.push("clip_weights");
+        for (node.clip_weights, 0..) |name, ci| {
+            if (!param_names.contains(name)) {
+                const idx_mark = path.pushIndex(ci);
+                try diags.add(path.slice(), "clip weight binds unknown parameter '{s}'", .{name});
+                path.pop(idx_mark);
+            }
+        }
+        path.pop(cw_mark);
         path.pop(node_mark);
     }
     path.pop(nodes_mark);
@@ -1736,6 +1770,59 @@ test "an unknown anchor name is rejected" {
     var found = false;
     for (result.diags.items) |d| {
         if (std.mem.indexOf(u8, d.message, "unknown anchor") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "clip weights parse on a model node and bind declared parameters" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "walk", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0},
+        \\   {"name": "run", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "clip_weights": ["walk", "run"]}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expectEqual(@as(usize, 2), manifest.nodes[0].clip_weights.len);
+    try t.expectEqualStrings("walk", manifest.nodes[0].clip_weights[0]);
+    try t.expectEqualStrings("run", manifest.nodes[0].clip_weights[1]);
+}
+
+test "a clip weight binding an unknown parameter fails cross reference" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "walk", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "clip_weights": ["walk", "sprint"]}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "clip weight binds unknown parameter 'sprint'") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "clip weights on a non-model node are rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "walk", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "a", "type": "beauty.reshape", "inputs": {"frame": "camera"}, "params": {}, "clip_weights": ["walk"]}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "clip_weights is a model.gltf field") != null) found = true;
     }
     try t.expect(found);
 }

@@ -110,6 +110,10 @@ const LensNode = struct {
     cloth: ?manifest.ClothField = null,
     hair: ?manifest.HairField = null,
     particles: ?manifest.ParticleField = null,
+    /// .model_gltf only: a parameter name per animation clip whose live
+    /// value is that clip's blend weight; empty plays the first clip.
+    /// Slices into the retained manifest arena, not separately owned.
+    clip_weights: []const []const u8 = &.{},
     /// .grade_pass only: the node's parametric color grade.
     grade: ?manifest.GradeField = null,
     /// .bloom_pass only: the node's glow threshold and intensity.
@@ -423,6 +427,24 @@ pub const Lens = struct {
         return node.model_elapsed_us;
     }
 
+    /// The blend weight the model.gltf node at graph_index binds to its
+    /// clip at clip_index: the live value of the bound parameter, 0 for a
+    /// clip past the bound list. Null when the node binds no weights, so
+    /// the caller falls back to playing the first clip at full weight.
+    pub fn clipWeight(self: *const Lens, graph_index: graph.NodeIndex, clip_index: usize) ?f32 {
+        const node = self.findNode(graph_index) orelse return null;
+        if (node.clip_weights.len == 0) return null;
+        if (clip_index >= node.clip_weights.len) return 0;
+        return self.paramValue(node.clip_weights[clip_index]) orelse 0;
+    }
+
+    /// Whether the model.gltf node at graph_index binds any clip weights,
+    /// so the caller knows to blend rather than take the single-clip path.
+    pub fn bindsClipWeights(self: *const Lens, graph_index: graph.NodeIndex) bool {
+        const node = self.findNode(graph_index) orelse return false;
+        return node.clip_weights.len > 0;
+    }
+
     /// The inline source of this lens's script node, or null if it has none.
     /// The host runs it each tick to drive parameters.
     pub fn scriptSource(self: *const Lens) ?[]const u8 {
@@ -570,6 +592,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .cloth = if (node_type == .model_gltf) node.cloth else null,
             .hair = if (node_type == .model_gltf) node.hair else null,
             .particles = if (node_type == .model_gltf) node.particles else null,
+            .clip_weights = if (node_type == .model_gltf) node.clip_weights else &.{},
             .grade = if (node_type == .grade_pass) node.grade else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .layout = if (node_type == .layout_composite) node.layout else null,
@@ -842,6 +865,40 @@ test "a param bound to a node reports its default as the initial effect value" {
     try t.expectEqual(@as(usize, 1), effects.len);
     try t.expectEqual(EffectSlot.thin_face, effects[0].effect);
     try t.expectEqual(@as(f32, 0.0), effects[0].value);
+}
+
+const clip_weight_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.mixer", "version": "1.0.0", "display_name": "Mixer",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [
+    \\    {"name": "walk", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0},
+    \\    {"name": "run", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+    \\  "nodes": [
+    \\    {"id": "body", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "clip_weights": ["walk", "run"]}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a model node reads its clip weights from the parameters it binds" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, clip_weight_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    try t.expectEqual(NodeType.model_gltf, lens.nodes[0].node_type);
+    const gi = lens.nodes[0].graph_index;
+    try t.expect(lens.bindsClipWeights(gi));
+    try t.expectEqual(@as(f32, 1.0), lens.clipWeight(gi, 0).?); // walk default
+    try t.expectEqual(@as(f32, 0.0), lens.clipWeight(gi, 1).?); // run default
+    try t.expectEqual(@as(f32, 0.0), lens.clipWeight(gi, 2).?); // a clip past the list weighs nothing
+
+    lens.setParam("run", 0.75);
+    try t.expectEqual(@as(f32, 0.75), lens.clipWeight(gi, 1).?);
 }
 
 const shader_pass_manifest =

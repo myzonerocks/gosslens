@@ -156,6 +156,16 @@ projection; while tracking is anything but full, the node draws
 nothing. `anchor` is rejected on every other node type, and `"face"`,
 `"body"`, `"skeleton"`, and `"world"` are the only anchors GLF 1.0 defines.
 
+A `model.gltf` node may add `"clip_weights"`: an array of parameter names,
+one per animation clip in the order the glTF declares them. Each frame the
+runtime samples every clip at the node's playback time and blends their
+poses by those parameters' live values, a weighted mean of translation and
+scale and a weighted nlerp of rotation, so a lens crossfades between
+animations by moving the weights. Ramp them with `param_ramp` (6.3) for an
+eased transition. Each name must be a declared parameter, a clip past the
+list weighs nothing, and with no `clip_weights` the node plays its first
+clip unchanged.
+
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
 pose drives the model matrix once simulation starts. `body` is `box`
 or `sphere`, `size` is box half extents (a sphere reads its radius
