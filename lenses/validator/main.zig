@@ -252,11 +252,12 @@ fn packageMaterialShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.D
         };
         const shaders_sub = try std.fmt.allocPrint(diags.arena, "{s}/shaders", .{package_dir});
         try cwd.createDirPath(io, shaders_sub);
-        const glsl_sub = try std.fmt.allocPrint(diags.arena, "{s}/shaders/material_{s}.glsl", .{ package_dir, node.id });
+        // Named by the node id, exactly like an authored shader, so the
+        // runtime loads and renders it through the same shader.pass path.
+        const glsl_sub = try std.fmt.allocPrint(diags.arena, "{s}/shaders/{s}.glsl", .{ package_dir, node.id });
         try cwd.writeFile(io, .{ .sub_path = glsl_sub, .data = src.writer.buffered() });
-        const stem = try std.fmt.allocPrint(diags.arena, "material_{s}", .{node.id});
         const diag_path = try std.fmt.allocPrint(diags.arena, "/material/{s}", .{node.id});
-        if (!try compileShaderProfiles(io, gpa, diags, glsl_sub, stem, package_dir, diag_path)) ok = false;
+        if (!try compileShaderProfiles(io, gpa, diags, glsl_sub, node.id, package_dir, diag_path)) ok = false;
     }
     return ok;
 }
