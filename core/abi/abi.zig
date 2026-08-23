@@ -170,6 +170,9 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count)",
     "goss_status goss_session_face_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result)",
+    "goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count)",
+    "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
+    "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
     "void goss_session_disable_beauty(goss_session *session)",
     "goss_status goss_session_set_beauty(goss_session *session, int32_t effect, float value)",
@@ -580,6 +583,8 @@ pub const Session = struct {
     /// the anchor render, so a one-face lens never regresses.
     face_results: [face.max_faces]face.Result = @splat(std.mem.zeroes(face.Result)),
     face_count: u32 = 0,
+    body_results: [pose.max_bodies]pose.Result = @splat(std.mem.zeroes(pose.Result)),
+    body_count: u32 = 0,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -3868,6 +3873,47 @@ pub export fn goss_session_face_result_at(session: ?*Session, index: u32, out_re
     return .ok;
 }
 
+/// Submits the bodies tracked this frame for the multi-person path, so a lens
+/// can instance effects across every body. Bodies past GOSS_BODY_MAX or with
+/// no landmarks are dropped; count zero clears the path.
+pub export fn goss_session_submit_bodies(session: ?*Session, bodies: ?[*]const pose.Result, count: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (count == 0) {
+        s.body_count = 0;
+        return .ok;
+    }
+    const src = bodies orelse return .invalid_argument;
+    var kept: u32 = 0;
+    var i: u32 = 0;
+    while (i < count and kept < pose.max_bodies) : (i += 1) {
+        const b = src[i];
+        if (b.landmark_count_out == 0 or b.presence < 0.5) continue;
+        s.body_results[kept] = b;
+        kept += 1;
+    }
+    s.body_count = kept;
+    return .ok;
+}
+
+/// How many bodies the last goss_session_submit_bodies kept, zero to
+/// GOSS_BODY_MAX. Zero also means the caller drives no multi-person path.
+pub export fn goss_session_body_count(session: ?*Session, out_count: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_count orelse return .invalid_argument;
+    out.* = s.body_count;
+    return .ok;
+}
+
+/// Reads the index-th submitted body. invalid_argument once index reaches
+/// body_count, so a caller loops zero to body_count to visit every body.
+pub export fn goss_session_body_result_at(session: ?*Session, index: u32, out_result: ?*pose.Result) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_result orelse return .invalid_argument;
+    if (index >= s.body_count) return .invalid_argument;
+    out.* = s.body_results[index];
+    return .ok;
+}
+
 /// Reads the newest hand tracking result into caller memory. Reports
 /// again until the worker has published its first result.
 pub export fn goss_session_hand_result(session: ?*Session, out_result: ?*hand.Result) Status {
@@ -5757,6 +5803,51 @@ test "submitted faces round-trip by index and drop the ones no real face fills" 
     try t.expectEqual(Status.invalid_argument, goss_session_submit_faces(session, null, 3));
     try t.expectEqual(Status.invalid_argument, goss_session_face_count(session, null));
     try t.expectEqual(Status.invalid_argument, goss_session_face_result_at(session, 0, null));
+}
+
+test "submitted bodies round-trip by index and drop the ones no real body fills" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var count: u32 = 99;
+    try t.expectEqual(Status.ok, goss_session_body_count(session, &count));
+    try t.expectEqual(@as(u32, 0), count);
+    var one: PoseResult = undefined;
+    try t.expectEqual(Status.invalid_argument, goss_session_body_result_at(session, 0, &one));
+
+    // Two real bodies, one too faint and one with no landmarks, in that order.
+    var bodies: [4]PoseResult = @splat(std.mem.zeroes(PoseResult));
+    bodies[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count_out = pose.landmark_count, .landmarks = @splat(1.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count_out = pose.landmark_count, .landmarks = @splat(2.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count_out = 0, .landmarks = @splat(3.0), .visibilities = @splat(1), .presences = @splat(1) };
+    bodies[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count_out = pose.landmark_count, .landmarks = @splat(4.0), .visibilities = @splat(1), .presences = @splat(1) };
+    try t.expectEqual(Status.ok, goss_session_submit_bodies(session, &bodies, 4));
+
+    // Only bodies 0 and 3 survive, compacted to slots 0 and 1 in order.
+    try t.expectEqual(Status.ok, goss_session_body_count(session, &count));
+    try t.expectEqual(@as(u32, 2), count);
+    try t.expectEqual(Status.ok, goss_session_body_result_at(session, 0, &one));
+    try t.expectEqual(@as(u64, 10), one.frame_serial);
+    try t.expectEqual(@as(f32, 1.0), one.landmarks[0]);
+    try t.expectEqual(Status.ok, goss_session_body_result_at(session, 1, &one));
+    try t.expectEqual(@as(u64, 40), one.frame_serial);
+    try t.expectEqual(Status.invalid_argument, goss_session_body_result_at(session, 2, &one));
+
+    // A count past the cap is clamped to the buffer, never overruns it.
+    var many: [8]PoseResult = @splat(bodies[0]);
+    try t.expectEqual(Status.ok, goss_session_submit_bodies(session, &many, 8));
+    try t.expectEqual(Status.ok, goss_session_body_count(session, &count));
+    try t.expectEqual(@as(u32, pose.max_bodies), count);
+
+    // Zero clears the multi-person path, and null arguments are rejected.
+    try t.expectEqual(Status.ok, goss_session_submit_bodies(session, null, 0));
+    try t.expectEqual(Status.ok, goss_session_body_count(session, &count));
+    try t.expectEqual(@as(u32, 0), count);
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_bodies(session, null, 3));
+    try t.expectEqual(Status.invalid_argument, goss_session_body_count(session, null));
+    try t.expectEqual(Status.invalid_argument, goss_session_body_result_at(session, 0, null));
 }
 
 test "face region guards its arguments and refuses with no tracked face" {

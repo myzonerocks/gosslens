@@ -70,6 +70,9 @@ object Gosslens {
     internal external fun nativeSubmitFaces(session: Long, faces: ByteBuffer, count: Int): Int
     internal external fun nativeFaceCount(session: Long): Int
     internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
+    internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
+    internal external fun nativeBodyCount(session: Long): Int
+    internal external fun nativeBodyResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeEnableBeauty(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
     internal external fun nativeDisableBeauty(session: Long)
     internal external fun nativeSetBeauty(session: Long, effect: Int, value: Float): Int
@@ -143,6 +146,7 @@ object Gosslens {
     const val FACE_BLENDSHAPE_COUNT = 52
     const val FACE_RESULT_BYTES = 5968
     const val FACE_MAX = 4
+    const val BODY_MAX = 4
 
     // Named face-mesh attach points for faceRegion; left/right are the subject's.
     const val FACE_REGION_FOREHEAD = 0
@@ -704,6 +708,31 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * reaches faceCount, so a caller loops zero to faceCount. */
     fun faceResultAt(index: Int, result: GossFaceResult): Boolean {
         if (Gosslens.nativeFaceResultAt(handle, index, result.buffer) != 0) return false
+        result.parse()
+        return true
+    }
+
+    /** Submits the bodies tracked this frame for the multi-person path, so a
+     * lens can instance effects across every body. An empty list clears the
+     * path; bodies past BODY_MAX are ignored. */
+    fun submitBodies(bodies: List<GossPoseResult>): Boolean {
+        if (bodies.isEmpty()) return Gosslens.nativeSubmitBodies(handle, ByteBuffer.allocateDirect(1), 0) == 0
+        val packed = ByteBuffer.allocateDirect(bodies.size * Gosslens.POSE_RESULT_BYTES).order(ByteOrder.nativeOrder())
+        for (b in bodies) {
+            b.buffer.rewind()
+            packed.put(b.buffer)
+        }
+        packed.rewind()
+        return Gosslens.nativeSubmitBodies(handle, packed, bodies.size) == 0
+    }
+
+    /** The number of bodies the last submitBodies kept, zero to BODY_MAX. */
+    fun bodyCount(): Int = Gosslens.nativeBodyCount(handle).coerceAtLeast(0)
+
+    /** Fills [result] with the index-th submitted body; false once index
+     * reaches bodyCount, so a caller loops zero to bodyCount. */
+    fun bodyResultAt(index: Int, result: GossPoseResult): Boolean {
+        if (Gosslens.nativeBodyResultAt(handle, index, result.buffer) != 0) return false
         result.parse()
         return true
     }

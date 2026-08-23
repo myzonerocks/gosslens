@@ -122,6 +122,33 @@ export interface GossFaceOut {
   blendshapes: Float32Array;
 }
 
+export const GOSS_POSE_LANDMARK_COUNT = 33;
+export const GOSS_BODY_MAX = 4;
+const POSE_RESULT_BYTES = 688;
+
+/// A body handed to submitBodies for the multi-person path. landmarks are
+/// frame pixels, GOSS_POSE_LANDMARK_COUNT * 3 floats; presence defaults to 1
+/// and a body below the tracked threshold is dropped by the engine.
+export interface GossPoseInput {
+  landmarks: Float32Array;
+  presence?: number;
+  visibilities?: Float32Array;
+  presences?: Float32Array;
+  frameSerial?: number;
+  timestampUs?: bigint;
+}
+
+/// One body read back from bodyResultAt, the frozen goss_pose_result laid out.
+export interface GossPoseOut {
+  frameSerial: bigint;
+  timestampUs: bigint;
+  presence: number;
+  landmarkCount: number;
+  landmarks: Float32Array;
+  visibilities: Float32Array;
+  presences: Float32Array;
+}
+
 /// A named attach point on the tracked face mesh, for faceRegion. The
 /// left/right labels are the subject's own.
 export enum GossFaceRegion {
@@ -1208,6 +1235,71 @@ export class GossSession {
       blendshapes: this.mod.HEAPF32.slice(bsStart, bsStart + GOSS_FACE_BLENDSHAPE_COUNT),
     };
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, FACE_RESULT_BYTES]);
+    return out;
+  }
+
+  /// Submits the bodies tracked this frame for the multi-person path, so a
+  /// lens can instance effects across every body. An empty array clears the
+  /// path; bodies past GOSS_BODY_MAX are ignored.
+  submitBodies(bodies: GossPoseInput[]): void {
+    if (bodies.length === 0) {
+      this.mod.ccall("goss_session_submit_bodies", "number", ["number", "number", "number"], [this.handle, 0, 0]);
+      return;
+    }
+    const bytes = bodies.length * POSE_RESULT_BYTES;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const dv = new DataView(this.mod.HEAPU8.buffer, ptr, bytes);
+    for (let i = 0; i < bodies.length; i += 1) {
+      const off = i * POSE_RESULT_BYTES;
+      const base = ptr + off;
+      const b = bodies[i]!;
+      const count = b.landmarks.length / 3;
+      dv.setBigUint64(off, BigInt(b.frameSerial ?? 0), true);
+      dv.setBigInt64(off + 8, BigInt(b.timestampUs ?? 0), true);
+      dv.setFloat32(off + 16, b.presence ?? 1, true);
+      dv.setUint32(off + 20, count, true);
+      this.mod.HEAPF32.set(b.landmarks, (base + 24) >> 2);
+      const visStart = (base + 24 + GOSS_POSE_LANDMARK_COUNT * 3 * 4) >> 2;
+      this.mod.HEAPF32.fill(0, visStart, visStart + GOSS_POSE_LANDMARK_COUNT * 2);
+      if (b.visibilities) this.mod.HEAPF32.set(b.visibilities, visStart);
+      if (b.presences) this.mod.HEAPF32.set(b.presences, visStart + GOSS_POSE_LANDMARK_COUNT);
+    }
+    this.mod.ccall("goss_session_submit_bodies", "number", ["number", "number", "number"], [this.handle, ptr, bodies.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+  }
+
+  /// The number of bodies the last submitBodies kept, zero to GOSS_BODY_MAX.
+  bodyCount(): number {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    this.mod.ccall("goss_session_body_count", "number", ["number", "number"], [this.handle, ptr]);
+    const count = this.mod.HEAP32[ptr >> 2]!;
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 4]);
+    return count;
+  }
+
+  /// Reads the index-th submitted body, or null once index reaches bodyCount,
+  /// so a caller loops zero to bodyCount to visit every body.
+  bodyResultAt(index: number): GossPoseOut | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [POSE_RESULT_BYTES]) as number;
+    const status = this.mod.ccall("goss_session_body_result_at", "number", ["number", "number", "number"], [this.handle, index, ptr]) as number;
+    if (status !== 0) {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, POSE_RESULT_BYTES]);
+      return null;
+    }
+    const dv = new DataView(this.mod.HEAPU8.buffer, ptr, POSE_RESULT_BYTES);
+    const lmStart = (ptr + 24) >> 2;
+    const visStart = lmStart + GOSS_POSE_LANDMARK_COUNT * 3;
+    const presStart = visStart + GOSS_POSE_LANDMARK_COUNT;
+    const out: GossPoseOut = {
+      frameSerial: dv.getBigUint64(0, true),
+      timestampUs: dv.getBigInt64(8, true),
+      presence: dv.getFloat32(16, true),
+      landmarkCount: dv.getUint32(20, true),
+      landmarks: this.mod.HEAPF32.slice(lmStart, visStart),
+      visibilities: this.mod.HEAPF32.slice(visStart, presStart),
+      presences: this.mod.HEAPF32.slice(presStart, presStart + GOSS_POSE_LANDMARK_COUNT),
+    };
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, POSE_RESULT_BYTES]);
     return out;
   }
 

@@ -124,6 +124,12 @@ of them:
     let n = try session.faceCount()
     for i in 0..<n { try session.faceResult(at: i, into: face) }
 
+`submitBodies` is the multi-person equivalent, so a body-anchored lens reaches
+every tracked figure:
+
+    try session.submitBodies(bodies)          // up to GOSS_BODY_MAX; empty clears
+    for i in 0..<(try session.bodyCount()) { try session.bodyResult(at: i, into: body) }
+
 To pin content to a spot on the face, `faceRegion` returns the tracked point of a
 named attach point - forehead, glabella, nose tip, chin, an eye, a cheek, an ear,
 or a mouth corner:

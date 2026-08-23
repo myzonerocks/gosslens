@@ -222,6 +222,33 @@ extension GossSession {
         result.parse()
     }
 
+    /// Submits the bodies tracked this frame for the multi-person path, so a
+    /// lens can instance effects across every body. An empty array clears the
+    /// path. Bodies past GOSS_BODY_MAX are ignored.
+    public func submitBodies(_ bodies: [GossPoseResult]) throws {
+        if bodies.isEmpty {
+            try checked(goss_session_submit_bodies(handle, nil, 0))
+            return
+        }
+        var raws = bodies.map { $0.raw }
+        try checked(goss_session_submit_bodies(handle, &raws, UInt32(raws.count)))
+    }
+
+    /// The number of bodies the last submitBodies kept, zero to GOSS_BODY_MAX.
+    public func bodyCount() throws -> Int {
+        var count: UInt32 = 0
+        try checked(goss_session_body_count(handle, &count))
+        return Int(count)
+    }
+
+    /// Fills result with the index-th submitted body. Throws .invalidArgument
+    /// once index reaches bodyCount, so a caller loops zero to bodyCount to
+    /// visit every body.
+    public func bodyResult(at index: Int, into result: GossPoseResult) throws {
+        try checked(goss_session_body_result_at(handle, UInt32(index), &result.raw))
+        result.parse()
+    }
+
     /// Fills result with the newest hand tracking output. Throws .again
     /// until the hand worker has published its first result.
     public func handResult(_ result: GossHandResult) throws {

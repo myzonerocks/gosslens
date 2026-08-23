@@ -113,6 +113,13 @@ across every face in frame, hand the engine the faces you tracked this frame:
       const face = session.faceResultAt(i);
     }
 
+`submitBodies` is the multi-person equivalent, reaching every tracked figure:
+
+    session.submitBodies(bodies);    // GossPoseInput[], up to GOSS_BODY_MAX; [] clears
+    for (let i = 0; i < session.bodyCount(); i++) {
+      const body = session.bodyResultAt(i);
+    }
+
 `faceRegion` returns the tracked point of a named attach point for pinning
 content - forehead, glabella, nose tip, chin, an eye, a cheek, an ear, or a mouth
 corner:

@@ -10,6 +10,8 @@ const detector = @import("detector");
 /// The published skeleton. The raw model emits 39 points - these 33
 /// plus six auxiliary alignment points that only steer the crop.
 pub const landmark_count = 33;
+/// The most bodies a caller can drive through the multi-person submit path.
+pub const max_bodies = 4;
 pub const raw_landmark_count = 39;
 /// x, y, z, visibility, presence per raw landmark.
 pub const raw_values_per_landmark = 5;

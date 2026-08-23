@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 39u
+#define GOSS_ABI_MINOR 42u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -212,6 +212,9 @@ typedef struct goss_pose_result {
     float visibilities[GOSS_POSE_LANDMARK_COUNT];
     float presences[GOSS_POSE_LANDMARK_COUNT];
 } goss_pose_result;
+
+/* The most bodies the multi-person submit path keeps in one frame. */
+#define GOSS_BODY_MAX 4u
 
 /* The live signals goss_session_tick_lens evaluates a lens's compiled
  * triggers against (a GLF `when` expression's signal reads). blendshapes
@@ -530,6 +533,20 @@ goss_status goss_session_face_count(goss_session *session, uint32_t *out_count);
  * GOSS_ERROR_INVALID_ARGUMENT once index reaches the face count, so a
  * caller loops zero to the count to visit every face. */
 goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result);
+
+/* Graph thread. Submits the bodies tracked this frame for the multi-person
+ * path. count past GOSS_BODY_MAX is clamped; zero clears the path. Bodies
+ * below the tracked presence or with no landmarks drop. */
+goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count);
+
+/* Graph thread. Writes how many bodies the last goss_session_submit_bodies
+ * kept, zero to GOSS_BODY_MAX. */
+goss_status goss_session_body_count(goss_session *session, uint32_t *out_count);
+
+/* Graph thread. Reads the index-th submitted body. Returns
+ * GOSS_ERROR_INVALID_ARGUMENT once index reaches the body count, so a caller
+ * loops zero to the count to visit every body. */
+goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result);
 
 /* Graph thread. Reads the newest hand tracking result into caller
  * memory. Reports GOSS_AGAIN until the worker has published its first
