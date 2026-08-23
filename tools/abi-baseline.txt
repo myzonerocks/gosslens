@@ -1,4 +1,4 @@
-abi 0.30
+abi 0.31
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
