@@ -16,6 +16,7 @@
 const std = @import("std");
 const manifest = @import("manifest");
 const trigger = @import("trigger");
+const material = @import("material");
 const image = @import("image");
 const gltf = @import("gltf");
 const build_options = @import("build_options");
@@ -160,6 +161,53 @@ const shader_profiles = [_]struct { profile: []const u8, platform: []const u8, t
 /// of the source bundle, made by packageLens below) that gets each
 /// compiled variant written into it as shaders/<name>.<tag>.bin instead
 /// of discarding the bytes - the same compile, run once, either way.
+/// Compiles one fragment shader on disk to every platform profile,
+/// writing each .bin into package_dir/shaders when packaging. Failures
+/// (including a missing toolchain) land as diagnostics on diag_path.
+fn compileShaderProfiles(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, disk_path: []const u8, stem: []const u8, package_dir: ?[]const u8, diag_path: []const u8) !bool {
+    if (build_options.shaderc_path.len == 0) {
+        try diags.add(diag_path, "shader toolchain unavailable (run zig build vendor-sync)", .{});
+        return false;
+    }
+    var ok = true;
+    for (shader_profiles) |profile| {
+        const out_path = if (package_dir) |dir|
+            try std.fmt.allocPrint(diags.arena, "{s}/shaders/{s}.{s}.bin", .{ dir, stem, profile.tag })
+        else
+            "/dev/null";
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{
+            build_options.shaderc_path,
+            "-f",           disk_path,
+            "-o",           out_path,
+            "--type",       "fragment",
+            "--platform",   profile.platform,
+            "-p",           profile.profile,
+            "--varyingdef", build_options.varyingdef_path,
+            "-i",           build_options.shader_include_dir,
+        });
+        const result = std.process.run(gpa, io, .{ .argv = argv.items }) catch |err| {
+            ok = false;
+            try diags.add(diag_path, "shaderc ({s}/{s}) could not run: {t}", .{ profile.platform, profile.profile, err });
+            continue;
+        };
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        const success = switch (result.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+        if (!success) {
+            ok = false;
+            const raw = if (result.stderr.len > 0) result.stderr else result.stdout;
+            const message = std.mem.trim(u8, raw, " \t\r\n");
+            try diags.add(diag_path, "shaderc ({s}/{s}): {s}", .{ profile.platform, profile.profile, message });
+        }
+    }
+    return ok;
+}
+
 fn validateShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, bundle_path: []const u8, package_dir: ?[]const u8) !bool {
     var bundle_dir = std.Io.Dir.cwd().openDir(io, bundle_path, .{ .iterate = true }) catch return true;
     defer bundle_dir.close(io);
@@ -173,50 +221,42 @@ fn validateShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnost
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".glsl")) continue;
         const diag_path = try std.fmt.allocPrint(diags.arena, "/shaders/{s}", .{entry.path});
-
-        if (build_options.shaderc_path.len == 0) {
-            try diags.add(diag_path, "shader toolchain unavailable (run zig build vendor-sync)", .{});
-            ok = false;
-            continue;
-        }
-
         const disk_path = try std.fs.path.join(diags.arena, &.{ bundle_path, "shaders", entry.path });
         const stem = entry.path[0 .. entry.path.len - ".glsl".len];
-        for (shader_profiles) |profile| {
-            const out_path = if (package_dir) |dir|
-                try std.fmt.allocPrint(diags.arena, "{s}/shaders/{s}.{s}.bin", .{ dir, stem, profile.tag })
-            else
-                "/dev/null";
-            var argv: std.ArrayList([]const u8) = .empty;
-            defer argv.deinit(gpa);
-            try argv.appendSlice(gpa, &.{
-                build_options.shaderc_path,
-                "-f",           disk_path,
-                "-o",           out_path,
-                "--type",       "fragment",
-                "--platform",   profile.platform,
-                "-p",           profile.profile,
-                "--varyingdef", build_options.varyingdef_path,
-                "-i",           build_options.shader_include_dir,
-            });
-            const result = std.process.run(gpa, io, .{ .argv = argv.items }) catch |err| {
-                ok = false;
-                try diags.add(diag_path, "shaderc ({s}/{s}) could not run: {t}", .{ profile.platform, profile.profile, err });
-                continue;
-            };
-            defer gpa.free(result.stdout);
-            defer gpa.free(result.stderr);
-            const success = switch (result.term) {
-                .exited => |code| code == 0,
-                else => false,
-            };
-            if (!success) {
-                ok = false;
-                const raw = if (result.stderr.len > 0) result.stderr else result.stdout;
-                const message = std.mem.trim(u8, raw, " \t\r\n");
-                try diags.add(diag_path, "shaderc ({s}/{s}): {s}", .{ profile.platform, profile.profile, message });
-            }
-        }
+        if (!try compileShaderProfiles(io, gpa, diags, disk_path, stem, package_dir, diag_path)) ok = false;
+    }
+    return ok;
+}
+
+/// Generates the fragment shader for every shader.pass node that carries
+/// a material node graph, writing it into the packaged bundle's shaders/
+/// dir as material_<id>.glsl so the shader-compile stage lowers and
+/// compiles it exactly like an authored shader.
+fn packageMaterialShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, lens: *const manifest.Manifest, package_dir: []const u8) !bool {
+    const cwd = std.Io.Dir.cwd();
+    var ok = true;
+    for (lens.nodes) |node| {
+        const graph = node.material orelse continue;
+        const types = try gpa.alloc(material.ValueType, graph.nodes.len);
+        defer gpa.free(types);
+        material.validate(gpa, graph, types) catch {
+            try diags.add("/material", "material graph on '{s}' did not resolve", .{node.id});
+            ok = false;
+            continue;
+        };
+        var src: std.Io.Writer.Allocating = .init(gpa);
+        defer src.deinit();
+        material.emitFragment(gpa, graph, types, &src.writer) catch {
+            ok = false;
+            continue;
+        };
+        const shaders_sub = try std.fmt.allocPrint(diags.arena, "{s}/shaders", .{package_dir});
+        try cwd.createDirPath(io, shaders_sub);
+        const glsl_sub = try std.fmt.allocPrint(diags.arena, "{s}/shaders/material_{s}.glsl", .{ package_dir, node.id });
+        try cwd.writeFile(io, .{ .sub_path = glsl_sub, .data = src.writer.buffered() });
+        const stem = try std.fmt.allocPrint(diags.arena, "material_{s}", .{node.id});
+        const diag_path = try std.fmt.allocPrint(diags.arena, "/material/{s}", .{node.id});
+        if (!try compileShaderProfiles(io, gpa, diags, glsl_sub, stem, package_dir, diag_path)) ok = false;
     }
     return ok;
 }
@@ -398,6 +438,13 @@ pub fn main(init: std.process.Init) !u8 {
     if (!try validateShaders(io, gpa, &diags, path, package_dir)) {
         try report(io, path, diags.list.items, false);
         return 1;
+    }
+
+    if (package_dir) |dir| {
+        if (!try packageMaterialShaders(io, gpa, &diags, &lens, dir)) {
+            try report(io, path, diags.list.items, false);
+            return 1;
+        }
     }
 
     if (!try validateAssets(io, gpa, &diags, path)) {

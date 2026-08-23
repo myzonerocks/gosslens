@@ -225,14 +225,29 @@ fn swizzle(value: ValueType) []const u8 {
     };
 }
 
-fn emitConstant(node: Node, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    const p = node.params;
-    switch (node.value_type) {
-        .float => try writer.print("{d}", .{p[0]}),
-        .vec2 => try writer.print("vec2({d}, {d})", .{ p[0], p[1] }),
-        .vec3 => try writer.print("vec3({d}, {d}, {d})", .{ p[0], p[1], p[2] }),
-        .vec4, .sampler => try writer.print("vec4({d}, {d}, {d}, {d})", .{ p[0], p[1], p[2], p[3] }),
+/// GLSL ES rejects an integer literal where a float is wanted, so a whole
+/// value gets an explicit .0.
+fn emitFloat(writer: *std.Io.Writer, value: f32) std.Io.Writer.Error!void {
+    if (std.math.isFinite(value) and value == @floor(value)) {
+        try writer.print("{d}.0", .{value});
+    } else {
+        try writer.print("{d}", .{value});
     }
+}
+
+fn emitConstant(node: Node, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    const count: usize = switch (node.value_type) {
+        .float => 1,
+        .vec2 => 2,
+        .vec3 => 3,
+        .vec4, .sampler => 4,
+    };
+    if (count > 1) try writer.print("vec{d}(", .{count});
+    for (0..count) |i| {
+        if (i > 0) try writer.writeAll(", ");
+        try emitFloat(writer, node.params[i]);
+    }
+    if (count > 1) try writer.writeAll(")");
 }
 
 /// Appends the nodes reachable from the root in dependency order, inputs
@@ -488,6 +503,8 @@ test "the graph lowers to a bgfx fragment shader" {
     try t.expect(std.mem.indexOf(u8, src, "vec4 n2 = texture2D(s_albedo, n0);") != null);
     try t.expect(std.mem.indexOf(u8, src, "vec4 n4 = n2 * n3;") != null);
     try t.expect(std.mem.indexOf(u8, src, "gl_FragColor = n4;") != null);
+    // Whole values keep a decimal, since GLSL ES rejects a bare int here.
+    try t.expect(std.mem.indexOf(u8, src, "vec4(1.0, 0.5, 0.2, 1.0)") != null);
 }
 
 test "vector algebra nodes validate and lower" {

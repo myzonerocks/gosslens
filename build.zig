@@ -290,6 +290,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "manifest", .module = lens_manifest_module },
             .{ .name = "trigger", .module = lens_trigger_module },
+            .{ .name = "material", .module = material_module },
         },
     });
     const lens_validator_exe = b.addExecutable(.{
