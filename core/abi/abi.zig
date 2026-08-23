@@ -753,6 +753,10 @@ pub const Session = struct {
     /// A sprite/text node's opacity parameter name (a slice into the lens
     /// manifest arena), when it binds one, so the draw reads a live opacity.
     sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
+    /// An animated sprite's frame state, when it declares frames > 1: the
+    /// per-frame loads in flight, the textures they land in, and the rate
+    /// the draw cycles them at off the lens clock.
+    sprite_anims: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteAnim) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
     model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     model_body_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
@@ -1371,9 +1375,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // through and draws the session's brush strokes over it, so it is
             // always ready.
             .draw_board => true,
-            // A sprite draws once its image has decoded; until then it holds
-            // the frame through, never blocking the chain.
-            .sprite => s.sprite_textures.contains(entry.graph_index),
+            // A sprite draws once its image has decoded (an animated sprite
+            // once all its frames have); until then it holds the frame
+            // through, never blocking the chain.
+            .sprite => s.sprite_textures.contains(entry.graph_index) or
+                (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
         };
         if (ready) ready_count += 1;
     }
@@ -1613,7 +1619,17 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .sprite => {
-                const sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
+                var sprite_texture: render.TextureHandle = undefined;
+                if (s.sprite_anims.get(entry.graph_index)) |anim| {
+                    // An animated sprite cycles its frames off the lens clock;
+                    // wait until every frame has landed so the cycle is whole.
+                    if (anim.loaded != anim.frames) continue;
+                    const active_us = if (s.active_lens) |*lens| lens.elapsedUs() else 0;
+                    const frame_idx: u64 = @intFromFloat(@as(f64, @floatFromInt(active_us)) / 1_000_000.0 * @as(f64, anim.fps));
+                    sprite_texture = anim.textures[@intCast(frame_idx % anim.frames)];
+                } else {
+                    sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
+                }
                 const rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
                 drawn += 1;
                 const blit_view = next_view_id;
@@ -2164,6 +2180,7 @@ pub fn destroySession(session: *Session) void {
     session.sprite_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
+    session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -4791,6 +4808,16 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
     session.sprite_opacity_params.clearRetainingCapacity();
+    var anim_it = session.sprite_anims.valueIterator();
+    while (anim_it.next()) |anim| {
+        for (anim.loaders) |maybe| if (maybe) |l| l.deinit();
+        if (session.engine.renderer) |*r| {
+            for (anim.textures) |tex| if (tex.idx != render.invalid_handle) r.destroyTexture(tex);
+        }
+        session.engine.gpa.free(anim.loaders);
+        session.engine.gpa.free(anim.textures);
+    }
+    session.sprite_anims.clearRetainingCapacity();
 }
 
 fn destroyMeshFaceState(session: *Session) void {
@@ -5286,9 +5313,21 @@ fn pollBlendLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     }
 }
 
+/// An animated sprite's frame state: the per-frame loads in flight, the
+/// textures they resolve into (in frame order), and the count landed so
+/// far, plus the rate the draw cycles them at.
+const SpriteAnim = struct {
+    frames: u32,
+    fps: f32,
+    loaders: []?*asset.ImageLoader,
+    textures: []render.TextureHandle,
+    loaded: u32 = 0,
+};
+
 /// Starts a background load for every spliced sprite.2d node's image
-/// (assets/<stem>.png) and records the rect it draws at - mirrors
-/// createBlendLoaders, plus the static rect the render loop needs.
+/// (assets/<stem>.png, or assets/<stem>_<i>.png for an animated sprite)
+/// and records the rect it draws at - mirrors createBlendLoaders, plus the
+/// static rect the render loop needs.
 fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
     const lens = if (session.active_lens) |*l| l else return;
     const sprites = try lens.spriteNodes(gpa, &session.lens_graph);
@@ -5296,6 +5335,10 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
     for (sprites) |sprite| {
         session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
         if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
+        if (sprite.frames > 1) {
+            startSpriteAnim(session, gpa, bundle_path, sprite);
+            continue;
+        }
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, sprite.image_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ImageLoader.start(gpa, path) catch continue;
@@ -5303,6 +5346,30 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             loader.deinit();
         };
     }
+}
+
+/// Kicks off one image load per frame of an animated sprite
+/// (assets/<stem>_<i>.png) into a fresh SpriteAnim, so pollSpriteLoaders
+/// can fill its texture list as the frames land.
+fn startSpriteAnim(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, sprite: runtime.SpriteNode) void {
+    const n = sprite.frames;
+    const loaders = gpa.alloc(?*asset.ImageLoader, n) catch return;
+    const textures = gpa.alloc(render.TextureHandle, n) catch {
+        gpa.free(loaders);
+        return;
+    };
+    @memset(loaders, null);
+    @memset(textures, .{ .idx = render.invalid_handle });
+    for (0..n) |i| {
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}_{d}.png", .{ bundle_path, sprite.image_stem, i }) catch continue;
+        defer gpa.free(path);
+        loaders[i] = asset.ImageLoader.start(gpa, path) catch null;
+    }
+    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = sprite.fps, .loaders = loaders, .textures = textures }) catch {
+        for (loaders) |maybe| if (maybe) |l| l.deinit();
+        gpa.free(loaders);
+        gpa.free(textures);
+    };
 }
 
 /// Turns every sprite image load that finished (or failed) since the last
@@ -5327,6 +5394,25 @@ fn pollSpriteLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Alloca
     }
     for (finished.items) |graph_index| {
         if (session.sprite_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+
+    // Animated sprites carry one loader per frame; land each into its slot.
+    var anim_it = session.sprite_anims.iterator();
+    while (anim_it.next()) |entry| {
+        const anim = entry.value_ptr;
+        for (anim.loaders, 0..) |*maybe, i| {
+            const loader = maybe.* orelse continue;
+            if (loader.take()) |decoded| {
+                anim.textures[i] = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+                gpa.free(decoded.rgba);
+                anim.loaded += 1;
+                loader.deinit();
+                maybe.* = null;
+            } else if (loader.hasFailed()) {
+                loader.deinit();
+                maybe.* = null;
+            }
+        }
     }
 }
 

@@ -267,9 +267,11 @@ all optional and defaulting to the full frame at full opacity. The image
 alpha-composites within the rect over whatever the chain has drawn so far,
 so a sprite reads as a sticker or badge pinned to the frame. An
 `"opacity_param"` names a parameter whose live value overrides the opacity
-each frame, so a param_ramp fades the sprite or a beat trigger pulses it.
-Until its image decodes the node holds the frame through, never blocking the
-chain.
+each frame, so a param_ramp fades the sprite or a beat trigger pulses it. A
+`"frames"` count above one makes the sprite animated: it loads
+`assets/<id>_0.png` through `assets/<id>_(frames-1).png` and cycles them at
+`"fps"` off the lens clock. Until its image decodes (all frames, for an
+animated sprite) the node holds the frame through, never blocking the chain.
 
 A `"text.2d"` node draws a line of text over the frame. It carries a `"text":
 {"content", "x", "y", "w", "h", "opacity", "color"}` block: the string to

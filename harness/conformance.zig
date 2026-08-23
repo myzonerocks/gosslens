@@ -4627,6 +4627,86 @@ fn proveSpriteFade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves an animated sprite cycles its frames off the lens clock. The
+/// sprite-anim bundle draws a two-frame badge at 8 fps; the frame at
+/// elapsed zero and the frame after ticking a quarter second (past one
+/// frame period) draw different images, so the two must differ.
+fn proveSpriteAnim(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/sprite-anim";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: sprite-anim proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // Let both frames decode (no tick, so the clock stays at zero), then
+    // screenshot frame 0.
+    for (0..16) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-anim-frame0");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Advance the lens clock into the second frame's window (one frame
+    // period at 8 fps is 125ms; ~180ms lands on frame 1, not a wrap back
+    // to frame 0 as a full 250ms two-period tick would).
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 180_000) : (elapsed_us += dt_us) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) {
+            std.debug.print("conformance: sprite-anim proof: tick refused\n", .{});
+            return false;
+        }
+    }
+
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-anim-frame1");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const frame0 = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-anim-frame0.tga", gpa, .limited(8 << 20));
+    defer gpa.free(frame0);
+    const frame1 = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-anim-frame1.tga", gpa, .limited(8 << 20));
+    defer gpa.free(frame1);
+
+    if (std.mem.eql(u8, frame0, frame1)) {
+        std.debug.print("conformance: FAIL sprite-anim: advancing the clock did not change the sprite frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF sprite-anim cycles its frames off the lens clock: advancing the clock draws a different frame\n", .{});
+    return true;
+}
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -4720,6 +4800,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("material clip");
     if (!try proveSpriteFade(gpa, engine)) return 1;
     watchHold("sprite fade");
+    if (!try proveSpriteAnim(gpa, engine)) return 1;
+    watchHold("sprite anim");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

@@ -166,7 +166,15 @@ pub const SpriteField = struct {
     /// a param_ramp can fade the sprite or a beat trigger pulse it. Empty
     /// leaves the static opacity in force.
     opacity_param: []const u8 = "",
+    /// Frame count for an animated sprite: 1 (default) draws assets/<id>.png
+    /// once; N>1 loads assets/<id>_0.png..assets/<id>_(N-1).png and cycles
+    /// them at `fps` off the lens clock. Capped so a lens cannot ask for an
+    /// unbounded number of textures.
+    frames: u32 = 1,
+    fps: f32 = 12.0,
 };
+
+pub const max_sprite_frames = 64;
 
 pub const TextField = struct {
     /// A text.2d node's inline string, the screen rect it fills (same
@@ -997,6 +1005,12 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(sv.object, "opacity_param")) |v| {
                     if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
                 }
+                if (getField(sv.object, "frames")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= max_sprite_frames) {
+                        field.frames = @intCast(v.integer);
+                    } else try diags.add(path.slice(), "sprite frames must be an integer 1..{d}", .{max_sprite_frames});
+                }
+                if (getField(sv.object, "fps")) |v| field.fps = @floatCast(numberOf(v) orelse field.fps);
                 sprite_field = field;
             }
             path.pop(smark);

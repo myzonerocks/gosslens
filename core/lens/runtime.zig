@@ -202,6 +202,9 @@ pub const SpriteNode = struct {
     /// A parameter name whose live value overrides opacity each frame, or
     /// empty for the static opacity.
     opacity_param: []const u8,
+    /// Frame count and rate for an animated sprite; frames == 1 is static.
+    frames: u32,
+    fps: f32,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -271,6 +274,9 @@ pub const Lens = struct {
     /// reads, not a value a trigger's action starts).
     timer_names: [][]u8,
     timer_elapsed_us: []u64,
+    /// Microseconds since activation, advanced every tick - a free-running
+    /// lens clock, the time source an animated sprite cycles its frames on.
+    elapsed_us: u64 = 0,
     /// tick()'s working and output storage, sized once at activation so
     /// the per-frame path allocates nothing: timer snapshot, per-param
     /// touch flags, and room for every parameter-bound effect at once.
@@ -429,7 +435,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .frames = sp.frames, .fps = sp.fps });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -496,6 +502,11 @@ pub const Lens = struct {
     pub fn modelElapsedUs(self: *const Lens, graph_index: graph.NodeIndex) ?u64 {
         const node = self.findNode(graph_index) orelse return null;
         return node.model_elapsed_us;
+    }
+
+    /// Microseconds since this lens activated, advanced every tick.
+    pub fn elapsedUs(self: *const Lens) u64 {
+        return self.elapsed_us;
     }
 
     /// The blend weight the model.gltf node at graph_index binds to its
@@ -815,6 +826,7 @@ fn clampToParam(p: manifest.Parameter, value: f32) f32 {
 /// still not wired to anything (real remaining work, tracked
 /// separately from this lens's own scope).
 pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const AppliedEffect {
+    lens.elapsed_us +|= real_dt_us;
     for (lens.timer_elapsed_us) |*elapsed| elapsed.* += real_dt_us;
     for (lens.timer_names, lens.timer_elapsed_us, 0..) |name, elapsed_us, i| {
         lens.tick_timer_values[i] = .{ .name = name, .seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0 };
