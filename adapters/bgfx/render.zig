@@ -1069,6 +1069,24 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.composite_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Draws a sprite over the frame already in the view's target: narrows
+    /// the view to the sprite's pixel rect and alpha-composites the image
+    /// there at `opacity` through the shared composite program. The caller
+    /// sets the target, so this works for an offscreen target or swap chain.
+    pub fn submitSpriteAtRect(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32) void {
+        c.bgfx_set_view_rect(view_id, @intCast(dx), @intCast(dy), dw, dh);
+        c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, sprite_tex, std.math.maxInt(u32));
+        const params = [4]f32{ opacity, 0, 0, 0 };
+        const chroma = [4]f32{ 0, 0, 0, 0 };
+        c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
+        c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
+        const blend = blendFunc(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA);
+        c.bgfx_set_state(@as(u64, c.BGFX_STATE_WRITE_RGB) | @as(u64, c.BGFX_STATE_WRITE_A) | blend, 0);
+        c.bgfx_submit(view_id, r.composite_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Points `view_id` at a sub-rectangle of `target` with no clear, so the
     /// caller can draw the camera preview into one composite cell via
     /// submitPreview (which fills whatever viewport is set).

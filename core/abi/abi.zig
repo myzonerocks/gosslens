@@ -744,6 +744,11 @@ pub const Session = struct {
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     mesh_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// sprite.2d nodes: the image load in flight, its resolved texture, and
+    /// the normalized rect+opacity {x,y,w,h,opacity} the node draws at.
+    sprite_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
+    sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    sprite_rects: std.AutoHashMapUnmanaged(graph.NodeIndex, [5]f32) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
     model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     model_body_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
@@ -1363,6 +1368,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // through and draws the session's brush strokes over it, so it is
             // always ready.
             .draw_board => true,
+            // A sprite draws once its image has decoded; until then it holds
+            // the frame through, never blocking the chain.
+            .sprite => s.sprite_textures.contains(entry.graph_index),
         };
         if (ready) ready_count += 1;
     }
@@ -1596,6 +1604,37 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         r.submitFaceMesh(view_id, input_texture, mesh_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), 1.0);
                     }
                 }
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .sprite => {
+                const sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
+                const rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
+                drawn += 1;
+                const blit_view = next_view_id;
+                next_view_id += 1;
+                const sprite_view = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                const out_w: u16 = if (is_final) output_width else width;
+                const out_h: u16 = if (is_final) output_height else height;
+                // The frame passes through whole on the blit view, then the
+                // sprite draws over it at its own rect on a second view (a
+                // separate view because it narrows the view rect).
+                if (output) |target| render.Renderer.setViewTarget(blit_view, target, out_w, out_h) else render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                if (output) |target| render.Renderer.setViewTarget(sprite_view, target, out_w, out_h) else render.Renderer.setViewTarget(sprite_view, null, output_width, output_height);
+                const full_w: f32 = @floatFromInt(if (output != null) out_w else output_width);
+                const full_h: f32 = @floatFromInt(if (output != null) out_h else output_height);
+                const dx: u16 = @intFromFloat(std.math.clamp(rect[0], 0, 1) * full_w);
+                const dy: u16 = @intFromFloat(std.math.clamp(rect[1], 0, 1) * full_h);
+                const dw: u16 = @intFromFloat(std.math.clamp(rect[2], 0, 1) * full_w);
+                const dh: u16 = @intFromFloat(std.math.clamp(rect[3], 0, 1) * full_h);
+                r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, rect[4]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2107,9 +2146,13 @@ pub fn destroySession(session: *Session) void {
     session.lut_loaders.deinit(session.engine.gpa);
     session.lut_textures.deinit(session.engine.gpa);
     destroyBlendState(session);
+    destroySpriteState(session);
     destroyMeshFaceState(session);
     session.blend_loaders.deinit(session.engine.gpa);
     session.blend_textures.deinit(session.engine.gpa);
+    session.sprite_loaders.deinit(session.engine.gpa);
+    session.sprite_textures.deinit(session.engine.gpa);
+    session.sprite_rects.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -2427,6 +2470,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollLutLoaders(s, r, s.engine.gpa);
         pollBlendLoaders(s, r, s.engine.gpa);
         pollMeshFaceLoaders(s, r, s.engine.gpa);
+        pollSpriteLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
         pollDepthOcclusion(s);
@@ -2512,6 +2556,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
 
     pollLutLoaders(s, r, s.engine.gpa);
     pollBlendLoaders(s, r, s.engine.gpa);
+    pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollDepthOcclusion(s);
@@ -2624,6 +2669,7 @@ test "swapRedBlue turns rgba into bgra" {
 fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollLutLoaders(s, r, s.engine.gpa);
     pollBlendLoaders(s, r, s.engine.gpa);
+    pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollDepthOcclusion(s);
@@ -4723,6 +4769,18 @@ fn destroyBlendState(session: *Session) void {
     session.bloom_params.clearRetainingCapacity();
 }
 
+fn destroySpriteState(session: *Session) void {
+    var loader_it = session.sprite_loaders.valueIterator();
+    while (loader_it.next()) |loader| loader.*.deinit();
+    session.sprite_loaders.clearRetainingCapacity();
+    if (session.engine.renderer) |*r| {
+        var texture_it = session.sprite_textures.valueIterator();
+        while (texture_it.next()) |handle| r.destroyTexture(handle.*);
+    }
+    session.sprite_textures.clearRetainingCapacity();
+    session.sprite_rects.clearRetainingCapacity();
+}
+
 fn destroyMeshFaceState(session: *Session) void {
     session.model_face_anchors.clearRetainingCapacity();
     session.model_body_anchors.clearRetainingCapacity();
@@ -4809,6 +4867,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyShaderPrograms(session);
     destroyLutState(session);
     destroyBlendState(session);
+    destroySpriteState(session);
     destroyMeshFaceState(session);
     destroyModelState(session);
     destroyChainOrder(session);
@@ -5215,6 +5274,49 @@ fn pollBlendLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     }
 }
 
+/// Starts a background load for every spliced sprite.2d node's image
+/// (assets/<stem>.png) and records the rect it draws at - mirrors
+/// createBlendLoaders, plus the static rect the render loop needs.
+fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const sprites = try lens.spriteNodes(gpa, &session.lens_graph);
+    defer gpa.free(sprites);
+    for (sprites) |sprite| {
+        session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, sprite.image_stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        session.sprite_loaders.put(gpa, sprite.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Turns every sprite image load that finished (or failed) since the last
+/// frame into a real texture (or drops it) - mirrors pollBlendLoaders.
+fn pollSpriteLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.sprite_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+            gpa.free(decoded.rgba);
+            session.sprite_textures.put(gpa, entry.key_ptr.*, texture) catch {
+                r.destroyTexture(texture);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.sprite_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
 /// Starts a background load for every spliced mesh.face node's texture
 /// (assets/<stem>.png) - mirrors createBlendLoaders exactly.
 fn createMeshFaceLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
@@ -5560,6 +5662,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createLutLoaders(session, gpa, bundle_path);
     try createBlendLoaders(session, gpa, bundle_path);
     try createMeshFaceLoaders(session, gpa, bundle_path);
+    try createSpriteLoaders(session, gpa, bundle_path);
     try createModelLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
     try createBloomParams(session, gpa);
@@ -5584,6 +5687,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyShaderPrograms(s);
     destroyLutState(s);
     destroyBlendState(s);
+    destroySpriteState(s);
     destroyMeshFaceState(s);
     destroyModelState(s);
     destroyChainOrder(s);

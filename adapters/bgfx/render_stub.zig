@@ -207,6 +207,17 @@ pub const Renderer = struct {
         _ = chroma;
     }
 
+    pub fn submitSpriteAtRect(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = sprite_tex;
+        _ = dx;
+        _ = dy;
+        _ = dw;
+        _ = dh;
+        _ = opacity;
+    }
+
     pub fn setLayoutViewport(view_id: u16, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
         _ = view_id;
         _ = target;

@@ -153,6 +153,17 @@ pub const BloomField = struct {
     intensity: f32 = 0.6,
 };
 
+pub const SpriteField = struct {
+    /// A sprite.2d node's screen rect in normalized coordinates (origin
+    /// top-left, 0..1 across the frame) and its draw opacity. The default
+    /// fills the frame at full opacity.
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+    w: f32 = 1.0,
+    h: f32 = 1.0,
+    opacity: f32 = 1.0,
+};
+
 pub const LayoutField = struct {
     /// A layout.composite node's head arrangement and the camera base's blend.
     /// arrangement 0 custom..5 overlay matches the ABI; key 0 none, 1 matte,
@@ -220,6 +231,9 @@ pub const Node = struct {
     bloom: ?BloomField = null,
     /// Set only on a layout.composite node: the head arrangement it drives.
     layout: ?LayoutField = null,
+    /// Set only on a sprite.2d node: the screen rect and opacity it draws
+    /// its image at.
+    sprite: ?SpriteField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -940,6 +954,27 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(bmark);
         }
+        var sprite_field: ?SpriteField = null;
+        if (getField(object, "sprite")) |sv| {
+            const smark = path.push("sprite");
+            if (!std.mem.eql(u8, node_type, "sprite.2d")) {
+                try diags.add(path.slice(), "sprite is a sprite.2d field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "sprite must be an object", .{});
+            } else {
+                var field: SpriteField = .{};
+                if (getField(sv.object, "x")) |v| field.x = @floatCast(numberOf(v) orelse field.x);
+                if (getField(sv.object, "y")) |v| field.y = @floatCast(numberOf(v) orelse field.y);
+                if (getField(sv.object, "w")) |v| field.w = @floatCast(numberOf(v) orelse field.w);
+                if (getField(sv.object, "h")) |v| field.h = @floatCast(numberOf(v) orelse field.h);
+                if (getField(sv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                sprite_field = field;
+            }
+            path.pop(smark);
+        } else if (std.mem.eql(u8, node_type, "sprite.2d")) {
+            // A sprite.2d node with no sprite block draws its image full-frame.
+            sprite_field = .{};
+        }
         var layout_field: ?LayoutField = null;
         if (getField(object, "layout")) |lv| {
             const lmark = path.push("layout");
@@ -1184,6 +1219,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .material = material_field,
             .bloom = bloom_field,
             .layout = layout_field,
+            .sprite = sprite_field,
             .script = script_source,
         });
     }
@@ -1882,6 +1918,51 @@ test "a morph weight binding an unknown parameter fails cross reference" {
     var found = false;
     for (result.diags.items) |d| {
         if (std.mem.indexOf(u8, d.message, "morph weight binds unknown parameter 'frown'") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a sprite.2d node parses its rect and opacity" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.25, "y": 0.1, "w": 0.5, "h": 0.3, "opacity": 0.8}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
+    try t.expectApproxEqAbs(@as(f32, 0.25), sp.x, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), sp.w, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.8), sp.opacity, 0.001);
+}
+
+test "a sprite.2d node with no sprite block defaults to full frame" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
+    try t.expectApproxEqAbs(@as(f32, 1.0), sp.w, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 1.0), sp.opacity, 0.001);
+}
+
+test "a sprite block on a non-sprite node is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "a", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.1}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "sprite is a sprite.2d field") != null) found = true;
     }
     try t.expect(found);
 }

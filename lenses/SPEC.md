@@ -259,6 +259,15 @@ and is always ready, since the strokes come from the host's draw input, not the
 bundle. Without a `draw.board` node the board still draws as a final overlay; the
 node only lets a lens place it earlier so later passes act on the drawing too.
 
+A `"sprite.2d"` node draws a 2D image over the frame at its own place in the
+chain. It ships its image as `assets/<id>.png` and carries a `"sprite":
+{"x", "y", "w", "h", "opacity"}` block: a rect in normalized frame
+coordinates (origin top-left, 0..1 across the frame) and a draw opacity,
+all optional and defaulting to the full frame at full opacity. The image
+alpha-composites within the rect over whatever the chain has drawn so far,
+so a sprite reads as a sticker or badge pinned to the frame. Until its image
+decodes the node holds the frame through, never blocking the chain.
+
 A `"layout.composite"` node lets a lens drive the head composite instead of the
 host: it carries a `"layout": {"arrangement", "key", "chroma", "similarity",
 "opacity"}` block where arrangement is one of `custom`, `side_by_side`,
@@ -287,7 +296,7 @@ The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
 passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing,
-the draw board, the layout composite, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
+the draw board, the layout composite, the 2D sprite, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
 the bottom; without a tracked face the node draws nothing, the standard
 capability degradation).

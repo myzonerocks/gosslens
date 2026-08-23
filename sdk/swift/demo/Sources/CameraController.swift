@@ -209,8 +209,9 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     // a material-graph lens whose shader is authored as a node graph, not a
     // hand-written .glsl. anim-mixer is bundled as well: a model with two
     // clips whose blend weights ramp between them. morph-blend is bundled
-    // too: a mesh a morph weight deforms. Swap the subdirectory below to
-    // "material-tint", "anim-mixer", or "morph-blend" to run any of them.
+    // too: a mesh a morph weight deforms. sprite-overlay draws a 2D image
+    // over the frame. Swap the subdirectory below to "material-tint",
+    // "anim-mixer", "morph-blend", or "sprite-overlay" to run any of them.
     private func activateLens() {
         guard let session,
               let url = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "beauty-baseline"),
