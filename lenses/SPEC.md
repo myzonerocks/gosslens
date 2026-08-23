@@ -280,10 +280,8 @@ draw, the same normalized rect and opacity a sprite takes, and an rgb color
 built-in font, so a text node ships no asset, and composites it into the rect
 like a sprite; it takes the same `"opacity_param"` for a parameter-driven
 fade. A newline in the `content` starts a new line, so a multi-line caption
-fits the rect as several rows. The font covers space, digits, uppercase
-letters, and common
-punctuation; lowercase folds to uppercase and any other character draws
-blank.
+fits the rect as several rows. The font covers space, digits, upper- and
+lowercase letters, and common punctuation; any other character draws blank.
 
 A `"layout.composite"` node lets a lens drive the head composite instead of the
 host: it carries a `"layout": {"arrangement", "key", "chroma", "similarity",
