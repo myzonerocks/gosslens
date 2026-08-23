@@ -282,6 +282,72 @@ pub fn emitFragment(gpa: std.mem.Allocator, graph: Graph, types: []const ValueTy
     writer.print("\tgl_FragColor = n{d};\n}}\n", .{graph.nodes[graph.root].inputs[0]}) catch return error.OutOfMemory;
 }
 
+pub const ParseError = error{ Malformed, UnknownKind, OutOfMemory };
+
+fn asF32(v: std.json.Value) ?f32 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| @floatCast(f),
+        else => null,
+    };
+}
+
+fn asU32(v: std.json.Value) ?u32 {
+    return switch (v) {
+        .integer => |i| if (i >= 0) @intCast(i) else null,
+        else => null,
+    };
+}
+
+fn stringField(o: std.json.ObjectMap, name: []const u8) ?[]const u8 {
+    const v = o.get(name) orelse return null;
+    return if (v == .string) v.string else null;
+}
+
+fn parseInputs(arena: std.mem.Allocator, v: std.json.Value) ParseError![]const u32 {
+    if (v != .array) return error.Malformed;
+    const out = try arena.alloc(u32, v.array.items.len);
+    for (v.array.items, out) |item, *slot| slot.* = asU32(item) orelse return error.Malformed;
+    return out;
+}
+
+fn parseParams(v: std.json.Value) ParseError![4]f32 {
+    if (v != .array) return error.Malformed;
+    var out: [4]f32 = .{ 0, 0, 0, 0 };
+    for (v.array.items, 0..) |item, i| {
+        if (i >= 4) break;
+        out[i] = asF32(item) orelse return error.Malformed;
+    }
+    return out;
+}
+
+fn parseNode(arena: std.mem.Allocator, item: std.json.Value) ParseError!Node {
+    if (item != .object) return error.Malformed;
+    const o = item.object;
+    const kind_str = stringField(o, "kind") orelse return error.Malformed;
+    var node: Node = .{ .kind = std.meta.stringToEnum(NodeKind, kind_str) orelse return error.UnknownKind };
+    if (o.get("inputs")) |v| node.inputs = try parseInputs(arena, v);
+    if (o.get("params")) |v| node.params = try parseParams(v);
+    if (stringField(o, "name")) |s| node.name = try arena.dupe(u8, s);
+    if (stringField(o, "type")) |s| node.value_type = std.meta.stringToEnum(ValueType, s) orelse return error.Malformed;
+    return node;
+}
+
+/// Parses a material block ({"output": <index>, "nodes": [...]}) into a
+/// graph whose slices are arena owned. Call validate() on the result
+/// before lowering; parse only shapes the data, it does not type-check.
+pub fn parse(arena: std.mem.Allocator, value: std.json.Value) ParseError!Graph {
+    if (value != .object) return error.Malformed;
+    const obj = value.object;
+    const nodes_val = obj.get("nodes") orelse return error.Malformed;
+    if (nodes_val != .array) return error.Malformed;
+    const items = nodes_val.array.items;
+    const nodes = try arena.alloc(Node, items.len);
+    for (items, nodes) |item, *node| node.* = try parseNode(arena, item);
+    const root = asU32(obj.get("output") orelse return error.Malformed) orelse return error.Malformed;
+    return .{ .nodes = nodes, .root = root };
+}
+
 const t = std.testing;
 
 fn expectValid(nodes: []const Node, root: u32) !void {
@@ -420,4 +486,42 @@ test "dot needs matching vectors" {
         .{ .kind = .output, .inputs = &.{2} }, // 3
     };
     try expectError(&bad, 3, error.TypeMismatch);
+}
+
+test "a material block parses into a graph and validates" {
+    const json =
+        \\{"output": 4, "nodes": [
+        \\  {"kind": "uv"},
+        \\  {"kind": "texture", "name": "albedo"},
+        \\  {"kind": "sample", "inputs": [1, 0]},
+        \\  {"kind": "constant", "type": "vec4", "params": [1, 0.5, 0.2, 1]},
+        \\  {"kind": "output", "inputs": [2]}
+        \\]}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, json, .{});
+    defer parsed.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+
+    const graph = try parse(arena.allocator(), parsed.value);
+    try t.expectEqual(@as(usize, 5), graph.nodes.len);
+    try t.expectEqual(@as(u32, 4), graph.root);
+    try t.expectEqual(NodeKind.texture, graph.nodes[1].kind);
+    try t.expectEqualStrings("albedo", graph.nodes[1].name);
+    try t.expectEqual(@as(u32, 1), graph.nodes[2].inputs[0]);
+    try t.expectEqual(ValueType.vec4, graph.nodes[3].value_type);
+
+    var types: [5]ValueType = undefined;
+    try validate(t.allocator, graph, &types);
+}
+
+test "an unknown node kind is rejected" {
+    const json =
+        \\{"output": 1, "nodes": [{"kind": "wobble"}, {"kind": "output", "inputs": [0]}]}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, t.allocator, json, .{});
+    defer parsed.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    try t.expectError(error.UnknownKind, parse(arena.allocator(), parsed.value));
 }
