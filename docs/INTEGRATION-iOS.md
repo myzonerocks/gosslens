@@ -146,6 +146,18 @@ tracked hand:
 
     let tip = try session.handJoint(.indexTip)
 
+## Depth
+
+If the device reports scene depth - LiDAR, or ARKit's smoothed estimate - feed it
+each frame so a depth-aware lens can occlude content behind real geometry. The
+map is metres per pixel, row major, with the near and far range it spans:
+
+    let map = frame.sceneDepth?.depthMap       // ARFrame.sceneDepth
+    // lock the pixel buffer, copy its Float32 plane into `depth`, then:
+    try session.submitDepth(depth, width: w, height: h, near: 0.1, far: 5.0)
+
+An empty array clears it. The engine keeps the latest map for the occlusion pass.
+
 ## Geofilters
 
 A lens can gate on place. Feed a location fix and describe the region the lens

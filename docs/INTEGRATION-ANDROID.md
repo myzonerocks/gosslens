@@ -132,6 +132,18 @@ tracked hand:
 
     val tip = session.handJoint(Gosslens.HAND_JOINT_INDEX_TIP) ?: return
 
+## Depth
+
+If the device supports the ARCore Depth API, feed the depth image each frame so a
+depth-aware lens can occlude content behind real geometry. The map is metres per
+pixel, row major, with the near and far range it spans:
+
+    val image = frame.acquireDepthImage16Bits()   // millimetres; convert to metres
+    // copy into a FloatArray, then:
+    session.submitDepth(depth, w, h, 0.1f, 5.0f)
+
+An empty array clears it. The engine keeps the latest map for the occlusion pass.
+
 ## Geofilters
 
 A lens can gate on place. Feed a location fix and describe the region the lens
