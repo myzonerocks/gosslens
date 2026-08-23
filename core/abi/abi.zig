@@ -4753,6 +4753,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     // Borrowed from the lens's own activation-sized storage, valid
     // until the next tick - nothing to free, nothing allocated.
     var live_signals = toTriggerSignals(sig);
+    // The camera zoom rides the stored controls; normalizeCameraControls clamps
+    // it to at least one, and one is the resting value before any control is set.
+    live_signals.camera_zoom = @max(s.camera_controls.zoom_factor, 1);
     if (s.audio_engine_fed) {
         live_signals.audio_level = s.audio.level;
         live_signals.audio_beat = s.audio.beat;
