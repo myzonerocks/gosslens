@@ -433,9 +433,11 @@ argument count, or a type mismatch, naming the offending node. A valid
 graph lowers to the same GLSL contract as an authored shader and
 compiles to every profile the same way, so a material a lens authors is
 a real compiled shader on the device, not an interpreter. A vignette,
-posterize, or pixelate effect is a material graph with no dedicated
+posterize, pixelate, or edge effect is a material graph with no dedicated
 shader; see the `material-tint`, `material-vignette`, `material-posterize`,
-and `material-pixelate` reference lenses.
+`material-pixelate`, and `material-edge` reference lenses. Neighbour
+sampling (an edge detector reads offset `uv` and compares) works too, so
+a material graph is not limited to per-pixel math.
 
 glTF/GLB assets bind through the engine's existing cgltf adapter: the same
 allocator-bridged parse, the same refusal of external file references (a glTF

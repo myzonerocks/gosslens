@@ -1,0 +1,30 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.material-edge",
+  "version": "1.0.0",
+  "display_name": "Material Edge",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "edge", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {},
+     "material": {"output": 14, "nodes": [
+       {"kind": "uv"},
+       {"kind": "texture", "name": "texColor"},
+       {"kind": "sample", "inputs": [1, 0]},
+       {"kind": "constant", "type": "vec2", "params": [0.005, 0.0]},
+       {"kind": "add", "inputs": [0, 3]},
+       {"kind": "sample", "inputs": [1, 4]},
+       {"kind": "constant", "type": "vec2", "params": [0.0, 0.005]},
+       {"kind": "add", "inputs": [0, 6]},
+       {"kind": "sample", "inputs": [1, 7]},
+       {"kind": "subtract", "inputs": [2, 5]},
+       {"kind": "abs", "inputs": [9]},
+       {"kind": "subtract", "inputs": [2, 8]},
+       {"kind": "abs", "inputs": [11]},
+       {"kind": "add", "inputs": [10, 12]},
+       {"kind": "output", "inputs": [13]}
+     ]}}
+  ],
+  "triggers": []
+}
