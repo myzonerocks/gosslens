@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 32u
+#define GOSS_ABI_MINOR 33u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -540,6 +540,28 @@ goss_status goss_session_hand_result(goss_session *session, goss_hand_result *ou
  * memory. Reports GOSS_AGAIN until the worker has published its first
  * result. */
 goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result);
+
+/* Named attach points on the tracked body skeleton for
+ * goss_session_body_joint; left/right are the subject's own. */
+#define GOSS_BODY_JOINT_HEAD 0u
+#define GOSS_BODY_JOINT_LEFT_SHOULDER 1u
+#define GOSS_BODY_JOINT_RIGHT_SHOULDER 2u
+#define GOSS_BODY_JOINT_LEFT_ELBOW 3u
+#define GOSS_BODY_JOINT_RIGHT_ELBOW 4u
+#define GOSS_BODY_JOINT_LEFT_WRIST 5u
+#define GOSS_BODY_JOINT_RIGHT_WRIST 6u
+#define GOSS_BODY_JOINT_LEFT_HIP 7u
+#define GOSS_BODY_JOINT_RIGHT_HIP 8u
+#define GOSS_BODY_JOINT_LEFT_KNEE 9u
+#define GOSS_BODY_JOINT_RIGHT_KNEE 10u
+#define GOSS_BODY_JOINT_LEFT_ANKLE 11u
+#define GOSS_BODY_JOINT_RIGHT_ANKLE 12u
+
+/* Graph thread. Writes the tracked body's named skeleton joint point (x, y in
+ * frame pixels, z in the same scale) into out_xyz, so a lens pins content to a
+ * shoulder, a wrist, or a knee. GOSS_ERROR_INVALID_ARGUMENT on an unknown
+ * joint; GOSS_AGAIN with no body or presence below threshold. */
+goss_status goss_session_body_joint(goss_session *session, uint32_t joint, float *out_xyz);
 
 /* Graph thread. Fits the canonical face onto the newest tracked
  * landmarks and writes the head transform - canonical metric space

@@ -130,6 +130,11 @@ or a mouth corner:
 
     let (x, y, _) = try session.faceRegion(.forehead)
 
+`bodyJoint` is the body-skeleton equivalent, pinning to a shoulder, wrist, or
+knee of the tracked figure:
+
+    let joint = try session.bodyJoint(.leftWrist)
+
 ## Geofilters
 
 A lens can gate on place. Feed a location fix and describe the region the lens

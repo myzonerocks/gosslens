@@ -117,6 +117,11 @@ or a mouth corner:
 
     val p = session.faceRegion(Gosslens.FACE_REGION_FOREHEAD) ?: return
 
+`bodyJoint` is the body-skeleton equivalent, pinning to a shoulder, wrist, or
+knee of the tracked figure:
+
+    val joint = session.bodyJoint(Gosslens.BODY_JOINT_LEFT_WRIST) ?: return
+
 ## Geofilters
 
 A lens can gate on place. Feed a location fix and describe the region the lens

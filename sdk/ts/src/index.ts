@@ -140,6 +140,24 @@ export enum GossFaceRegion {
   RightMouthCorner = 12,
 }
 
+/// A named attach point on the tracked body skeleton, for bodyJoint. The
+/// left/right labels are the subject's own.
+export enum GossBodyJoint {
+  Head = 0,
+  LeftShoulder = 1,
+  RightShoulder = 2,
+  LeftElbow = 3,
+  RightElbow = 4,
+  LeftWrist = 5,
+  RightWrist = 6,
+  LeftHip = 7,
+  RightHip = 8,
+  LeftKnee = 9,
+  RightKnee = 10,
+  LeftAnkle = 11,
+  RightAnkle = 12,
+}
+
 /// The segmentation mask channels a lens can name, in the engine's frozen
 /// order: the derived person mask, then the multiclass model's own labels.
 /// Index 0 (person) rides the subject mask; the rest upload as class masks.
@@ -1186,6 +1204,21 @@ export class GossSession {
   faceRegion(region: GossFaceRegion): [number, number, number] | null {
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
     const status = this.mod.ccall("goss_session_face_region", "number", ["number", "number", "number"], [this.handle, region, ptr]) as number;
+    if (status !== 0) {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
+      return null;
+    }
+    const w = ptr >> 2;
+    const out: [number, number, number] = [this.mod.HEAPF32[w], this.mod.HEAPF32[w + 1], this.mod.HEAPF32[w + 2]];
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
+    return out;
+  }
+
+  /// The tracked point (x, y in frame pixels, z in the same scale) of a named
+  /// body skeleton joint, or null until a body is tracked.
+  bodyJoint(joint: GossBodyJoint): [number, number, number] | null {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const status = this.mod.ccall("goss_session_body_joint", "number", ["number", "number", "number"], [this.handle, joint, ptr]) as number;
     if (status !== 0) {
       this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
       return null;

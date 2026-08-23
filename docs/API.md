@@ -195,6 +195,7 @@ file must move together.
 | `goss_session_face_result` | `faceResult(result)` | native tracking path |
 | `goss_session_hand_result` | `handResult(result)` | native tracking path |
 | `goss_session_pose_result` | `poseResult(result)` | native tracking path |
+| `goss_session_body_joint` | `bodyJoint(joint)`, the tracked body's named skeleton joint point (x, y in frame pixels, z in the same scale) so a lens pins content to a shoulder, a wrist, or a knee; see the `GOSS_BODY_JOINT_*` points (head, left/right shoulder, elbow, wrist, hip, knee, ankle) | native tracking path |
 | `goss_session_face_pose` | `facePose(matrix)`, filling a caller-owned 16-float column-major array | native tracking path |
 | `goss_session_submit_faces` | `submitFaces(faces, count)`, submits the faces tracked this frame for the multi-face path; count past `GOSS_FACE_MAX` clamps, zero clears back to the single tracker, and a face-anchored model fans out to every submitted face | native tracking path |
 | `goss_session_face_count` | `faceCount()`, how many faces the last `submitFaces` kept, zero to `GOSS_FACE_MAX`; zero also means no multi-face path this frame | native tracking path |
