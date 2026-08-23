@@ -26,7 +26,14 @@ pub const NodeKind = enum {
     max, // (T, T) -> T
     dot, // (vecN, vecN) -> float
     normalize, // (vecN) -> vecN
+    length, // (vecN) -> float
     saturate, // (T) -> T
+    abs, // (T) -> T
+    floor, // (T) -> T
+    fract, // (T) -> T
+    sin, // (T) -> T
+    cos, // (T) -> T
+    clamp, // (T, T, T) -> T
     split, // (vecN) -> float, channel in params[0] (0..3)
     combine3, // (float, float, float) -> vec3
     combine4, // (float, float, float, float) -> vec4
@@ -74,9 +81,9 @@ const ResolveState = enum { unseen, on_stack, done };
 fn arity(kind: NodeKind) usize {
     return switch (kind) {
         .uv, .time, .constant, .uniform, .texture => 0,
-        .saturate, .normalize, .split, .output => 1,
+        .saturate, .normalize, .length, .abs, .floor, .fract, .sin, .cos, .split, .output => 1,
         .sample, .add, .subtract, .multiply, .divide, .power, .min, .max, .dot => 2,
-        .mix, .combine3 => 3,
+        .mix, .combine3, .clamp => 3,
         .combine4 => 4,
     };
 }
@@ -139,10 +146,19 @@ fn outputType(node: Node, out_types: []const ValueType) Error!ValueType {
     switch (node.kind) {
         .uv, .time, .texture, .sample => return fixedOutput(node.kind).?,
         .constant, .uniform => return node.value_type,
-        .saturate, .normalize => {
+        .saturate, .normalize, .abs, .floor, .fract, .sin, .cos => {
             const a = out_types[in[0]];
             if (a == .sampler) return error.TypeMismatch;
             if (node.kind == .normalize and !isVector(a)) return error.TypeMismatch;
+            return a;
+        },
+        .length => {
+            if (!isVector(out_types[in[0]])) return error.TypeMismatch;
+            return .float;
+        },
+        .clamp => {
+            const a = out_types[in[0]];
+            if (a == .sampler or a != out_types[in[1]] or a != out_types[in[2]]) return error.TypeMismatch;
             return a;
         },
         .add, .subtract, .multiply, .divide, .power, .min, .max => {
@@ -235,6 +251,13 @@ fn emitStatement(graph: Graph, types: []const ValueType, index: u32, writer: *st
         .max => try writer.print("max(n{d}, n{d})", .{ in[0], in[1] }),
         .dot => try writer.print("dot(n{d}, n{d})", .{ in[0], in[1] }),
         .normalize => try writer.print("normalize(n{d})", .{in[0]}),
+        .length => try writer.print("length(n{d})", .{in[0]}),
+        .abs => try writer.print("abs(n{d})", .{in[0]}),
+        .floor => try writer.print("floor(n{d})", .{in[0]}),
+        .fract => try writer.print("fract(n{d})", .{in[0]}),
+        .sin => try writer.print("sin(n{d})", .{in[0]}),
+        .cos => try writer.print("cos(n{d})", .{in[0]}),
+        .clamp => try writer.print("clamp(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
         .split => try writer.print("n{d}.{c}", .{ in[0], "xyzw"[@min(3, @as(usize, @intFromFloat(node.params[0])))] }),
         .combine3 => try writer.print("vec3(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
         .combine4 => try writer.print("vec4(n{d}, n{d}, n{d}, n{d})", .{ in[0], in[1], in[2], in[3] }),
@@ -486,6 +509,35 @@ test "dot needs matching vectors" {
         .{ .kind = .output, .inputs = &.{2} }, // 3
     };
     try expectError(&bad, 3, error.TypeMismatch);
+}
+
+test "scalar math nodes validate and lower" {
+    const nodes = [_]Node{
+        .{ .kind = .time }, // 0 float
+        .{ .kind = .sin, .inputs = &.{0} }, // 1 float
+        .{ .kind = .abs, .inputs = &.{1} }, // 2 float
+        .{ .kind = .uv }, // 3 vec2
+        .{ .kind = .length, .inputs = &.{3} }, // 4 float
+        .{ .kind = .constant, .value_type = .float, .params = .{ 0, 0, 0, 0 } }, // 5 lo
+        .{ .kind = .constant, .value_type = .float, .params = .{ 1, 0, 0, 0 } }, // 6 hi
+        .{ .kind = .clamp, .inputs = &.{ 4, 5, 6 } }, // 7 float
+        .{ .kind = .combine4, .inputs = &.{ 2, 7, 2, 7 } }, // 8 vec4
+        .{ .kind = .output, .inputs = &.{8} }, // 9
+    };
+    const graph: Graph = .{ .nodes = &nodes, .root = 9 };
+    var types: [nodes.len]ValueType = undefined;
+    try validate(t.allocator, graph, &types);
+    try t.expectEqual(ValueType.float, types[4]); // length collapses a vector
+    try t.expectEqual(ValueType.float, types[7]); // clamp keeps the scalar
+
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try emitFragment(t.allocator, graph, &types, &out.writer);
+    const src = out.writer.buffered();
+    try t.expect(std.mem.indexOf(u8, src, "sin(n0)") != null);
+    try t.expect(std.mem.indexOf(u8, src, "abs(n1)") != null);
+    try t.expect(std.mem.indexOf(u8, src, "length(n3)") != null);
+    try t.expect(std.mem.indexOf(u8, src, "clamp(n4, n5, n6)") != null);
 }
 
 test "a material block parses into a graph and validates" {
