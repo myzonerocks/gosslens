@@ -207,7 +207,9 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     // The reference lens ships as a bundled folder (project.yml) at
     // <bundle>/beauty-baseline/manifest.json. material-tint is bundled too:
     // a material-graph lens whose shader is authored as a node graph, not a
-    // hand-written .glsl. Swap the subdirectory below to "material-tint" to run it.
+    // hand-written .glsl. anim-mixer is bundled as well: a model with two
+    // clips whose blend weights ramp between them. Swap the subdirectory
+    // below to "material-tint" or "anim-mixer" to run either.
     private func activateLens() {
         guard let session,
               let url = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "beauty-baseline"),

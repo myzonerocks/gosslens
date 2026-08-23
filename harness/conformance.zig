@@ -4170,6 +4170,90 @@ fn proveTriggerAnimFires(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the mixer blends clips by their bound weights. The anim-mixer
+/// bundle holds a spin clip and a slide clip whose weights start on the
+/// spin clip (quad centered) and ramp onto the slide clip (quad offset in
+/// +x), so screenshots before and after the ramp must differ.
+fn proveMixerBlend(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/anim-mixer";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: anim-mixer proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+
+    // Let the async .glb land, then screenshot the rest pose: full weight
+    // on the spin clip, the quad centered.
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const before_path: [:0]const u8 = "zig-out/conformance-anim-mixer-before";
+    engine.renderer.?.requestScreenshot(before_path.ptr);
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Tick past the triggers' 0.3s threshold and the 100ms ramp so the
+    // weight moves fully onto the slide clip.
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 600_000) : (elapsed_us += dt_us) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) {
+            std.debug.print("conformance: anim-mixer proof: tick refused\n", .{});
+            return false;
+        }
+    }
+
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const after_path: [:0]const u8 = "zig-out/conformance-anim-mixer-after";
+    engine.renderer.?.requestScreenshot(after_path.ptr);
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const before = try std.Io.Dir.cwd().readFileAlloc(harness_io, before_path ++ ".tga", gpa, .limited(8 << 20));
+    defer gpa.free(before);
+    const after = try std.Io.Dir.cwd().readFileAlloc(harness_io, after_path ++ ".tga", gpa, .limited(8 << 20));
+    defer gpa.free(after);
+
+    if (std.mem.eql(u8, before, after)) {
+        std.debug.print("conformance: FAIL anim-mixer: shifting the clip weights left the pose unchanged\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF anim-mixer blends its clips by weight: ramping onto the slide clip visibly moves the pose\n", .{});
+    return true;
+}
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -4251,6 +4335,8 @@ pub fn main(init_args: std.process.Init) !u8 {
 
     if (!try proveTriggerAnimFires(gpa, engine)) return 1;
     watchHold("trigger anim fires");
+    if (!try proveMixerBlend(gpa, engine)) return 1;
+    watchHold("anim mixer blend");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;
