@@ -49,6 +49,7 @@ const hand_corpus_path = ".models/corpus/hand_raised.jpg";
 const hand_bundle_path = ".models/hand_landmarker.task";
 const multiclass_model_path = ".models/selfie_multiclass.tflite";
 const single_class_model_path = ".models/selfie_segmenter.tflite";
+const scene_model_path = ".models/deeplab_v3.tflite";
 const beauty_resource_path = ".vendor/gpupixel/src";
 
 var harness_io: std.Io = undefined;
@@ -3718,6 +3719,35 @@ fn proveMaskDegradation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveSceneSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // The deeplab scene segmenter infers 21 classes at 257 x 257 - both
+    // past the portrait segmenters' shape. It must load, resample onto
+    // the canonical mask grid, and drive the subject mask deterministically.
+    try renderOnce(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-scene-a", scene_model_path);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-scene-b", scene_model_path);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-scene-unseg", null);
+    settle(engine);
+
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-scene-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-scene-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the deeplab scene segmenter is not deterministic across runs\n", .{});
+        return false;
+    }
+    const unseg = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-scene-unseg.tga", gpa, .limited(8 << 20));
+    defer gpa.free(unseg);
+    if (std.mem.eql(u8, a, unseg)) {
+        std.debug.print("conformance: FAIL the deeplab scene mask changed nothing - the model never drove the composite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a 21-class 257x257 scene segmenter resamples onto the canonical mask grid and drives the subject mask deterministically\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -4024,6 +4054,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;
     watchHold("mask degradation");
+    if (!try proveSceneSegmentation(gpa, engine)) return 1;
+    watchHold("scene segmentation");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
