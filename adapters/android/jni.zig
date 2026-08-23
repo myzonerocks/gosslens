@@ -503,6 +503,18 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitSourceFrameRgba(env: *JniEnv, c
     return @intFromEnum(abi.goss_session_submit_source_frame_rgba_copy(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), &desc, rgba, @intCast(@max(stride, 0))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSetSourceComposite(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, opacity: f32, key_mode: i32, key_r: f32, key_g: f32, key_b: f32, similarity: f32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_set_source_composite(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), opacity, @intCast(@max(key_mode, 0)), key_r, key_g, key_b, similarity));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeDefineScreenShare(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_define_screen_share(sessionFromHandle(session), name, @intCast(@max(name_len, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSetLayout(env: *JniEnv, cls: jobject, session: i64, arrangement: i32) i32 {
     _ = env;
     _ = cls;

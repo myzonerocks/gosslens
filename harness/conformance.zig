@@ -1292,6 +1292,68 @@ fn proveLayoutComposite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves per-source composite opacity: a green source at half opacity in an
+/// overlay layout over a red camera blends to a red-green mix, not an opaque
+/// green overwrite, so the compositor really alpha-blends the source.
+fn proveCompositeOpacity(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sw: u32 = 64;
+    const sh: u32 = 64;
+    const cam = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(cam);
+    const src = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(src);
+    for (0..sw * sh) |p| {
+        cam[p * 4 + 0] = 255;
+        cam[p * 4 + 1] = 0;
+        cam[p * 4 + 2] = 0;
+        cam[p * 4 + 3] = 255; // red
+        src[p * 4 + 0] = 0;
+        src[p * 4 + 1] = 255;
+        src[p * 4 + 2] = 0;
+        src[p * 4 + 3] = 255; // green
+    }
+    const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_define_source(session, "g", 1) != .ok or
+        abi.goss_session_submit_source_frame_rgba_copy(session, "g", 1, &base_desc, src.ptr, sw * 4) != .ok or
+        abi.goss_session_set_source_composite(session, "g", 1, 0.5, 0, 0, 0, 0, 0) != .ok or
+        abi.goss_session_set_layout(session, 5) != .ok)
+    {
+        std.debug.print("conformance: FAIL composite opacity setup\n", .{});
+        return false;
+    }
+    for (0..3) |i| {
+        var d = base_desc;
+        d.timestamp_us = @intCast((i + 1) * 33_333);
+        if (abi.goss_session_submit_frame_rgba_copy(session, &d, cam.ptr, sw * 4) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var cw: u32 = 0;
+    var ch: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    defer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &cw, &ch) != .ok) {
+        std.debug.print("conformance: FAIL composite opacity capture\n", .{});
+        return false;
+    }
+    const w: usize = 400;
+    const h: usize = 300;
+    const centre = (h / 2 * w + w / 2) * 4;
+    const rr = shot[centre + 0];
+    const gg = shot[centre + 1];
+    // Half-opacity green over red: both channels land mid-range, neither saturated.
+    if (!(rr > 90 and rr < 180 and gg > 90 and gg < 180)) {
+        std.debug.print("conformance: FAIL opacity did not blend the source over the camera (r={d} g={d})\n", .{ rr, gg });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a source at half opacity composites over the camera as a blend, not an opaque overwrite\n", .{});
+    return true;
+}
+
 /// Proves geofilters through the public ABI: a lens with a geo.in_region trigger
 /// fires its action when a submitted location is inside the geofence, not when
 /// it is outside, deterministically, with the location computed on-device and
@@ -3382,6 +3444,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveCameraControls(gpa, engine)) return 1;
     if (!try proveEventTrigger(gpa, engine)) return 1;
     if (!try proveLayoutComposite(gpa, engine)) return 1;
+    if (!try proveCompositeOpacity(gpa, engine)) return 1;
     if (!try proveGeofilter(gpa, engine)) return 1;
     if (!try proveBrushStroke(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;

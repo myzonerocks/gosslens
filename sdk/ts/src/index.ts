@@ -810,6 +810,19 @@ export class GossSession {
     this.mod.ccall("goss_session_clear_layout", "number", ["number"], [this.handle]);
   }
 
+  /// Sets a source's composite blend: opacity, key mode (0 none, 1 matte, 2
+  /// chroma), chroma color, similarity. The name "camera" is the base.
+  setSourceComposite(name: string, opacity = 1, keyMode = 0, chroma: [number, number, number] = [0, 0, 0], similarity = 0): void {
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_set_source_composite", "number", ["number", "number", "number", "number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, opacity, keyMode, chroma[0], chroma[1], chroma[2], similarity]));
+  }
+
+  /// Defines a screen-share source whose frame letterboxes to fit its cell.
+  defineScreenShare(name: string): void {
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_define_screen_share", "number", ["number", "number", "number"], [this.handle, ptr, len]));
+  }
+
   /// Feeds a location fix for on-device geo.in_region membership; the location never leaves the engine.
   submitLocation(latitude: number, longitude: number, accuracyM: number, timestampUs: number): void {
     this.mod.ccall("goss_session_submit_location", "number", ["number", "number", "number", "number", "number"], [this.handle, latitude, longitude, accuracyM, timestampUs]);

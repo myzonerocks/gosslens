@@ -82,6 +82,8 @@ object Gosslens {
     internal external fun nativeSubmitSourceFrameRgba(session: Long, nameBuffer: ByteBuffer, nameLen: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int, stride: Int, pixelFormat: Int): Int
     internal external fun nativeSetLayout(session: Long, arrangement: Int): Int
     internal external fun nativeClearLayout(session: Long): Int
+    internal external fun nativeSetSourceComposite(session: Long, nameBuffer: ByteBuffer, nameLen: Int, opacity: Float, keyMode: Int, keyR: Float, keyG: Float, keyB: Float, similarity: Float): Int
+    internal external fun nativeDefineScreenShare(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
     internal external fun nativeSubmitLocation(session: Long, latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Int
     internal external fun nativeSetGeofence(session: Long, latitude: Double, longitude: Double, radiusM: Double): Int
     internal external fun nativeClearGeofence(session: Long): Int
@@ -682,6 +684,18 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     fun setLayout(arrangement: Int): Boolean = Gosslens.nativeSetLayout(handle, arrangement) == 0
 
     fun clearLayout(): Boolean = Gosslens.nativeClearLayout(handle) == 0
+
+    /** Sets a source's composite blend: opacity, key mode (0 none, 1 matte, 2 chroma), chroma color, similarity. Name "camera" is the base. */
+    fun setSourceComposite(name: String, opacity: Float = 1f, keyMode: Int = 0, keyR: Float = 0f, keyG: Float = 0f, keyB: Float = 0f, similarity: Float = 0f): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeSetSourceComposite(handle, buf, n, opacity, keyMode, keyR, keyG, keyB, similarity) == 0
+    }
+
+    /** Defines a screen-share source whose frame letterboxes to fit its cell instead of stretching. */
+    fun defineScreenShare(name: String): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeDefineScreenShare(handle, buf, n) == 0
+    }
 
     /** Feeds a location fix for on-device geo.in_region membership. */
     fun submitLocation(latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Boolean =
