@@ -18,9 +18,19 @@ pub const NodeKind = enum {
     texture, // () -> sampler, bound by name
     sample, // (sampler, vec2) -> vec4
     add, // (T, T) -> T, T any non-sampler
+    subtract, // (T, T) -> T
     multiply, // (T, T) -> T
-    mix, // (T, T, float) -> T
+    divide, // (T, T) -> T
+    power, // (T, T) -> T
+    min, // (T, T) -> T
+    max, // (T, T) -> T
+    dot, // (vecN, vecN) -> float
+    normalize, // (vecN) -> vecN
     saturate, // (T) -> T
+    split, // (vecN) -> float, channel in params[0] (0..3)
+    combine3, // (float, float, float) -> vec3
+    combine4, // (float, float, float, float) -> vec4
+    mix, // (T, T, float) -> T
     output, // (vec4) -> the material colour, the graph root
 };
 
@@ -54,15 +64,20 @@ pub const Error = error{
     OutOfMemory,
 };
 
+fn isVector(value: ValueType) bool {
+    return value == .vec2 or value == .vec3 or value == .vec4;
+}
+
 const ResolveState = enum { unseen, on_stack, done };
 
 /// How many inputs a kind reads.
 fn arity(kind: NodeKind) usize {
     return switch (kind) {
         .uv, .time, .constant, .uniform, .texture => 0,
-        .saturate, .output => 1,
-        .sample, .add, .multiply => 2,
-        .mix => 3,
+        .saturate, .normalize, .split, .output => 1,
+        .sample, .add, .subtract, .multiply, .divide, .power, .min, .max, .dot => 2,
+        .mix, .combine3 => 3,
+        .combine4 => 4,
     };
 }
 
@@ -124,14 +139,29 @@ fn outputType(node: Node, out_types: []const ValueType) Error!ValueType {
     switch (node.kind) {
         .uv, .time, .texture, .sample => return fixedOutput(node.kind).?,
         .constant, .uniform => return node.value_type,
-        .saturate => {
-            if (out_types[in[0]] == .sampler) return error.TypeMismatch;
-            return out_types[in[0]];
+        .saturate, .normalize => {
+            const a = out_types[in[0]];
+            if (a == .sampler) return error.TypeMismatch;
+            if (node.kind == .normalize and !isVector(a)) return error.TypeMismatch;
+            return a;
         },
-        .add, .multiply => {
+        .add, .subtract, .multiply, .divide, .power, .min, .max => {
             const a = out_types[in[0]];
             if (a == .sampler or a != out_types[in[1]]) return error.TypeMismatch;
             return a;
+        },
+        .dot => {
+            const a = out_types[in[0]];
+            if (!isVector(a) or a != out_types[in[1]]) return error.TypeMismatch;
+            return .float;
+        },
+        .split => {
+            if (!isVector(out_types[in[0]])) return error.TypeMismatch;
+            return .float;
+        },
+        .combine3, .combine4 => {
+            for (in) |i| if (out_types[i] != .float) return error.TypeMismatch;
+            return if (node.kind == .combine3) .vec3 else .vec4;
         },
         .mix => {
             const a = out_types[in[0]];
@@ -197,7 +227,17 @@ fn emitStatement(graph: Graph, types: []const ValueType, index: u32, writer: *st
         .uniform => try writer.print("u_{s}{s}", .{ node.name, swizzle(node.value_type) }),
         .sample => try writer.print("texture2D(s_{s}, n{d})", .{ graph.nodes[in[0]].name, in[1] }),
         .add => try writer.print("n{d} + n{d}", .{ in[0], in[1] }),
+        .subtract => try writer.print("n{d} - n{d}", .{ in[0], in[1] }),
         .multiply => try writer.print("n{d} * n{d}", .{ in[0], in[1] }),
+        .divide => try writer.print("n{d} / n{d}", .{ in[0], in[1] }),
+        .power => try writer.print("pow(n{d}, n{d})", .{ in[0], in[1] }),
+        .min => try writer.print("min(n{d}, n{d})", .{ in[0], in[1] }),
+        .max => try writer.print("max(n{d}, n{d})", .{ in[0], in[1] }),
+        .dot => try writer.print("dot(n{d}, n{d})", .{ in[0], in[1] }),
+        .normalize => try writer.print("normalize(n{d})", .{in[0]}),
+        .split => try writer.print("n{d}.{c}", .{ in[0], "xyzw"[@min(3, @as(usize, @intFromFloat(node.params[0])))] }),
+        .combine3 => try writer.print("vec3(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
+        .combine4 => try writer.print("vec4(n{d}, n{d}, n{d}, n{d})", .{ in[0], in[1], in[2], in[3] }),
         .mix => try writer.print("mix(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
         .saturate => try writer.print("clamp(n{d}, 0.0, 1.0)", .{in[0]}),
         .texture, .output => unreachable,
@@ -345,4 +385,39 @@ test "the graph lowers to a bgfx fragment shader" {
     try t.expect(std.mem.indexOf(u8, src, "vec4 n2 = texture2D(s_albedo, n0);") != null);
     try t.expect(std.mem.indexOf(u8, src, "vec4 n4 = n2 * n3;") != null);
     try t.expect(std.mem.indexOf(u8, src, "gl_FragColor = n4;") != null);
+}
+
+test "vector algebra nodes validate and lower" {
+    const nodes = [_]Node{
+        .{ .kind = .uniform, .value_type = .vec3, .name = "normal" }, // 0 -> vec3
+        .{ .kind = .normalize, .inputs = &.{0} }, // 1 -> vec3
+        .{ .kind = .dot, .inputs = &.{ 1, 1 } }, // 2 -> float
+        .{ .kind = .split, .inputs = &.{0}, .params = .{ 1, 0, 0, 0 } }, // 3 -> float (normal.y)
+        .{ .kind = .combine4, .inputs = &.{ 2, 3, 2, 3 } }, // 4 -> vec4
+        .{ .kind = .output, .inputs = &.{4} }, // 5
+    };
+    const graph: Graph = .{ .nodes = &nodes, .root = 5 };
+    var types: [nodes.len]ValueType = undefined;
+    try validate(t.allocator, graph, &types);
+    try t.expectEqual(ValueType.vec3, types[1]); // normalize keeps the vector
+    try t.expectEqual(ValueType.float, types[2]); // dot collapses to a scalar
+
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try emitFragment(t.allocator, graph, &types, &out.writer);
+    const src = out.writer.buffered();
+    try t.expect(std.mem.indexOf(u8, src, "normalize(n0)") != null);
+    try t.expect(std.mem.indexOf(u8, src, "dot(n1, n1)") != null);
+    try t.expect(std.mem.indexOf(u8, src, "n0.y") != null);
+    try t.expect(std.mem.indexOf(u8, src, "vec4(n2, n3, n2, n3)") != null);
+}
+
+test "dot needs matching vectors" {
+    const bad = [_]Node{
+        .{ .kind = .uniform, .value_type = .float, .name = "a" }, // 0 float
+        .{ .kind = .dot, .inputs = &.{ 0, 0 } }, // 1 dot of scalars is invalid
+        .{ .kind = .combine4, .inputs = &.{ 1, 1, 1, 1 } }, // 2
+        .{ .kind = .output, .inputs = &.{2} }, // 3
+    };
+    try expectError(&bad, 3, error.TypeMismatch);
 }
