@@ -150,4 +150,15 @@ pub const Engine = struct {
         }
         return dims[0..count];
     }
+
+    pub fn inputDims(engine: *const Engine, index: usize, dims: []i32) Error![]i32 {
+        const tensor = c.TfLiteInterpreterGetInputTensor(engine.interpreter, @intCast(index)) orelse
+            return error.TensorMissing;
+        const count: usize = @intCast(c.TfLiteTensorNumDims(tensor));
+        if (count > dims.len) return error.TensorShapeMismatch;
+        for (dims[0..count], 0..) |*dim, at| {
+            dim.* = c.TfLiteTensorDim(tensor, @intCast(at));
+        }
+        return dims[0..count];
+    }
 };

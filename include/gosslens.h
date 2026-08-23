@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 43u
+#define GOSS_ABI_MINOR 45u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -506,6 +506,11 @@ void goss_session_disable_hand_tracking(goss_session *session);
 goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads);
 void goss_session_disable_pose_tracking(goss_session *session);
 
+/* Graph thread. Upper-body pose mode: while enabled (non-zero), the tracked
+ * pose reports only the upper body (face, torso, arms, hips); the lower-body
+ * joints (knees, ankles, feet) read absent, for selfie framing with legs out. */
+goss_status goss_session_set_pose_upper_body(goss_session *session, uint32_t enabled);
+
 /* Graph thread. Stands the segmentation worker up from a raw model
  * (a selfie or hair segmenter .tflite file, not bundled the way
  * face_landmarker.task is). The model bytes are copied; the caller may
@@ -553,6 +558,12 @@ goss_status goss_session_body_count(goss_session *session, uint32_t *out_count);
  * GOSS_ERROR_INVALID_ARGUMENT once index reaches the body count, so a caller
  * loops zero to the count to visit every body. */
 goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result);
+
+/* Graph thread. Submits one frame's depth map from the host AR backend
+ * (ARKit scene depth, ARCore Depth API, WebXR depth-sensing): width*height
+ * metres per pixel, row major, with the near and far metres that bound it.
+ * A zero size clears it. Kept for depth occlusion against the content. */
+goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far);
 
 /* Graph thread. Reads the newest hand tracking result into caller
  * memory. Reports GOSS_AGAIN until the worker has published its first

@@ -360,6 +360,39 @@ pub const Renderer = struct {
         _ = aspect_ratio;
     }
 
+    pub const SkinnedMesh = struct {
+        position_buffer: TextureHandle = .{},
+        index_buffer: IndexBufferHandle = .{},
+        vertex_count: u32 = 0,
+        index_count: u32 = 0,
+    };
+
+    pub fn createSkinnedMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !SkinnedMesh {
+        _ = r;
+        _ = vertex_count;
+        _ = indices;
+        return error.RendererUnavailable;
+    }
+
+    pub fn updateSkinnedMesh(r: *Renderer, mesh: SkinnedMesh, positions: []const [3]f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
+    }
+
+    pub fn destroySkinnedMesh(mesh: SkinnedMesh) void {
+        _ = mesh;
+    }
+
+    pub fn drawSkinnedMesh(r: *Renderer, mesh_view: u8, mesh: SkinnedMesh, model_matrix: math.Mat4, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = mesh_view;
+        _ = mesh;
+        _ = model_matrix;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
     pub fn uploadNv12(r: *Renderer, width: u16, height: u16, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) !Nv12Textures {
         _ = r;
         _ = width;

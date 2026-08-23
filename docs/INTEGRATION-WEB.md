@@ -140,6 +140,18 @@ The face tracker also drives the `gaze.*` and `head.nod`/`head.shake`/`head.tilt
 lens triggers; `camera.*` follow the camera controls and `geo.in_region` the
 geofence below. The full grammar is in [the lens spec](../lenses/SPEC.md).
 
+## Depth
+
+If the XR session was granted `depth-sensing`, feed each frame's depth so a
+depth-aware lens can occlude content behind real geometry. The map is metres per
+pixel, row major, with the near and far range it spans:
+
+    const info = frame.getDepthInformation(view);   // WebXR depth-sensing
+    // read info into a Float32Array of metres, then:
+    session.submitDepth(depth, info.width, info.height, 0.1, 5.0);
+
+An empty array clears it. The engine keeps the latest map for the occlusion pass.
+
 ## Geofilters
 
 A lens can gate on place. Feed a location fix from the Geolocation API and

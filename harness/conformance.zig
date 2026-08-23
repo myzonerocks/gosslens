@@ -49,6 +49,7 @@ const hand_corpus_path = ".models/corpus/hand_raised.jpg";
 const hand_bundle_path = ".models/hand_landmarker.task";
 const multiclass_model_path = ".models/selfie_multiclass.tflite";
 const single_class_model_path = ".models/selfie_segmenter.tflite";
+const scene_model_path = ".models/deeplab_v3.tflite";
 const beauty_resource_path = ".vendor/gpupixel/src";
 
 var harness_io: std.Io = undefined;
@@ -860,6 +861,162 @@ fn proveSkeletonRig(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveSkinnedBodyMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const pose_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, pose_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(pose_bytes);
+    if (abi.goss_session_enable_pose_tracking(session, pose_bytes.ptr, pose_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL skinned-body tracking enable\n", .{});
+        return false;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/skinned-body", ".lens-packages/skinned-body".len) != .ok) {
+        std.debug.print("conformance: FAIL skinned-body lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, body_corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+    var base: abi.PoseResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_pose_result(session, &base) == .again or base.landmark_count_out == 0) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.PoseResultTimedOut;
+    }
+
+    // Move only the left wrist (landmark 15); the shoulders and hips that
+    // set the body anchor stay put. A rigid mesh renders identically, so
+    // any change proves the hand skinned to follow the wrist.
+    var moved = base;
+    const shift = @as(f32, @floatFromInt(planes.width)) * 0.15;
+    moved.landmarks[15 * 3] += shift;
+    moved.landmarks[15 * 3 + 1] -= shift;
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_rest = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_rest);
+    const shot_bent = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_bent);
+    const rest = [_]abi.PoseResult{base};
+    const bent = [_]abi.PoseResult{moved};
+    var wr: u32 = 0;
+    var hr: u32 = 0;
+    var wb: u32 = 0;
+    var hb: u32 = 0;
+    try renderSubmittedBodies(engine, session, &desc, planes, &rest, shot_rest, &wr, &hr);
+    try renderSubmittedBodies(engine, session, &desc, planes, &bent, shot_bent, &wb, &hb);
+    if (wr == 0 or wr != wb or hr != hb) {
+        std.debug.print("conformance: FAIL skinned-body capture size {d}x{d} vs {d}x{d}\n", .{ wr, hr, wb, hb });
+        return false;
+    }
+
+    var changed: usize = 0;
+    for (0..wr * hr) |i| {
+        if (!std.mem.eql(u8, shot_rest[i * 4 .. i * 4 + 4], shot_bent[i * 4 .. i * 4 + 4])) changed += 1;
+    }
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL moving the wrist did not deform the skinned mesh\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a skinned body mesh bends to follow a moved wrist while its body anchor holds ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
+fn proveDepthOcclusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    // A blend.pass lens with no segmentation model: the submitted depth
+    // alone drives its subject mask.
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/background-swap", ".lens-packages/background-swap".len) != .ok) {
+        std.debug.print("conformance: FAIL depth-occlusion lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, body_corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    // Range 0.1..5.0 puts the occlusion plane at 2.55 m. The left half of
+    // the near map sits in front of it, the right half and the far map behind.
+    const dw = 64;
+    const dh = 48;
+    var near_map: [dw * dh]f32 = undefined;
+    var far_map: [dw * dh]f32 = undefined;
+    for (0..dh) |y| {
+        for (0..dw) |x| {
+            near_map[y * dw + x] = if (x < dw / 2) 0.5 else 3.0;
+            far_map[y * dw + x] = 3.0;
+        }
+    }
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_near = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_near);
+    const shot_near2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_near2);
+    const shot_far = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_far);
+    var wn: u32 = 0;
+    var hn: u32 = 0;
+    var wn2: u32 = 0;
+    var hn2: u32 = 0;
+    var wf: u32 = 0;
+    var hf: u32 = 0;
+    try renderWithDepth(engine, session, &desc, planes, &near_map, dw, dh, 0.1, 5.0, shot_near, &wn, &hn);
+    try renderWithDepth(engine, session, &desc, planes, &near_map, dw, dh, 0.1, 5.0, shot_near2, &wn2, &hn2);
+    try renderWithDepth(engine, session, &desc, planes, &far_map, dw, dh, 0.1, 5.0, shot_far, &wf, &hf);
+    if (wn == 0 or wn != wf or hn != hf or wn != wn2 or hn != hn2) {
+        std.debug.print("conformance: FAIL depth-occlusion capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_near[0 .. wn * hn * 4], shot_near2[0 .. wn * hn * 4])) {
+        std.debug.print("conformance: FAIL depth occlusion is not deterministic across runs\n", .{});
+        return false;
+    }
+    var changed: usize = 0;
+    for (0..wn * hn) |i| {
+        if (!std.mem.eql(u8, shot_near[i * 4 .. i * 4 + 4], shot_far[i * 4 .. i * 4 + 4])) changed += 1;
+    }
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL the near depth patch did not change the composite\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF submitted depth drives occlusion: a near patch pokes the camera frame through the composite ({d} pixels changed), deterministically\n", .{changed});
+    return true;
+}
+
 /// Submits one frame with a set of faces, renders it settled, and captures.
 fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, faces: []const abi.FaceResult, shot: []u8, out_w: *u32, out_h: *u32) !void {
     const half_w = (planes.width + 1) / 2;
@@ -879,6 +1036,21 @@ fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const
 fn renderSubmittedBodies(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, bodies: []const abi.PoseResult, shot: []u8, out_w: *u32, out_h: *u32) !void {
     const half_w = (planes.width + 1) / 2;
     if (abi.goss_session_submit_bodies(session, bodies.ptr, @intCast(bodies.len)) != .ok) return error.SubmitBodiesFailed;
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) {
+        return error.CaptureFailed;
+    }
+}
+
+fn renderWithDepth(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, depth: []const f32, dw: u32, dh: u32, near: f32, far: f32, shot: []u8, out_w: *u32, out_h: *u32) !void {
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_depth(session, depth.ptr, dw, dh, near, far) != .ok) return error.SubmitDepthFailed;
     for (0..5) |_| {
         if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
             return error.SubmitFailed;
@@ -3718,6 +3890,35 @@ fn proveMaskDegradation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveSceneSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // The deeplab scene segmenter infers 21 classes at 257 x 257 - both
+    // past the portrait segmenters' shape. It must load, resample onto
+    // the canonical mask grid, and drive the subject mask deterministically.
+    try renderOnce(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-scene-a", scene_model_path);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-scene-b", scene_model_path);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-scene-unseg", null);
+    settle(engine);
+
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-scene-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-scene-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the deeplab scene segmenter is not deterministic across runs\n", .{});
+        return false;
+    }
+    const unseg = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-scene-unseg.tga", gpa, .limited(8 << 20));
+    defer gpa.free(unseg);
+    if (std.mem.eql(u8, a, unseg)) {
+        std.debug.print("conformance: FAIL the deeplab scene mask changed nothing - the model never drove the composite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a 21-class 257x257 scene segmenter resamples onto the canonical mask grid and drives the subject mask deterministically\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -4024,6 +4225,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;
     watchHold("mask degradation");
+    if (!try proveSceneSegmentation(gpa, engine)) return 1;
+    watchHold("scene segmentation");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
@@ -4036,6 +4239,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;
     watchHold("skeleton rig");
+    if (!try proveSkinnedBodyMesh(gpa, engine)) return 1;
+    watchHold("skinned body mesh");
+    if (!try proveDepthOcclusion(gpa, engine)) return 1;
+    watchHold("depth occlusion");
     if (!try proveFaceRegions(gpa, engine)) return 1;
     watchHold("face regions");
     if (!try proveBodyJoints(gpa, engine)) return 1;

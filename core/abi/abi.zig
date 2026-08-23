@@ -157,6 +157,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_hand_joint(goss_session *session, uint32_t hand_index, uint32_t joint, float *out_xyz)",
     "goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
     "void goss_session_disable_pose_tracking(goss_session *session)",
+    "goss_status goss_session_set_pose_upper_body(goss_session *session, uint32_t enabled)",
     "goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result)",
     "goss_status goss_session_body_joint(goss_session *session, uint32_t joint, float *out_xyz)",
     "goss_status goss_session_face_pose(goss_session *session, float *out_matrix)",
@@ -174,6 +175,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count)",
     "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
+    "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
     "void goss_session_disable_beauty(goss_session *session)",
     "goss_status goss_session_set_beauty(goss_session *session, int32_t effect, float value)",
@@ -493,6 +495,9 @@ pub const Session = struct {
     face_tracking: ?*tracking.Tracking = null,
     hand_tracking: ?*tracking.hand_worker.HandTracking = null,
     pose_tracking: ?*tracking.pose_worker.PoseTracking = null,
+    /// While set, the tracked pose reports only the upper body: the lower-body
+    /// joints (knees down) read absent, for selfie framing with the legs out.
+    pose_upper_body: bool = false,
     segmentation_worker: ?*segmentation.Segmentation = null,
     /// The most recent mask, uploaded as a real GPU texture the same way
     /// a lut.pass asset is - a raw byte array has no reason to cross the
@@ -586,6 +591,14 @@ pub const Session = struct {
     face_count: u32 = 0,
     body_results: [pose.max_bodies]pose.Result = @splat(std.mem.zeroes(pose.Result)),
     body_count: u32 = 0,
+    /// The most recent host-submitted depth map (metres per pixel, row
+    /// major) with its plane size and near/far range, kept for depth
+    /// occlusion. Empty until a frame arrives.
+    depth_data: []f32 = &.{},
+    depth_width: u32 = 0,
+    depth_height: u32 = 0,
+    depth_near: f32 = 0,
+    depth_far: f32 = 0,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -751,10 +764,32 @@ pub const Session = struct {
 /// A model.gltf node's loaded state: real gpu buffers plus the plain
 /// CPU-side animation data renderCompositeChain samples every frame at
 /// the lens's own reported elapsed time.
+/// Where a skin joint reads its world position from the tracked body:
+/// one pose landmark, the mean of two (hip or shoulder centre), or none
+/// for a joint whose name matched nothing, which holds its bind pose.
+const JointTarget = union(enum) {
+    none,
+    point: u8,
+    midpoint: [2]u8,
+};
+
+/// The per-model state a skinned body mesh deforms against every frame:
+/// the parsed skin, a kept copy of the bind positions, scratch for the
+/// skinned output, the joint palette, and each joint's landmark target.
+const SkinnedRig = struct {
+    mesh: render.Renderer.SkinnedMesh,
+    skin: gltf.DecodedSkin,
+    rest: [][3]f32,
+    skinned: [][3]f32,
+    palette: []math.Mat4,
+    joint_targets: []JointTarget,
+};
+
 const LoadedModel = struct {
     mesh: render.Renderer.ModelMesh,
     base_color: [4]f32,
     animation: ?gltf.DecodedAnimation,
+    rig: ?SkinnedRig = null,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -1794,6 +1829,39 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         .{ -0.5 * world_height * rect_aspect, 0.5 * world_height, 0, 1 },
                     } };
                     const base_model_matrix = model_matrix;
+                    if (loaded.rig) |*rig| {
+                        // A skinned mesh deforms per body via its joint
+                        // palette; the shared dynamic buffer holds one
+                        // pose, so drive it from the first tracked body.
+                        const cp: ?pose.Result = if (s.body_count > 0) null else currentPose(s);
+                        var rig_lm: ?*const [pose.landmark_count * 3]f32 = null;
+                        if (s.body_count > 0) {
+                            rig_lm = &s.body_results[0].landmarks;
+                        } else if (cp) |*body| {
+                            rig_lm = &body.landmarks;
+                        }
+                        if (rig_lm) |lm| skinned: {
+                            const bp = bodyAnchorPose(lm) orelse break :skinned;
+                            const anchor_full = bp.mul(base_model_matrix);
+                            buildBodySkinPalette(rig, lm, anchor_full);
+                            skinPositions(rig.rest, rig.skin.vertex_joints, rig.skin.vertex_weights, rig.palette, rig.skinned);
+                            r.updateSkinnedMesh(rig.mesh, rig.skinned);
+                            r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                            r.drawSkinnedMesh(mesh_view, rig.mesh, pixel_to_world.mul(anchor_full), loaded.base_color, tiledAspect(s, rect_width, rect_height));
+                            if (output) |target| {
+                                input_texture = target.texture;
+                                if (!is_final) next_slot += 1;
+                            }
+                            continue;
+                        }
+                        // No tracked body to skin against: pass the frame through.
+                        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                        if (output) |target| {
+                            input_texture = target.texture;
+                            if (!is_final) next_slot += 1;
+                        }
+                        continue;
+                    }
                     if (s.body_count > 0) {
                         // The host's submitted bodies drive one model per body:
                         // blit the frame once through the first, draw the rest
@@ -1997,6 +2065,7 @@ pub fn destroySession(session: *Session) void {
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
+    if (session.depth_data.len != 0) session.engine.gpa.free(session.depth_data);
     destroyChainOrder(session);
     if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
     session.active_lens = null;
@@ -2293,6 +2362,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollMeshFaceLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
+        pollDepthOcclusion(s);
         if (e.recording != null and e.recording_session == s and !s.capture_requested) {
             if (s.current) |current| {
                 recording_frame = prepareRecordingFrame(e, r);
@@ -2377,6 +2447,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollBlendLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollDepthOcclusion(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
         const mirror = resolveMirror(s, current.desc.flags);
@@ -2488,6 +2559,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollBlendLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollDepthOcclusion(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
         const mirror = resolveMirror(s, current.desc.flags);
@@ -4076,6 +4148,65 @@ pub export fn goss_session_body_result_at(session: ?*Session, index: u32, out_re
     return .ok;
 }
 
+/// Submits one frame's depth map from the host AR backend (ARKit scene
+/// depth, ARCore Depth API, WebXR depth-sensing): width*height metres
+/// per pixel, row major, with the near and far metres that bound it. A
+/// zero size clears it. Kept for depth occlusion against the content.
+pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32, width: u32, height: u32, near: f32, far: f32) Status {
+    const s = session orelse return .invalid_argument;
+    const gpa = s.engine.gpa;
+    const count = @as(usize, width) * height;
+    if (count == 0) {
+        if (s.depth_data.len != 0) gpa.free(s.depth_data);
+        s.depth_data = &.{};
+        s.depth_width = 0;
+        s.depth_height = 0;
+        return .ok;
+    }
+    const src = depth orelse return .invalid_argument;
+    if (s.depth_data.len != count) {
+        if (s.depth_data.len != 0) gpa.free(s.depth_data);
+        s.depth_data = gpa.alloc(f32, count) catch {
+            s.depth_data = &.{};
+            s.depth_width = 0;
+            s.depth_height = 0;
+            return .out_of_memory;
+        };
+    }
+    @memcpy(s.depth_data, src[0..count]);
+    s.depth_width = width;
+    s.depth_height = height;
+    s.depth_near = near;
+    s.depth_far = far;
+    return .ok;
+}
+
+/// The depth (metres) at a normalized frame coordinate, nearest sample,
+/// or null when no depth has been submitted. The occlusion pass reads
+/// this to tell whether real geometry sits in front of the content.
+fn depthAt(s: *const Session, u: f32, v: f32) ?f32 {
+    if (s.depth_data.len == 0) return null;
+    const fx = std.math.clamp(u, 0, 1) * @as(f32, @floatFromInt(s.depth_width - 1));
+    const fy = std.math.clamp(v, 0, 1) * @as(f32, @floatFromInt(s.depth_height - 1));
+    const x: usize = @intFromFloat(fx);
+    const y: usize = @intFromFloat(fy);
+    return s.depth_data[y * s.depth_width + x];
+}
+
+/// Derives an occlusion mask from the submitted depth into out, one
+/// value per depth pixel: 1 where content sitting at plane_metres is
+/// visible, 0 where nearer real geometry hides it. A non-positive depth
+/// reads as no occluder. A small bias keeps the plane itself visible.
+fn depthOcclusionMask(s: *const Session, plane_metres: f32, out: []f32) usize {
+    const count = @min(out.len, s.depth_data.len);
+    const bias: f32 = 0.02;
+    for (0..count) |i| {
+        const scene = s.depth_data[i];
+        out[i] = if (scene > 0 and scene < plane_metres - bias) 0 else 1;
+    }
+    return count;
+}
+
 /// Reads the newest hand tracking result into caller memory. Reports
 /// again until the worker has published its first result.
 pub export fn goss_session_hand_result(session: ?*Session, out_result: ?*hand.Result) Status {
@@ -4106,11 +4237,39 @@ pub export fn goss_session_hand_joint(session: ?*Session, hand_index: u32, joint
 
 /// Reads the newest pose tracking result into caller memory. Reports
 /// again until the worker has published its first result.
+/// The first lower-body landmark. Upper-body mode suppresses the knees, ankles,
+/// and feet (25..32), keeping the face, torso, arms, and hips.
+const pose_lower_body_start = 25;
+
+/// Zeros the lower-body joints of a pose result when upper-body mode is on, so
+/// every reader of the pose sees the same suppressed skeleton.
+fn applyPoseMode(s: *const Session, out: *pose.Result) void {
+    if (!s.pose_upper_body) return;
+    var i: usize = pose_lower_body_start;
+    while (i < pose.landmark_count) : (i += 1) {
+        out.landmarks[i * 3] = 0;
+        out.landmarks[i * 3 + 1] = 0;
+        out.landmarks[i * 3 + 2] = 0;
+        out.visibilities[i] = 0;
+        out.presences[i] = 0;
+    }
+}
+
+/// Sets upper-body pose mode: while enabled, the tracked pose reports only the
+/// upper body (face, torso, arms, hips); the lower-body joints read absent, for
+/// selfie framing where the legs are out of shot.
+pub export fn goss_session_set_pose_upper_body(session: ?*Session, enabled: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.pose_upper_body = enabled != 0;
+    return .ok;
+}
+
 pub export fn goss_session_pose_result(session: ?*Session, out_result: ?*pose.Result) Status {
     const s = session orelse return .invalid_argument;
     const out = out_result orelse return .invalid_argument;
     const worker = s.pose_tracking orelse return .again;
     if (!tracking.pose_worker.readResult(worker, out)) return .again;
+    applyPoseMode(s, out);
     return .ok;
 }
 
@@ -4447,6 +4606,29 @@ fn pollSegmentationMask(session: *Session) void {
     }
 }
 
+/// When the host submits depth and no in-engine segmenter runs, the depth
+/// doubles as the subject mask: geometry nearer than the submitted range's
+/// midpoint reads as foreground, so a blend.pass lens shows the camera
+/// frame through it and hides content behind it.
+fn pollDepthOcclusion(session: *Session) void {
+    if (session.segmentation_worker != null) return;
+    if (session.depth_data.len == 0) return;
+    const plane = (session.depth_near + session.depth_far) * 0.5;
+    const bias: f32 = 0.02;
+    const side = segmentation.mask_side;
+    var mask: [segmentation.mask_len]f32 = undefined;
+    for (0..side) |y| {
+        for (0..side) |x| {
+            const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(side));
+            const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(side));
+            const scene = depthAt(session, u, v) orelse 0;
+            mask[y * side + x] = if (scene > 0 and scene < plane - bias) 1 else 0;
+        }
+    }
+    destroySegmentationTexture(session);
+    session.segmentation_texture = maskToTexture(&mask);
+}
+
 fn destroyLutState(session: *Session) void {
     var loader_it = session.lut_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
@@ -4529,6 +4711,7 @@ fn destroyModelState(session: *Session) void {
     while (mesh_it.next()) |loaded| {
         render.Renderer.destroyModelMesh(loaded.mesh);
         if (loaded.animation) |*anim| gltf.freeAnimation(session.engine.gpa, anim);
+        if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
     session.model_meshes.clearRetainingCapacity();
 }
@@ -5221,17 +5404,30 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 gpa.free(decoded.positions);
                 gpa.free(decoded.indices);
                 if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
+                if (decoded.skin) |*sk| gltf.freeSkin(gpa, sk);
                 finished.append(gpa, entry.key_ptr.*) catch {};
                 continue;
             };
+            // A skinned mesh keeps its geometry to deform each frame; the
+            // rig takes over the skin and a copy of the bind positions,
+            // while the static mesh still uploaded and can drop them.
+            const rig: ?SkinnedRig = if (decoded.skin) |sk|
+                (buildSkinnedRig(r, gpa, decoded.positions, decoded.indices, sk) catch null)
+            else
+                null;
             gpa.free(decoded.positions);
             gpa.free(decoded.indices);
             session.model_meshes.put(gpa, entry.key_ptr.*, .{
                 .mesh = mesh,
                 .base_color = decoded.base_color,
                 .animation = decoded.animation,
+                .rig = rig,
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
+                if (rig) |rg| {
+                    var owned = rg;
+                    destroySkinnedRig(gpa, &owned);
+                }
                 if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
             };
             finished.append(gpa, entry.key_ptr.*) catch {};
@@ -5452,6 +5648,7 @@ fn currentPose(s: *Session) ?pose.Result {
     var result: pose.Result = undefined;
     if (!tracking.pose_worker.readResult(worker, &result)) return null;
     if (result.landmark_count_out == 0 or result.presence < 0.5) return null;
+    applyPoseMode(s, &result);
     return result;
 }
 
@@ -5543,6 +5740,182 @@ test "bodyAnchorPose centres on the torso, scales by its length, and rejects a d
 
     var flat: [pose.landmark_count * 3]f32 = @splat(0);
     try t.expect(bodyAnchorPose(&flat) == null);
+}
+
+/// Linear-blend skinning: writes each rest position deformed by its up
+/// to four weighted joint matrices, renormalizing by the summed weight
+/// so an unnormalized asset does not scale the mesh. A joint matrix is
+/// the tracked joint's world transform times the mesh's inverse bind.
+fn skinPositions(
+    positions: []const [3]f32,
+    vertex_joints: []const [4]u16,
+    vertex_weights: []const [4]f32,
+    joint_matrices: []const math.Mat4,
+    out: [][3]f32,
+) void {
+    for (positions, vertex_joints, vertex_weights, out) |pos, joints, weights, *dst| {
+        const rest: math.Vec3 = pos;
+        var blended: math.Vec3 = .{ 0, 0, 0 };
+        var total: f32 = 0;
+        for (0..4) |k| {
+            const w = weights[k];
+            if (w == 0) continue;
+            blended += @as(math.Vec3, @splat(w)) * joint_matrices[joints[k]].mulPoint(rest);
+            total += w;
+        }
+        const skinned: math.Vec3 = if (total > 0) blended / @as(math.Vec3, @splat(total)) else rest;
+        dst.* = skinned;
+    }
+}
+
+test "skinPositions blends weighted joint transforms and renormalizes" {
+    const positions = [_][3]f32{ .{ 1, 0, 0 }, .{ 0, 0, 0 } };
+    const joints = [_][4]u16{ .{ 0, 1, 0, 0 }, .{ 1, 0, 0, 0 } };
+    const weights = [_][4]f32{ .{ 0.5, 0.5, 0, 0 }, .{ 1, 0, 0, 0 } };
+    const mats = [_]math.Mat4{ math.Mat4.identity, math.Mat4.translation(.{ 10, 0, 0 }) };
+    var out: [2][3]f32 = undefined;
+    skinPositions(&positions, &joints, &weights, &mats, &out);
+    // Half rest, half shifted by ten: the midpoint at x=6.
+    try t.expectApproxEqAbs(@as(f32, 6), out[0][0], 0.001);
+    // Fully joint 1: the origin shifted straight to x=10.
+    try t.expectApproxEqAbs(@as(f32, 10), out[1][0], 0.001);
+}
+
+/// Lowercases into buf and drops a "mixamorig:" style prefix (anything
+/// up to the last colon) so the mixamo and vrm/gltf conventions match
+/// the same table.
+fn normalizeJointName(name: []const u8, buf: *[64]u8) []const u8 {
+    var src = name;
+    if (std.mem.lastIndexOfScalar(u8, src, ':')) |colon| src = src[colon + 1 ..];
+    const n = @min(src.len, buf.len);
+    for (buf[0..n], src[0..n]) |*d, ch| d.* = std.ascii.toLower(ch);
+    return buf[0..n];
+}
+
+/// Maps a humanoid joint name to the pose landmark that drives it,
+/// tolerant of mixamo and vrm/gltf naming. Order matters: forearm
+/// before arm, upper-leg before leg. An unrecognized name gets .none
+/// and holds its bind pose.
+fn mapJointTarget(name: []const u8) JointTarget {
+    var buf: [64]u8 = undefined;
+    const j = normalizeJointName(name, &buf);
+    const has = struct {
+        fn f(h: []const u8, n: []const u8) bool {
+            return std.mem.indexOf(u8, h, n) != null;
+        }
+    }.f;
+    const side = struct {
+        fn f(h: []const u8, left: u8, right: u8) JointTarget {
+            return .{ .point = if (std.mem.indexOf(u8, h, "right") != null) right else left };
+        }
+    }.f;
+    if (has(j, "hips") or std.mem.eql(u8, j, "hip")) return .{ .midpoint = .{ 23, 24 } };
+    if (has(j, "forearm") or has(j, "lowerarm")) return side(j, 13, 14);
+    if (has(j, "hand") or has(j, "wrist")) return side(j, 15, 16);
+    if (has(j, "shoulder")) return side(j, 11, 12);
+    if (has(j, "arm")) return side(j, 11, 12);
+    if (has(j, "upleg") or has(j, "upperleg") or has(j, "thigh")) return side(j, 23, 24);
+    if (has(j, "leg") or has(j, "shin") or has(j, "calf")) return side(j, 25, 26);
+    if (has(j, "foot") or has(j, "ankle") or has(j, "toe")) return side(j, 27, 28);
+    if (has(j, "head")) return .{ .point = 0 };
+    if (has(j, "neck") or has(j, "chest") or has(j, "spine")) return .{ .midpoint = .{ 11, 12 } };
+    return .none;
+}
+
+fn jointTargetPixel(landmarks: *const [pose.landmark_count * 3]f32, target: JointTarget) ?math.Vec3 {
+    return switch (target) {
+        .none => null,
+        .point => |i| .{ landmarks[@as(usize, i) * 3], landmarks[@as(usize, i) * 3 + 1], 0 },
+        .midpoint => |ab| .{
+            (landmarks[@as(usize, ab[0]) * 3] + landmarks[@as(usize, ab[1]) * 3]) * 0.5,
+            (landmarks[@as(usize, ab[0]) * 3 + 1] + landmarks[@as(usize, ab[1]) * 3 + 1]) * 0.5,
+            0,
+        },
+    };
+}
+
+/// Fills the rig's joint palette for one tracked body: each mapped joint
+/// moves to its landmark, brought into mesh space by the anchor inverse
+/// so the anchor the draw re-applies cancels and lands it there.
+/// Unmapped joints and a singular anchor hold the bind pose.
+fn buildBodySkinPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark_count * 3]f32, anchor_full: math.Mat4) void {
+    const inv = math.Mat4.inverse(anchor_full) orelse {
+        for (rig.palette) |*p| p.* = math.Mat4.identity;
+        return;
+    };
+    for (rig.palette, rig.joint_targets, rig.skin.inverse_bind) |*p, target, ibm| {
+        const pixel = jointTargetPixel(landmarks, target) orelse {
+            p.* = math.Mat4.identity;
+            continue;
+        };
+        p.* = math.Mat4.translation(inv.mulPoint(pixel)).mul(ibm);
+    }
+}
+
+/// Stands a skinned rig up from a decoded model: a dynamic render mesh,
+/// a kept copy of the bind positions, scratch for the skinned output,
+/// the joint palette, and each joint's resolved landmark target. Takes
+/// ownership of the passed skin.
+fn buildSkinnedRig(r: *render.Renderer, gpa: std.mem.Allocator, positions: []const [3]f32, indices: []const u32, skin: gltf.DecodedSkin) !SkinnedRig {
+    var owned = skin;
+    errdefer gltf.freeSkin(gpa, &owned);
+    const mesh = try r.createSkinnedMesh(@intCast(positions.len), indices);
+    errdefer render.Renderer.destroySkinnedMesh(mesh);
+    const rest = try gpa.dupe([3]f32, positions);
+    errdefer gpa.free(rest);
+    const skinned = try gpa.alloc([3]f32, positions.len);
+    errdefer gpa.free(skinned);
+    const palette = try gpa.alloc(math.Mat4, owned.joint_count);
+    errdefer gpa.free(palette);
+    const joint_targets = try gpa.alloc(JointTarget, owned.joint_count);
+    errdefer gpa.free(joint_targets);
+    for (joint_targets, owned.joint_names) |*jt, name| jt.* = mapJointTarget(name);
+    return .{ .mesh = mesh, .skin = owned, .rest = rest, .skinned = skinned, .palette = palette, .joint_targets = joint_targets };
+}
+
+fn destroySkinnedRig(gpa: std.mem.Allocator, rig: *SkinnedRig) void {
+    render.Renderer.destroySkinnedMesh(rig.mesh);
+    gltf.freeSkin(gpa, &rig.skin);
+    gpa.free(rig.rest);
+    gpa.free(rig.skinned);
+    gpa.free(rig.palette);
+    gpa.free(rig.joint_targets);
+}
+
+test "mapJointTarget covers mixamo and vrm naming" {
+    try t.expectEqual(JointTarget{ .midpoint = .{ 23, 24 } }, mapJointTarget("mixamorig:Hips"));
+    try t.expectEqual(JointTarget{ .point = 13 }, mapJointTarget("mixamorig:LeftForeArm"));
+    try t.expectEqual(JointTarget{ .point = 11 }, mapJointTarget("LeftArm"));
+    try t.expectEqual(JointTarget{ .point = 16 }, mapJointTarget("rightHand"));
+    try t.expectEqual(JointTarget{ .point = 26 }, mapJointTarget("RightLowerLeg"));
+    try t.expectEqual(JointTarget{ .point = 23 }, mapJointTarget("leftUpperLeg"));
+    try t.expectEqual(JointTarget{ .point = 0 }, mapJointTarget("Head"));
+    try t.expect(mapJointTarget("Camera") == .none);
+}
+
+test "buildBodySkinPalette lands a mapped joint on its landmark" {
+    // One joint, identity inverse-bind, mapped to the nose (landmark 0).
+    var inverse_bind = [_]math.Mat4{math.Mat4.identity};
+    var targets = [_]JointTarget{.{ .point = 0 }};
+    var palette: [1]math.Mat4 = undefined;
+    const rig: SkinnedRig = .{
+        .mesh = undefined,
+        .skin = .{ .joint_count = 1, .inverse_bind = &inverse_bind, .joint_names = &.{}, .vertex_joints = &.{}, .vertex_weights = &.{} },
+        .rest = &.{},
+        .skinned = &.{},
+        .palette = &palette,
+        .joint_targets = &targets,
+    };
+    var lm: [pose.landmark_count * 3]f32 = @splat(0);
+    lm[0] = 200; // nose x
+    lm[1] = 120; // nose y
+    const anchor = math.Mat4.translation(.{ 10, 20, 0 });
+    buildBodySkinPalette(&rig, &lm, anchor);
+    // palette = translate(anchor^-1 * nose) with identity bind; anchor
+    // re-applied puts the joint origin back at the nose pixel.
+    const placed = anchor.mul(palette[0]).mulPoint(.{ 0, 0, 0 });
+    try t.expectApproxEqAbs(@as(f32, 200), placed[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 120), placed[1], 0.001);
 }
 
 const body_history = 64;
@@ -6142,6 +6515,46 @@ test "submitted bodies round-trip by index and drop the ones no real body fills"
     try t.expectEqual(Status.invalid_argument, goss_session_body_result_at(session, 0, null));
 }
 
+test "submitted depth stores the map, resamples on resize, and clears" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    try t.expect(depthAt(session, 0.5, 0.5) == null);
+    const depth = [_]f32{ 1.0, 2.0, 3.0, 4.0 }; // 2x2 metres, row major
+    try t.expectEqual(Status.ok, goss_session_submit_depth(session, &depth, 2, 2, 0.1, 5.0));
+    try t.expectEqual(@as(u32, 2), session.depth_width);
+    try t.expectApproxEqAbs(@as(f32, 1.0), depthAt(session, 0.0, 0.0).?, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 4.0), depthAt(session, 1.0, 1.0).?, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 5.0), session.depth_far, 0.001);
+
+    // A differently sized frame reallocates rather than reading stale data.
+    const wide = [_]f32{ 7.0, 8.0, 9.0 };
+    try t.expectEqual(Status.ok, goss_session_submit_depth(session, &wide, 3, 1, 0.1, 5.0));
+    try t.expectEqual(@as(u32, 3), session.depth_width);
+    try t.expectApproxEqAbs(@as(f32, 9.0), depthAt(session, 1.0, 0.0).?, 0.001);
+
+    // Zero size clears; a null buffer with a real size is rejected.
+    try t.expectEqual(Status.ok, goss_session_submit_depth(session, null, 0, 0, 0, 0));
+    try t.expect(depthAt(session, 0.5, 0.5) == null);
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_depth(session, null, 4, 4, 0, 1));
+}
+
+test "depthOcclusionMask hides content behind nearer real geometry" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    // Two pixels nearer than the plane, one beyond it, one invalid (zero).
+    const depth = [_]f32{ 0.5, 2.0, 0.0, 3.0 };
+    try t.expectEqual(Status.ok, goss_session_submit_depth(session, &depth, 2, 2, 0.1, 5.0));
+    var mask: [4]f32 = undefined;
+    try t.expectEqual(@as(usize, 4), depthOcclusionMask(session, 1.0, &mask));
+    try t.expectEqual([4]f32{ 0, 1, 1, 1 }, mask); // 0.5 occludes; 2.0, invalid, 3.0 stay visible
+}
+
 test "face region guards its arguments and refuses with no tracked face" {
     const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
     defer destroyEngine(engine);
@@ -6155,6 +6568,34 @@ test "face region guards its arguments and refuses with no tracked face" {
     try t.expectEqual(Status.invalid_argument, goss_session_face_region(session, 99, &out));
     // A valid region with no worker reports again, never a stale point.
     try t.expectEqual(Status.again, goss_session_face_region(session, 0, &out));
+}
+
+test "upper-body pose mode suppresses the lower-body joints and keeps the hips" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var result: PoseResult = std.mem.zeroes(PoseResult);
+    var i: usize = 0;
+    while (i < pose.landmark_count) : (i += 1) {
+        result.landmarks[i * 3] = 1;
+        result.visibilities[i] = 1;
+        result.presences[i] = 1;
+    }
+
+    // Off by default: every joint survives.
+    applyPoseMode(session, &result);
+    try t.expectEqual(@as(f32, 1), result.visibilities[27]); // an ankle stays
+
+    // On: the hips (24) stay, the knee (25) and ankle (27) read absent.
+    try t.expectEqual(Status.ok, goss_session_set_pose_upper_body(session, 1));
+    applyPoseMode(session, &result);
+    try t.expectEqual(@as(f32, 1), result.visibilities[24]);
+    try t.expectEqual(@as(f32, 0), result.visibilities[25]);
+    try t.expectEqual(@as(f32, 0), result.landmarks[27 * 3]);
+
+    try t.expectEqual(Status.invalid_argument, goss_session_set_pose_upper_body(null, 1));
 }
 
 test "body joint guards its arguments and refuses with no tracked body" {

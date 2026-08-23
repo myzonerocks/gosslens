@@ -1003,6 +1003,12 @@ export class GossSession {
     this.mod.ccall("goss_session_set_layout", "number", ["number", "number"], [this.handle, arrangement]);
   }
 
+  /// Upper-body pose mode: while enabled the tracked pose reports only the upper
+  /// body; the lower-body joints (knees down) read absent.
+  setPoseUpperBody(enabled: boolean): void {
+    this.mod.ccall("goss_session_set_pose_upper_body", "number", ["number", "number"], [this.handle, enabled ? 1 : 0]);
+  }
+
   clearLayout(): void {
     this.mod.ccall("goss_session_clear_layout", "number", ["number"], [this.handle]);
   }
@@ -1286,6 +1292,22 @@ export class GossSession {
       if (b.presences) this.mod.HEAPF32.set(b.presences, visStart + GOSS_POSE_LANDMARK_COUNT);
     }
     this.mod.ccall("goss_session_submit_bodies", "number", ["number", "number", "number"], [this.handle, ptr, bodies.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+  }
+
+  /// Submits one frame's depth map from the host AR backend (WebXR depth-
+  /// sensing): width by height metres per pixel, row major, with the near and
+  /// far metres that bound it. An empty array clears it. Kept for depth
+  /// occlusion against the rendered content.
+  submitDepth(depth: Float32Array, width: number, height: number, near: number, far: number): void {
+    if (depth.length === 0) {
+      this.mod.ccall("goss_session_submit_depth", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, 0, 0, 0, 0, 0]);
+      return;
+    }
+    const bytes = depth.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    this.mod.HEAPF32.set(depth, ptr >> 2);
+    this.mod.ccall("goss_session_submit_depth", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, width, height, near, far]);
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 

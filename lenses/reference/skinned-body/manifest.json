@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.skinned-body",
+  "version": "1.0.0",
+  "display_name": "Skinned Body",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "body", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "body"}
+  ],
+  "triggers": []
+}

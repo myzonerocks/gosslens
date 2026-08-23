@@ -192,6 +192,7 @@ file must move together.
 | `goss_session_disable_hand_tracking` | `disableHandTracking()` | native tracking path |
 | `goss_session_enable_pose_tracking` | `enablePoseTracking(taskBundle, threads)` | native tracking path |
 | `goss_session_disable_pose_tracking` | `disablePoseTracking()` | native tracking path |
+| `goss_session_set_pose_upper_body` | `setPoseUpperBody(enabled)`, upper-body mode; the tracked pose reports only the upper body, the lower-body joints (knees down) read absent | native tracking path |
 | `goss_session_track_frame` | `trackFrame(y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs)`; feeds every enabled tracking worker | native tracking path |
 | `goss_session_face_result` | `faceResult(result)` | native tracking path |
 | `goss_session_hand_result` | `handResult(result)` | native tracking path |
@@ -205,6 +206,7 @@ file must move together.
 | `goss_session_submit_bodies` | `submitBodies(bodies, count)`, submits the bodies tracked this frame for the multi-person path; count past `GOSS_BODY_MAX` clamps, zero clears the path, and a body below the tracked presence or with no landmarks drops | native tracking path |
 | `goss_session_body_count` | `bodyCount()`, how many bodies the last `submitBodies` kept, zero to `GOSS_BODY_MAX` | native tracking path |
 | `goss_session_body_result_at` | `bodyResultAt(index, result)`, reads the index-th submitted body; a caller loops zero to the count to visit every body | native tracking path |
+| `goss_session_submit_depth` | `submitDepth(depth, width, height, near, far)`, submits one frame's depth map (metres per pixel, row major) from the host AR backend (ARKit scene depth, ARCore Depth API, WebXR depth-sensing); an empty map clears it, kept for depth occlusion | native + web depth path |
 | `goss_session_face_region` | `faceRegion(region, outXyz)`, the newest tracked face's named attach point (x, y in frame pixels, z in the same scale) so a lens pins content to the forehead, glabella, nose tip, chin, an eye, a cheek, an ear, or the mouth centre/corner; see the `GOSS_FACE_REGION_*` points | native tracking path |
 | `goss_session_set_face_landmarks` | `setFaceLandmarks(points)`; web adds `sourceWidth, sourceHeight` since its analysis resolution is decoupled from the rendered frame's | Web analysis-producer path |
 | `goss_session_set_segmentation_mask` | `setSegmentationMask(mask)`, a mask_side x mask_side float mask the web tracking module produced, uploaded as the subject texture | Web analysis-producer path |
@@ -217,6 +219,13 @@ file must move together.
 parameter contract is not frozen yet. **No SDK may invent and ship a public
 `enableSegmentation(...)` signature until this section is updated with the
 complete parameter list.**
+
+The in-engine core reads each model's own tensor dimensions, so the bytes
+handed to it can be any square RGB segmenter with any output resolution and
+up to 32 classes. It resamples the model's native mask onto the canonical
+`mask_side x mask_side` grid, covering the portrait segmenters and scene
+segmenters like the 21-class deeplab model alike. `segmentationChannels()`
+then reports the loaded model's class count.
 
 | ABI function | Public operation | Scope |
 |---|---|---|

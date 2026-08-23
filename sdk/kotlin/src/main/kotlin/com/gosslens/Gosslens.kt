@@ -49,6 +49,7 @@ object Gosslens {
     internal external fun nativeHandResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeEnablePoseTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
     internal external fun nativeDisablePoseTracking(session: Long)
+    internal external fun nativeSetPoseUpperBody(session: Long, enabled: Int): Int
     internal external fun nativePoseResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeFacePose(session: Long, matrixBuffer: ByteBuffer): Int
     internal external fun nativeFaceRegion(session: Long, region: Int, outBuffer: ByteBuffer): Int
@@ -71,6 +72,7 @@ object Gosslens {
     internal external fun nativeFaceCount(session: Long): Int
     internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
+    internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
     internal external fun nativeBodyCount(session: Long): Int
     internal external fun nativeBodyResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeEnableBeauty(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
@@ -584,6 +586,10 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
 
     fun disablePoseTracking() = Gosslens.nativeDisablePoseTracking(handle)
 
+    /** Upper-body pose mode: while enabled the tracked pose reports only the
+     * upper body; the lower-body joints (knees down) read absent. */
+    fun setPoseUpperBody(enabled: Boolean): Boolean = Gosslens.nativeSetPoseUpperBody(handle, if (enabled) 1 else 0) == 0
+
     /** Fills [result] with the newest pose tracking output; false until
      * the worker publishes its first result. */
     fun poseResult(result: GossPoseResult): Boolean {
@@ -738,6 +744,18 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         }
         packed.rewind()
         return Gosslens.nativeSubmitBodies(handle, packed, bodies.size) == 0
+    }
+
+    /** Submits one frame's depth map from the host AR backend (ARCore Depth
+     * API): width by height metres per pixel, row major, with the near and
+     * far metres that bound it. An empty array clears it. Kept for depth
+     * occlusion against the rendered content. */
+    fun submitDepth(depth: FloatArray, width: Int, height: Int, near: Float, far: Float): Boolean {
+        if (depth.isEmpty()) return Gosslens.nativeSubmitDepth(handle, ByteBuffer.allocateDirect(4), 0, 0, 0f, 0f) == 0
+        val buf = ByteBuffer.allocateDirect(depth.size * 4).order(ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(depth)
+        buf.rewind()
+        return Gosslens.nativeSubmitDepth(handle, buf, width, height, near, far) == 0
     }
 
     /** The number of bodies the last submitBodies kept, zero to BODY_MAX. */
