@@ -755,10 +755,32 @@ pub const Session = struct {
 /// A model.gltf node's loaded state: real gpu buffers plus the plain
 /// CPU-side animation data renderCompositeChain samples every frame at
 /// the lens's own reported elapsed time.
+/// Where a skin joint reads its world position from the tracked body:
+/// one pose landmark, the mean of two (hip or shoulder centre), or none
+/// for a joint whose name matched nothing, which holds its bind pose.
+const JointTarget = union(enum) {
+    none,
+    point: u8,
+    midpoint: [2]u8,
+};
+
+/// The per-model state a skinned body mesh deforms against every frame:
+/// the parsed skin, a kept copy of the bind positions, scratch for the
+/// skinned output, the joint palette, and each joint's landmark target.
+const SkinnedRig = struct {
+    mesh: render.Renderer.SkinnedMesh,
+    skin: gltf.DecodedSkin,
+    rest: [][3]f32,
+    skinned: [][3]f32,
+    palette: []math.Mat4,
+    joint_targets: []JointTarget,
+};
+
 const LoadedModel = struct {
     mesh: render.Renderer.ModelMesh,
     base_color: [4]f32,
     animation: ?gltf.DecodedAnimation,
+    rig: ?SkinnedRig = null,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -1798,6 +1820,39 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         .{ -0.5 * world_height * rect_aspect, 0.5 * world_height, 0, 1 },
                     } };
                     const base_model_matrix = model_matrix;
+                    if (loaded.rig) |*rig| {
+                        // A skinned mesh deforms per body via its joint
+                        // palette; the shared dynamic buffer holds one
+                        // pose, so drive it from the first tracked body.
+                        const cp: ?pose.Result = if (s.body_count > 0) null else currentPose(s);
+                        var rig_lm: ?*const [pose.landmark_count * 3]f32 = null;
+                        if (s.body_count > 0) {
+                            rig_lm = &s.body_results[0].landmarks;
+                        } else if (cp) |*body| {
+                            rig_lm = &body.landmarks;
+                        }
+                        if (rig_lm) |lm| skinned: {
+                            const bp = bodyAnchorPose(lm) orelse break :skinned;
+                            const anchor_full = bp.mul(base_model_matrix);
+                            buildBodySkinPalette(rig, lm, anchor_full);
+                            skinPositions(rig.rest, rig.skin.vertex_joints, rig.skin.vertex_weights, rig.palette, rig.skinned);
+                            r.updateSkinnedMesh(rig.mesh, rig.skinned);
+                            r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                            r.drawSkinnedMesh(mesh_view, rig.mesh, pixel_to_world.mul(anchor_full), loaded.base_color, tiledAspect(s, rect_width, rect_height));
+                            if (output) |target| {
+                                input_texture = target.texture;
+                                if (!is_final) next_slot += 1;
+                            }
+                            continue;
+                        }
+                        // No tracked body to skin against: pass the frame through.
+                        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                        if (output) |target| {
+                            input_texture = target.texture;
+                            if (!is_final) next_slot += 1;
+                        }
+                        continue;
+                    }
                     if (s.body_count > 0) {
                         // The host's submitted bodies drive one model per body:
                         // blit the frame once through the first, draw the rest
@@ -4561,6 +4616,7 @@ fn destroyModelState(session: *Session) void {
     while (mesh_it.next()) |loaded| {
         render.Renderer.destroyModelMesh(loaded.mesh);
         if (loaded.animation) |*anim| gltf.freeAnimation(session.engine.gpa, anim);
+        if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
     session.model_meshes.clearRetainingCapacity();
 }
@@ -5253,17 +5309,30 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 gpa.free(decoded.positions);
                 gpa.free(decoded.indices);
                 if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
+                if (decoded.skin) |*sk| gltf.freeSkin(gpa, sk);
                 finished.append(gpa, entry.key_ptr.*) catch {};
                 continue;
             };
+            // A skinned mesh keeps its geometry to deform each frame; the
+            // rig takes over the skin and a copy of the bind positions,
+            // while the static mesh still uploaded and can drop them.
+            const rig: ?SkinnedRig = if (decoded.skin) |sk|
+                (buildSkinnedRig(r, gpa, decoded.positions, decoded.indices, sk) catch null)
+            else
+                null;
             gpa.free(decoded.positions);
             gpa.free(decoded.indices);
             session.model_meshes.put(gpa, entry.key_ptr.*, .{
                 .mesh = mesh,
                 .base_color = decoded.base_color,
                 .animation = decoded.animation,
+                .rig = rig,
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
+                if (rig) |rg| {
+                    var owned = rg;
+                    destroySkinnedRig(gpa, &owned);
+                }
                 if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
             };
             finished.append(gpa, entry.key_ptr.*) catch {};
@@ -5615,6 +5684,143 @@ test "skinPositions blends weighted joint transforms and renormalizes" {
     try t.expectApproxEqAbs(@as(f32, 6), out[0][0], 0.001);
     // Fully joint 1: the origin shifted straight to x=10.
     try t.expectApproxEqAbs(@as(f32, 10), out[1][0], 0.001);
+}
+
+/// Lowercases into buf and drops a "mixamorig:" style prefix (anything
+/// up to the last colon) so the mixamo and vrm/gltf conventions match
+/// the same table.
+fn normalizeJointName(name: []const u8, buf: *[64]u8) []const u8 {
+    var src = name;
+    if (std.mem.lastIndexOfScalar(u8, src, ':')) |colon| src = src[colon + 1 ..];
+    const n = @min(src.len, buf.len);
+    for (buf[0..n], src[0..n]) |*d, ch| d.* = std.ascii.toLower(ch);
+    return buf[0..n];
+}
+
+/// Maps a humanoid joint name to the pose landmark that drives it,
+/// tolerant of mixamo and vrm/gltf naming. Order matters: forearm
+/// before arm, upper-leg before leg. An unrecognized name gets .none
+/// and holds its bind pose.
+fn mapJointTarget(name: []const u8) JointTarget {
+    var buf: [64]u8 = undefined;
+    const j = normalizeJointName(name, &buf);
+    const has = struct {
+        fn f(h: []const u8, n: []const u8) bool {
+            return std.mem.indexOf(u8, h, n) != null;
+        }
+    }.f;
+    const side = struct {
+        fn f(h: []const u8, left: u8, right: u8) JointTarget {
+            return .{ .point = if (std.mem.indexOf(u8, h, "right") != null) right else left };
+        }
+    }.f;
+    if (has(j, "hips") or std.mem.eql(u8, j, "hip")) return .{ .midpoint = .{ 23, 24 } };
+    if (has(j, "forearm") or has(j, "lowerarm")) return side(j, 13, 14);
+    if (has(j, "hand") or has(j, "wrist")) return side(j, 15, 16);
+    if (has(j, "shoulder")) return side(j, 11, 12);
+    if (has(j, "arm")) return side(j, 11, 12);
+    if (has(j, "upleg") or has(j, "upperleg") or has(j, "thigh")) return side(j, 23, 24);
+    if (has(j, "leg") or has(j, "shin") or has(j, "calf")) return side(j, 25, 26);
+    if (has(j, "foot") or has(j, "ankle") or has(j, "toe")) return side(j, 27, 28);
+    if (has(j, "head")) return .{ .point = 0 };
+    if (has(j, "neck") or has(j, "chest") or has(j, "spine")) return .{ .midpoint = .{ 11, 12 } };
+    return .none;
+}
+
+fn jointTargetPixel(landmarks: *const [pose.landmark_count * 3]f32, target: JointTarget) ?math.Vec3 {
+    return switch (target) {
+        .none => null,
+        .point => |i| .{ landmarks[@as(usize, i) * 3], landmarks[@as(usize, i) * 3 + 1], 0 },
+        .midpoint => |ab| .{
+            (landmarks[@as(usize, ab[0]) * 3] + landmarks[@as(usize, ab[1]) * 3]) * 0.5,
+            (landmarks[@as(usize, ab[0]) * 3 + 1] + landmarks[@as(usize, ab[1]) * 3 + 1]) * 0.5,
+            0,
+        },
+    };
+}
+
+/// Fills the rig's joint palette for one tracked body: each mapped joint
+/// moves to its landmark, brought into mesh space by the anchor inverse
+/// so the anchor the draw re-applies cancels and lands it there.
+/// Unmapped joints and a singular anchor hold the bind pose.
+fn buildBodySkinPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark_count * 3]f32, anchor_full: math.Mat4) void {
+    const inv = math.Mat4.inverse(anchor_full) orelse {
+        for (rig.palette) |*p| p.* = math.Mat4.identity;
+        return;
+    };
+    for (rig.palette, rig.joint_targets, rig.skin.inverse_bind) |*p, target, ibm| {
+        const pixel = jointTargetPixel(landmarks, target) orelse {
+            p.* = math.Mat4.identity;
+            continue;
+        };
+        p.* = math.Mat4.translation(inv.mulPoint(pixel)).mul(ibm);
+    }
+}
+
+/// Stands a skinned rig up from a decoded model: a dynamic render mesh,
+/// a kept copy of the bind positions, scratch for the skinned output,
+/// the joint palette, and each joint's resolved landmark target. Takes
+/// ownership of the passed skin.
+fn buildSkinnedRig(r: *render.Renderer, gpa: std.mem.Allocator, positions: []const [3]f32, indices: []const u32, skin: gltf.DecodedSkin) !SkinnedRig {
+    var owned = skin;
+    errdefer gltf.freeSkin(gpa, &owned);
+    const mesh = try r.createSkinnedMesh(@intCast(positions.len), indices);
+    errdefer render.Renderer.destroySkinnedMesh(mesh);
+    const rest = try gpa.dupe([3]f32, positions);
+    errdefer gpa.free(rest);
+    const skinned = try gpa.alloc([3]f32, positions.len);
+    errdefer gpa.free(skinned);
+    const palette = try gpa.alloc(math.Mat4, owned.joint_count);
+    errdefer gpa.free(palette);
+    const joint_targets = try gpa.alloc(JointTarget, owned.joint_count);
+    errdefer gpa.free(joint_targets);
+    for (joint_targets, owned.joint_names) |*jt, name| jt.* = mapJointTarget(name);
+    return .{ .mesh = mesh, .skin = owned, .rest = rest, .skinned = skinned, .palette = palette, .joint_targets = joint_targets };
+}
+
+fn destroySkinnedRig(gpa: std.mem.Allocator, rig: *SkinnedRig) void {
+    render.Renderer.destroySkinnedMesh(rig.mesh);
+    gltf.freeSkin(gpa, &rig.skin);
+    gpa.free(rig.rest);
+    gpa.free(rig.skinned);
+    gpa.free(rig.palette);
+    gpa.free(rig.joint_targets);
+}
+
+test "mapJointTarget covers mixamo and vrm naming" {
+    try t.expectEqual(JointTarget{ .midpoint = .{ 23, 24 } }, mapJointTarget("mixamorig:Hips"));
+    try t.expectEqual(JointTarget{ .point = 13 }, mapJointTarget("mixamorig:LeftForeArm"));
+    try t.expectEqual(JointTarget{ .point = 11 }, mapJointTarget("LeftArm"));
+    try t.expectEqual(JointTarget{ .point = 16 }, mapJointTarget("rightHand"));
+    try t.expectEqual(JointTarget{ .point = 26 }, mapJointTarget("RightLowerLeg"));
+    try t.expectEqual(JointTarget{ .point = 23 }, mapJointTarget("leftUpperLeg"));
+    try t.expectEqual(JointTarget{ .point = 0 }, mapJointTarget("Head"));
+    try t.expect(mapJointTarget("Camera") == .none);
+}
+
+test "buildBodySkinPalette lands a mapped joint on its landmark" {
+    // One joint, identity inverse-bind, mapped to the nose (landmark 0).
+    var inverse_bind = [_]math.Mat4{math.Mat4.identity};
+    var targets = [_]JointTarget{.{ .point = 0 }};
+    var palette: [1]math.Mat4 = undefined;
+    const rig: SkinnedRig = .{
+        .mesh = undefined,
+        .skin = .{ .joint_count = 1, .inverse_bind = &inverse_bind, .joint_names = &.{}, .vertex_joints = &.{}, .vertex_weights = &.{} },
+        .rest = &.{},
+        .skinned = &.{},
+        .palette = &palette,
+        .joint_targets = &targets,
+    };
+    var lm: [pose.landmark_count * 3]f32 = @splat(0);
+    lm[0] = 200; // nose x
+    lm[1] = 120; // nose y
+    const anchor = math.Mat4.translation(.{ 10, 20, 0 });
+    buildBodySkinPalette(&rig, &lm, anchor);
+    // palette = translate(anchor^-1 * nose) with identity bind; anchor
+    // re-applied puts the joint origin back at the nose pixel.
+    const placed = anchor.mul(palette[0]).mulPoint(.{ 0, 0, 0 });
+    try t.expectApproxEqAbs(@as(f32, 200), placed[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 120), placed[1], 0.001);
 }
 
 const body_history = 64;

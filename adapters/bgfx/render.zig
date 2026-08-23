@@ -1246,6 +1246,16 @@ pub const Renderer = struct {
         index_count: u32,
     };
 
+    /// A skinned model mesh: a dynamic position buffer re-uploaded each
+    /// frame from the CPU skinning pass, and the mesh's own static index
+    /// buffer. Drawn with the same model program as a static ModelMesh.
+    pub const SkinnedMesh = struct {
+        position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
+        index_buffer: c.bgfx_index_buffer_handle_t,
+        vertex_count: u32,
+        index_count: u32,
+    };
+
     /// A simulated cloth grid: positions live in a dynamic vertex
     /// buffer updated every frame from the physics solver, the grid's
     /// triangles in a static index buffer.
@@ -1284,6 +1294,32 @@ pub const Renderer = struct {
 
     pub fn destroyModelMesh(mesh: ModelMesh) void {
         c.bgfx_destroy_vertex_buffer(mesh.vertex_buffer);
+        c.bgfx_destroy_index_buffer(mesh.index_buffer);
+    }
+
+    /// Builds a skinned mesh: a dynamic position buffer sized to the
+    /// vertex count and the mesh's own static index buffer. Positions
+    /// start empty and land on the first updateSkinnedMesh.
+    pub fn createSkinnedMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !SkinnedMesh {
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(vertex_count, &r.layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        return .{ .position_buffer = position_buffer, .index_buffer = index_buffer, .vertex_count = vertex_count, .index_count = @intCast(indices.len) };
+    }
+
+    /// Uploads CPU-skinned positions (three floats each) into the
+    /// dynamic buffer, padding the texcoord to zero to match r.layout.
+    pub fn updateSkinnedMesh(r: *Renderer, mesh: SkinnedMesh, positions: []const [3]f32) void {
+        const count = @min(positions.len, mesh.vertex_count);
+        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
+        defer r.gpa.free(interleaved);
+        for (0..count) |i| {
+            interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
+        }
+        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+    }
+
+    pub fn destroySkinnedMesh(mesh: SkinnedMesh) void {
+        c.bgfx_destroy_dynamic_vertex_buffer(mesh.position_buffer);
         c.bgfx_destroy_index_buffer(mesh.index_buffer);
     }
 
@@ -1514,6 +1550,21 @@ pub const Renderer = struct {
         c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
         _ = c.bgfx_set_transform(&model_matrix.cols, 1);
         c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
+        c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
+        c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws a skinned mesh from its dynamic position buffer under the
+    /// body anchor matrix, otherwise identical to drawModelMesh.
+    pub fn drawSkinnedMesh(r: *Renderer, mesh_view: c.bgfx_view_id_t, mesh: SkinnedMesh, model_matrix: math.Mat4, base_color: [4]f32, aspect_ratio: f32) void {
+        const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
+        const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
+        _ = c.bgfx_set_transform(&model_matrix.cols, 1);
+        c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
         c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
