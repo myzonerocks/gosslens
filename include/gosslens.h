@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 43u
+#define GOSS_ABI_MINOR 44u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -505,6 +505,11 @@ void goss_session_disable_hand_tracking(goss_session *session);
  * stack report unsupported. */
 goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads);
 void goss_session_disable_pose_tracking(goss_session *session);
+
+/* Graph thread. Upper-body pose mode: while enabled (non-zero), the tracked
+ * pose reports only the upper body (face, torso, arms, hips); the lower-body
+ * joints (knees, ankles, feet) read absent, for selfie framing with legs out. */
+goss_status goss_session_set_pose_upper_body(goss_session *session, uint32_t enabled);
 
 /* Graph thread. Stands the segmentation worker up from a raw model
  * (a selfie or hair segmenter .tflite file, not bundled the way

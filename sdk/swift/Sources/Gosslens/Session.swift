@@ -118,6 +118,12 @@ public final class GossSession: @unchecked Sendable {
         goss_session_disable_pose_tracking(handle)
     }
 
+    /// Upper-body pose mode. While enabled, the tracked pose reports only the
+    /// upper body; the lower-body joints (knees down) read absent.
+    public func setPoseUpperBody(_ enabled: Bool) throws {
+        try checked(goss_session_set_pose_upper_body(handle, enabled ? 1 : 0))
+    }
+
     public func trackFrame(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, colorStandard: GossColorStandard = .bt709, colorRange: GossColorRange = .video, timestampUs: Int64) throws {
         var raw = GossFrameDesc(width: width, height: height, pixelFormat: .nv12, colorStandard: colorStandard, colorRange: colorRange, timestampUs: timestampUs).raw
         try checked(goss_session_track_frame(handle, &raw, y, yStride, uv, uvStride))

@@ -157,6 +157,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_hand_joint(goss_session *session, uint32_t hand_index, uint32_t joint, float *out_xyz)",
     "goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
     "void goss_session_disable_pose_tracking(goss_session *session)",
+    "goss_status goss_session_set_pose_upper_body(goss_session *session, uint32_t enabled)",
     "goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result)",
     "goss_status goss_session_body_joint(goss_session *session, uint32_t joint, float *out_xyz)",
     "goss_status goss_session_face_pose(goss_session *session, float *out_matrix)",
@@ -493,6 +494,9 @@ pub const Session = struct {
     face_tracking: ?*tracking.Tracking = null,
     hand_tracking: ?*tracking.hand_worker.HandTracking = null,
     pose_tracking: ?*tracking.pose_worker.PoseTracking = null,
+    /// While set, the tracked pose reports only the upper body: the lower-body
+    /// joints (knees down) read absent, for selfie framing with the legs out.
+    pose_upper_body: bool = false,
     segmentation_worker: ?*segmentation.Segmentation = null,
     /// The most recent mask, uploaded as a real GPU texture the same way
     /// a lut.pass asset is - a raw byte array has no reason to cross the
@@ -4106,11 +4110,39 @@ pub export fn goss_session_hand_joint(session: ?*Session, hand_index: u32, joint
 
 /// Reads the newest pose tracking result into caller memory. Reports
 /// again until the worker has published its first result.
+/// The first lower-body landmark. Upper-body mode suppresses the knees, ankles,
+/// and feet (25..32), keeping the face, torso, arms, and hips.
+const pose_lower_body_start = 25;
+
+/// Zeros the lower-body joints of a pose result when upper-body mode is on, so
+/// every reader of the pose sees the same suppressed skeleton.
+fn applyPoseMode(s: *const Session, out: *pose.Result) void {
+    if (!s.pose_upper_body) return;
+    var i: usize = pose_lower_body_start;
+    while (i < pose.landmark_count) : (i += 1) {
+        out.landmarks[i * 3] = 0;
+        out.landmarks[i * 3 + 1] = 0;
+        out.landmarks[i * 3 + 2] = 0;
+        out.visibilities[i] = 0;
+        out.presences[i] = 0;
+    }
+}
+
+/// Sets upper-body pose mode: while enabled, the tracked pose reports only the
+/// upper body (face, torso, arms, hips); the lower-body joints read absent, for
+/// selfie framing where the legs are out of shot.
+pub export fn goss_session_set_pose_upper_body(session: ?*Session, enabled: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.pose_upper_body = enabled != 0;
+    return .ok;
+}
+
 pub export fn goss_session_pose_result(session: ?*Session, out_result: ?*pose.Result) Status {
     const s = session orelse return .invalid_argument;
     const out = out_result orelse return .invalid_argument;
     const worker = s.pose_tracking orelse return .again;
     if (!tracking.pose_worker.readResult(worker, out)) return .again;
+    applyPoseMode(s, out);
     return .ok;
 }
 
@@ -5452,6 +5484,7 @@ fn currentPose(s: *Session) ?pose.Result {
     var result: pose.Result = undefined;
     if (!tracking.pose_worker.readResult(worker, &result)) return null;
     if (result.landmark_count_out == 0 or result.presence < 0.5) return null;
+    applyPoseMode(s, &result);
     return result;
 }
 
@@ -6155,6 +6188,34 @@ test "face region guards its arguments and refuses with no tracked face" {
     try t.expectEqual(Status.invalid_argument, goss_session_face_region(session, 99, &out));
     // A valid region with no worker reports again, never a stale point.
     try t.expectEqual(Status.again, goss_session_face_region(session, 0, &out));
+}
+
+test "upper-body pose mode suppresses the lower-body joints and keeps the hips" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var result: PoseResult = std.mem.zeroes(PoseResult);
+    var i: usize = 0;
+    while (i < pose.landmark_count) : (i += 1) {
+        result.landmarks[i * 3] = 1;
+        result.visibilities[i] = 1;
+        result.presences[i] = 1;
+    }
+
+    // Off by default: every joint survives.
+    applyPoseMode(session, &result);
+    try t.expectEqual(@as(f32, 1), result.visibilities[27]); // an ankle stays
+
+    // On: the hips (24) stay, the knee (25) and ankle (27) read absent.
+    try t.expectEqual(Status.ok, goss_session_set_pose_upper_body(session, 1));
+    applyPoseMode(session, &result);
+    try t.expectEqual(@as(f32, 1), result.visibilities[24]);
+    try t.expectEqual(@as(f32, 0), result.visibilities[25]);
+    try t.expectEqual(@as(f32, 0), result.landmarks[27 * 3]);
+
+    try t.expectEqual(Status.invalid_argument, goss_session_set_pose_upper_body(null, 1));
 }
 
 test "body joint guards its arguments and refuses with no tracked body" {

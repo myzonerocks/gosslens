@@ -621,6 +621,12 @@ export fn Java_com_gosslens_Gosslens_nativeSetLayout(env: *JniEnv, cls: jobject,
     return @intFromEnum(abi.goss_session_set_layout(sessionFromHandle(session), @intCast(@max(arrangement, 0))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSetPoseUpperBody(env: *JniEnv, cls: jobject, session: i64, enabled: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_set_pose_upper_body(sessionFromHandle(session), @intCast(@max(enabled, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeClearLayout(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;

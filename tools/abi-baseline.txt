@@ -1,4 +1,4 @@
-abi 0.43
+abi 0.44
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -168,6 +168,7 @@ fn goss_status goss_session_hand_result(goss_session *session, goss_hand_result 
 fn goss_status goss_session_hand_joint(goss_session *session, uint32_t hand_index, uint32_t joint, float *out_xyz)
 fn goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)
 fn void goss_session_disable_pose_tracking(goss_session *session)
+fn goss_status goss_session_set_pose_upper_body(goss_session *session, uint32_t enabled)
 fn goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result)
 fn goss_status goss_session_body_joint(goss_session *session, uint32_t joint, float *out_xyz)
 fn goss_status goss_session_face_pose(goss_session *session, float *out_matrix)

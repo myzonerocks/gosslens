@@ -49,6 +49,7 @@ object Gosslens {
     internal external fun nativeHandResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeEnablePoseTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
     internal external fun nativeDisablePoseTracking(session: Long)
+    internal external fun nativeSetPoseUpperBody(session: Long, enabled: Int): Int
     internal external fun nativePoseResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeFacePose(session: Long, matrixBuffer: ByteBuffer): Int
     internal external fun nativeFaceRegion(session: Long, region: Int, outBuffer: ByteBuffer): Int
@@ -583,6 +584,10 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         Gosslens.nativeEnablePoseTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
 
     fun disablePoseTracking() = Gosslens.nativeDisablePoseTracking(handle)
+
+    /** Upper-body pose mode: while enabled the tracked pose reports only the
+     * upper body; the lower-body joints (knees down) read absent. */
+    fun setPoseUpperBody(enabled: Boolean): Boolean = Gosslens.nativeSetPoseUpperBody(handle, if (enabled) 1 else 0) == 0
 
     /** Fills [result] with the newest pose tracking output; false until
      * the worker publishes its first result. */

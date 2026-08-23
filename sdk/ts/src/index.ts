@@ -1003,6 +1003,12 @@ export class GossSession {
     this.mod.ccall("goss_session_set_layout", "number", ["number", "number"], [this.handle, arrangement]);
   }
 
+  /// Upper-body pose mode: while enabled the tracked pose reports only the upper
+  /// body; the lower-body joints (knees down) read absent.
+  setPoseUpperBody(enabled: boolean): void {
+    this.mod.ccall("goss_session_set_pose_upper_body", "number", ["number", "number"], [this.handle, enabled ? 1 : 0]);
+  }
+
   clearLayout(): void {
     this.mod.ccall("goss_session_clear_layout", "number", ["number"], [this.handle]);
   }
