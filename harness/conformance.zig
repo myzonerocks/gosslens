@@ -4482,6 +4482,76 @@ fn proveTextDraw(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a material graph can clip the frame to a region: the material-clip
+/// bundle keeps the frame inside a centre rect and blacks out the rest
+/// through a step/mix graph, so its output must differ from the plain frame.
+fn proveMaterialClip(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+
+    {
+        const plain = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(plain);
+        if (abi.goss_session_submit_frame_copy(plain, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        for (0..8) |_| {
+            _ = abi.goss_engine_render_frame(engine, plain);
+            c.glfwPollEvents();
+        }
+        engine.renderer.?.requestScreenshot("zig-out/conformance-clip-plain");
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, plain);
+            c.glfwPollEvents();
+        }
+        settle(engine);
+    }
+
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        const bundle_path = ".lens-packages/material-clip";
+        const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+        if (activated != .ok) {
+            std.debug.print("conformance: material-clip proof: activate: {s}\n", .{@tagName(activated)});
+            return false;
+        }
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        for (0..8) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        engine.renderer.?.requestScreenshot("zig-out/conformance-clip-drawn");
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        settle(engine);
+    }
+
+    const plain = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-clip-plain.tga", gpa, .limited(8 << 20));
+    defer gpa.free(plain);
+    const drawn = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-clip-drawn.tga", gpa, .limited(8 << 20));
+    defer gpa.free(drawn);
+
+    if (std.mem.eql(u8, plain, drawn)) {
+        std.debug.print("conformance: FAIL material-clip: clipping the frame to a region produced no visible change\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF material-clip clips the frame to a region: the composited output differs from the plain frame\n", .{});
+    return true;
+}
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -4571,6 +4641,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("sprite overlay");
     if (!try proveTextDraw(gpa, engine)) return 1;
     watchHold("text overlay");
+    if (!try proveMaterialClip(gpa, engine)) return 1;
+    watchHold("material clip");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

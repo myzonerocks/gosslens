@@ -1,0 +1,32 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.material-clip",
+  "version": "1.0.0",
+  "display_name": "Material Clip",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "clip", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {},
+     "material": {"output": 16, "nodes": [
+       {"kind": "uv"},
+       {"kind": "split", "inputs": [0], "params": [0, 0, 0, 0]},
+       {"kind": "split", "inputs": [0], "params": [1, 0, 0, 0]},
+       {"kind": "constant", "type": "float", "params": [0.25, 0, 0, 0]},
+       {"kind": "constant", "type": "float", "params": [0.75, 0, 0, 0]},
+       {"kind": "step", "inputs": [3, 1]},
+       {"kind": "step", "inputs": [4, 1]},
+       {"kind": "subtract", "inputs": [5, 6]},
+       {"kind": "step", "inputs": [3, 2]},
+       {"kind": "step", "inputs": [4, 2]},
+       {"kind": "subtract", "inputs": [8, 9]},
+       {"kind": "multiply", "inputs": [7, 10]},
+       {"kind": "texture", "name": "texColor"},
+       {"kind": "sample", "inputs": [12, 0]},
+       {"kind": "combine4", "inputs": [11, 11, 11, 11]},
+       {"kind": "multiply", "inputs": [13, 14]},
+       {"kind": "output", "inputs": [15]}
+     ]}}
+  ],
+  "triggers": []
+}
