@@ -28,12 +28,15 @@ pub const SignalKind = enum {
     gaze_x,
     gaze_y,
     looking_at_camera,
+    head_nod,
+    head_shake,
+    head_tilt,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera => true,
-        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y => false,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake => true,
+        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt => false,
     };
 }
 
@@ -105,6 +108,15 @@ pub const Signals = struct {
     /// the camera controls, a one-tick pulse an edge-triggered action reads once.
     camera_focus: bool = false,
     camera_exposure: bool = false,
+    /// One-tick pulses set the tick a nod (pitch oscillation) or shake (yaw
+    /// oscillation) completes, detected on-device from the head-pose history;
+    /// the raw pose never crosses the ABI, only these edges do. A refractory
+    /// window makes each completed gesture fire exactly once.
+    head_nod: bool = false,
+    head_shake: bool = false,
+    /// Current head roll (radians, positive tipping to the person's left), a
+    /// sustained level a lens compares (`head.tilt > 0.3`). Zero is upright.
+    head_tilt: f64 = 0,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -161,6 +173,8 @@ fn readBool(s: Signal, signals: Signals) bool {
             const g = gazeXY(signals);
             return @abs(g[0]) < gaze_center_threshold and @abs(g[1]) < gaze_center_threshold;
         },
+        .head_nod => signals.head_nod,
+        .head_shake => signals.head_shake,
         else => unreachable,
     };
 }
@@ -180,6 +194,7 @@ fn readNumber(s: Signal, signals: Signals) f64 {
         .camera_zoom => signals.camera_zoom,
         .gaze_x => gazeXY(signals)[0],
         .gaze_y => gazeXY(signals)[1],
+        .head_tilt => signals.head_tilt,
         else => unreachable,
     };
 }
@@ -570,6 +585,15 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "gaze") and std.mem.eql(u8, tail, "at_camera")) {
             return .{ .kind = .looking_at_camera };
         }
+        if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "nod")) {
+            return .{ .kind = .head_nod };
+        }
+        if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "shake")) {
+            return .{ .kind = .head_shake };
+        }
+        if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "tilt")) {
+            return .{ .kind = .head_tilt };
+        }
         return self.fail("unknown signal '{s}.{s}'", .{ head, tail });
     }
 };
@@ -794,4 +818,21 @@ test "gaze reads from the eyeLook blendshapes and centres with no face" {
     var centred = [_]f32{0} ** face.blendshape_count;
     try t.expect(evaluate(at.root, .{ .blendshapes = &centred })); // neutral eyes
     try t.expect(!evaluate(at.root, .{ .blendshapes = &shapes })); // gaze off to the side
+}
+
+test "head nod, shake, and tilt read the fed pose gestures" {
+    var nod = try compileOk("head.nod");
+    defer nod.deinit();
+    try t.expect(!evaluate(nod.root, .{}));
+    try t.expect(evaluate(nod.root, .{ .head_nod = true }));
+
+    var shake = try compileOk("head.shake");
+    defer shake.deinit();
+    try t.expect(!evaluate(shake.root, .{}));
+    try t.expect(evaluate(shake.root, .{ .head_shake = true }));
+
+    var tilt = try compileOk("head.tilt > 0.3");
+    defer tilt.deinit();
+    try t.expect(!evaluate(tilt.root, .{})); // upright is not past 0.3
+    try t.expect(evaluate(tilt.root, .{ .head_tilt = 0.5 }));
 }

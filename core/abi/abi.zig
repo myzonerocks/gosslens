@@ -492,6 +492,14 @@ pub const Session = struct {
     /// does not fire a stale trigger on the first tick after it does.
     cam_focus_pulse: bool = false,
     cam_exposure_pulse: bool = false,
+    /// Recent head-pose euler samples for the head-movement gesture detector,
+    /// a fixed ring fed at tick from the tracked face. The pose is computed and
+    /// scanned on-device; only the nod/shake/tilt edges reach a lens.
+    head_samples: [head_pose_history]HeadSample = @splat(.{}),
+    head_write: usize = 0,
+    head_clock_us: i64 = 0,
+    head_nod_refractory_us: i64 = 0,
+    head_shake_refractory_us: i64 = 0,
     /// The recording policy and capture-UI intent the SDK applies: the engine
     /// validates and stores them, never touching the recorder or drawing the UI.
     recording_policy: RecordingPolicy = .{},
@@ -4952,6 +4960,111 @@ pub export fn goss_session_fire_event(session: ?*Session, name: ?[*]const u8, na
     return .ok;
 }
 
+const head_pose_history = 64;
+/// One head-pose reading in the detector's ring: euler radians plus the
+/// session clock it was taken at.
+const HeadSample = struct {
+    yaw: f32 = 0,
+    pitch: f32 = 0,
+    roll: f32 = 0,
+    t_us: i64 = 0,
+    valid: bool = false,
+};
+
+const head_window_us: i64 = 900_000;
+const head_gesture_amplitude: f32 = 0.26;
+const head_gesture_reversals: u32 = 2;
+const head_gesture_vel_eps: f32 = 0.01;
+const head_gesture_refractory_us: i64 = 700_000;
+const head_dominant_ratio: f32 = 1.5;
+
+/// Decomposes the canonical->frame head transform into yaw, pitch, and roll.
+/// The basis columns carry the fit's uniform scale, so normalize first.
+fn headEuler(m: math.Mat4) HeadSample {
+    const x = math.vec.normalizeOrZero(math.vec.vec3From4(m.cols[0]));
+    const z = math.vec.normalizeOrZero(math.vec.vec3From4(m.cols[2]));
+    const pitch = std.math.asin(std.math.clamp(-z[1], -1.0, 1.0));
+    const yaw = std.math.atan2(z[0], z[2]);
+    const roll = std.math.atan2(x[1], x[0]);
+    return .{ .yaw = yaw, .pitch = pitch, .roll = roll };
+}
+
+/// Pushes a head-pose sample into the ring at the current session clock.
+fn pushHeadSample(s: *Session, e: HeadSample) void {
+    s.head_samples[s.head_write] = .{ .yaw = e.yaw, .pitch = e.pitch, .roll = e.roll, .t_us = s.head_clock_us, .valid = true };
+    s.head_write = (s.head_write + 1) % head_pose_history;
+}
+
+/// A nod is a pitch oscillation, a shake a yaw oscillation: at least two
+/// direction reversals in the window, total travel past the amplitude, and
+/// the moving axis dominating the other so a diagonal wobble fires neither.
+/// The refractory window makes each completed gesture a single edge.
+fn detectHeadGestures(s: *Session) struct { nod: bool, shake: bool } {
+    var buf: [head_pose_history]HeadSample = undefined;
+    var n: usize = 0;
+    const now = s.head_clock_us;
+    var idx: usize = s.head_write;
+    for (0..head_pose_history) |_| {
+        idx = (idx + head_pose_history - 1) % head_pose_history;
+        const smp = s.head_samples[idx];
+        if (!smp.valid or now - smp.t_us > head_window_us) break;
+        buf[n] = smp;
+        n += 1;
+    }
+    if (n < 4) return .{ .nod = false, .shake = false };
+    std.mem.reverse(HeadSample, buf[0..n]);
+
+    var pitch_rev: u32 = 0;
+    var yaw_rev: u32 = 0;
+    var p_min = buf[0].pitch;
+    var p_max = buf[0].pitch;
+    var y_min = buf[0].yaw;
+    var y_max = buf[0].yaw;
+    var p_dir: i2 = 0;
+    var y_dir: i2 = 0;
+    for (1..n) |i| {
+        const dp = buf[i].pitch - buf[i - 1].pitch;
+        const dy = buf[i].yaw - buf[i - 1].yaw;
+        const pd: i2 = if (dp > head_gesture_vel_eps) 1 else if (dp < -head_gesture_vel_eps) -1 else 0;
+        const yd: i2 = if (dy > head_gesture_vel_eps) 1 else if (dy < -head_gesture_vel_eps) -1 else 0;
+        if (pd != 0 and p_dir != 0 and pd != p_dir) pitch_rev += 1;
+        if (yd != 0 and y_dir != 0 and yd != y_dir) yaw_rev += 1;
+        if (pd != 0) p_dir = pd;
+        if (yd != 0) y_dir = yd;
+        p_min = @min(p_min, buf[i].pitch);
+        p_max = @max(p_max, buf[i].pitch);
+        y_min = @min(y_min, buf[i].yaw);
+        y_max = @max(y_max, buf[i].yaw);
+    }
+    const p_span = p_max - p_min;
+    const y_span = y_max - y_min;
+
+    var nod = false;
+    var shake = false;
+    if (now >= s.head_nod_refractory_us and pitch_rev >= head_gesture_reversals and
+        p_span > head_gesture_amplitude and p_span > y_span * head_dominant_ratio)
+    {
+        nod = true;
+        s.head_nod_refractory_us = now + head_gesture_refractory_us;
+    }
+    if (now >= s.head_shake_refractory_us and yaw_rev >= head_gesture_reversals and
+        y_span > head_gesture_amplitude and y_span > p_span * head_dominant_ratio)
+    {
+        shake = true;
+        s.head_shake_refractory_us = now + head_gesture_refractory_us;
+    }
+    return .{ .nod = nod, .shake = shake };
+}
+
+/// The head transform for the newest tracked face, or null with no face.
+fn currentHeadPose(s: *Session) ?math.Mat4 {
+    const worker = s.face_tracking orelse return null;
+    var result: face.Result = undefined;
+    if (!tracking.readResult(worker, &result)) return null;
+    if (result.landmark_count_out == 0 or result.presence < 0.5) return null;
+    return face_geometry.estimateHeadPose(&result.landmarks);
+}
+
 pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
@@ -4970,6 +5083,17 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     live_signals.camera_zoom = @max(s.camera_controls.zoom_factor, 1);
     live_signals.camera_focus = s.cam_focus_pulse;
     live_signals.camera_exposure = s.cam_exposure_pulse;
+    // Head movement rides the tracked head pose, computed and scanned
+    // on-device; only the nod/shake/tilt edges reach the lens, never the pose.
+    s.head_clock_us += @as(i64, dt_us);
+    if (currentHeadPose(s)) |head| {
+        const e = headEuler(head);
+        pushHeadSample(s, e);
+        live_signals.head_tilt = e.roll;
+        const gestures = detectHeadGestures(s);
+        live_signals.head_nod = gestures.nod;
+        live_signals.head_shake = gestures.shake;
+    }
     if (s.audio_engine_fed) {
         live_signals.audio_level = s.audio.level;
         live_signals.audio_beat = s.audio.beat;
@@ -5302,6 +5426,38 @@ test "face region guards its arguments and refuses with no tracked face" {
     try t.expectEqual(Status.invalid_argument, goss_session_face_region(session, 99, &out));
     // A valid region with no worker reports again, never a stale point.
     try t.expectEqual(Status.again, goss_session_face_region(session, 0, &out));
+}
+
+test "head euler decomposes identity to zero and the detector separates nod from shake" {
+    const identity = headEuler(math.Mat4.identity);
+    try t.expectApproxEqAbs(@as(f32, 0), identity.yaw, 1e-5);
+    try t.expectApproxEqAbs(@as(f32, 0), identity.pitch, 1e-5);
+    try t.expectApproxEqAbs(@as(f32, 0), identity.roll, 1e-5);
+
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    // A nod: pitch swings there and back while yaw holds. Samples 30 ms apart.
+    const swing = [_]f32{ 0.0, 0.15, 0.30, 0.15, 0.0, -0.05, 0.0 };
+    for (swing) |p| {
+        session.head_clock_us += 30_000;
+        pushHeadSample(session, .{ .pitch = p, .yaw = 0, .roll = 0 });
+    }
+    const nod = detectHeadGestures(session);
+    try t.expect(nod.nod);
+    try t.expect(!nod.shake);
+
+    // Advance well past the window so the nod samples age out, then a shake.
+    session.head_clock_us += 2_000_000;
+    for (swing) |y| {
+        session.head_clock_us += 30_000;
+        pushHeadSample(session, .{ .yaw = y, .pitch = 0, .roll = 0 });
+    }
+    const shake = detectHeadGestures(session);
+    try t.expect(shake.shake);
+    try t.expect(!shake.nod);
 }
 
 test "beauty on a build without the effects engine refuses" {

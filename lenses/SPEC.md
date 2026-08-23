@@ -300,6 +300,8 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   focus or exposure), `gaze.x` (horizontal eye gaze, roughly -1 to 1,
   positive toward the subject's left), `gaze.y` (vertical, positive up),
   `gaze.at_camera` (true when gaze is near centre; a lost face reads false),
+  `head.nod` / `head.shake` (true for one tick when a nod or shake completes),
+  `head.tilt` (head roll in radians, positive tipping to the subject's left),
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `tap`, `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
