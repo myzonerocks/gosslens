@@ -279,7 +279,9 @@ draw, the same normalized rect and opacity a sprite takes, and an rgb color
 (three 0..1 numbers) for the glyphs. The engine rasterizes the string with a
 built-in font, so a text node ships no asset, and composites it into the rect
 like a sprite; it takes the same `"opacity_param"` for a parameter-driven
-fade. The font covers space, digits, uppercase letters, and common
+fade. A newline in the `content` starts a new line, so a multi-line caption
+fits the rect as several rows. The font covers space, digits, uppercase
+letters, and common
 punctuation; lowercase folds to uppercase and any other character draws
 blank.
 

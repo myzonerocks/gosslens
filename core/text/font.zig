@@ -60,10 +60,22 @@ fn glyph(ch: u8) [8]u8 {
 }
 
 /// The pixel size of `text` at integer `scale` (each glyph cell is
-/// glyph_px*scale). A one-line, monospace layout.
+/// glyph_px*scale). Monospace, one row per line: a newline starts a new
+/// line, so width is the longest line and height is the line count.
 pub fn measure(text: []const u8, scale: u32) struct { w: u32, h: u32 } {
     const s = @max(scale, 1);
-    return .{ .w = @as(u32, @intCast(text.len)) * glyph_px * s, .h = glyph_px * s };
+    var lines: u32 = 1;
+    var max_len: u32 = 0;
+    var cur: u32 = 0;
+    for (text) |ch| {
+        if (ch == '\n') {
+            lines += 1;
+            if (cur > max_len) max_len = cur;
+            cur = 0;
+        } else cur += 1;
+    }
+    if (cur > max_len) max_len = cur;
+    return .{ .w = max_len * glyph_px * s, .h = lines * glyph_px * s };
 }
 
 /// Rasterizes `text` into a freshly allocated RGBA buffer: each glyph
@@ -76,9 +88,18 @@ pub fn rasterize(gpa: std.mem.Allocator, text: []const u8, scale: u32, color: [4
     const height = @max(dim.h, 1);
     const rgba = try gpa.alloc(u8, width * height * 4);
     @memset(rgba, 0);
-    for (text, 0..) |ch, ci| {
+    var col: u32 = 0;
+    var line: u32 = 0;
+    for (text) |ch| {
+        if (ch == '\n') {
+            line += 1;
+            col = 0;
+            continue;
+        }
         const rows = glyph(ch);
-        const base_x = @as(u32, @intCast(ci)) * glyph_px * s;
+        const base_x = col * glyph_px * s;
+        const base_y = line * glyph_px * s;
+        col += 1;
         for (rows, 0..) |row, ry| {
             var bit: u3 = 0;
             while (true) : (bit += 1) {
@@ -89,7 +110,7 @@ pub fn rasterize(gpa: std.mem.Allocator, text: []const u8, scale: u32, color: [4
                         var dx: u32 = 0;
                         while (dx < s) : (dx += 1) {
                             const px = base_x + @as(u32, bit) * s + dx;
-                            const py = @as(u32, @intCast(ry)) * s + dy;
+                            const py = base_y + @as(u32, @intCast(ry)) * s + dy;
                             const idx = (py * width + px) * 4;
                             rgba[idx + 0] = color[0];
                             rgba[idx + 1] = color[1];
@@ -111,6 +132,22 @@ test "measure sizes a monospace line" {
     const m = measure("ABC", 2);
     try t.expectEqual(@as(u32, 3 * 8 * 2), m.w);
     try t.expectEqual(@as(u32, 8 * 2), m.h);
+}
+
+test "measure and rasterize handle multiple lines" {
+    // Two lines, the longer one four glyphs wide, so width is 4 cells and
+    // height two rows.
+    const m = measure("HI\nFOUR", 1);
+    try t.expectEqual(@as(u32, 4 * 8), m.w);
+    try t.expectEqual(@as(u32, 2 * 8), m.h);
+
+    const out = try rasterize(t.allocator, "A\nB", 1, .{ 0, 255, 0, 255 });
+    defer t.allocator.free(out.rgba);
+    try t.expectEqual(@as(u32, 8), out.width);
+    try t.expectEqual(@as(u32, 16), out.height); // two lines tall
+    // 'B' sits on the second line (row 8): its row 0 is 0x7C, column 1 set.
+    try t.expectEqual(@as(u8, 255), out.rgba[((8 + 0) * 8 + 1) * 4 + 3]);
+    try t.expectEqual(@as(u8, 255), out.rgba[((8 + 0) * 8 + 1) * 4 + 1]); // green
 }
 
 test "rasterize sets glyph pixels opaque and leaves gaps clear" {
