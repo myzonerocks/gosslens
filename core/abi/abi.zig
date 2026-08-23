@@ -732,6 +732,7 @@ pub const Session = struct {
     mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
     model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    model_body_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     /// model.gltf nodes anchored to the tracked world, by graph index.
     model_world_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     /// One background loader per currently-spliced model.gltf node
@@ -1730,7 +1731,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     }
                     continue;
                 }
-                var anchored_without_face = false;
+                var anchored_without_target = false;
                 if (s.model_face_anchors.contains(entry.graph_index)) {
                     // The head transform lands in source-frame pixels, stretched
                     // by the preview blit to fill a rect whose z=0 plane spans
@@ -1768,19 +1769,61 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         }
                         continue;
                     }
-                    anchored_without_face = true;
+                    anchored_without_target = true;
                     if (s.face_tracking) |worker| {
                         var tracked: face.Result = undefined;
                         if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
                             if (face_geometry.estimateHeadPose(&tracked.landmarks)) |head| {
                                 model_matrix = pixel_to_world.mul(head).mul(base_model_matrix);
-                                anchored_without_face = false;
+                                anchored_without_target = false;
                             }
                         }
                     }
                 }
+                if (s.model_body_anchors.contains(entry.graph_index)) {
+                    const world_height: f32 = 1.6568542;
+                    const rect_aspect = tiledAspect(s, rect_width, rect_height);
+                    const sx = world_height * rect_aspect / @as(f32, @floatFromInt(width));
+                    const sy = world_height / @as(f32, @floatFromInt(height));
+                    const pixel_to_world: math.Mat4 = .{ .cols = .{
+                        .{ sx, 0, 0, 0 },
+                        .{ 0, -sy, 0, 0 },
+                        .{ 0, 0, -sy, 0 },
+                        .{ -0.5 * world_height * rect_aspect, 0.5 * world_height, 0, 1 },
+                    } };
+                    const base_model_matrix = model_matrix;
+                    if (s.body_count > 0) {
+                        // The host's submitted bodies drive one model per body:
+                        // blit the frame once through the first, draw the rest
+                        // of the meshes over it.
+                        var drawn_body = false;
+                        for (s.body_results[0..s.body_count]) |*br| {
+                            const bp = bodyAnchorPose(&br.landmarks) orelse continue;
+                            const m = pixel_to_world.mul(bp).mul(base_model_matrix);
+                            if (!drawn_body) {
+                                r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, m, loaded.base_color, rect_aspect);
+                                drawn_body = true;
+                            } else {
+                                r.drawModelMesh(mesh_view, loaded.mesh, m, loaded.base_color, rect_aspect);
+                            }
+                        }
+                        if (!drawn_body) r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                        if (output) |target| {
+                            input_texture = target.texture;
+                            if (!is_final) next_slot += 1;
+                        }
+                        continue;
+                    }
+                    anchored_without_target = true;
+                    if (currentPose(s)) |body| {
+                        if (bodyAnchorPose(&body.landmarks)) |bp| {
+                            model_matrix = pixel_to_world.mul(bp).mul(base_model_matrix);
+                            anchored_without_target = false;
+                        }
+                    }
+                }
                 const aspect_ratio: f32 = tiledAspect(s, rect_width, rect_height);
-                if (anchored_without_face) {
+                if (anchored_without_target) {
                     // The anchor's capability degradation: the frame
                     // still passes through, the mesh alone stays off.
                     r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
@@ -1888,6 +1931,7 @@ pub fn destroySession(session: *Session) void {
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
     session.model_face_anchors.deinit(session.engine.gpa);
+    session.model_body_anchors.deinit(session.engine.gpa);
     session.model_world_anchors.deinit(session.engine.gpa);
     if (session.physics_world) |world| world.destroy();
     session.physics_bodies.deinit(session.engine.gpa);
@@ -4314,6 +4358,7 @@ fn destroyBlendState(session: *Session) void {
 
 fn destroyMeshFaceState(session: *Session) void {
     session.model_face_anchors.clearRetainingCapacity();
+    session.model_body_anchors.clearRetainingCapacity();
     session.model_world_anchors.clearRetainingCapacity();
     if (session.engine.renderer) |*r| {
         _ = r;
@@ -4917,6 +4962,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         if (model.face_anchor) {
             session.model_face_anchors.put(gpa, model.graph_index, {}) catch {};
         }
+        if (model.body_anchor) {
+            session.model_body_anchors.put(gpa, model.graph_index, {}) catch {};
+        }
         if (model.world_anchor) {
             session.model_world_anchors.put(gpa, model.graph_index, {}) catch {};
         }
@@ -5283,6 +5331,61 @@ fn currentPose(s: *Session) ?pose.Result {
     if (!tracking.pose_worker.readResult(worker, &result)) return null;
     if (result.landmark_count_out == 0 or result.presence < 0.5) return null;
     return result;
+}
+
+/// A source-frame-pixel anchor transform for a tracked body: positioned at the
+/// torso centre, scaled by torso length, and rolled by the torso's tilt, so a
+/// body-anchored model rides the figure the way a head-anchored one rides a
+/// face. Null when the torso is degenerate.
+fn bodyAnchorPose(landmarks: *const [pose.landmark_count * 3]f32) ?math.Mat4 {
+    const at = struct {
+        fn p(l: *const [pose.landmark_count * 3]f32, i: usize) [2]f32 {
+            return .{ l[i * 3], l[i * 3 + 1] };
+        }
+    }.p;
+    const lsh = at(landmarks, 11);
+    const rsh = at(landmarks, 12);
+    const lhip = at(landmarks, 23);
+    const rhip = at(landmarks, 24);
+    const sh_cx = (lsh[0] + rsh[0]) * 0.5;
+    const sh_cy = (lsh[1] + rsh[1]) * 0.5;
+    const hip_cx = (lhip[0] + rhip[0]) * 0.5;
+    const hip_cy = (lhip[1] + rhip[1]) * 0.5;
+    const ux = sh_cx - hip_cx;
+    const uy = sh_cy - hip_cy;
+    const torso = @sqrt(ux * ux + uy * uy);
+    if (torso <= 0) return null;
+    const nux = ux / torso;
+    const nuy = uy / torso;
+    return .{ .cols = .{
+        .{ nuy * torso, -nux * torso, 0, 0 },
+        .{ nux * torso, nuy * torso, 0, 0 },
+        .{ 0, 0, torso, 0 },
+        .{ (sh_cx + hip_cx) * 0.5, (sh_cy + hip_cy) * 0.5, 0, 1 },
+    } };
+}
+
+test "bodyAnchorPose centres on the torso, scales by its length, and rejects a degenerate torso" {
+    const set = struct {
+        fn p(l: *[pose.landmark_count * 3]f32, i: usize, x: f32, y: f32) void {
+            l[i * 3] = x;
+            l[i * 3 + 1] = y;
+        }
+    }.p;
+    var lm: [pose.landmark_count * 3]f32 = @splat(0);
+    // Upright: shoulders at y=100, hips at y=300, both centred at x=200.
+    set(&lm, 11, 180, 100);
+    set(&lm, 12, 220, 100);
+    set(&lm, 23, 180, 300);
+    set(&lm, 24, 220, 300);
+    const m = bodyAnchorPose(&lm).?;
+    try t.expectApproxEqAbs(@as(f32, 200), m.cols[3][0], 0.01); // torso centre x
+    try t.expectApproxEqAbs(@as(f32, 200), m.cols[3][1], 0.01); // torso centre y
+    try t.expectApproxEqAbs(@as(f32, 0), m.cols[1][0], 0.01); // model up maps straight up,
+    try t.expectApproxEqAbs(@as(f32, -200), m.cols[1][1], 0.01); // scaled by the torso length
+
+    var flat: [pose.landmark_count * 3]f32 = @splat(0);
+    try t.expect(bodyAnchorPose(&flat) == null);
 }
 
 const body_history = 64;
