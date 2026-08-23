@@ -533,6 +533,129 @@ fn proveWorldAnchor(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the multi-face render fan-out: a face-anchored model draws once
+/// per submitted face. One real corpus face renders alone on the left, then
+/// again with a copy shifted right; the left half stays put while the right
+/// half gains the second model, so every submitted face got the model.
+fn proveMultiFaceFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL multi-face tracking enable\n", .{});
+        return false;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/face-mask", ".lens-packages/face-mask".len) != .ok) {
+        std.debug.print("conformance: FAIL multi-face lens activation\n", .{});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    // Harvest one real face off the corpus so its landmarks fit a real head.
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+    var base: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &base) == .again) {
+        std.Thread.yield() catch {};
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+
+    // A horizontal shift in landmark pixels moves the anchored model the same
+    // way on screen: one face sits left of centre, its copy sits right.
+    const shift = @as(f32, @floatFromInt(planes.width)) * 0.2;
+    const landmark_count = base.landmarks.len / 3;
+    var left = base;
+    var right = base;
+    var lm: usize = 0;
+    while (lm < landmark_count) : (lm += 1) {
+        left.landmarks[lm * 3] -= shift;
+        right.landmarks[lm * 3] += shift;
+    }
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_one = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_one);
+    const shot_two = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_two);
+
+    const one = [_]abi.FaceResult{left};
+    const two = [_]abi.FaceResult{ left, right };
+    var w1: u32 = 0;
+    var h1: u32 = 0;
+    var w2: u32 = 0;
+    var h2: u32 = 0;
+    try renderSubmittedFaces(engine, session, &desc, planes, &one, shot_one, &w1, &h1);
+    try renderSubmittedFaces(engine, session, &desc, planes, &two, shot_two, &w2, &h2);
+    if (w1 != w2 or h1 != h2 or w1 == 0 or h1 == 0) {
+        std.debug.print("conformance: FAIL multi-face capture size {d}x{d} vs {d}x{d}\n", .{ w1, h1, w2, h2 });
+        return false;
+    }
+
+    // Count where the second face changed the frame. Its model lands right of
+    // centre, so the right half must move far more than the left.
+    var left_changed: usize = 0;
+    var right_changed: usize = 0;
+    var y: u32 = 0;
+    while (y < h1) : (y += 1) {
+        var x: u32 = 0;
+        while (x < w1) : (x += 1) {
+            const idx = (y * w1 + x) * 4;
+            const differs = !std.mem.eql(u8, shot_one[idx .. idx + 4], shot_two[idx .. idx + 4]);
+            if (differs) {
+                if (x < w1 / 2) left_changed += 1 else right_changed += 1;
+            }
+        }
+    }
+    if (right_changed == 0 or right_changed <= left_changed * 3) {
+        std.debug.print("conformance: FAIL multi-face fan-out (left changed {d}, right changed {d})\n", .{ left_changed, right_changed });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_two[0 .. w1 * h1 * 4], @intCast(w1), @intCast(h1));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-multi-face.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF a face-anchored model fans out to every submitted face (left changed {d}, right changed {d})\n", .{ left_changed, right_changed });
+    return true;
+}
+
+/// Submits one frame with a set of faces, renders it settled, and captures.
+fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, faces: []const abi.FaceResult, shot: []u8, out_w: *u32, out_h: *u32) !void {
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_faces(session, faces.ptr, @intCast(faces.len)) != .ok) return error.SubmitFacesFailed;
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) {
+        return error.CaptureFailed;
+    }
+}
+
 /// Proves lens physics end to end: a dropped marker settles onto the
 /// slab across advancing frame timestamps, the settled frame differs
 /// from the falling frame, and two runs land bit-identical.
@@ -3429,6 +3552,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveVideoRecording(gpa, engine)) return 1;
     if (!try provePlatformPhotos(gpa, engine)) return 1;
     if (!try proveWorldAnchor(gpa, engine)) return 1;
+    if (!try proveMultiFaceFanOut(gpa, engine)) return 1;
     if (!try provePhysicsDrop(gpa, engine)) return 1;
     if (!try provePhysicsChain(gpa, engine)) return 1;
     if (!try proveClothFlag(gpa, engine)) return 1;
