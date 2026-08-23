@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 29u
+#define GOSS_ABI_MINOR 30u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -404,6 +404,44 @@ typedef struct goss_camera_controls {
 goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls);
 goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out);
 
+/* How the SDK should record. The engine only stores this intent; it never drives
+ * the recorder. Layout: 40 bytes, static-asserted below. */
+typedef struct goss_recording_policy {
+    uint32_t max_duration_ms; /* 0 unlimited, else a hard clip cap */
+    uint32_t min_clip_ms;     /* a segment shorter than this is dropped */
+    uint32_t segment_mode;    /* 0 single take, 1 multi-clip pause/resume */
+    uint32_t loop_playback;   /* 0 off, 1 loop the recorded clip */
+    uint32_t speed_preset;    /* 0 1x, 1 0.3x, 2 0.5x, 3 2x, 4 3x */
+    uint32_t mic_muted;       /* 0 record mic, 1 mute */
+    uint32_t save_original;   /* 0 off, 1 keep the unprocessed take too */
+    uint32_t stabilization;   /* 0 off, 1 standard, 2 cinematic */
+    uint32_t reserved0;
+    uint32_t reserved1;
+} goss_recording_policy;
+
+/* The capture chrome the app draws over its own surface. The engine only stores
+ * the intent; the front-screen flash is a brightness/warmth fill the app draws,
+ * not baked into the captured frame. Layout: 40 bytes, static-asserted below. */
+typedef struct goss_capture_ui {
+    uint32_t grid_mode;              /* 0 off, 1 thirds, 2 golden, 3 square */
+    uint32_t level_indicator;        /* 0 off, 1 on */
+    uint32_t shutter_mode;           /* 0 photo, 1 hold-video, 2 handsfree, 3 loop, 4 timer */
+    uint32_t countdown_s;            /* self-timer seconds, 0 off */
+    uint32_t night_mode;             /* 0 off, 1 on, 2 auto */
+    uint32_t screen_flash_mode;      /* 0 off, 1 on, 2 auto (front-screen fill) */
+    float screen_flash_intensity;    /* 0..1 brightness of the fill */
+    float screen_flash_warmth;       /* 0 cool .. 1 warm */
+    uint32_t reserved0;
+    uint32_t reserved1;
+} goss_capture_ui;
+
+/* Graph thread. The engine validates and stores these; the SDK reads them back
+ * and applies them to the platform recorder and the capture UI. */
+goss_status goss_session_set_recording_policy(goss_session *session, const goss_recording_policy *policy);
+goss_status goss_session_recording_policy(goss_session *session, goss_recording_policy *out);
+goss_status goss_session_set_capture_ui(goss_session *session, const goss_capture_ui *ui);
+goss_status goss_session_capture_ui(goss_session *session, goss_capture_ui *out);
+
 /* Graph thread. config may be null for defaults. */
 goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session);
 void goss_session_destroy(goss_session *session);
@@ -699,6 +737,8 @@ _Static_assert(sizeof(goss_renderer_desc) == (sizeof(void *) == 8 ? 16 : 12), "g
 _Static_assert(sizeof(goss_frame_planes) == 32, "goss_frame_planes layout is frozen");
 _Static_assert(sizeof(goss_lens_signals) == 232, "goss_lens_signals layout is frozen");
 _Static_assert(sizeof(goss_camera_controls) == 56, "goss_camera_controls layout is frozen");
+_Static_assert(sizeof(goss_recording_policy) == 40, "goss_recording_policy layout is frozen");
+_Static_assert(sizeof(goss_capture_ui) == 40, "goss_capture_ui layout is frozen");
 _Static_assert(offsetof(goss_lens_signals, world_tracking_state) == 8, "goss_lens_signals layout is frozen");
 _Static_assert(offsetof(goss_lens_signals, blendshapes) == 24, "goss_lens_signals layout is frozen");
 #endif

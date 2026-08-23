@@ -539,6 +539,28 @@ export interface GossCameraControls {
   mirrorSavePolicy: number;
 }
 
+export interface GossRecordingPolicy {
+  maxDurationMs: number;
+  minClipMs: number;
+  segmentMode: number;
+  loopPlayback: number;
+  speedPreset: number;
+  micMuted: number;
+  saveOriginal: number;
+  stabilization: number;
+}
+
+export interface GossCaptureUi {
+  gridMode: number;
+  levelIndicator: number;
+  shutterMode: number;
+  countdownS: number;
+  nightMode: number;
+  screenFlashMode: number;
+  screenFlashIntensity: number;
+  screenFlashWarmth: number;
+}
+
 /// Per-preview runtime: frame submission, beauty, tracking, lens. Owns
 /// its own scratch allocations (frame descriptor, pixel buffer,
 /// landmarks) rather than one shared per-engine pool - matches every
@@ -749,6 +771,62 @@ export class GossSession {
     };
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 56]);
     return c;
+  }
+
+  /// Stores the recording policy the app applies to MediaRecorder. The engine
+  /// normalizes it; read it back with `recordingPolicy`.
+  setRecordingPolicy(p: GossRecordingPolicy): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [40]) as number;
+    const w = ptr >> 2;
+    this.mod.HEAP32[w] = p.maxDurationMs; this.mod.HEAP32[w + 1] = p.minClipMs;
+    this.mod.HEAP32[w + 2] = p.segmentMode; this.mod.HEAP32[w + 3] = p.loopPlayback;
+    this.mod.HEAP32[w + 4] = p.speedPreset; this.mod.HEAP32[w + 5] = p.micMuted;
+    this.mod.HEAP32[w + 6] = p.saveOriginal; this.mod.HEAP32[w + 7] = p.stabilization;
+    this.mod.HEAP32[w + 8] = 0; this.mod.HEAP32[w + 9] = 0;
+    this.mod.ccall("goss_session_set_recording_policy", "number", ["number", "number"], [this.handle, ptr]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 40]);
+  }
+
+  recordingPolicy(): GossRecordingPolicy {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [40]) as number;
+    this.mod.ccall("goss_session_recording_policy", "number", ["number", "number"], [this.handle, ptr]);
+    const w = ptr >> 2;
+    const p: GossRecordingPolicy = {
+      maxDurationMs: this.mod.HEAP32[w], minClipMs: this.mod.HEAP32[w + 1],
+      segmentMode: this.mod.HEAP32[w + 2], loopPlayback: this.mod.HEAP32[w + 3],
+      speedPreset: this.mod.HEAP32[w + 4], micMuted: this.mod.HEAP32[w + 5],
+      saveOriginal: this.mod.HEAP32[w + 6], stabilization: this.mod.HEAP32[w + 7],
+    };
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 40]);
+    return p;
+  }
+
+  /// Stores the capture-UI intent the page renders (grid, timer, night mode, the
+  /// front-screen flash). The engine normalizes it; read it back with `captureUi`.
+  setCaptureUi(u: GossCaptureUi): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [40]) as number;
+    const w = ptr >> 2;
+    this.mod.HEAP32[w] = u.gridMode; this.mod.HEAP32[w + 1] = u.levelIndicator;
+    this.mod.HEAP32[w + 2] = u.shutterMode; this.mod.HEAP32[w + 3] = u.countdownS;
+    this.mod.HEAP32[w + 4] = u.nightMode; this.mod.HEAP32[w + 5] = u.screenFlashMode;
+    this.mod.HEAPF32[w + 6] = u.screenFlashIntensity; this.mod.HEAPF32[w + 7] = u.screenFlashWarmth;
+    this.mod.HEAP32[w + 8] = 0; this.mod.HEAP32[w + 9] = 0;
+    this.mod.ccall("goss_session_set_capture_ui", "number", ["number", "number"], [this.handle, ptr]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 40]);
+  }
+
+  captureUi(): GossCaptureUi {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [40]) as number;
+    this.mod.ccall("goss_session_capture_ui", "number", ["number", "number"], [this.handle, ptr]);
+    const w = ptr >> 2;
+    const u: GossCaptureUi = {
+      gridMode: this.mod.HEAP32[w], levelIndicator: this.mod.HEAP32[w + 1],
+      shutterMode: this.mod.HEAP32[w + 2], countdownS: this.mod.HEAP32[w + 3],
+      nightMode: this.mod.HEAP32[w + 4], screenFlashMode: this.mod.HEAP32[w + 5],
+      screenFlashIntensity: this.mod.HEAPF32[w + 6], screenFlashWarmth: this.mod.HEAPF32[w + 7],
+    };
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 40]);
+    return u;
   }
 
   /// Fires a named event the next `tickLens` delivers to the lens's

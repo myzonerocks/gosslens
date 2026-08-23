@@ -295,7 +295,9 @@ small closed grammar, parsed once at load time into a typed expression tree
 
 - Signal reads: `face.blendshape('name')`, `face.present`, `hands.present`,
   `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
-onset hops), `timer('name')` (seconds since the
+onset hops), `camera.zoom` (the camera zoom factor, one at rest),
+  `camera.focus`, `camera.exposure` (true for one tick after the app changes
+  focus or exposure), `timer('name')` (seconds since the
   timer's last reset, see actions below), `tap`, `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
   numeric or boolean literal.

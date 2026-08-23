@@ -22,12 +22,15 @@ pub const SignalKind = enum {
     param,
     event,
     geo_in_region,
+    camera_zoom,
+    camera_focus,
+    camera_exposure,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region => true,
-        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param => false,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure => true,
+        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom => false,
     };
 }
 
@@ -91,6 +94,14 @@ pub const Signals = struct {
     /// on-device from goss_session_submit_location; the location never crosses
     /// the ABI, only this boolean.
     geo_in_region: bool = false,
+    /// The camera's current zoom factor, engine-fed at tick from the session's
+    /// camera controls, so a lens fires an effect on zoom (`camera.zoom > 2`).
+    /// One means no zoom, the resting value before any control is set.
+    camera_zoom: f64 = 1,
+    /// True for exactly the tick after the app changed focus or exposure through
+    /// the camera controls, a one-tick pulse an edge-triggered action reads once.
+    camera_focus: bool = false,
+    camera_exposure: bool = false,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -116,6 +127,8 @@ fn readBool(s: Signal, signals: Signals) bool {
             return false;
         },
         .geo_in_region => signals.geo_in_region,
+        .camera_focus => signals.camera_focus,
+        .camera_exposure => signals.camera_exposure,
         else => unreachable,
     };
 }
@@ -132,6 +145,7 @@ fn readNumber(s: Signal, signals: Signals) f64 {
             break :blk 0;
         },
         .param => if (s.param_index < signals.params.len) signals.params[s.param_index] else 0,
+        .camera_zoom => signals.camera_zoom,
         else => unreachable,
     };
 }
@@ -504,6 +518,15 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "beat")) {
             return .{ .kind = .audio_beat };
         }
+        if (std.mem.eql(u8, head, "camera") and std.mem.eql(u8, tail, "zoom")) {
+            return .{ .kind = .camera_zoom };
+        }
+        if (std.mem.eql(u8, head, "camera") and std.mem.eql(u8, tail, "focus")) {
+            return .{ .kind = .camera_focus };
+        }
+        if (std.mem.eql(u8, head, "camera") and std.mem.eql(u8, tail, "exposure")) {
+            return .{ .kind = .camera_exposure };
+        }
         return self.fail("unknown signal '{s}.{s}'", .{ head, tail });
     }
 };
@@ -690,4 +713,23 @@ test "geo.in_region reads the on-device membership boolean" {
     defer expr.deinit();
     try t.expect(!evaluate(expr.root, .{}));
     try t.expect(evaluate(expr.root, .{ .geo_in_region = true }));
+}
+
+test "camera.zoom compiles as a numeric signal and compares live" {
+    var expr = try compileOk("camera.zoom > 2");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{})); // resting zoom of 1 is not past 2
+    try t.expect(!evaluate(expr.root, .{ .camera_zoom = 2 })); // exactly 2 is not past it
+    try t.expect(evaluate(expr.root, .{ .camera_zoom = 3 })); // zoomed in past 2
+}
+
+test "camera.focus and camera.exposure read the one-tick change pulses" {
+    var f = try compileOk("camera.focus");
+    defer f.deinit();
+    try t.expect(!evaluate(f.root, .{}));
+    try t.expect(evaluate(f.root, .{ .camera_focus = true }));
+    var e = try compileOk("camera.exposure");
+    defer e.deinit();
+    try t.expect(!evaluate(e.root, .{}));
+    try t.expect(evaluate(e.root, .{ .camera_exposure = true }));
 }

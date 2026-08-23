@@ -76,6 +76,10 @@ object Gosslens {
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
     internal external fun nativeCameraControls(session: Long, buffer: ByteBuffer): Int
+    internal external fun nativeSetRecordingPolicy(session: Long, buffer: ByteBuffer): Int
+    internal external fun nativeRecordingPolicy(session: Long, buffer: ByteBuffer): Int
+    internal external fun nativeSetCaptureUi(session: Long, buffer: ByteBuffer): Int
+    internal external fun nativeCaptureUi(session: Long, buffer: ByteBuffer): Int
     internal external fun nativeFireEvent(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
     internal external fun nativeDefineSource(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
     internal external fun nativeRemoveSource(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
@@ -193,6 +197,28 @@ data class GossCameraControls(
     val zoomFactor: Float = 1f,
     val maxZoomFactor: Float = 0f,
     val mirrorSavePolicy: Int = 0,
+)
+
+data class GossRecordingPolicy(
+    val maxDurationMs: Int = 0,
+    val minClipMs: Int = 0,
+    val segmentMode: Int = 0,
+    val loopPlayback: Int = 0,
+    val speedPreset: Int = 0,
+    val micMuted: Int = 0,
+    val saveOriginal: Int = 0,
+    val stabilization: Int = 0,
+)
+
+data class GossCaptureUi(
+    val gridMode: Int = 0,
+    val levelIndicator: Int = 0,
+    val shutterMode: Int = 0,
+    val countdownS: Int = 0,
+    val nightMode: Int = 0,
+    val screenFlashMode: Int = 0,
+    val screenFlashIntensity: Float = 1f,
+    val screenFlashWarmth: Float = 0.5f,
 )
 
 class GossEngine private constructor(internal val handle: Long) : AutoCloseable {
@@ -646,6 +672,44 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
             buf.getFloat(16), buf.getFloat(20), buf.getInt(24),
             buf.getFloat(28), buf.getFloat(32), buf.getFloat(36),
             buf.getFloat(40), buf.getFloat(44), buf.getInt(48),
+        )
+    }
+
+    /** Stores the recording policy the SDK applies to the platform recorder. */
+    fun setRecordingPolicy(p: GossRecordingPolicy): Boolean {
+        val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
+        buf.putInt(p.maxDurationMs); buf.putInt(p.minClipMs); buf.putInt(p.segmentMode); buf.putInt(p.loopPlayback)
+        buf.putInt(p.speedPreset); buf.putInt(p.micMuted); buf.putInt(p.saveOriginal); buf.putInt(p.stabilization)
+        buf.putInt(0); buf.putInt(0)
+        buf.rewind()
+        return Gosslens.nativeSetRecordingPolicy(handle, buf) == 0
+    }
+
+    fun recordingPolicy(): GossRecordingPolicy? {
+        val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeRecordingPolicy(handle, buf) != 0) return null
+        return GossRecordingPolicy(
+            buf.getInt(0), buf.getInt(4), buf.getInt(8), buf.getInt(12),
+            buf.getInt(16), buf.getInt(20), buf.getInt(24), buf.getInt(28),
+        )
+    }
+
+    /** Stores the capture-UI intent the app renders (grid, timer, night mode, flash). */
+    fun setCaptureUi(u: GossCaptureUi): Boolean {
+        val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
+        buf.putInt(u.gridMode); buf.putInt(u.levelIndicator); buf.putInt(u.shutterMode); buf.putInt(u.countdownS)
+        buf.putInt(u.nightMode); buf.putInt(u.screenFlashMode); buf.putFloat(u.screenFlashIntensity); buf.putFloat(u.screenFlashWarmth)
+        buf.putInt(0); buf.putInt(0)
+        buf.rewind()
+        return Gosslens.nativeSetCaptureUi(handle, buf) == 0
+    }
+
+    fun captureUi(): GossCaptureUi? {
+        val buf = ByteBuffer.allocateDirect(40).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeCaptureUi(handle, buf) != 0) return null
+        return GossCaptureUi(
+            buf.getInt(0), buf.getInt(4), buf.getInt(8), buf.getInt(12),
+            buf.getInt(16), buf.getInt(20), buf.getFloat(24), buf.getFloat(28),
         )
     }
 

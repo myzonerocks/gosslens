@@ -1,4 +1,4 @@
-abi 0.29
+abi 0.30
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -70,6 +70,28 @@ type abi.CameraControls size=56 align=4
   field max_zoom_factor offset=44 size=4
   field mirror_save_policy offset=48 size=4
   field reserved offset=52 size=4
+type abi.RecordingPolicy size=40 align=4
+  field max_duration_ms offset=0 size=4
+  field min_clip_ms offset=4 size=4
+  field segment_mode offset=8 size=4
+  field loop_playback offset=12 size=4
+  field speed_preset offset=16 size=4
+  field mic_muted offset=20 size=4
+  field save_original offset=24 size=4
+  field stabilization offset=28 size=4
+  field reserved0 offset=32 size=4
+  field reserved1 offset=36 size=4
+type abi.CaptureUiIntent size=40 align=4
+  field grid_mode offset=0 size=4
+  field level_indicator offset=4 size=4
+  field shutter_mode offset=8 size=4
+  field countdown_s offset=12 size=4
+  field night_mode offset=16 size=4
+  field screen_flash_mode offset=20 size=4
+  field screen_flash_intensity offset=24 size=4
+  field screen_flash_warmth offset=28 size=4
+  field reserved0 offset=32 size=4
+  field reserved1 offset=36 size=4
 fn uint32_t goss_abi_version(void)
 fn void *goss_alloc(size_t size)
 fn void goss_free(void *ptr, size_t size)
@@ -94,6 +116,10 @@ fn goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint
 fn goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)
 fn goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)
 fn goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)
+fn goss_status goss_session_set_recording_policy(goss_session *session, const goss_recording_policy *policy)
+fn goss_status goss_session_recording_policy(goss_session *session, goss_recording_policy *out)
+fn goss_status goss_session_set_capture_ui(goss_session *session, const goss_capture_ui *ui)
+fn goss_status goss_session_capture_ui(goss_session *session, goss_capture_ui *out)
 fn goss_status goss_session_fire_event(goss_session *session, const uint8_t *name, size_t name_len)
 fn goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len)
 fn goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len)
