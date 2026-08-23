@@ -336,6 +336,19 @@ pub const Renderer = struct {
         return error.RendererUnavailable;
     }
 
+    pub fn createDynamicModelMesh(r: *Renderer, positions: []const [3]f32, indices: []const u32) !ModelMesh {
+        _ = r;
+        _ = positions;
+        _ = indices;
+        return error.RendererUnavailable;
+    }
+
+    pub fn updateModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
+    }
+
     pub fn destroyModelMesh(mesh: ModelMesh) void {
         _ = mesh;
     }

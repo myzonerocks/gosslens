@@ -114,6 +114,10 @@ const LensNode = struct {
     /// value is that clip's blend weight; empty plays the first clip.
     /// Slices into the retained manifest arena, not separately owned.
     clip_weights: []const []const u8 = &.{},
+    /// .model_gltf only: a parameter name per morph target whose live
+    /// value is that target's blend weight; empty leaves the mesh
+    /// unmorphed. Slices into the retained manifest arena.
+    morph_weights: []const []const u8 = &.{},
     /// .grade_pass only: the node's parametric color grade.
     grade: ?manifest.GradeField = null,
     /// .bloom_pass only: the node's glow threshold and intensity.
@@ -445,6 +449,22 @@ pub const Lens = struct {
         return node.clip_weights.len > 0;
     }
 
+    /// The blend weight the model.gltf node at graph_index binds to its
+    /// morph target at target_index: the bound parameter's live value, 0
+    /// for a target past the bound list or when the node binds none.
+    pub fn morphWeight(self: *const Lens, graph_index: graph.NodeIndex, target_index: usize) f32 {
+        const node = self.findNode(graph_index) orelse return 0;
+        if (target_index >= node.morph_weights.len) return 0;
+        return self.paramValue(node.morph_weights[target_index]) orelse 0;
+    }
+
+    /// Whether the model.gltf node at graph_index binds any morph weights,
+    /// so the caller knows to deform the mesh this frame.
+    pub fn bindsMorphWeights(self: *const Lens, graph_index: graph.NodeIndex) bool {
+        const node = self.findNode(graph_index) orelse return false;
+        return node.morph_weights.len > 0;
+    }
+
     /// The inline source of this lens's script node, or null if it has none.
     /// The host runs it each tick to drive parameters.
     pub fn scriptSource(self: *const Lens) ?[]const u8 {
@@ -593,6 +613,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .hair = if (node_type == .model_gltf) node.hair else null,
             .particles = if (node_type == .model_gltf) node.particles else null,
             .clip_weights = if (node_type == .model_gltf) node.clip_weights else &.{},
+            .morph_weights = if (node_type == .model_gltf) node.morph_weights else &.{},
             .grade = if (node_type == .grade_pass) node.grade else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .layout = if (node_type == .layout_composite) node.layout else null,
@@ -899,6 +920,40 @@ test "a model node reads its clip weights from the parameters it binds" {
 
     lens.setParam("run", 0.75);
     try t.expectEqual(@as(f32, 0.75), lens.clipWeight(gi, 1).?);
+}
+
+const morph_weight_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.morph", "version": "1.0.0", "display_name": "Morph",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [
+    \\    {"name": "smile", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0},
+    \\    {"name": "blink", "type": "float", "default": 0.25, "min": 0.0, "max": 1.0}],
+    \\  "nodes": [
+    \\    {"id": "face", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "morph_weights": ["smile", "blink"]}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a model node reads its morph weights from the parameters it binds" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, morph_weight_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    try t.expectEqual(NodeType.model_gltf, lens.nodes[0].node_type);
+    const gi = lens.nodes[0].graph_index;
+    try t.expect(lens.bindsMorphWeights(gi));
+    try t.expectEqual(@as(f32, 0.0), lens.morphWeight(gi, 0)); // smile default
+    try t.expectEqual(@as(f32, 0.25), lens.morphWeight(gi, 1)); // blink default
+    try t.expectEqual(@as(f32, 0.0), lens.morphWeight(gi, 2)); // a target past the list weighs nothing
+
+    lens.setParam("smile", 1.0);
+    try t.expectEqual(@as(f32, 1.0), lens.morphWeight(gi, 0));
 }
 
 const shader_pass_manifest =

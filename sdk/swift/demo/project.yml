@@ -46,6 +46,10 @@ targets:
         type: folder
         buildPhase: resources
         optional: true
+      - path: ../../../.lens-packages/morph-blend
+        type: folder
+        buildPhase: resources
+        optional: true
     dependencies:
       - package: Gosslens
     settings:

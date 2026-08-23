@@ -1240,8 +1240,14 @@ pub const Renderer = struct {
     /// A model.gltf node's geometry, uploaded once at load time - fixed
     /// topology, unlike the makeup mesh's per-frame-updated positions,
     /// so both buffers are static (not dynamic).
+    /// A model mesh, static by default. A mesh with morph targets is
+    /// built dynamic instead: its positions live in a dynamic buffer the
+    /// morph pass re-uploads each frame, drawn by the same model program.
     pub const ModelMesh = struct {
-        vertex_buffer: c.bgfx_vertex_buffer_handle_t,
+        vertex_buffer: c.bgfx_vertex_buffer_handle_t = .{ .idx = invalid_handle },
+        dynamic_vertex_buffer: c.bgfx_dynamic_vertex_buffer_handle_t = .{ .idx = invalid_handle },
+        dynamic: bool = false,
+        vertex_count: u32 = 0,
         index_buffer: c.bgfx_index_buffer_handle_t,
         index_count: u32,
     };
@@ -1289,12 +1295,46 @@ pub const Renderer = struct {
         }
         const vertex_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))), &r.layout, 0);
         const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
-        return .{ .vertex_buffer = vertex_buffer, .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
+        return .{ .vertex_buffer = vertex_buffer, .vertex_count = @intCast(positions.len), .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
+    }
+
+    /// Like createModelMesh but backs the positions with a dynamic buffer
+    /// the morph pass re-uploads each frame; the initial upload is the
+    /// mesh's rest positions, so it draws unmorphed until a weight moves.
+    pub fn createDynamicModelMesh(r: *Renderer, positions: []const [3]f32, indices: []const u32) !ModelMesh {
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(@intCast(positions.len), &r.layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        const mesh: ModelMesh = .{ .dynamic_vertex_buffer = position_buffer, .dynamic = true, .vertex_count = @intCast(positions.len), .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
+        r.updateModelMesh(mesh, positions);
+        return mesh;
+    }
+
+    /// Re-uploads deformed positions into a dynamic model mesh, padding
+    /// the texcoord to zero to match r.layout. A no-op on a static mesh.
+    pub fn updateModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32) void {
+        if (!mesh.dynamic) return;
+        const count = @min(positions.len, mesh.vertex_count);
+        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
+        defer r.gpa.free(interleaved);
+        for (0..count) |i| {
+            interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
+        }
+        c.bgfx_update_dynamic_vertex_buffer(mesh.dynamic_vertex_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
     }
 
     pub fn destroyModelMesh(mesh: ModelMesh) void {
-        c.bgfx_destroy_vertex_buffer(mesh.vertex_buffer);
+        if (mesh.dynamic) c.bgfx_destroy_dynamic_vertex_buffer(mesh.dynamic_vertex_buffer) else c.bgfx_destroy_vertex_buffer(mesh.vertex_buffer);
         c.bgfx_destroy_index_buffer(mesh.index_buffer);
+    }
+
+    /// Binds a model mesh's positions, dynamic buffer or static, so the
+    /// three model draw paths do not each branch on the buffer kind.
+    fn setModelVertexBuffer(mesh: ModelMesh) void {
+        if (mesh.dynamic) {
+            c.bgfx_set_dynamic_vertex_buffer(0, mesh.dynamic_vertex_buffer, 0, mesh.vertex_count);
+        } else {
+            c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
+        }
     }
 
     /// Builds a skinned mesh: a dynamic position buffer sized to the
@@ -1549,7 +1589,7 @@ pub const Renderer = struct {
         const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
         c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
         _ = c.bgfx_set_transform(&model_matrix.cols, 1);
-        c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
+        setModelVertexBuffer(mesh);
         c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
@@ -1580,7 +1620,7 @@ pub const Renderer = struct {
         const projection_tiled = r.tiledProjection(projection);
         c.bgfx_set_view_transform(mesh_view, &view.cols, &projection_tiled.cols);
         _ = c.bgfx_set_transform(&model_matrix.cols, 1);
-        c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
+        setModelVertexBuffer(mesh);
         c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);

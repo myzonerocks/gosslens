@@ -790,6 +790,10 @@ const SkinnedRig = struct {
 /// contribute to the blended pose - far above any real rig's clip count.
 const max_blend_clips = 16;
 
+/// The most morph targets one model node blends in a frame; only the
+/// first this many carry a weight. Above the 52 an ARKit face rig uses.
+const max_morph_targets = 64;
+
 const LoadedModel = struct {
     mesh: render.Renderer.ModelMesh,
     base_color: [4]f32,
@@ -799,7 +803,27 @@ const LoadedModel = struct {
     /// lens can blend them into the mesh by weight. Empty for a mesh with
     /// no blendshapes.
     morph_targets: []const []const [3]f32 = &.{},
+    /// A morphable mesh keeps its rest positions and a scratch buffer to
+    /// deform into each frame; its `mesh` is a dynamic model mesh. Both
+    /// empty for a mesh with no morph targets.
+    morph_rest: []const [3]f32 = &.{},
+    morph_scratch: [][3]f32 = &.{},
 };
+
+/// Deforms rest positions by a weighted sum of morph target deltas into
+/// `out`: out[v] = rest[v] + sum_t weight[t] * target[t][v]. Weights come
+/// from the lens; a zero weight leaves that target out at no cost.
+fn morphPositions(out: [][3]f32, rest: []const [3]f32, targets: []const []const [3]f32, weights: []const f32) void {
+    for (out, rest) |*o, base| o.* = base;
+    for (targets, weights) |target, w| {
+        if (w == 0) continue;
+        for (out, target) |*o, delta| {
+            o[0] += w * delta[0];
+            o[1] += w * delta[1];
+            o[2] += w * delta[2];
+        }
+    }
+}
 
 /// The model node's local matrix this frame: the weighted blend of its
 /// clips' sampled poses. A lens can bind each clip's weight to a live
@@ -1767,6 +1791,20 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const elapsed_us = if (active_lens) |lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
                 const elapsed_seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0;
                 var model_matrix = modelPoseMatrix(loaded, elapsed_seconds, active_lens, entry.graph_index);
+                // A morphable mesh deforms its rest positions by the lens's
+                // bound morph weights and re-uploads once, before any anchor
+                // path draws it; an unbound mesh keeps its rest shape.
+                if (loaded.morph_targets.len > 0 and loaded.morph_scratch.len > 0) {
+                    if (active_lens) |lens| {
+                        if (lens.bindsMorphWeights(entry.graph_index)) {
+                            var weights: [max_morph_targets]f32 = undefined;
+                            const n = @min(loaded.morph_targets.len, max_morph_targets);
+                            for (0..n) |ti| weights[ti] = lens.morphWeight(entry.graph_index, ti);
+                            morphPositions(loaded.morph_scratch, loaded.morph_rest, loaded.morph_targets[0..n], weights[0..n]);
+                            r.updateModelMesh(loaded.mesh, loaded.morph_scratch);
+                        }
+                    }
+                }
                 if (s.physics_bodies.get(entry.graph_index)) |body_id| {
                     if (s.physics_world) |world| {
                         if (world.bodyPose(body_id)) |body_pose| {
@@ -4741,6 +4779,8 @@ fn destroyModelState(session: *Session) void {
         render.Renderer.destroyModelMesh(loaded.mesh);
         gltf.freeAnimations(session.engine.gpa, loaded.animations);
         gltf.freeMorphTargets(session.engine.gpa, loaded.morph_targets);
+        if (loaded.morph_rest.len > 0) session.engine.gpa.free(loaded.morph_rest);
+        if (loaded.morph_scratch.len > 0) session.engine.gpa.free(loaded.morph_scratch);
         if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
     session.model_meshes.clearRetainingCapacity();
@@ -5430,7 +5470,13 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     while (it.next()) |entry| {
         const loader = entry.value_ptr.*;
         if (loader.take()) |decoded| {
-            const mesh = r.createModelMesh(decoded.positions, decoded.indices) catch {
+            // A morphable mesh draws from a dynamic buffer the morph pass
+            // re-uploads each frame; a plain mesh uploads once and stays static.
+            const has_morph = decoded.morph_targets.len > 0;
+            const mesh = (if (has_morph)
+                r.createDynamicModelMesh(decoded.positions, decoded.indices)
+            else
+                r.createModelMesh(decoded.positions, decoded.indices)) catch {
                 gpa.free(decoded.positions);
                 gpa.free(decoded.indices);
                 gltf.freeAnimations(gpa, decoded.animations);
@@ -5446,7 +5492,20 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 (buildSkinnedRig(r, gpa, decoded.positions, decoded.indices, sk) catch null)
             else
                 null;
-            gpa.free(decoded.positions);
+            // A morph mesh keeps its rest positions to deform against and a
+            // scratch buffer for the deformed output; a plain mesh drops them.
+            var morph_rest: []const [3]f32 = &.{};
+            var morph_scratch: [][3]f32 = &.{};
+            if (has_morph) {
+                if (gpa.alloc([3]f32, decoded.positions.len)) |scratch| {
+                    morph_rest = decoded.positions;
+                    morph_scratch = scratch;
+                } else |_| {
+                    gpa.free(decoded.positions);
+                }
+            } else {
+                gpa.free(decoded.positions);
+            }
             gpa.free(decoded.indices);
             session.model_meshes.put(gpa, entry.key_ptr.*, .{
                 .mesh = mesh,
@@ -5454,6 +5513,8 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 .animations = decoded.animations,
                 .rig = rig,
                 .morph_targets = decoded.morph_targets,
+                .morph_rest = morph_rest,
+                .morph_scratch = morph_scratch,
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
                 if (rig) |rg| {
@@ -5462,6 +5523,8 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 }
                 gltf.freeAnimations(gpa, decoded.animations);
                 gltf.freeMorphTargets(gpa, decoded.morph_targets);
+                if (morph_rest.len > 0) gpa.free(morph_rest);
+                if (morph_scratch.len > 0) gpa.free(morph_scratch);
             };
             finished.append(gpa, entry.key_ptr.*) catch {};
         } else if (loader.hasFailed()) {
@@ -5812,6 +5875,28 @@ test "skinPositions blends weighted joint transforms and renormalizes" {
     try t.expectApproxEqAbs(@as(f32, 6), out[0][0], 0.001);
     // Fully joint 1: the origin shifted straight to x=10.
     try t.expectApproxEqAbs(@as(f32, 10), out[1][0], 0.001);
+}
+
+test "morphPositions adds weighted target deltas to the rest pose" {
+    const rest = [_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 } };
+    const smile = [_][3]f32{ .{ 0, 1, 0 }, .{ 0, 1, 0 } };
+    const blink = [_][3]f32{ .{ 0, 0, 2 }, .{ 0, 0, 0 } };
+    const targets = [_][]const [3]f32{ &smile, &blink };
+    var out: [2][3]f32 = undefined;
+
+    // Half smile, quarter blink: vertex 0 rises 0.5 in y and 0.5 in z.
+    morphPositions(&out, &rest, &targets, &.{ 0.5, 0.25 });
+    try t.expectApproxEqAbs(@as(f32, 0.0), out[0][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), out[0][1], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), out[0][2], 0.001);
+    // Vertex 1 keeps its x, takes half the smile's y, no blink.
+    try t.expectApproxEqAbs(@as(f32, 1.0), out[1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), out[1][1], 0.001);
+
+    // All weights zero returns the rest pose untouched.
+    morphPositions(&out, &rest, &targets, &.{ 0.0, 0.0 });
+    try t.expectApproxEqAbs(@as(f32, 1.0), out[1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.0), out[1][1], 0.001);
 }
 
 /// Lowercases into buf and drops a "mixamorig:" style prefix (anything

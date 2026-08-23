@@ -1,0 +1,17 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.morph-blend",
+  "version": "1.0.0",
+  "display_name": "Morph Blend",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [
+    {"name": "expand", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}
+  ],
+  "nodes": [
+    {"id": "face", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "morph_weights": ["expand"]}
+  ],
+  "triggers": [
+    {"when": "timer('x') >= 0.3", "action": {"kind": "param_ramp", "target": "expand", "to": 1.0, "duration_ms": 100, "curve": "ease_in_out_quad"}}
+  ]
+}

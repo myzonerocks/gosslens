@@ -166,6 +166,14 @@ eased transition. Each name must be a declared parameter, a clip past the
 list weighs nothing, and with no `clip_weights` the node plays its first
 clip unchanged.
 
+A `model.gltf` node may add `"morph_weights"`: an array of parameter names,
+one per morph target (blendshape) in the order the glTF declares them. Each
+frame the runtime deforms the mesh by the weighted sum of those targets'
+per-vertex deltas, the weights taken from the named parameters' live values,
+so ramping a weight opens a blendshape (a smile, a blink). Each name must be
+a declared parameter, a target past the list contributes nothing, and with
+no `morph_weights` the mesh draws unmorphed.
+
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
 pose drives the model matrix once simulation starts. `body` is `box`
 or `sphere`, `size` is box half extents (a sphere reads its radius

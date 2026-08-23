@@ -207,6 +207,10 @@ pub const Node = struct {
     /// the node plays its first clip at full weight. A clip past this
     /// list weighs nothing.
     clip_weights: []const []const u8 = &.{},
+    /// model.gltf only: a parameter name per morph target, in target
+    /// order, whose live value is that target's blend weight. Empty leaves
+    /// the mesh unmorphed. A target past this list contributes nothing.
+    morph_weights: []const []const u8 = &.{},
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
     /// Set only on a shader.pass node that authors a material node graph
@@ -689,6 +693,32 @@ fn parseBinding(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
     }
 }
 
+/// Parses a model.gltf node's array of parameter names (clip_weights or
+/// morph_weights): one weight-driving parameter name per clip or target.
+/// Rejected on any other node type. Cross-referencing each name against
+/// the declared parameters happens in the validation pass.
+fn parseWeightNames(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, object: std.json.ObjectMap, node_type: []const u8, field: []const u8) error{OutOfMemory}![]const []const u8 {
+    var names: []const []const u8 = &.{};
+    if (getField(object, field)) |value| {
+        const mark = path.push(field);
+        if (!std.mem.eql(u8, node_type, "model.gltf")) {
+            try diags.add(path.slice(), "{s} is a model.gltf field, found it on '{s}'", .{ field, node_type });
+        } else if (try expectArray(diags, path, value)) |array| {
+            var list: std.ArrayList([]const u8) = .empty;
+            for (array.items, 0..) |name_value, i| {
+                const name_mark = path.pushIndex(i);
+                if (try expectString(diags, path, name_value)) |name| {
+                    try list.append(arena, try arena.dupe(u8, name));
+                }
+                path.pop(name_mark);
+            }
+            names = try list.toOwnedSlice(arena);
+        }
+        path.pop(mark);
+    }
+    return names;
+}
+
 fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, array: std.json.Array) error{OutOfMemory}!?[]const Node {
     if (array.items.len > max_nodes) {
         try diags.add(path.slice(), "at most {d} nodes, found {d}", .{ max_nodes, array.items.len });
@@ -1103,24 +1133,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             path.pop(anchor_mark);
         }
 
-        var clip_weights: []const []const u8 = &.{};
-        if (getField(object, "clip_weights")) |cw_value| {
-            const cw_mark = path.push("clip_weights");
-            if (!std.mem.eql(u8, node_type, "model.gltf")) {
-                try diags.add(path.slice(), "clip_weights is a model.gltf field, found it on '{s}'", .{node_type});
-            } else if (try expectArray(diags, path, cw_value)) |cw_array| {
-                var names: std.ArrayList([]const u8) = .empty;
-                for (cw_array.items, 0..) |name_value, ci| {
-                    const name_mark = path.pushIndex(ci);
-                    if (try expectString(diags, path, name_value)) |name| {
-                        try names.append(arena, try arena.dupe(u8, name));
-                    }
-                    path.pop(name_mark);
-                }
-                clip_weights = try names.toOwnedSlice(arena);
-            }
-            path.pop(cw_mark);
-        }
+        const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
+        const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
 
         var mask_channel: ?u8 = null;
         if (getField(object, "mask")) |mask_value| {
@@ -1165,6 +1179,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .hair = hair_field,
             .particles = particle_field,
             .clip_weights = clip_weights,
+            .morph_weights = morph_weights,
             .grade = grade_field,
             .material = material_field,
             .bloom = bloom_field,
@@ -1432,6 +1447,15 @@ fn crossReference(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocato
             }
         }
         path.pop(cw_mark);
+        const mw_mark = path.push("morph_weights");
+        for (node.morph_weights, 0..) |name, mi| {
+            if (!param_names.contains(name)) {
+                const idx_mark = path.pushIndex(mi);
+                try diags.add(path.slice(), "morph weight binds unknown parameter '{s}'", .{name});
+                path.pop(idx_mark);
+            }
+        }
+        path.pop(mw_mark);
         path.pop(node_mark);
     }
     path.pop(nodes_mark);
@@ -1823,6 +1847,41 @@ test "clip weights on a non-model node are rejected" {
     var found = false;
     for (result.diags.items) |d| {
         if (std.mem.indexOf(u8, d.message, "clip_weights is a model.gltf field") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "morph weights parse on a model node and bind declared parameters" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "smile", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0},
+        \\   {"name": "blink", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "morph_weights": ["smile", "blink"]}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expectEqual(@as(usize, 2), manifest.nodes[0].morph_weights.len);
+    try t.expectEqualStrings("smile", manifest.nodes[0].morph_weights[0]);
+    try t.expectEqualStrings("blink", manifest.nodes[0].morph_weights[1]);
+}
+
+test "a morph weight binding an unknown parameter fails cross reference" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "smile", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "morph_weights": ["smile", "frown"]}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "morph weight binds unknown parameter 'frown'") != null) found = true;
     }
     try t.expect(found);
 }
