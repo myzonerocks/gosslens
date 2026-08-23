@@ -219,6 +219,13 @@ parameter contract is not frozen yet. **No SDK may invent and ship a public
 `enableSegmentation(...)` signature until this section is updated with the
 complete parameter list.**
 
+The in-engine core reads each model's own tensor dimensions, so the bytes
+handed to it can be any square RGB segmenter with any output resolution and
+up to 32 classes. It resamples the model's native mask onto the canonical
+`mask_side x mask_side` grid, covering the portrait segmenters and scene
+segmenters like the 21-class deeplab model alike. `segmentationChannels()`
+then reports the loaded model's class count.
+
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_session_enable_segmentation` | `enableSegmentation(...)` (reserved, parameters not yet frozen) | pending contract |
