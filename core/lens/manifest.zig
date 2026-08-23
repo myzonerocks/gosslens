@@ -228,7 +228,7 @@ pub const ActionKind = enum {
     play_sound,
 };
 
-pub const Curve = enum { linear, spring };
+pub const Curve = enum { linear, ease_in_quad, ease_out_quad, ease_in_out_quad, ease_in_out_cubic, ease_in_out_sine, spring };
 
 pub const Action = struct {
     kind: ActionKind,

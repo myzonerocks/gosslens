@@ -760,8 +760,10 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
             const idx = paramIndex(lens, action.target) orelse return;
             const target = clampToParam(lens.manifest.parameters[idx], action.to);
             lens.ramps[idx] = switch (action.curve) {
-                .linear => animation.Ramp.startLinear(lens.param_values[idx], target, action.duration_ms),
                 .spring => animation.Ramp.startSpring(lens.param_values[idx], target, action.stiffness, action.damping),
+                // linear and every easing curve are time-based; the tags match
+                // animation.Curve one to one, so map by name.
+                else => |c| animation.Ramp.startEased(lens.param_values[idx], target, action.duration_ms, std.meta.stringToEnum(animation.Curve, @tagName(c)).?),
             };
         },
         .play_animation => {

@@ -348,14 +348,16 @@ paragraph.
 
 ### 6.3 Parameter animation
 
-Two curve primitives, chosen per `param_ramp`: `linear` (duration_ms, from
-current value to target) and `spring` (stiffness, damping, target; a
-standard critically-damped-tunable spring integrated at the fixed graph
-timestep, not wall-clock, so it is frame-rate independent and
-deterministic across platforms for the conformance harness). No custom
-easing curves in GLF 1.0; if a future version adds them, they arrive as a
-minor-version-gated new `curve` field a 1.0 runtime tolerates and ignores,
-falling back to `linear`.
+Curve primitives, chosen per `param_ramp`: `linear` (duration_ms, from
+current value to target); the easing curves `ease_in_quad`,
+`ease_out_quad`, `ease_in_out_quad`, `ease_in_out_cubic`, and
+`ease_in_out_sine` (all duration_ms, shaping the same progress through
+their curve so the ramp still lands exactly on target when its time is
+up); and `spring` (stiffness, damping, target; a standard
+critically-damped-tunable spring integrated at the fixed graph timestep,
+not wall-clock, so it is frame-rate independent and deterministic across
+platforms for the conformance harness). An unknown `curve` value fails
+validation.
 
 ## 7. Assets
 
