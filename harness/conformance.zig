@@ -4552,6 +4552,81 @@ fn proveMaterialClip(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a sprite's opacity follows a bound parameter. The sprite-fade
+/// bundle draws a badge at full opacity, then a param_ramp fades its
+/// opacity_param to zero, so the frame before the ramp (badge visible) and
+/// after (badge gone) must differ.
+fn proveSpriteFade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/sprite-fade";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: sprite-fade proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    for (0..12) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-fade-before");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 600_000) : (elapsed_us += dt_us) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) {
+            std.debug.print("conformance: sprite-fade proof: tick refused\n", .{});
+            return false;
+        }
+    }
+
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-fade-after");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const before = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-fade-before.tga", gpa, .limited(8 << 20));
+    defer gpa.free(before);
+    const after = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-fade-after.tga", gpa, .limited(8 << 20));
+    defer gpa.free(after);
+
+    if (std.mem.eql(u8, before, after)) {
+        std.debug.print("conformance: FAIL sprite-fade: fading the opacity parameter left the frame unchanged\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF sprite-fade follows its opacity parameter: ramping it to zero fades the badge out\n", .{});
+    return true;
+}
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -4643,6 +4718,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("text overlay");
     if (!try proveMaterialClip(gpa, engine)) return 1;
     watchHold("material clip");
+    if (!try proveSpriteFade(gpa, engine)) return 1;
+    watchHold("sprite fade");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

@@ -162,6 +162,10 @@ pub const SpriteField = struct {
     w: f32 = 1.0,
     h: f32 = 1.0,
     opacity: f32 = 1.0,
+    /// A parameter name whose live value overrides `opacity` each frame, so
+    /// a param_ramp can fade the sprite or a beat trigger pulse it. Empty
+    /// leaves the static opacity in force.
+    opacity_param: []const u8 = "",
 };
 
 pub const TextField = struct {
@@ -178,6 +182,9 @@ pub const TextField = struct {
     r: u8 = 255,
     g: u8 = 255,
     b: u8 = 255,
+    /// Like SpriteField.opacity_param: a parameter name whose live value
+    /// overrides the text's opacity each frame. Empty keeps the static one.
+    opacity_param: []const u8 = "",
 };
 
 pub const LayoutField = struct {
@@ -987,6 +994,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(sv.object, "w")) |v| field.w = @floatCast(numberOf(v) orelse field.w);
                 if (getField(sv.object, "h")) |v| field.h = @floatCast(numberOf(v) orelse field.h);
                 if (getField(sv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(sv.object, "opacity_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
+                }
                 sprite_field = field;
             }
             path.pop(smark);
@@ -1018,6 +1028,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         field.g = @intFromFloat(std.math.clamp(rgb[1], 0.0, 1.0) * 255.0);
                         field.b = @intFromFloat(std.math.clamp(rgb[2], 0.0, 1.0) * 255.0);
                     } else try diags.add(path.slice(), "text color must be three numbers", .{});
+                }
+                if (getField(tv.object, "opacity_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
                 }
                 text_field = field;
             }
@@ -1543,6 +1556,16 @@ fn crossReference(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocato
             }
         }
         path.pop(mw_mark);
+        if (node.sprite) |sp| {
+            if (sp.opacity_param.len > 0 and !param_names.contains(sp.opacity_param)) {
+                try diags.add(path.slice(), "sprite opacity_param binds unknown parameter '{s}'", .{sp.opacity_param});
+            }
+        }
+        if (node.text) |tf| {
+            if (tf.opacity_param.len > 0 and !param_names.contains(tf.opacity_param)) {
+                try diags.add(path.slice(), "text opacity_param binds unknown parameter '{s}'", .{tf.opacity_param});
+            }
+        }
         path.pop(node_mark);
     }
     path.pop(nodes_mark);
@@ -2016,6 +2039,36 @@ test "a sprite block on a non-sprite node is rejected" {
         if (std.mem.indexOf(u8, d.message, "sprite is a sprite.2d field") != null) found = true;
     }
     try t.expect(found);
+}
+
+test "a sprite opacity_param binding an unknown parameter fails cross reference" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.3, "opacity_param": "pulse"}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "sprite opacity_param binds unknown parameter 'pulse'") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a sprite opacity_param naming a declared parameter parses" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "pulse", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.3, "opacity_param": "pulse"}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expectEqualStrings("pulse", manifest.nodes[0].sprite.?.opacity_param);
 }
 
 test "a text.2d node parses its content, rect, and color" {

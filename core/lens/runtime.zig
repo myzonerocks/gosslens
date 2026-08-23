@@ -199,6 +199,9 @@ pub const SpriteNode = struct {
     image_stem: []const u8,
     rect: [4]f32,
     opacity: f32,
+    /// A parameter name whose live value overrides opacity each frame, or
+    /// empty for the static opacity.
+    opacity_param: []const u8,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -210,6 +213,9 @@ pub const TextNode = struct {
     rect: [4]f32,
     opacity: f32,
     color: [3]u8,
+    /// A parameter name whose live value overrides opacity each frame, or
+    /// empty for the static opacity.
+    opacity_param: []const u8,
 };
 
 /// One grade.pass node ready for the caller to draw - which graph node
@@ -423,7 +429,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -439,7 +445,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .text_2d) continue;
             const tf = node.text orelse manifest.TextField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b } });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param });
         }
         return out.toOwnedSlice(gpa);
     }

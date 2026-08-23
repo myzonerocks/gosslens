@@ -265,15 +265,19 @@ chain. It ships its image as `assets/<id>.png` and carries a `"sprite":
 coordinates (origin top-left, 0..1 across the frame) and a draw opacity,
 all optional and defaulting to the full frame at full opacity. The image
 alpha-composites within the rect over whatever the chain has drawn so far,
-so a sprite reads as a sticker or badge pinned to the frame. Until its image
-decodes the node holds the frame through, never blocking the chain.
+so a sprite reads as a sticker or badge pinned to the frame. An
+`"opacity_param"` names a parameter whose live value overrides the opacity
+each frame, so a param_ramp fades the sprite or a beat trigger pulses it.
+Until its image decodes the node holds the frame through, never blocking the
+chain.
 
 A `"text.2d"` node draws a line of text over the frame. It carries a `"text":
 {"content", "x", "y", "w", "h", "opacity", "color"}` block: the string to
 draw, the same normalized rect and opacity a sprite takes, and an rgb color
 (three 0..1 numbers) for the glyphs. The engine rasterizes the string with a
 built-in font, so a text node ships no asset, and composites it into the rect
-like a sprite. The font covers space, digits, uppercase letters, and common
+like a sprite; it takes the same `"opacity_param"` for a parameter-driven
+fade. The font covers space, digits, uppercase letters, and common
 punctuation; lowercase folds to uppercase and any other character draws
 blank.
 

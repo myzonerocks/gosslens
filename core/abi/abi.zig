@@ -750,6 +750,9 @@ pub const Session = struct {
     sprite_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     sprite_rects: std.AutoHashMapUnmanaged(graph.NodeIndex, [5]f32) = .empty,
+    /// A sprite/text node's opacity parameter name (a slice into the lens
+    /// manifest arena), when it binds one, so the draw reads a live opacity.
+    sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
     model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     model_body_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
@@ -1634,7 +1637,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const dy: u16 = @intFromFloat(std.math.clamp(rect[1], 0, 1) * full_h);
                 const dw: u16 = @intFromFloat(std.math.clamp(rect[2], 0, 1) * full_w);
                 const dh: u16 = @intFromFloat(std.math.clamp(rect[3], 0, 1) * full_h);
-                r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, rect[4]);
+                // A bound opacity parameter overrides the static one each frame.
+                var sprite_opacity = rect[4];
+                if (s.sprite_opacity_params.get(entry.graph_index)) |pname| {
+                    if (s.active_lens) |*lens| {
+                        if (lens.paramValue(pname)) |v| sprite_opacity = std.math.clamp(v, 0, 1);
+                    }
+                }
+                r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, sprite_opacity);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2153,6 +2163,7 @@ pub fn destroySession(session: *Session) void {
     session.sprite_loaders.deinit(session.engine.gpa);
     session.sprite_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
+    session.sprite_opacity_params.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -4779,6 +4790,7 @@ fn destroySpriteState(session: *Session) void {
     }
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
+    session.sprite_opacity_params.clearRetainingCapacity();
 }
 
 fn destroyMeshFaceState(session: *Session) void {
@@ -5283,6 +5295,7 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
     defer gpa.free(sprites);
     for (sprites) |sprite| {
         session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
+        if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, sprite.image_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ImageLoader.start(gpa, path) catch continue;
@@ -5335,6 +5348,7 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
             continue;
         };
         session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
+        if (txt.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, txt.graph_index, txt.opacity_param) catch {};
     }
 }
 
