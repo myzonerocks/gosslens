@@ -297,7 +297,10 @@ small closed grammar, parsed once at load time into a typed expression tree
   `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
 onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   `camera.focus`, `camera.exposure` (true for one tick after the app changes
-  focus or exposure), `timer('name')` (seconds since the
+  focus or exposure), `gaze.x` (horizontal eye gaze, roughly -1 to 1,
+  positive toward the subject's left), `gaze.y` (vertical, positive up),
+  `gaze.at_camera` (true when gaze is near centre; a lost face reads false),
+  `timer('name')` (seconds since the
   timer's last reset, see actions below), `tap`, `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
   numeric or boolean literal.
