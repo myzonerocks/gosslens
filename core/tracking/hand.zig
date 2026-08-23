@@ -29,6 +29,27 @@ pub fn gestureIndex(name: []const u8) ?u8 {
     return null;
 }
 
+// Landmark indices used for hand-pose heuristics, in the model's own order.
+pub const wrist_idx = 0;
+pub const thumb_tip_idx = 4;
+pub const index_tip_idx = 8;
+pub const middle_mcp_idx = 9;
+
+fn landmarkDistance(landmarks: *const [landmark_count * 3]f32, a: usize, b: usize) f32 {
+    const dx = landmarks[a * 3] - landmarks[b * 3];
+    const dy = landmarks[a * 3 + 1] - landmarks[b * 3 + 1];
+    return @sqrt(dx * dx + dy * dy);
+}
+
+/// True when the thumb and index fingertips have closed together, a pinch.
+/// Distances are 2D in frame pixels; the palm (wrist to the middle knuckle)
+/// sets the scale, so it holds at any hand size or distance from the camera.
+pub fn isPinching(landmarks: *const [landmark_count * 3]f32) bool {
+    const pinch = landmarkDistance(landmarks, thumb_tip_idx, index_tip_idx);
+    const palm = landmarkDistance(landmarks, wrist_idx, middle_mcp_idx);
+    return palm > 0 and pinch < palm * 0.4;
+}
+
 /// The crop points the hand up: the steering segment's target angle is a
 /// quarter turn, where the face pipeline levels its segment to zero.
 const target_angle = std.math.pi * 0.5;
@@ -333,6 +354,20 @@ test "gesture names resolve to their own index" {
         try t.expectEqual(@as(?u8, @intCast(i)), gestureIndex(name));
     }
     try t.expectEqual(@as(?u8, null), gestureIndex("not_a_gesture"));
+}
+
+test "pinch fires only when the finger tips close on the palm scale" {
+    var landmarks = [_]f32{0} ** (landmark_count * 3);
+    // Palm scale: wrist at the origin, middle knuckle 100 px up.
+    landmarks[middle_mcp_idx * 3 + 1] = 100;
+    // Spread: tips 80 px apart, wider than 0.4 of the palm.
+    landmarks[thumb_tip_idx * 3] = -40;
+    landmarks[index_tip_idx * 3] = 40;
+    try t.expect(!isPinching(&landmarks));
+    // Pinched: tips 20 px apart, well inside the threshold.
+    landmarks[thumb_tip_idx * 3] = -10;
+    landmarks[index_tip_idx * 3] = 10;
+    try t.expect(isPinching(&landmarks));
 }
 
 test "gesture inputs are wrist-origined and span-scaled" {

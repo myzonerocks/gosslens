@@ -5101,16 +5101,15 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         live_signals.head_nod = gestures.nod;
         live_signals.head_shake = gestures.shake;
     }
-    // The hand gesture rides the hand worker: the first non-None gesture any
-    // tracked hand is showing, so a lens fires on `hands.gesture('Thumb_Up')`.
+    // The hand gesture and pinch ride the hand worker: the first non-None
+    // gesture and whether any tracked hand is pinching, so a lens fires on
+    // `hands.gesture('Thumb_Up')` or `hands.pinch`.
     if (s.hand_tracking) |worker| {
         var hands: hand.Result = undefined;
         if (tracking.hand_worker.readResult(worker, &hands)) {
-            for (hands.hands[0..@min(hands.hand_count, hand.max_hands)]) |h| {
-                if (h.gesture != 0) {
-                    live_signals.hand_gesture = h.gesture;
-                    break;
-                }
+            for (hands.hands[0..@min(hands.hand_count, hand.max_hands)]) |*h| {
+                if (h.gesture != 0 and live_signals.hand_gesture == 0) live_signals.hand_gesture = h.gesture;
+                if (hand.isPinching(&h.landmarks)) live_signals.hand_pinch = true;
             }
         }
     }

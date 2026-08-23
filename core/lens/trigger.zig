@@ -33,11 +33,12 @@ pub const SignalKind = enum {
     head_shake,
     head_tilt,
     hand_gesture,
+    hand_pinch,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch => true,
         .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt => false,
     };
 }
@@ -124,6 +125,9 @@ pub const Signals = struct {
     /// gesture classes, engine-fed at tick from the hand worker. Zero is the
     /// no-gesture class, the resting value with no hand or no gesture.
     hand_gesture: u32 = 0,
+    /// True while a tracked hand's thumb and index tips are pinched together,
+    /// engine-fed at tick from the hand landmarks. False with no hand.
+    hand_pinch: bool = false,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -183,6 +187,7 @@ fn readBool(s: Signal, signals: Signals) bool {
         .head_nod => signals.head_nod,
         .head_shake => signals.head_shake,
         .hand_gesture => signals.hand_gesture == s.gesture_index,
+        .hand_pinch => signals.hand_pinch,
         else => unreachable,
     };
 }
@@ -570,6 +575,9 @@ const Parser = struct {
             };
             return .{ .kind = .hand_gesture, .gesture_index = index };
         }
+        if (std.mem.eql(u8, head, "hands") and std.mem.eql(u8, tail, "pinch")) {
+            return .{ .kind = .hand_pinch };
+        }
         if (std.mem.eql(u8, head, "world") and std.mem.eql(u8, tail, "tracking_state")) {
             return .{ .kind = .world_tracking_state };
         }
@@ -749,6 +757,13 @@ test "hands.gesture matches the tracked gesture class by name" {
     const err = try compileFails("hands.gesture('Nope')");
     defer t.allocator.free(err.message);
     try t.expect(std.mem.indexOf(u8, err.message, "unknown gesture") != null);
+}
+
+test "hands.pinch reads the fed pinch state" {
+    var expr = try compileOk("hands.pinch");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .hand_pinch = true }));
 }
 
 test "an unknown parameter name fails to compile" {
