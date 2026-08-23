@@ -172,6 +172,7 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
     var polls: usize = 0;
     while (abi.goss_session_face_result(session, &result) == .again) {
         std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
         polls += 1;
         if (polls > 100_000_000) return error.FaceResultTimedOut;
     }
@@ -579,6 +580,7 @@ fn proveMultiFaceFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     var polls: usize = 0;
     while (abi.goss_session_face_result(session, &base) == .again) {
         std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
         polls += 1;
         if (polls > 100_000_000) return error.FaceResultTimedOut;
     }
@@ -695,6 +697,7 @@ fn proveFaceRegions(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     var polls: usize = 0;
     while (abi.goss_session_face_result(session, &result) == .again) {
         std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
         polls += 1;
         if (polls > 100_000_000) return error.FaceResultTimedOut;
     }
@@ -778,6 +781,7 @@ fn proveBodyJoints(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     var polls: usize = 0;
     while (abi.goss_session_pose_result(session, &result) == .again or result.landmark_count_out == 0) {
         std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
         polls += 1;
         if (polls > 100_000_000) return error.PoseResultTimedOut;
     }
@@ -840,6 +844,7 @@ fn proveHandJoints(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     var polls: usize = 0;
     while (abi.goss_session_hand_result(session, &result) == .again or result.hand_count == 0) {
         std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
         polls += 1;
         if (polls > 100_000_000) return error.HandResultTimedOut;
     }
@@ -3704,6 +3709,22 @@ fn proveTriggerAnimFires(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+var g_watch_window: ?*c.GLFWwindow = null;
+var g_watch = false;
+
+// In watch mode, hold each proof's final frame on screen and title the
+// window with its name, so the run reads as a live sequence of real
+// renders instead of one frozen frame. A no-op in the default run.
+fn watchHold(name: [*:0]const u8) void {
+    if (!g_watch) return;
+    const window = g_watch_window orelse return;
+    c.glfwSetWindowTitle(window, name);
+    var held: usize = 0;
+    while (held < 30) : (held += 1) {
+        c.glfwWaitEventsTimeout(0.016);
+    }
+}
+
 pub fn main(init_args: std.process.Init) !u8 {
     const gpa = init_args.gpa;
     harness_io = init_args.io;
@@ -3714,13 +3735,16 @@ pub fn main(init_args: std.process.Init) !u8 {
 
     var arg_it = std.process.Args.Iterator.init(init_args.minimal.args);
     _ = arg_it.next();
-    const print_mode = if (arg_it.next()) |arg| std.mem.eql(u8, arg, "--print") else false;
+    const first_arg = arg_it.next();
+    const print_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--print") else false;
+    g_watch = if (first_arg) |arg| std.mem.eql(u8, arg, "--watch") else false;
 
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
     const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "gosslens conformance", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
+    g_watch_window = window;
 
     // The engine runs under a counting allocator so the per-frame budget
     // gate can watch its heap footprint settle across a render loop.
@@ -3765,48 +3789,92 @@ pub fn main(init_args: std.process.Init) !u8 {
     std.debug.print("conformance: PROOF all reference lenses match the pinned baseline\n", .{});
 
     if (!try proveTriggerAnimFires(gpa, engine)) return 1;
+    watchHold("trigger anim fires");
     if (!try provePhotoCapture(gpa, engine)) return 1;
+    watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;
+    watchHold("mask degradation");
     if (!try proveVideoRecording(gpa, engine)) return 1;
+    watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
+    watchHold("platform photos");
     if (!try proveWorldAnchor(gpa, engine)) return 1;
+    watchHold("world anchor");
     if (!try proveMultiFaceFanOut(gpa, engine)) return 1;
+    watchHold("multi face fan out");
     if (!try proveFaceRegions(gpa, engine)) return 1;
+    watchHold("face regions");
     if (!try proveBodyJoints(gpa, engine)) return 1;
+    watchHold("body joints");
     if (!try proveHandJoints(gpa, engine)) return 1;
+    watchHold("hand joints");
     if (!try provePhysicsDrop(gpa, engine)) return 1;
+    watchHold("physics drop");
     if (!try provePhysicsChain(gpa, engine)) return 1;
+    watchHold("physics chain");
     if (!try proveClothFlag(gpa, engine)) return 1;
+    watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
+    watchHold("particles");
     if (!try proveHairSim(gpa, engine)) return 1;
+    watchHold("hair sim");
     if (!try proveHighResCapture(gpa, engine)) return 1;
+    watchHold("high res capture");
     if (!try proveTiledCapture(gpa, engine)) return 1;
+    watchHold("tiled capture");
     if (!try prove3DTiledCapture(gpa, engine)) return 1;
+    watchHold("d tiled capture");
     if (!try proveColorManagedCapture(gpa, engine)) return 1;
+    watchHold("color managed capture");
     if (!try proveScript(gpa, engine)) return 1;
+    watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;
+    watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;
+    watchHold("output mix");
     if (!try proveCameraControls(gpa, engine)) return 1;
+    watchHold("camera controls");
     if (!try proveEventTrigger(gpa, engine)) return 1;
+    watchHold("event trigger");
     if (!try proveLayoutComposite(gpa, engine)) return 1;
+    watchHold("layout composite");
     if (!try proveCompositeOpacity(gpa, engine)) return 1;
+    watchHold("composite opacity");
     if (!try proveGeofilter(gpa, engine)) return 1;
+    watchHold("geofilter");
     if (!try proveBrushStroke(gpa, engine)) return 1;
+    watchHold("brush stroke");
     if (!try proveBlur(gpa, engine)) return 1;
+    watchHold("blur");
     if (!try proveGrade(gpa, engine)) return 1;
+    watchHold("grade");
     if (!try proveBloom(gpa, engine)) return 1;
+    watchHold("bloom");
     if (!try proveStackedPostEffects(gpa, engine)) return 1;
+    watchHold("stacked post effects");
     if (!try proveExpressionScript(gpa, engine)) return 1;
+    watchHold("expression script");
     if (!try proveEmber(gpa, engine)) return 1;
+    watchHold("ember");
     if (!try proveStarSprite(gpa, engine)) return 1;
+    watchHold("star sprite");
     if (!try proveParticlePatterns(gpa, engine)) return 1;
+    watchHold("particle patterns");
     if (!try proveFaceSparkle(gpa, engine)) return 1;
+    watchHold("face sparkle");
     if (!try proveJsonPostEffect(gpa, engine)) return 1;
+    watchHold("json post effect");
     if (!try proveJsonParticles(gpa, engine)) return 1;
+    watchHold("json particles");
     if (!try proveFullStack(gpa, engine)) return 1;
+    watchHold("full stack");
     if (!try proveTiledPostEffect(gpa, engine)) return 1;
+    watchHold("tiled post effect");
     if (!try proveNoLeaks(gpa)) return 1;
+    watchHold("no leaks");
     if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;
+    watchHold("per frame budget");
     if (!try provePeakBoundedCapture(gpa, engine, &frame_counter)) return 1;
+    watchHold("peak bounded capture");
     return 0;
 }

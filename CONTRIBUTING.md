@@ -27,15 +27,18 @@ for you when a commit touches the surface; `zig build abi` verifies both match.
 
 ## Watch it draw
 
-    zig build harness       # run a lens through the real graph, drawn on screen
-    zig build conformance   # run a reference lens through the ABI twice, proving bit-stable output
+    zig build harness              # run a lens through the real graph, drawn on screen
+    zig build conformance          # run a reference lens through the ABI twice, proving bit-stable output
+    zig build conformance -- --watch  # the same run, holding and labelling each proof's render on screen
 
 The harness runs a lens through the real graph and draws it on screen, the same
 pipeline the SDKs drive, the fastest way to see an effect move before a device
 is involved. Conformance runs a reference lens through the real ABI twice and
 proves the output is bit for bit stable. Every engine feature that touches the
 ABI adds a proof here, and the run prints one PROOF line per capability it
-clears.
+clears. Add `--watch` to hold each proof's final frame on screen with its name
+in the title bar, so the run reads as a live sequence instead of one frozen
+frame; it is display only and leaves the pinned output unchanged.
 
 ## Shaders and lenses
 
