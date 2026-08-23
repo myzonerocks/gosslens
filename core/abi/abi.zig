@@ -75,7 +75,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 31;
+pub const abi_minor: u16 = 32;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -3779,6 +3779,22 @@ pub export fn goss_session_face_pose(session: ?*Session, out_matrix: ?*[16]f32) 
     return .ok;
 }
 
+/// Writes the newest tracked face's named region point (x, y in frame
+/// pixels, z in the same scale) into out_xyz, so a lens pins content to the
+/// forehead, a cheek, or the chin. invalid_argument on an unknown region;
+/// again with no worker, no face, or presence below the tracked threshold.
+pub export fn goss_session_face_region(session: ?*Session, region: u32, out_xyz: ?*[3]f32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_xyz orelse return .invalid_argument;
+    const r = face.Region.fromU32(region) orelse return .invalid_argument;
+    const worker = s.face_tracking orelse return .again;
+    var result: face.Result = undefined;
+    if (!tracking.readResult(worker, &result)) return .again;
+    if (result.landmark_count_out == 0 or result.presence < 0.5) return .again;
+    out.* = face.regionPoint(&result.landmarks, r);
+    return .ok;
+}
+
 /// Stands the beauty chain up for a session. The resource path names the
 /// directory holding the effect engine's shader and image assets; builds
 /// without the effects engine report unsupported.
@@ -5271,6 +5287,21 @@ test "submitted faces round-trip by index and drop the ones no real face fills" 
     try t.expectEqual(Status.invalid_argument, goss_session_submit_faces(session, null, 3));
     try t.expectEqual(Status.invalid_argument, goss_session_face_count(session, null));
     try t.expectEqual(Status.invalid_argument, goss_session_face_result_at(session, 0, null));
+}
+
+test "face region guards its arguments and refuses with no tracked face" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var out: [3]f32 = undefined;
+    // Null session/out and an unknown region are rejected, not crashes.
+    try t.expectEqual(Status.invalid_argument, goss_session_face_region(null, 0, &out));
+    try t.expectEqual(Status.invalid_argument, goss_session_face_region(session, 0, null));
+    try t.expectEqual(Status.invalid_argument, goss_session_face_region(session, 99, &out));
+    // A valid region with no worker reports again, never a stale point.
+    try t.expectEqual(Status.again, goss_session_face_region(session, 0, &out));
 }
 
 test "beauty on a build without the effects engine refuses" {

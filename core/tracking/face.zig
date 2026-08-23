@@ -70,6 +70,78 @@ comptime {
     std.debug.assert(@offsetOf(Result, "blendshapes") == 24 + landmark_count * 3 * 4);
 }
 
+/// Named attach points on the mesh, so a lens can pin content to the
+/// forehead or a cheek without knowing the mesh indices. The left/right
+/// labels are the subject's own, resolved against the canonical model.
+pub const Region = enum(u32) {
+    forehead = 0,
+    glabella = 1,
+    nose_tip = 2,
+    chin = 3,
+    left_eye = 4,
+    right_eye = 5,
+    left_cheek = 6,
+    right_cheek = 7,
+    left_ear = 8,
+    right_ear = 9,
+    mouth_center = 10,
+    left_mouth_corner = 11,
+    right_mouth_corner = 12,
+
+    pub fn fromU32(value: u32) ?Region {
+        return switch (value) {
+            0...12 => @enumFromInt(value),
+            else => null,
+        };
+    }
+};
+
+/// The representative landmark for each region, chosen so the canonical
+/// model position sits on the named part of the face.
+const region_landmark = [_]u16{
+    10, // forehead - global-max-y centre-line vertex
+    168, // glabella - between the brows
+    1, // nose_tip - the pinned nose-tip vertex
+    152, // chin - global-min-y centre-line vertex
+    263, // left_eye - subject's left outer corner (positive canonical x)
+    33, // right_eye - subject's right outer corner
+    280, // left_cheek - subject's left, positive canonical x
+    50, // right_cheek - subject's right
+    454, // left_ear - subject's left tragion
+    234, // right_ear - subject's right tragion
+    13, // mouth_center - inner lip-gap centre
+    291, // left_mouth_corner - subject's left commissure
+    61, // right_mouth_corner - subject's right commissure
+};
+
+/// The tracked point for a region: x, y in frame pixels and z in the same
+/// scale, read straight from the mesh. landmarks is a result's flat array.
+pub fn regionPoint(landmarks: *const [landmark_count * 3]f32, region: Region) [3]f32 {
+    const idx = region_landmark[@intFromEnum(region)];
+    const base = @as(usize, idx) * 3;
+    return .{ landmarks[base], landmarks[base + 1], landmarks[base + 2] };
+}
+
+test "every region maps to an in-range landmark and reads its point" {
+    var landmarks: [landmark_count * 3]f32 = undefined;
+    for (0..landmark_count) |i| {
+        landmarks[i * 3] = @floatFromInt(i);
+        landmarks[i * 3 + 1] = @floatFromInt(i * 2);
+        landmarks[i * 3 + 2] = @floatFromInt(i * 3);
+    }
+    inline for (std.meta.fields(Region)) |field| {
+        const region: Region = @enumFromInt(field.value);
+        const idx = region_landmark[field.value];
+        try t.expect(idx < landmark_count);
+        const p = regionPoint(&landmarks, region);
+        try t.expectEqual(@as(f32, @floatFromInt(idx)), p[0]);
+        try t.expectEqual(@as(f32, @floatFromInt(idx * 2)), p[1]);
+        try t.expectEqual(@as(f32, @floatFromInt(idx * 3)), p[2]);
+    }
+    try t.expectEqual(Region.nose_tip, Region.fromU32(2).?);
+    try t.expectEqual(@as(?Region, null), Region.fromU32(99));
+}
+
 /// Indices of the landmarks the blendshape model consumes, in its input
 /// order. The subset is part of the model's contract, fixed at training.
 pub const blendshape_subset = [146]u16{

@@ -51,6 +51,7 @@ object Gosslens {
     internal external fun nativeDisablePoseTracking(session: Long)
     internal external fun nativePoseResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeFacePose(session: Long, matrixBuffer: ByteBuffer): Int
+    internal external fun nativeFaceRegion(session: Long, region: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeTrackFrame(
         session: Long,
         yBuffer: ByteBuffer,
@@ -140,6 +141,21 @@ object Gosslens {
     const val FACE_BLENDSHAPE_COUNT = 52
     const val FACE_RESULT_BYTES = 5968
     const val FACE_MAX = 4
+
+    // Named face-mesh attach points for faceRegion; left/right are the subject's.
+    const val FACE_REGION_FOREHEAD = 0
+    const val FACE_REGION_GLABELLA = 1
+    const val FACE_REGION_NOSE_TIP = 2
+    const val FACE_REGION_CHIN = 3
+    const val FACE_REGION_LEFT_EYE = 4
+    const val FACE_REGION_RIGHT_EYE = 5
+    const val FACE_REGION_LEFT_CHEEK = 6
+    const val FACE_REGION_RIGHT_CHEEK = 7
+    const val FACE_REGION_LEFT_EAR = 8
+    const val FACE_REGION_RIGHT_EAR = 9
+    const val FACE_REGION_MOUTH_CENTER = 10
+    const val FACE_REGION_LEFT_MOUTH_CORNER = 11
+    const val FACE_REGION_RIGHT_MOUTH_CORNER = 12
     const val HAND_LANDMARK_COUNT = 21
     const val HAND_MAX = 2
     const val HAND_RESULT_BYTES = 560
@@ -537,6 +553,9 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     private val facePoseBuffer: ByteBuffer =
         ByteBuffer.allocateDirect(16 * 4).order(java.nio.ByteOrder.nativeOrder())
 
+    private val faceRegionBuffer: ByteBuffer =
+        ByteBuffer.allocateDirect(3 * 4).order(java.nio.ByteOrder.nativeOrder())
+
     /** Fills [matrix] with the column-major head transform - canonical
      * metric space into frame pixels; false until a face is tracked. */
     fun facePose(matrix: FloatArray): Boolean {
@@ -545,6 +564,16 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         facePoseBuffer.rewind()
         facePoseBuffer.asFloatBuffer().get(matrix, 0, 16)
         return true
+    }
+
+    /** The tracked point (x, y in frame pixels, z in the same scale) of a
+     * named FACE_REGION_*, or null until a face is tracked. */
+    fun faceRegion(region: Int): FloatArray? {
+        if (Gosslens.nativeFaceRegion(handle, region, faceRegionBuffer) != 0) return null
+        faceRegionBuffer.rewind()
+        val out = FloatArray(3)
+        faceRegionBuffer.asFloatBuffer().get(out, 0, 3)
+        return out
     }
 
     /** Fills [result] with the newest hand tracking output; false until
