@@ -5578,6 +5578,45 @@ test "bodyAnchorPose centres on the torso, scales by its length, and rejects a d
     try t.expect(bodyAnchorPose(&flat) == null);
 }
 
+/// Linear-blend skinning: writes each rest position deformed by its up
+/// to four weighted joint matrices, renormalizing by the summed weight
+/// so an unnormalized asset does not scale the mesh. A joint matrix is
+/// the tracked joint's world transform times the mesh's inverse bind.
+fn skinPositions(
+    positions: []const [3]f32,
+    vertex_joints: []const [4]u16,
+    vertex_weights: []const [4]f32,
+    joint_matrices: []const math.Mat4,
+    out: [][3]f32,
+) void {
+    for (positions, vertex_joints, vertex_weights, out) |pos, joints, weights, *dst| {
+        const rest: math.Vec3 = pos;
+        var blended: math.Vec3 = .{ 0, 0, 0 };
+        var total: f32 = 0;
+        for (0..4) |k| {
+            const w = weights[k];
+            if (w == 0) continue;
+            blended += @as(math.Vec3, @splat(w)) * joint_matrices[joints[k]].mulPoint(rest);
+            total += w;
+        }
+        const skinned: math.Vec3 = if (total > 0) blended / @as(math.Vec3, @splat(total)) else rest;
+        dst.* = skinned;
+    }
+}
+
+test "skinPositions blends weighted joint transforms and renormalizes" {
+    const positions = [_][3]f32{ .{ 1, 0, 0 }, .{ 0, 0, 0 } };
+    const joints = [_][4]u16{ .{ 0, 1, 0, 0 }, .{ 1, 0, 0, 0 } };
+    const weights = [_][4]f32{ .{ 0.5, 0.5, 0, 0 }, .{ 1, 0, 0, 0 } };
+    const mats = [_]math.Mat4{ math.Mat4.identity, math.Mat4.translation(.{ 10, 0, 0 }) };
+    var out: [2][3]f32 = undefined;
+    skinPositions(&positions, &joints, &weights, &mats, &out);
+    // Half rest, half shifted by ten: the midpoint at x=6.
+    try t.expectApproxEqAbs(@as(f32, 6), out[0][0], 0.001);
+    // Fully joint 1: the origin shifted straight to x=10.
+    try t.expectApproxEqAbs(@as(f32, 10), out[1][0], 0.001);
+}
+
 const body_history = 64;
 const body_window_us: i64 = 1_200_000;
 const body_jump_amplitude: f32 = 0.18;
