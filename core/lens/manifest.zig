@@ -6,6 +6,7 @@
 //! stopping at the first one, so a lens author sees every problem at once.
 
 const std = @import("std");
+const material = @import("material");
 
 pub const max_manifest_bytes = 256 * 1024;
 pub const max_json_depth = 32;
@@ -203,6 +204,9 @@ pub const Node = struct {
     particles: ?ParticleField = null,
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
+    /// Set only on a shader.pass node that authors a material node graph
+    /// instead of naming a built-in shader; lowers to a fragment shader.
+    material: ?material.Graph = null,
     /// Set only on a bloom.pass node: its glow threshold and intensity.
     bloom: ?BloomField = null,
     /// Set only on a layout.composite node: the head arrangement it drives.
@@ -864,6 +868,28 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(gmark);
         }
+        var material_field: ?material.Graph = null;
+        if (getField(object, "material")) |mv| {
+            const mmark = path.push("material");
+            if (!std.mem.eql(u8, node_type, "shader.pass")) {
+                try diags.add(path.slice(), "material is a shader.pass field, found it on '{s}'", .{node_type});
+            } else {
+                const graph: ?material.Graph = material.parse(arena, mv) catch |err| blk: {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    try diags.add(path.slice(), "material graph is malformed ({s})", .{@errorName(err)});
+                    break :blk null;
+                };
+                if (graph) |g| {
+                    const types = try arena.alloc(material.ValueType, g.nodes.len);
+                    material.validate(arena, g, types) catch |err| {
+                        if (err == error.OutOfMemory) return error.OutOfMemory;
+                        try diags.add(path.slice(), "material graph is invalid ({s})", .{@errorName(err)});
+                    };
+                    material_field = g;
+                }
+            }
+            path.pop(mmark);
+        }
         var bloom_field: ?BloomField = null;
         if (getField(object, "bloom")) |bv| {
             const bmark = path.push("bloom");
@@ -1115,6 +1141,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .hair = hair_field,
             .particles = particle_field,
             .grade = grade_field,
+            .material = material_field,
             .bloom = bloom_field,
             .layout = layout_field,
             .script = script_source,
@@ -1471,6 +1498,53 @@ test "a minimal valid manifest parses with every field populated" {
     try t.expect(manifest.engine_compat.contains(0, 5));
     try t.expect(!manifest.engine_compat.contains(1, 0));
     try t.expect(!manifest.engine_compat.contains(0, 4));
+}
+
+test "a material graph parses on a shader.pass node" {
+    const src =
+        \\{
+        \\  "glf": "1.0", "id": "com.example.mat", "version": "1.0.0",
+        \\  "display_name": "Mat", "engine_compat": ">=0.5 <1.0",
+        \\  "capabilities": [], "parameters": [],
+        \\  "nodes": [
+        \\    {"id": "mat", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {},
+        \\     "material": {"output": 3, "nodes": [
+        \\        {"kind": "uv"},
+        \\        {"kind": "texture", "name": "albedo"},
+        \\        {"kind": "sample", "inputs": [1, 0]},
+        \\        {"kind": "output", "inputs": [2]}
+        \\     ]}}
+        \\  ],
+        \\  "triggers": []
+        \\}
+    ;
+    var manifest = try parseOk(src);
+    defer manifest.deinit();
+    const g = manifest.nodes[0].material orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(usize, 4), g.nodes.len);
+    try t.expectEqual(@as(u32, 3), g.root);
+}
+
+test "a material on a non shader.pass node is rejected" {
+    const src =
+        \\{
+        \\  "glf": "1.0", "id": "com.example.mat", "version": "1.0.0",
+        \\  "display_name": "Mat", "engine_compat": ">=0.5 <1.0",
+        \\  "capabilities": [], "parameters": [],
+        \\  "nodes": [
+        \\    {"id": "b", "type": "beauty.reshape", "inputs": {"frame": "camera"}, "params": {},
+        \\     "material": {"output": 0, "nodes": [{"kind": "output", "inputs": [0]}]}}
+        \\  ],
+        \\  "triggers": []
+        \\}
+    ;
+    var failed = try parseFails(src);
+    defer failed.deinit();
+    var found = false;
+    for (failed.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "material is a shader.pass field") != null) found = true;
+    }
+    try t.expect(found);
 }
 
 test "a missing required field reports its exact path" {

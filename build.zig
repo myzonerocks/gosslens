@@ -254,6 +254,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lens_manifest_module.addImport("material", material_module);
     const lens_trigger_module = b.createModule(.{
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = target,
