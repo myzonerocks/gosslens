@@ -4707,6 +4707,85 @@ fn proveSpriteAnim(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the dof.pass blurs by the submitted depth. The dof-blur bundle
+/// holds the frame through until depth arrives (its capability is absent),
+/// then, given a near-to-far depth gradient, softens everything off the
+/// focus plane, so the frame with depth differs from the frame without.
+fn proveDofPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/dof-blur";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: dof-blur proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // No depth yet: the dof.pass holds the frame through.
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-dof-nodepth");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // A near-to-far depth gradient across the frame: only the middle sits at
+    // the focus plane, so the sides blur.
+    const dw: u32 = 32;
+    const dh: u32 = 32;
+    var depth: [dw * dh]f32 = undefined;
+    for (0..dh) |y| {
+        for (0..dw) |x| {
+            const t01 = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(dw - 1));
+            depth[y * dw + x] = 0.1 + t01 * 4.9;
+        }
+    }
+    if (abi.goss_session_submit_depth(session, &depth, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-dof-depth");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const nodepth = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-dof-nodepth.tga", gpa, .limited(8 << 20));
+    defer gpa.free(nodepth);
+    const withdepth = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-dof-depth.tga", gpa, .limited(8 << 20));
+    defer gpa.free(withdepth);
+
+    if (std.mem.eql(u8, nodepth, withdepth)) {
+        std.debug.print("conformance: FAIL dof-blur: submitting depth did not change the frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF dof-blur softens by depth: the frame with a depth gradient differs from the frame without depth\n", .{});
+    return true;
+}
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -4802,6 +4881,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("sprite fade");
     if (!try proveSpriteAnim(gpa, engine)) return 1;
     watchHold("sprite anim");
+    if (!try proveDofPass(gpa, engine)) return 1;
+    watchHold("dof pass");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

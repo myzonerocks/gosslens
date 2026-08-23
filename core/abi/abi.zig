@@ -600,6 +600,11 @@ pub const Session = struct {
     depth_height: u32 = 0,
     depth_near: f32 = 0,
     depth_far: f32 = 0,
+    /// The submitted depth normalized into an R8 texture the dof.pass
+    /// samples, refreshed each submit_depth. Null until depth arrives.
+    depth_texture: ?render.TextureHandle = null,
+    /// dof.pass nodes by graph index: their focus plane and blur strength.
+    dof_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -1361,6 +1366,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .grade => s.grade_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
+            // Depth of field needs the host's depth: with none submitted the
+            // node holds the frame through, the standard capability degradation.
+            .dof => s.dof_params.contains(entry.graph_index) and s.depth_texture != null,
             // Only the background image gates readiness - the mask
             // degrades to the renderer's always-foreground default
             // when segmentation is unavailable (SPEC's rule: a node
@@ -1516,6 +1524,22 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitGradePass(view_id, input_texture, grade);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .dof => {
+                const params = s.dof_params.get(entry.graph_index) orelse continue;
+                const depth_tex = s.depth_texture orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitDofPass(view_id, input_texture, depth_tex, params[0], params[1]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2182,6 +2206,10 @@ pub fn destroySession(session: *Session) void {
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
+    session.dof_params.deinit(session.engine.gpa);
+    if (session.depth_texture) |tex| {
+        if (session.engine.renderer) |*r| r.destroyTexture(tex);
+    }
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
@@ -4302,6 +4330,10 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
         s.depth_data = &.{};
         s.depth_width = 0;
         s.depth_height = 0;
+        if (s.depth_texture) |old| {
+            if (s.engine.renderer) |*r| r.destroyTexture(old);
+            s.depth_texture = null;
+        }
         return .ok;
     }
     const src = depth orelse return .invalid_argument;
@@ -4319,7 +4351,25 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
     s.depth_height = height;
     s.depth_near = near;
     s.depth_far = far;
+    updateDepthTexture(s, gpa);
     return .ok;
+}
+
+/// Normalizes the submitted depth (near..far metres) into an R8 texture the
+/// dof.pass samples, replacing the previous frame's. A best-effort upload:
+/// on allocation failure the old texture stays, so the pass just holds.
+fn updateDepthTexture(s: *Session, gpa: std.mem.Allocator) void {
+    const r = if (s.engine.renderer) |*rr| rr else return;
+    if (s.depth_data.len == 0) return;
+    const bytes = gpa.alloc(u8, s.depth_data.len) catch return;
+    defer gpa.free(bytes);
+    const span = if (s.depth_far > s.depth_near) s.depth_far - s.depth_near else 1.0;
+    for (s.depth_data, bytes) |d, *b| {
+        const n = std.math.clamp((d - s.depth_near) / span, 0.0, 1.0);
+        b.* = @intFromFloat(n * 255.0);
+    }
+    if (s.depth_texture) |old| r.destroyTexture(old);
+    s.depth_texture = render.Renderer.createMaskTexture(@intCast(s.depth_width), @intCast(s.depth_height), bytes);
 }
 
 /// The depth (metres) at a normalized frame coordinate, nearest sample,
@@ -4794,6 +4844,7 @@ fn destroyBlendState(session: *Session) void {
     session.blend_textures.clearRetainingCapacity();
     // grade.pass and bloom.pass hold only plain params, nothing to free.
     session.grade_params.clearRetainingCapacity();
+    session.dof_params.clearRetainingCapacity();
     session.bloom_params.clearRetainingCapacity();
 }
 
@@ -5152,6 +5203,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // that need packaged assets stay not-ready until a directory load.
     createGradeParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
+    createDofParams(s, gpa) catch {};
     // A particle fountain also needs no bundle (the CPU sim and its mesh are
     // built from the field alone), so create it here too; the empty bundle
     // path just means a glTF model's own asset never loads, degrading it,
@@ -5201,6 +5253,17 @@ fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(grades);
     for (grades) |g| {
         session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
+    }
+}
+
+/// Resolves every spliced dof.pass node's focus and strength into
+/// session.dof_params, once at activation - mirrors createGradeParams.
+fn createDofParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const dofs = try lens.dofPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(dofs);
+    for (dofs) |d| {
+        session.dof_params.put(gpa, d.graph_index, .{ d.focus, d.strength }) catch {};
     }
 }
 
@@ -5788,6 +5851,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createModelLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
     try createBloomParams(session, gpa);
+    try createDofParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
 }

@@ -252,6 +252,15 @@ over the frame scaled by `intensity`, so bright areas bleed a soft halo.
 Both fields are optional with engine defaults. Like `blur.pass` and
 `grade.pass` it ships no asset and is always ready.
 
+A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
+{"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
+the host's submitted depth near..far range) and `strength` how sharply the
+frame softens with distance from it, so geometry nearer or farther than the
+focus plane blurs while the plane reads crisp. It reads the depth the host
+submits; with no depth it holds the frame through, the standard capability
+degradation. Both fields are optional with engine defaults, and it ships no
+asset.
+
 A `"draw.board"` node draws the session's brush board at its own place in the
 chain: the frame passes through, then every committed stroke draws over it, neon
 strokes additively and the rest on alpha. It ships no asset, carries no params,

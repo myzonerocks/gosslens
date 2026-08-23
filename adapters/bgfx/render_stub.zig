@@ -265,6 +265,15 @@ pub const Renderer = struct {
         _ = step;
     }
 
+    pub fn submitDofPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, depth_texture: TextureHandle, focus: f32, strength: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = depth_texture;
+        _ = focus;
+        _ = strength;
+    }
+
     pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
         _ = r;
         _ = view_id;

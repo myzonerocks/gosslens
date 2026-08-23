@@ -153,6 +153,14 @@ pub const BloomField = struct {
     intensity: f32 = 0.6,
 };
 
+pub const DofField = struct {
+    /// A dof.pass node's focus plane (0..1 in the submitted depth's
+    /// near..far range) and blur strength (how sharply the frame softens
+    /// with distance from that plane).
+    focus: f32 = 0.5,
+    strength: f32 = 4.0,
+};
+
 pub const SpriteField = struct {
     /// A sprite.2d node's screen rect in normalized coordinates (origin
     /// top-left, 0..1 across the frame) and its draw opacity. The default
@@ -260,6 +268,8 @@ pub const Node = struct {
     material: ?material.Graph = null,
     /// Set only on a bloom.pass node: its glow threshold and intensity.
     bloom: ?BloomField = null,
+    /// Set only on a dof.pass node: its focus plane and blur strength.
+    dof: ?DofField = null,
     /// Set only on a layout.composite node: the head arrangement it drives.
     layout: ?LayoutField = null,
     /// Set only on a sprite.2d node: the screen rect and opacity it draws
@@ -988,6 +998,23 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(bmark);
         }
+        var dof_field: ?DofField = null;
+        if (getField(object, "dof")) |dv| {
+            const dmark = path.push("dof");
+            if (!std.mem.eql(u8, node_type, "dof.pass")) {
+                try diags.add(path.slice(), "dof is a dof.pass field, found it on '{s}'", .{node_type});
+            } else if (dv != .object) {
+                try diags.add(path.slice(), "dof must be an object", .{});
+            } else {
+                var field: DofField = .{};
+                if (getField(dv.object, "focus")) |v| field.focus = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.focus)), 0.0, 1.0);
+                if (getField(dv.object, "strength")) |v| field.strength = @floatCast(numberOf(v) orelse field.strength);
+                dof_field = field;
+            }
+            path.pop(dmark);
+        } else if (std.mem.eql(u8, node_type, "dof.pass")) {
+            dof_field = .{};
+        }
         var sprite_field: ?SpriteField = null;
         if (getField(object, "sprite")) |sv| {
             const smark = path.push("sprite");
@@ -1295,6 +1322,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .grade = grade_field,
             .material = material_field,
             .bloom = bloom_field,
+            .dof = dof_field,
             .layout = layout_field,
             .sprite = sprite_field,
             .text = text_field,
