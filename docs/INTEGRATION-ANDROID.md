@@ -111,6 +111,11 @@ the faces you tracked this frame:
     session.submitFaces(results)              // up to FACE_MAX; empty clears
     for (i in 0 until session.faceCount()) session.faceResultAt(i, face)
 
+`submitBodies` is the multi-person equivalent, reaching every tracked figure:
+
+    session.submitBodies(bodies)              // up to BODY_MAX; empty clears
+    for (i in 0 until session.bodyCount()) session.bodyResultAt(i, body)
+
 To pin content to a spot on the face, `faceRegion` returns the tracked point of a
 named attach point - forehead, glabella, nose tip, chin, an eye, a cheek, an ear,
 or a mouth corner:
