@@ -75,7 +75,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 28;
+pub const abi_minor: u16 = 29;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -495,6 +495,24 @@ pub const Session = struct {
     source_dims: [comp.max_sources][2]u16 = @splat(.{ 0, 0 }),
     source_has_frame: [comp.max_sources]bool = @splat(false),
     source_count: u8 = 0,
+    /// Per-source composite blend the layout draws with: opacity, key mode
+    /// (0 none, 1 matte from the source alpha, 2 chroma-key), the chroma key
+    /// color and its match softness, and whether the source letterboxes to fit
+    /// its cell (a screen share) rather than filling it.
+    source_opacity: [comp.max_sources]f32 = @splat(1),
+    source_key: [comp.max_sources]u8 = @splat(0),
+    source_chroma: [comp.max_sources][4]f32 = @splat(.{ 0, 0, 0, 0 }),
+    source_softness: [comp.max_sources]f32 = @splat(0.1),
+    source_fit: [comp.max_sources]bool = @splat(false),
+    /// The camera (composite placement 0) carries the same blend, so a lens can
+    /// chroma-key the live camera over a guest.
+    camera_opacity: f32 = 1,
+    camera_key: u8 = 0,
+    camera_chroma: [4]f32 = .{ 0, 0, 0, 0 },
+    camera_softness: f32 = 0.1,
+    /// Set when the active lens's layout.composite node drove the layout, so
+    /// deactivating the lens clears it rather than leaving a host arrangement.
+    layout_from_lens: bool = false,
     layout_active: ?comp.Layout = null,
     /// The last submitted location fix and the session's active geofence. The
     /// engine computes geo.in_region on-device from these; the location itself
@@ -1155,7 +1173,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
 
     var next_view_id: u8 = 1;
     if (s.layout_active) |lay| {
-        next_view_id = composeLayout(r, s, current, targets[0], width, height, rotation, mirror, lay);
+        next_view_id = composeLayout(r, s, current, targets[0], targets[1], width, height, rotation, mirror, lay);
     } else {
         render.Renderer.setViewTarget(0, targets[0], width, height);
         r.submitPreview(0, current.preview, rotation * 90, mirror);
@@ -2818,6 +2836,7 @@ pub export fn goss_session_define_source(session: ?*Session, name: ?[*]const u8,
     const n = name orelse return .invalid_argument;
     if (name_len == 0) return .invalid_argument;
     const key = n[0..name_len];
+    if (std.mem.eql(u8, key, "camera")) return .invalid_argument; // reserved for placement 0
     if (findSource(s, key) != null) return .ok;
     if (s.source_count + 1 >= comp.max_sources) return .invalid_argument; // camera + this
     const slot = s.source_count;
@@ -2827,7 +2846,44 @@ pub export fn goss_session_define_source(session: ?*Session, name: ?[*]const u8,
     s.source_tex[slot] = .{};
     s.source_dims[slot] = .{ 0, 0 };
     s.source_has_frame[slot] = false;
+    s.source_opacity[slot] = 1;
+    s.source_key[slot] = 0;
+    s.source_chroma[slot] = .{ 0, 0, 0, 0 };
+    s.source_softness[slot] = 0.1;
+    s.source_fit[slot] = false;
     s.source_count += 1;
+    return .ok;
+}
+
+/// A screen-share source: like a defined source, but its frame letterboxes to
+/// fit its cell (preserving aspect) instead of stretching to fill it.
+pub export fn goss_session_define_screen_share(session: ?*Session, name: ?[*]const u8, name_len: usize) Status {
+    const status = goss_session_define_source(session, name, name_len);
+    if (status != .ok) return status;
+    const s = session.?;
+    if (findSource(s, name.?[0..name_len])) |idx| s.source_fit[idx] = true;
+    return .ok;
+}
+
+/// Sets a source's composite blend for the layout: opacity in [0,1], key mode
+/// (0 none, 1 matte from the source alpha, 2 chroma-key), the chroma key color,
+/// and a match similarity. The name "camera" addresses the live camera base.
+pub export fn goss_session_set_source_composite(session: ?*Session, name: ?[*]const u8, name_len: usize, opacity: f32, key_mode: u32, key_r: f32, key_g: f32, key_b: f32, similarity: f32) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    const op = std.math.clamp(opacity, 0, 1);
+    const key: u8 = @intCast(@min(key_mode, 2));
+    const sim = if (similarity > 0) similarity else 0;
+    if (std.mem.eql(u8, nm[0..name_len], "camera")) {
+        s.camera_opacity = op;
+        s.camera_key = key;
+        s.camera_chroma = .{ key_r, key_g, key_b, sim };
+        return .ok;
+    }
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+    s.source_opacity[idx] = op;
+    s.source_key[idx] = key;
+    s.source_chroma[idx] = .{ key_r, key_g, key_b, sim };
     return .ok;
 }
 
@@ -2845,10 +2901,18 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
         s.source_tex[i] = s.source_tex[i + 1];
         s.source_dims[i] = s.source_dims[i + 1];
         s.source_has_frame[i] = s.source_has_frame[i + 1];
+        s.source_opacity[i] = s.source_opacity[i + 1];
+        s.source_key[i] = s.source_key[i + 1];
+        s.source_chroma[i] = s.source_chroma[i + 1];
+        s.source_softness[i] = s.source_softness[i + 1];
+        s.source_fit[i] = s.source_fit[i + 1];
     }
     s.source_count -= 1;
     s.source_tex[s.source_count] = .{}; // its handle moved down; do not deinit here
     s.source_has_frame[s.source_count] = false;
+    s.source_opacity[s.source_count] = 1;
+    s.source_key[s.source_count] = 0;
+    s.source_fit[s.source_count] = false;
     return .ok;
 }
 
@@ -2881,6 +2945,7 @@ pub export fn goss_session_set_layout(session: ?*Session, arrangement: u32) Stat
         2 => comp.Layout.topBottom(total),
         3 => comp.Layout.pip(.{ 0.62, 0.62, 0.34, 0.34 }),
         0, 4 => comp.Layout.grid(total),
+        5 => comp.Layout.overlay(total),
         else => return .invalid_argument,
     };
     return .ok;
@@ -2897,7 +2962,23 @@ pub export fn goss_session_clear_layout(session: ?*Session) Status {
 /// the head of the render chain: a full-frame clear, then each placed source
 /// drawn into its own viewport in draw order. Returns the next free view id for
 /// the rest of the chain. Allocation-free; walks the fixed layout arrays only.
-fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, targets0: render.Renderer.OffscreenTarget, width: u16, height: u16, rotation: u32, mirror: bool, lay: comp.Layout) u8 {
+/// Letterboxes a source of aspect dims[0]/dims[1] inside the cell, centered, so
+/// a screen share fits without stretching. Returns the sub-rect x, y, w, h.
+fn fitRect(dims: [2]u16, dx: u16, dy: u16, dw: u16, dh: u16) [4]u16 {
+    if (dims[0] == 0 or dims[1] == 0 or dw == 0 or dh == 0) return .{ dx, dy, dw, dh };
+    const sa = @as(f32, @floatFromInt(dims[0])) / @as(f32, @floatFromInt(dims[1]));
+    const ca = @as(f32, @floatFromInt(dw)) / @as(f32, @floatFromInt(dh));
+    var w = dw;
+    var h = dh;
+    if (sa > ca) {
+        h = @intFromFloat(@as(f32, @floatFromInt(dw)) / sa);
+    } else {
+        w = @intFromFloat(@as(f32, @floatFromInt(dh)) * sa);
+    }
+    return .{ dx + (dw - w) / 2, dy + (dh - h) / 2, w, h };
+}
+
+fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, targets0: render.Renderer.OffscreenTarget, scratch: render.Renderer.OffscreenTarget, width: u16, height: u16, rotation: u32, mirror: bool, lay: comp.Layout) u8 {
     render.Renderer.clearComposite(0, targets0, width, height);
     var order: [comp.max_sources]u8 = undefined;
     const n = lay.drawOrder(&order);
@@ -2913,14 +2994,47 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
         const dh: u16 = @intFromFloat(std.math.clamp(rect[3], 0, 1) * fh);
         if (dw == 0 or dh == 0) continue;
         if (p == 0) {
-            render.Renderer.setLayoutViewport(view, targets0, dx, dy, dw, dh);
-            r.submitPreview(view, current.preview, rotation * 90, mirror);
+            if (s.camera_key == 0 and s.camera_opacity >= 1) {
+                // Opaque camera base: draw the preview straight into its cell.
+                render.Renderer.setLayoutViewport(view, targets0, dx, dy, dw, dh);
+                r.submitPreview(view, current.preview, rotation * 90, mirror);
+                view += 1;
+            } else {
+                // Keyed camera: render the preview full into the scratch, then
+                // composite it into the cell with the camera's blend.
+                render.Renderer.setViewTarget(view, scratch, width, height);
+                render.Renderer.clearComposite(view, scratch, width, height);
+                r.submitPreview(view, current.preview, rotation * 90, mirror);
+                view += 1;
+                const params = [4]f32{ s.camera_opacity, @floatFromInt(s.camera_key), s.camera_chroma[3], s.camera_softness };
+                const chroma = [4]f32{ s.camera_chroma[0], s.camera_chroma[1], s.camera_chroma[2], 0 };
+                r.submitCompositeSource(view, scratch.texture, targets0, dx, dy, dw, dh, params, chroma);
+                view += 1;
+            }
         } else {
             const src = p - 1;
             if (src >= s.source_count or !s.source_has_frame[src]) continue;
-            r.submitLayoutSource(view, s.source_tex[src].handle, targets0, dx, dy, dw, dh);
+            var cx = dx;
+            var cy = dy;
+            var cw = dw;
+            var ch = dh;
+            if (s.source_fit[src]) {
+                const fit = fitRect(s.source_dims[src], dx, dy, dw, dh);
+                cx = fit[0];
+                cy = fit[1];
+                cw = fit[2];
+                ch = fit[3];
+                if (cw == 0 or ch == 0) continue;
+            }
+            if (s.source_key[src] == 0 and s.source_opacity[src] >= 1) {
+                r.submitLayoutSource(view, s.source_tex[src].handle, targets0, cx, cy, cw, ch);
+            } else {
+                const params = [4]f32{ s.source_opacity[src], @floatFromInt(s.source_key[src]), s.source_chroma[src][3], s.source_softness[src] };
+                const chroma = [4]f32{ s.source_chroma[src][0], s.source_chroma[src][1], s.source_chroma[src][2], 0 };
+                r.submitCompositeSource(view, s.source_tex[src].handle, targets0, cx, cy, cw, ch, params, chroma);
+            }
+            view += 1;
         }
-        view += 1;
     }
     return view;
 }
@@ -3860,8 +3974,37 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroySounds(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
+    applyLensLayout(session);
     setupScript(session);
     applyLensEffects(session, effects);
+}
+
+/// Drives the head composite from the active lens's layout.composite node, if it
+/// has one: its arrangement becomes the active layout and its blend the camera
+/// base's, marked so it clears when the lens changes. A previous lens-driven
+/// layout never carries over to a new lens.
+fn applyLensLayout(s: *Session) void {
+    if (s.layout_from_lens) {
+        s.layout_active = null;
+        s.camera_opacity = 1;
+        s.camera_key = 0;
+        s.camera_chroma = .{ 0, 0, 0, 0 };
+        s.layout_from_lens = false;
+    }
+    const lens = if (s.active_lens) |*l| l else return;
+    const lf = lens.layoutComposite() orelse return;
+    const total: u8 = s.source_count + 1;
+    s.layout_active = switch (lf.arrangement) {
+        1 => comp.Layout.sideBySide(total),
+        2 => comp.Layout.topBottom(total),
+        3 => comp.Layout.pip(.{ 0.62, 0.62, 0.34, 0.34 }),
+        5 => comp.Layout.overlay(total),
+        else => comp.Layout.grid(total),
+    };
+    s.camera_opacity = std.math.clamp(lf.opacity, 0, 1);
+    s.camera_key = @min(lf.key, 2);
+    s.camera_chroma = .{ lf.chroma[0], lf.chroma[1], lf.chroma[2], if (lf.similarity > 0) lf.similarity else 0 };
+    s.layout_from_lens = true;
 }
 
 const script_fuel_per_tick: u32 = 2_000_000;
@@ -4561,6 +4704,13 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroySounds(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
+    if (s.layout_from_lens) {
+        s.layout_active = null;
+        s.camera_opacity = 1;
+        s.camera_key = 0;
+        s.camera_chroma = .{ 0, 0, 0, 0 };
+        s.layout_from_lens = false;
+    }
 }
 
 /// Reads a live parameter of the active lens by name, including whatever a

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 28u
+#define GOSS_ABI_MINOR 29u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -570,6 +570,13 @@ goss_status goss_session_remove_source(goss_session *session, const uint8_t *nam
 goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
 goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement);
 goss_status goss_session_clear_layout(goss_session *session);
+/* arrangement 5 overlay stacks the sources full-frame over each other. A source
+ * composites with a per-source blend: opacity, key_mode 1 mattes from the
+ * source alpha, key_mode 2 chroma-keys against (key_r,key_g,key_b) by color
+ * distance with a similarity threshold; the name "camera" addresses the base.
+ * A screen-share source letterboxes to fit its cell instead of stretching. */
+goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity);
+goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len);
 
 /* Graph thread. Geofilters: location-gated overlay lenses. set_geofence sets a
  * circle the app derives from a lens's intended place; submit_location feeds a

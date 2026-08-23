@@ -233,6 +233,14 @@ and is always ready, since the strokes come from the host's draw input, not the
 bundle. Without a `draw.board` node the board still draws as a final overlay; the
 node only lets a lens place it earlier so later passes act on the drawing too.
 
+A `"layout.composite"` node lets a lens drive the head composite instead of the
+host: it carries a `"layout": {"arrangement", "key", "chroma", "similarity",
+"opacity"}` block where arrangement is one of `custom`, `side_by_side`,
+`top_bottom`, `pip`, `grid`, `overlay`, and key is `none`, `matte`, or `chroma`
+for the camera base's blend. The app still supplies the source media; the lens
+only arranges it. The node configures the composite at the head of the chain, so
+it never draws as a chain pass, and the arrangement clears when the lens changes.
+
 A `"script"` node carries an inline `"source"` string of JavaScript that
 defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
@@ -253,7 +261,7 @@ The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
 passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing,
-the draw board, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
+the draw board, the layout composite, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
 the bottom; without a tracked face the node draws nothing, the standard
 capability degradation).

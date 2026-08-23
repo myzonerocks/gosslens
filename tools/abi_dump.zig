@@ -44,6 +44,8 @@ const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
     "goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement)",
     "goss_status goss_session_clear_layout(goss_session *session)",
+    "goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity)",
+    "goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us)",
     "goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m)",
     "goss_status goss_session_clear_geofence(goss_session *session)",

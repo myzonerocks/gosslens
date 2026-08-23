@@ -194,6 +194,19 @@ pub const Renderer = struct {
         _ = dh;
     }
 
+    pub fn submitCompositeSource(r: *Renderer, view_id: u16, source_tex: TextureHandle, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16, params: [4]f32, chroma: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = source_tex;
+        _ = target;
+        _ = dx;
+        _ = dy;
+        _ = dw;
+        _ = dh;
+        _ = params;
+        _ = chroma;
+    }
+
     pub fn setLayoutViewport(view_id: u16, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
         _ = view_id;
         _ = target;

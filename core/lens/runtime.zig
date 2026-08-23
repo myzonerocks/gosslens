@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, model_gltf, mesh_face, draw_board };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, model_gltf, mesh_face, draw_board, layout_composite };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -52,6 +52,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "bloom.pass")) return .bloom_pass;
     if (std.mem.eql(u8, type_str, "model.gltf")) return .model_gltf;
     if (std.mem.eql(u8, type_str, "draw.board")) return .draw_board;
+    if (std.mem.eql(u8, type_str, "layout.composite")) return .layout_composite;
     return null;
 }
 
@@ -75,7 +76,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .model_gltf, .mesh_face, .draw_board => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite => &.{},
     };
 }
 
@@ -111,6 +112,9 @@ const LensNode = struct {
     grade: ?manifest.GradeField = null,
     /// .bloom_pass only: the node's glow threshold and intensity.
     bloom: ?manifest.BloomField = null,
+    /// .layout_composite only: the head arrangement and camera blend the lens
+    /// drives the composite with.
+    layout: ?manifest.LayoutField = null,
     /// .model_gltf only: microseconds since play_animation last fired
     /// for this node, null if it never has. Advances every tick() the
     /// same way a ramp does - once a trigger starts it, not before.
@@ -396,6 +400,16 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// The first layout.composite node's field, if the lens has one, so the head
+    /// composite can take its arrangement and camera blend from the lens rather
+    /// than a host set_layout call. A layout.composite node draws nothing itself.
+    pub fn layoutComposite(self: *const Lens) ?manifest.LayoutField {
+        for (self.nodes) |node| {
+            if (node.node_type == .layout_composite) return node.layout;
+        }
+        return null;
+    }
+
     /// Current playback position for a model.gltf node, microseconds
     /// since its play_animation trigger last fired - null if it never
     /// has. The caller samples the loaded animation clip at this time;
@@ -552,6 +566,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .particles = if (node_type == .model_gltf) node.particles else null,
             .grade = if (node_type == .grade_pass) node.grade else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
+            .layout = if (node_type == .layout_composite) node.layout else null,
         };
 
         for (node.inputs) |input| {
@@ -1053,6 +1068,36 @@ test "a draw.board node becomes a draw_board pass in the chain" {
     try t.expectEqual(@as(usize, 2), chain.len);
     try t.expectEqual(PassKind.shader, chain[0].kind);
     try t.expectEqual(PassKind.draw_board, chain[1].kind);
+}
+
+const layout_composite_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.layoutcomposite", "version": "1.0.0", "display_name": "Layout",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "compose", "type": "layout.composite", "inputs": {"frame": "camera"}, "params": {}, "layout": {"arrangement": "overlay", "opacity": 0.5}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a layout.composite node drives the head layout, not the draw chain" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, layout_composite_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const lf = lens.layoutComposite() orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(u8, 5), lf.arrangement); // overlay
+    try t.expectApproxEqAbs(@as(f32, 0.5), lf.opacity, 1e-6);
+    // It configures the head composite, so it is not a draw-chain pass.
+    const chain = try lens.compositePassNodes(t.allocator, &g);
+    defer t.allocator.free(chain);
+    try t.expectEqual(@as(usize, 0), chain.len);
 }
 
 const three_way_chain_manifest =

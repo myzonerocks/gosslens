@@ -4,9 +4,10 @@
 //! placements; who the sources are and how they arrive is the SDK's, not core's.
 const std = @import("std");
 
-/// A single layout node caps at this many sources (matches the frame graph's
-/// per-node port ceiling). Larger grids chain layout nodes.
-pub const max_sources = 8;
+/// The composite source pool ceiling, so a live grid holds the camera plus
+/// fifteen guests. Not the frame graph's per-node port count; nothing couples
+/// them. Larger grids chain layout nodes.
+pub const max_sources = 16;
 
 /// How a source's alpha is cut before it blends into the composite.
 pub const KeyMode = enum(u8) {
@@ -31,6 +32,7 @@ pub const Arrangement = enum(u8) {
     top_bottom = 2,
     pip = 3,
     grid = 4,
+    overlay = 5,
 };
 
 pub const Layout = struct {
@@ -89,6 +91,19 @@ pub const Layout = struct {
             const col = @as(u8, @intCast(i)) % cols;
             const row = @as(u8, @intCast(i)) / cols;
             out.placements[i] = .{ .rect = .{ @as(f32, @floatFromInt(col)) * cw, @as(f32, @floatFromInt(row)) * ch, cw, ch } };
+        }
+        return out;
+    }
+
+    /// n sources stacked full-frame, each composited over the last: every
+    /// placement fills the frame with an ascending z, so a higher-registration
+    /// source draws over a lower one. Each source's blend (opacity, matte,
+    /// chroma) is set separately, which is what makes the stack read as layers.
+    pub fn overlay(n: u8) Layout {
+        const c = clampCount(n);
+        var out = Layout{ .count = c };
+        for (0..c) |i| {
+            out.placements[i] = .{ .rect = .{ 0, 0, 1, 1 }, .z = @intCast(i) };
         }
         return out;
     }
@@ -174,4 +189,24 @@ test "draw order sorts by z then registration index, stably" {
 test "counts clamp into range" {
     try t.expectEqual(@as(u8, 1), Layout.sideBySide(0).count);
     try t.expectEqual(@as(u8, max_sources), Layout.grid(99).count);
+}
+
+test "overlay stacks full-frame placements by registration" {
+    const l = Layout.overlay(3);
+    try t.expectEqual(@as(u8, 3), l.count);
+    for (0..3) |i| {
+        try t.expectEqual([4]f32{ 0, 0, 1, 1 }, l.placements[i].rect);
+        try t.expectEqual(@as(i16, @intCast(i)), l.placements[i].z);
+    }
+    var order: [max_sources]u8 = undefined;
+    try t.expectEqual(@as(u8, 3), l.drawOrder(&order));
+    try t.expectEqual(@as(u8, 0), order[0]); // lowest z first
+    try t.expectEqual(@as(u8, 2), order[2]); // highest z on top
+}
+
+test "the grid holds a full sixteen-source live wall" {
+    const g = Layout.grid(16); // 4x4
+    try t.expectEqual(@as(u8, 16), g.count);
+    try t.expectEqual([4]f32{ 0, 0, 0.25, 0.25 }, g.placements[0].rect);
+    try t.expectEqual([4]f32{ 0.75, 0.75, 0.25, 0.25 }, g.placements[15].rect);
 }

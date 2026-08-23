@@ -175,6 +175,25 @@ extension GossSession {
         try checked(goss_session_clear_layout(handle))
     }
 
+    /// Sets a source's composite blend: opacity, key mode (0 none, 1 matte from
+    /// the source alpha, 2 chroma-key), the chroma color, and a match
+    /// similarity. The name "camera" addresses the live camera base.
+    public func setSourceComposite(_ name: String, opacity: Float = 1, key: UInt32 = 0, chroma: (r: Float, g: Float, b: Float) = (0, 0, 0), similarity: Float = 0) throws {
+        var b = Array(name.utf8)
+        try b.withUnsafeMutableBufferPointer { buf in
+            try checked(goss_session_set_source_composite(handle, buf.baseAddress, buf.count, opacity, key, chroma.r, chroma.g, chroma.b, similarity))
+        }
+    }
+
+    /// Defines a screen-share source: its frame letterboxes to fit its cell
+    /// instead of stretching.
+    public func defineScreenShare(_ name: String) throws {
+        var b = Array(name.utf8)
+        try b.withUnsafeMutableBufferPointer { buf in
+            try checked(goss_session_define_screen_share(handle, buf.baseAddress, buf.count))
+        }
+    }
+
     /// Feeds a location fix for on-device geo.in_region membership; the location never leaves the engine.
     public func submitLocation(latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Int64) throws {
         try checked(goss_session_submit_location(handle, latitude, longitude, accuracyM, timestampUs))
