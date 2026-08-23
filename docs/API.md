@@ -194,6 +194,7 @@ file must move together.
 | `goss_session_track_frame` | `trackFrame(y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs)`; feeds every enabled tracking worker | native tracking path |
 | `goss_session_face_result` | `faceResult(result)` | native tracking path |
 | `goss_session_hand_result` | `handResult(result)` | native tracking path |
+| `goss_session_hand_joint` | `handJoint(joint, handIndex)`, the handIndex-th tracked hand's named joint point (x, y in frame pixels, z in the same scale) so a lens pins content to a fingertip or the wrist; see the `GOSS_HAND_JOINT_*` points (palm is the middle knuckle) | native tracking path |
 | `goss_session_pose_result` | `poseResult(result)` | native tracking path |
 | `goss_session_body_joint` | `bodyJoint(joint)`, the tracked body's named skeleton joint point (x, y in frame pixels, z in the same scale) so a lens pins content to a shoulder, a wrist, or a knee; see the `GOSS_BODY_JOINT_*` points (head, left/right shoulder, elbow, wrist, hip, knee, ankle) | native tracking path |
 | `goss_session_face_pose` | `facePose(matrix)`, filling a caller-owned 16-float column-major array | native tracking path |

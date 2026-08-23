@@ -135,6 +135,11 @@ knee of the tracked figure:
 
     let joint = try session.bodyJoint(.leftWrist)
 
+`handJoint` is the hand equivalent, pinning to a fingertip or the wrist of the
+tracked hand:
+
+    let tip = try session.handJoint(.indexTip)
+
 ## Geofilters
 
 A lens can gate on place. Feed a location fix and describe the region the lens

@@ -84,6 +84,7 @@ const abi_functions = [_][]const u8{
     "goss_status goss_session_enable_hand_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
     "void goss_session_disable_hand_tracking(goss_session *session)",
     "goss_status goss_session_hand_result(goss_session *session, goss_hand_result *out_result)",
+    "goss_status goss_session_hand_joint(goss_session *session, uint32_t hand_index, uint32_t joint, float *out_xyz)",
     "goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
     "void goss_session_disable_pose_tracking(goss_session *session)",
     "goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result)",

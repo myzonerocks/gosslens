@@ -83,6 +83,18 @@ public enum GossBodyJoint: UInt32 {
     case rightAnkle = 12
 }
 
+/// A named attach point on a tracked hand, for `handJoint`. `palm` is the
+/// middle-finger knuckle, a stable palm-centre proxy.
+public enum GossHandJoint: UInt32 {
+    case wrist = 0
+    case thumbTip = 1
+    case indexTip = 2
+    case middleTip = 3
+    case ringTip = 4
+    case pinkyTip = 5
+    case palm = 6
+}
+
 /// One reusable hand tracking readout, up to two hands per frame.
 /// handedness is the model's score that the hand is a right hand; hand
 /// h's point p sits at (h * landmarkCount + p) * 3 in landmarks.
@@ -252,6 +264,17 @@ extension GossSession {
         var xyz: [Float] = [0, 0, 0]
         try xyz.withUnsafeMutableBufferPointer { buffer in
             try checked(goss_session_body_joint(handle, joint.rawValue, buffer.baseAddress))
+        }
+        return (xyz[0], xyz[1], xyz[2])
+    }
+
+    /// The tracked point (x, y in frame pixels, z in the same scale) of a named
+    /// joint on the handIndex-th tracked hand, so a lens pins content to a
+    /// fingertip or the wrist. Throws .again until that hand is tracked.
+    public func handJoint(_ joint: GossHandJoint, hand handIndex: Int = 0) throws -> (x: Float, y: Float, z: Float) {
+        var xyz: [Float] = [0, 0, 0]
+        try xyz.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_hand_joint(handle, UInt32(handIndex), joint.rawValue, buffer.baseAddress))
         }
         return (xyz[0], xyz[1], xyz[2])
     }

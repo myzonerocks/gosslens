@@ -122,6 +122,11 @@ knee of the tracked figure:
 
     val joint = session.bodyJoint(Gosslens.BODY_JOINT_LEFT_WRIST) ?: return
 
+`handJoint` is the hand equivalent, pinning to a fingertip or the wrist of the
+tracked hand:
+
+    val tip = session.handJoint(Gosslens.HAND_JOINT_INDEX_TIP) ?: return
+
 ## Geofilters
 
 A lens can gate on place. Feed a location fix and describe the region the lens

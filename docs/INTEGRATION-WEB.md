@@ -124,6 +124,11 @@ knee of the tracked figure:
 
     const joint = session.bodyJoint(GossBodyJoint.LeftWrist);
 
+`handJoint` is the hand equivalent, pinning to a fingertip or the wrist of the
+tracked hand:
+
+    const tip = session.handJoint(GossHandJoint.IndexTip);
+
 The face tracker also drives the `gaze.*` and `head.nod`/`head.shake`/`head.tilt`
 lens triggers; `camera.*` follow the camera controls and `geo.in_region` the
 geofence below. The full grammar is in [the lens spec](../lenses/SPEC.md).
