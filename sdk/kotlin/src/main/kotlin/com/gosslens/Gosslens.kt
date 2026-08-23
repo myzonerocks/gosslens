@@ -64,6 +64,9 @@ object Gosslens {
         timestampUs: Long,
     ): Int
     internal external fun nativeFaceResult(session: Long, resultBuffer: ByteBuffer): Int
+    internal external fun nativeSubmitFaces(session: Long, faces: ByteBuffer, count: Int): Int
+    internal external fun nativeFaceCount(session: Long): Int
+    internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeEnableBeauty(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
     internal external fun nativeDisableBeauty(session: Long)
     internal external fun nativeSetBeauty(session: Long, effect: Int, value: Float): Int
@@ -136,6 +139,7 @@ object Gosslens {
     const val FACE_LANDMARK_COUNT = 478
     const val FACE_BLENDSHAPE_COUNT = 52
     const val FACE_RESULT_BYTES = 5968
+    const val FACE_MAX = 4
     const val HAND_LANDMARK_COUNT = 21
     const val HAND_MAX = 2
     const val HAND_RESULT_BYTES = 560
@@ -599,6 +603,32 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     fun faceResult(result: GossFaceResult): Boolean {
         val status = Gosslens.nativeFaceResult(handle, result.buffer)
         if (status != 0) return false
+        result.parse()
+        return true
+    }
+
+    /** Submits the faces tracked this frame for the multi-face path, so a
+     * lens can instance effects across every face and the face-anchor render
+     * fans out. An empty list clears the path back to the single internal
+     * tracker; faces past FACE_MAX are ignored. */
+    fun submitFaces(faces: List<GossFaceResult>): Boolean {
+        if (faces.isEmpty()) return Gosslens.nativeSubmitFaces(handle, ByteBuffer.allocateDirect(1), 0) == 0
+        val packed = ByteBuffer.allocateDirect(faces.size * Gosslens.FACE_RESULT_BYTES).order(ByteOrder.nativeOrder())
+        for (f in faces) {
+            f.buffer.rewind()
+            packed.put(f.buffer)
+        }
+        packed.rewind()
+        return Gosslens.nativeSubmitFaces(handle, packed, faces.size) == 0
+    }
+
+    /** The number of faces the last submitFaces kept, zero to FACE_MAX. */
+    fun faceCount(): Int = Gosslens.nativeFaceCount(handle).coerceAtLeast(0)
+
+    /** Fills [result] with the index-th submitted face; false once index
+     * reaches faceCount, so a caller loops zero to faceCount. */
+    fun faceResultAt(index: Int, result: GossFaceResult): Boolean {
+        if (Gosslens.nativeFaceResultAt(handle, index, result.buffer) != 0) return false
         result.parse()
         return true
     }

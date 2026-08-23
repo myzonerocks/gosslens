@@ -1501,7 +1501,13 @@ pub const Renderer = struct {
     /// attachment, real future work this lens does not need.
     pub fn submitModel(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, aspect_ratio: f32) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+        r.drawModelMesh(mesh_view, mesh, model_matrix, base_color, aspect_ratio);
+    }
 
+    /// The mesh half of submitModel, without the frame blit. The multi-face
+    /// fan-out blits once through submitModel for the first face and draws
+    /// each further face's model over it with this, so N faces cost one blit.
+    pub fn drawModelMesh(r: *Renderer, mesh_view: c.bgfx_view_id_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, aspect_ratio: f32) void {
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
         const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
         const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 30u
+#define GOSS_ABI_MINOR 31u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -153,6 +153,7 @@ typedef struct goss_landmarks {
  * 5968 bytes, static-asserted below. */
 #define GOSS_FACE_LANDMARK_COUNT 478u
 #define GOSS_FACE_BLENDSHAPE_COUNT 52u
+#define GOSS_FACE_MAX 4u
 typedef struct goss_face_result {
     uint64_t frame_serial;
     int64_t timestamp_us;
@@ -513,6 +514,22 @@ goss_status goss_session_track_frame(goss_session *session, const goss_frame_des
 /* Graph thread. Reads the newest tracking result into caller memory.
  * Reports GOSS_AGAIN until the worker has published its first result. */
 goss_status goss_session_face_result(goss_session *session, goss_face_result *out_result);
+
+/* Graph thread. Submits the faces tracked this frame for the multi-face
+ * path. count past GOSS_FACE_MAX is clamped; zero clears the path back to
+ * the single tracker. Faces below the tracked presence or with no
+ * landmarks drop, so the count only holds real faces. */
+goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count);
+
+/* Graph thread. Writes how many faces the last goss_session_submit_faces
+ * kept, zero to GOSS_FACE_MAX. Zero also means no multi-face path this
+ * frame. */
+goss_status goss_session_face_count(goss_session *session, uint32_t *out_count);
+
+/* Graph thread. Reads the index-th submitted face. Returns
+ * GOSS_ERROR_INVALID_ARGUMENT once index reaches the face count, so a
+ * caller loops zero to the count to visit every face. */
+goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result);
 
 /* Graph thread. Reads the newest hand tracking result into caller
  * memory. Reports GOSS_AGAIN until the worker has published its first

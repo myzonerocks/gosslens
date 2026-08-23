@@ -75,7 +75,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 30;
+pub const abi_minor: u16 = 31;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -460,6 +460,12 @@ pub const Session = struct {
     /// Null means no face this frame, the same meaning a zero
     /// landmark_count carries elsewhere.
     web_face_landmarks: ?[face.landmark_count]face.Landmark = null,
+    /// Faces the host submitted this frame, the source of truth for the
+    /// multi-face read ops and the render fan-out. face_count is how many
+    /// slots hold a real face; zero leaves the single-face tracker owning
+    /// the anchor render, so a one-face lens never regresses.
+    face_results: [face.max_faces]face.Result = @splat(std.mem.zeroes(face.Result)),
+    face_count: u32 = 0,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -1589,26 +1595,48 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
                 var anchored_without_face = false;
                 if (s.model_face_anchors.contains(entry.graph_index)) {
+                    // The head transform lands in source-frame pixels, stretched
+                    // by the preview blit to fill a rect whose z=0 plane spans
+                    // 4*tan(22.5) world units vertically.
+                    const world_height: f32 = 1.6568542;
+                    const rect_aspect = tiledAspect(s, rect_width, rect_height);
+                    const sx = world_height * rect_aspect / @as(f32, @floatFromInt(width));
+                    const sy = world_height / @as(f32, @floatFromInt(height));
+                    const pixel_to_world: math.Mat4 = .{ .cols = .{
+                        .{ sx, 0, 0, 0 },
+                        .{ 0, -sy, 0, 0 },
+                        .{ 0, 0, -sy, 0 },
+                        .{ -0.5 * world_height * rect_aspect, 0.5 * world_height, 0, 1 },
+                    } };
+                    const base_model_matrix = model_matrix;
+                    if (s.face_count > 0) {
+                        // The host's submitted faces drive one model per face:
+                        // blit the frame once through the first, draw the rest
+                        // of the meshes over it.
+                        var drawn_face = false;
+                        for (s.face_results[0..s.face_count]) |*fr| {
+                            const head = face_geometry.estimateHeadPose(&fr.landmarks) orelse continue;
+                            const m = pixel_to_world.mul(head).mul(base_model_matrix);
+                            if (!drawn_face) {
+                                r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, m, loaded.base_color, rect_aspect);
+                                drawn_face = true;
+                            } else {
+                                r.drawModelMesh(mesh_view, loaded.mesh, m, loaded.base_color, rect_aspect);
+                            }
+                        }
+                        if (!drawn_face) r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                        if (output) |target| {
+                            input_texture = target.texture;
+                            if (!is_final) next_slot += 1;
+                        }
+                        continue;
+                    }
                     anchored_without_face = true;
                     if (s.face_tracking) |worker| {
                         var tracked: face.Result = undefined;
                         if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
                             if (face_geometry.estimateHeadPose(&tracked.landmarks)) |head| {
-                                // The head transform lands in source-frame
-                                // pixels, stretched by the preview blit to
-                                // fill a rect whose z=0 plane spans
-                                // 4*tan(22.5) world units vertically.
-                                const world_height: f32 = 1.6568542;
-                                const rect_aspect = tiledAspect(s, rect_width, rect_height);
-                                const sx = world_height * rect_aspect / @as(f32, @floatFromInt(width));
-                                const sy = world_height / @as(f32, @floatFromInt(height));
-                                const pixel_to_world: math.Mat4 = .{ .cols = .{
-                                    .{ sx, 0, 0, 0 },
-                                    .{ 0, -sy, 0, 0 },
-                                    .{ 0, 0, -sy, 0 },
-                                    .{ -0.5 * world_height * rect_aspect, 0.5 * world_height, 0, 1 },
-                                } };
-                                model_matrix = pixel_to_world.mul(head).mul(model_matrix);
+                                model_matrix = pixel_to_world.mul(head).mul(base_model_matrix);
                                 anchored_without_face = false;
                             }
                         }
@@ -3666,6 +3694,48 @@ pub export fn goss_session_face_result(session: ?*Session, out_result: ?*face.Re
     return .ok;
 }
 
+/// Submits the faces tracked this frame for the multi-face path. count past
+/// GOSS_FACE_MAX is clamped; zero clears the path back to the single
+/// tracker. A face below the tracked presence or with no landmarks drops,
+/// so face_count only ever counts real faces.
+pub export fn goss_session_submit_faces(session: ?*Session, faces: ?[*]const face.Result, count: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (count == 0) {
+        s.face_count = 0;
+        return .ok;
+    }
+    const src = faces orelse return .invalid_argument;
+    var kept: u32 = 0;
+    var i: u32 = 0;
+    while (i < count and kept < face.max_faces) : (i += 1) {
+        const f = src[i];
+        if (f.landmark_count_out == 0 or f.presence < 0.5) continue;
+        s.face_results[kept] = f;
+        kept += 1;
+    }
+    s.face_count = kept;
+    return .ok;
+}
+
+/// How many faces the last goss_session_submit_faces kept, zero to
+/// GOSS_FACE_MAX. Zero also means the caller drives no multi-face path.
+pub export fn goss_session_face_count(session: ?*Session, out_count: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_count orelse return .invalid_argument;
+    out.* = s.face_count;
+    return .ok;
+}
+
+/// Reads the index-th submitted face. invalid_argument once index reaches
+/// face_count, so a caller loops zero to face_count to visit every face.
+pub export fn goss_session_face_result_at(session: ?*Session, index: u32, out_result: ?*face.Result) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_result orelse return .invalid_argument;
+    if (index >= s.face_count) return .invalid_argument;
+    out.* = s.face_results[index];
+    return .ok;
+}
+
 /// Reads the newest hand tracking result into caller memory. Reports
 /// again until the worker has published its first result.
 pub export fn goss_session_hand_result(session: ?*Session, out_result: ?*hand.Result) Status {
@@ -5152,6 +5222,55 @@ test "face tracking on a build without the inference stack refuses" {
     try t.expectEqual(Status.again, goss_session_track_frame(session, &desc, &planes, 2, &planes, 2));
     goss_session_disable_face_tracking(session);
     try t.expectEqual(Status.invalid_argument, goss_session_face_result(session, null));
+}
+
+test "submitted faces round-trip by index and drop the ones no real face fills" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    // No faces submitted yet.
+    var count: u32 = 99;
+    try t.expectEqual(Status.ok, goss_session_face_count(session, &count));
+    try t.expectEqual(@as(u32, 0), count);
+    var one: FaceResult = undefined;
+    try t.expectEqual(Status.invalid_argument, goss_session_face_result_at(session, 0, &one));
+
+    // Two real faces, one too faint and one with no landmarks, in that order.
+    var faces: [4]FaceResult = @splat(std.mem.zeroes(FaceResult));
+    faces[0] = .{ .frame_serial = 10, .timestamp_us = 1, .presence = 0.9, .landmark_count_out = face.landmark_count, .landmarks = @splat(1.0), .blendshapes = @splat(0) };
+    faces[1] = .{ .frame_serial = 20, .timestamp_us = 2, .presence = 0.2, .landmark_count_out = face.landmark_count, .landmarks = @splat(2.0), .blendshapes = @splat(0) };
+    faces[2] = .{ .frame_serial = 30, .timestamp_us = 3, .presence = 0.95, .landmark_count_out = 0, .landmarks = @splat(3.0), .blendshapes = @splat(0) };
+    faces[3] = .{ .frame_serial = 40, .timestamp_us = 4, .presence = 0.8, .landmark_count_out = face.landmark_count, .landmarks = @splat(4.0), .blendshapes = @splat(0) };
+    try t.expectEqual(Status.ok, goss_session_submit_faces(session, &faces, 4));
+
+    // Only faces 0 and 3 survive, compacted to slots 0 and 1 in order.
+    try t.expectEqual(Status.ok, goss_session_face_count(session, &count));
+    try t.expectEqual(@as(u32, 2), count);
+    try t.expectEqual(Status.ok, goss_session_face_result_at(session, 0, &one));
+    try t.expectEqual(@as(u64, 10), one.frame_serial);
+    try t.expectEqual(@as(f32, 1.0), one.landmarks[0]);
+    try t.expectEqual(Status.ok, goss_session_face_result_at(session, 1, &one));
+    try t.expectEqual(@as(u64, 40), one.frame_serial);
+    try t.expectEqual(@as(f32, 4.0), one.landmarks[0]);
+    try t.expectEqual(Status.invalid_argument, goss_session_face_result_at(session, 2, &one));
+
+    // A count past the cap is clamped to the buffer, never overruns it.
+    var many: [8]FaceResult = @splat(faces[0]);
+    try t.expectEqual(Status.ok, goss_session_submit_faces(session, &many, 8));
+    try t.expectEqual(Status.ok, goss_session_face_count(session, &count));
+    try t.expectEqual(@as(u32, face.max_faces), count);
+
+    // Zero clears the multi-face path.
+    try t.expectEqual(Status.ok, goss_session_submit_faces(session, null, 0));
+    try t.expectEqual(Status.ok, goss_session_face_count(session, &count));
+    try t.expectEqual(@as(u32, 0), count);
+
+    // Null arguments are rejected, not crashes.
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_faces(session, null, 3));
+    try t.expectEqual(Status.invalid_argument, goss_session_face_count(session, null));
+    try t.expectEqual(Status.invalid_argument, goss_session_face_result_at(session, 0, null));
 }
 
 test "beauty on a build without the effects engine refuses" {

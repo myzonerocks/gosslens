@@ -11,6 +11,11 @@ const detector = @import("detector");
 
 pub const landmark_count = 478;
 pub const blendshape_count = 52;
+
+/// How many faces the multi-face path carries at once. A group selfie
+/// rarely fills a frame past this, and the per-face Result is large, so
+/// the cap bounds the session buffer that backs face_count/face_result_at.
+pub const max_faces = 4;
 pub const region_scale = 1.5;
 
 /// The blendshape model's output order, extracted from the pinned model
