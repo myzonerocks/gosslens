@@ -20,8 +20,10 @@ different version, so the toolchain question has exactly one answer.
 
 `zig build ci` is the whole local bar in one command. Green here is green
 upstream, so never push and let CI find a failure the local run would have.
-Regenerate the ABI baseline after an intended ABI change with
-`zig build abi -- --print > tools/abi-baseline.txt` and commit it with the code.
+After an intended ABI change run `zig build abi-update`: it regenerates
+`tools/abi-baseline.txt` and stamps `GOSS_ABI_MINOR` in the header from the
+surface, so the version is never bumped by hand. The pre-commit hook runs it
+for you when a commit touches the surface; `zig build abi` verifies both match.
 
 ## Watch it draw
 
@@ -67,9 +69,11 @@ baseline, all three SDKs, and a proof, or it is unfinished.
 
 1. Build it in the boundary that already owns it (see
    [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
-2. Add the C op to `include/gosslens.h`, register it in `tools/abi_dump.zig`,
-   and bump the ABI minor.
-3. Regenerate `tools/abi-baseline.txt`.
+2. Add the C op to `include/gosslens.h` and its signature to `abi_functions`
+   in `core/abi/abi.zig`. The ABI minor is derived from that list, so nothing
+   to bump.
+3. Run `zig build abi-update` (or just commit; the hook syncs the baseline and
+   header for you).
 4. Decide the canonical operation name and parameters in
    [docs/API.md](docs/API.md) first, then wire the Swift, Kotlin, and TypeScript
    SDKs and the Android JNI binding to that one name.

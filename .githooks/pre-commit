@@ -1,10 +1,16 @@
 #!/bin/sh
-# Source-tracked gate, both directions, plus the abi surface check on every
-# commit.
+# Source-tracked gate both directions. When a commit touches the ABI surface
+# and nothing is unstaged, the baseline and header are regenerated and staged
+# so the minor is never bumped by hand; the regenerate reads the tree, so it
+# only runs when the tree equals the index. The final check proves the surface.
 set -e
 root="$(git rev-parse --show-toplevel)"
 zig="$root/.local/zig/current/zig"
 [ -x "$zig" ] || zig=zig
 cd "$root"
 "$zig" build gate -- --staged
+if git diff --cached --name-only | grep -qE '^(core/abi/abi\.zig|tools/abi_dump\.zig|include/gosslens\.h)$' && git diff --quiet; then
+    "$zig" build abi-update
+    git add tools/abi-baseline.txt include/gosslens.h
+fi
 exec "$zig" build abi

@@ -30,6 +30,11 @@ a.out
 .local/
 .DS_Store
 
+# Git worktrees for parallel branches live under .wt and are never part of
+# the tree they check out. Ignored so a stray add cannot commit one as a
+# gitlink.
+.wt/
+
 # Vendored engine caches and download archives, rebuilt from the pins in
 # third_party by zig build vendor-sync. The pin files are tracked; the
 # fetched trees and tarballs are not.
