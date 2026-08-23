@@ -3795,12 +3795,19 @@ pub export fn goss_session_face_region(session: ?*Session, region: u32, out_xyz:
     const s = session orelse return .invalid_argument;
     const out = out_xyz orelse return .invalid_argument;
     const r = face.Region.fromU32(region) orelse return .invalid_argument;
-    const worker = s.face_tracking orelse return .again;
-    var result: face.Result = undefined;
-    if (!tracking.readResult(worker, &result)) return .again;
-    if (result.landmark_count_out == 0 or result.presence < 0.5) return .again;
-    out.* = face.regionPoint(&result.landmarks, r);
-    return .ok;
+    if (s.face_tracking) |worker| {
+        var result: face.Result = undefined;
+        if (tracking.readResult(worker, &result) and result.landmark_count_out > 0 and result.presence >= 0.5) {
+            out.* = face.regionPoint(&result.landmarks, r);
+            return .ok;
+        }
+    }
+    // The web host-submitted landmark path, where there is no native worker.
+    if (s.web_face_landmarks) |*landmarks| {
+        out.* = face.regionPointFromLandmarks(landmarks, r);
+        return .ok;
+    }
+    return .again;
 }
 
 /// Stands the beauty chain up for a session. The resource path names the

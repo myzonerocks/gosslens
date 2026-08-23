@@ -114,12 +114,22 @@ const region_landmark = [_]u16{
     61, // right_mouth_corner - subject's right commissure
 };
 
+/// The mesh landmark a region resolves to.
+pub fn regionLandmark(region: Region) u16 {
+    return region_landmark[@intFromEnum(region)];
+}
+
 /// The tracked point for a region: x, y in frame pixels and z in the same
 /// scale, read straight from the mesh. landmarks is a result's flat array.
 pub fn regionPoint(landmarks: *const [landmark_count * 3]f32, region: Region) [3]f32 {
-    const idx = region_landmark[@intFromEnum(region)];
-    const base = @as(usize, idx) * 3;
+    const base = @as(usize, regionLandmark(region)) * 3;
     return .{ landmarks[base], landmarks[base + 1], landmarks[base + 2] };
+}
+
+/// The region point read from a Landmark array (the web host-submitted path).
+pub fn regionPointFromLandmarks(landmarks: *const [landmark_count]Landmark, region: Region) [3]f32 {
+    const lm = landmarks[regionLandmark(region)];
+    return .{ lm.x, lm.y, lm.z };
 }
 
 test "every region maps to an in-range landmark and reads its point" {
