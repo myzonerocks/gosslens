@@ -61,6 +61,27 @@ to the WebGL2 URL. If you drive the loop yourself, the pieces are public too:
     session.submitFrameRgbaCopy(rgba, width * 4, width, height);
     engine.renderFrame(session);
 
+## Camera controls
+
+The engine never touches the camera. It holds declarative intent you set,
+normalizes it, and hands it back for you to apply as getUserMedia track
+constraints. The controls live on `GossSession`, so reach them through
+`preview.session` if you took the `GossPreviewSession` path:
+
+    session.setCameraControls({ ...session.cameraControls(), flashMode: 2, zoomFactor: 2 });
+
+    const applied = session.cameraControls();
+    await track.applyConstraints({ advanced: [{ zoom: applied.zoomFactor,
+                                                 torch: applied.torch === 1 }] });
+
+`GossCameraControls` also carries focus and exposure mode and points, the
+exposure bias, and the front-camera mirror-save policy. `setRecordingPolicy`/
+`recordingPolicy` (clip cap, segment and loop mode, speed preset, mic mute,
+save-original, stabilization) round-trips for your `MediaRecorder`, and
+`setCaptureUi`/`captureUi` (grid, level, shutter mode, self-timer, night mode,
+front-screen flash) for the capture chrome you draw. The engine validates and
+clamps every field; you read it back and apply it.
+
 ## Tracking
 
 Face, hand, pose, and segmentation run in the `gosslens_tracking.wasm` module,
@@ -83,6 +104,58 @@ session with `setSegmentationMask` so a lens can composite against it.
 The `.task`/`.tflite` bundles (`face_landmarker.task`, `gesture_recognizer.task`,
 `pose_landmarker_full.task`, `selfie_multiclass.tflite`) are the ones
 `fetch-models` writes; host and fetch the ones your lenses use.
+
+The single-face path is `setFaceLandmarks`. To fan a face-anchored lens out
+across every face in frame, hand the engine the faces you tracked this frame:
+
+    session.submitFaces(faces);      // GossFaceInput[], up to GOSS_FACE_MAX; [] clears
+    for (let i = 0; i < session.faceCount(); i++) {
+      const face = session.faceResultAt(i);
+    }
+
+`faceRegion` returns the tracked point of a named attach point for pinning
+content - forehead, glabella, nose tip, chin, an eye, a cheek, an ear, or a mouth
+corner:
+
+    const p = session.faceRegion(GossFaceRegion.Forehead);
+
+The face tracker also drives the `gaze.*` and `head.nod`/`head.shake`/`head.tilt`
+lens triggers; `camera.*` follow the camera controls and `geo.in_region` the
+geofence below. The full grammar is in [the lens spec](../lenses/SPEC.md).
+
+## Geofilters
+
+A lens can gate on place. Feed a location fix from the Geolocation API and
+describe the region the lens belongs to; the engine decides membership in wasm
+and the fix never leaves the page:
+
+    navigator.geolocation.watchPosition((pos) => {
+      session.submitLocation(pos.coords.latitude, pos.coords.longitude,
+                             pos.coords.accuracy, pos.timestamp * 1000);
+    });
+    session.setGeofence(lat, lon, 150);
+
+`setGeofenceBBox` and `setGeofencePolygon` describe a box or a ring instead;
+`setGeoAccuracy` sets the worst fix that still counts as inside, and
+`clearGeofence` drops the gate. Membership drives the lens grammar's
+`geo.in_region` trigger.
+
+## Brush
+
+Freehand strokes composite over the frame. Open a stroke, push normalized points,
+and close it; the engine keeps the undo/redo stack and hands back the ribbon
+(x, y, r, g, b, a per vertex):
+
+    session.setBrushStyle(1, 0.4, 0.6, 1, 0.01);
+    session.setBrushMode(3);              // 0 pen, 1 highlighter, 2 marker, 3 neon
+    session.beginStroke();
+    session.addStrokePoint(nx, ny);
+    session.endStroke();
+    const ribbon = session.brushVertices();
+
+`setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x, y, z)`/`endARStroke` are the
+world-anchored twin: points are pushed in the world frame world tracking reports,
+so a stroke stays fixed in the scene.
 
 ## Lives and calls
 

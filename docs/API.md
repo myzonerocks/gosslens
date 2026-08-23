@@ -196,6 +196,10 @@ file must move together.
 | `goss_session_hand_result` | `handResult(result)` | native tracking path |
 | `goss_session_pose_result` | `poseResult(result)` | native tracking path |
 | `goss_session_face_pose` | `facePose(matrix)`, filling a caller-owned 16-float column-major array | native tracking path |
+| `goss_session_submit_faces` | `submitFaces(faces, count)`, submits the faces tracked this frame for the multi-face path; count past `GOSS_FACE_MAX` clamps, zero clears back to the single tracker, and a face-anchored model fans out to every submitted face | native tracking path |
+| `goss_session_face_count` | `faceCount()`, how many faces the last `submitFaces` kept, zero to `GOSS_FACE_MAX`; zero also means no multi-face path this frame | native tracking path |
+| `goss_session_face_result_at` | `faceResultAt(index, result)`, reads the index-th submitted face; a caller loops zero to the count to visit every face | native tracking path |
+| `goss_session_face_region` | `faceRegion(region, outXyz)`, the newest tracked face's named attach point (x, y in frame pixels, z in the same scale) so a lens pins content to the forehead, glabella, nose tip, chin, an eye, a cheek, an ear, or the mouth centre/corner; see the `GOSS_FACE_REGION_*` points | native tracking path |
 | `goss_session_set_face_landmarks` | `setFaceLandmarks(points)`; web adds `sourceWidth, sourceHeight` since its analysis resolution is decoupled from the rendered frame's | Web analysis-producer path |
 | `goss_session_set_segmentation_mask` | `setSegmentationMask(mask)`, a mask_side x mask_side float mask the web tracking module produced, uploaded as the subject texture | Web analysis-producer path |
 | `goss_session_segmentation_channels` | `segmentationChannels()`, a bitmask over the mask channels the active lens samples | Web analysis-producer path |
@@ -242,13 +246,48 @@ complete parameter list.**
 | `goss_session_define_source` / `_remove_source` | `defineSource(name)` / `removeSource(name)`, register or drop a named RGBA source for multi-source composition; the camera is the implicit source 0 | all SDKs |
 | `goss_session_submit_source_frame_rgba_copy` | `submitSourceFrame(name, rgba, ...)`, uploads one RGBA/BGRA frame into a named source's own texture | all SDKs |
 | `goss_session_set_layout` / `_clear_layout` | `setLayout(arrangement)` / `clearLayout()`, composites the camera and named sources side-by-side, top-bottom, picture-in-picture, or in a grid (Duet, Stitch, live grids); clear returns to a single camera | all SDKs |
+| `goss_session_set_source_composite` | `setSourceComposite(name, opacity, keyMode, keyR, keyG, keyB, similarity)`, a per-source blend: opacity, `keyMode` 1 mattes from source alpha, 2 chroma-keys against (keyR,keyG,keyB) within a similarity threshold; the name "camera" addresses the base | all SDKs |
+| `goss_session_define_screen_share` | `defineScreenShare(name)`, a source that letterboxes to fit its cell instead of stretching | all SDKs |
 | `goss_session_submit_location` | `submitLocation(lat, lon, accuracy, ts)`, feeds a location fix; the engine computes `geo.in_region` on-device and the location never crosses back over the ABI | all SDKs |
 | `goss_session_set_geofence` / `_clear_geofence` | `setGeofence(lat, lon, radius)` / `clearGeofence()`, sets the circle a geofilter lens is active within, derived by the app from the lens's intended place | all SDKs |
+| `goss_session_set_geofence_bbox` / `_set_geofence_polygon` | `setGeofenceBbox(minLat, minLon, maxLat, maxLon)` / `setGeofencePolygon(coords, vertexCount)`, an axis-aligned box or a polygon ring (three to 64 lat/lon vertices) the geofilter lens is active within | all SDKs |
+| `goss_session_set_geo_accuracy` | `setGeoAccuracy(maxAccuracyM)`, refuses a fix vaguer than this so a lens does not fire on an uncertain location; zero clears the gate | all SDKs |
 | `goss_session_parameter_value` | `parameterValue(name)`, reads a live lens parameter by name, including whatever a script node last wrote | all SDKs |
 | `goss_session_pull_audio` | `pullAudio(out, frames)`, the next block of mixed lens audio (interleaved s16) a play_sound trigger produced, for the SDK to route to platform audio out; silence when no lens sound is active | all SDKs |
 | `goss_session_mix_output_audio` | `mixOutputAudio(mic, frameCount, sampleRate, channels)`, folds the lens sound into the caller's outgoing call/live audio track and returns the mixed interleaved s16 - the lens mixer's 48 kHz mono resampled to the track's rate and summed with saturation into every channel; a null mic mixes the lens sound over silence. Advances the lens mixer once, so it replaces `pullAudio` on the call path | all SDKs |
-| `goss_session_set_camera_controls` | `setCameraControls(controls)`, stores declarative camera-hardware intent (flash/torch, focus mode + point, exposure mode + bias, zoom, mirror-save policy) after the engine validates and normalizes every field; the SDK reads it back and drives the platform camera. The engine never touches camera hardware | all SDKs |
+
+### Capture controls
+
+Declarative hardware and chrome intent the engine validates, normalizes, and
+stores; the SDK reads it back and drives the platform camera, recorder, and
+capture UI. The engine never touches camera hardware.
+
+| ABI function | Public operation | Scope |
+|---|---|---|
+| `goss_session_set_camera_controls` | `setCameraControls(controls)`, stores camera-hardware intent (flash/torch, focus mode + point, exposure mode + bias, zoom, mirror-save policy) after the engine validates and normalizes every field | all SDKs |
 | `goss_session_camera_controls` | `cameraControls()`, reads the normalized controls back for the SDK to apply to AVFoundation / CameraX / getUserMedia | all SDKs |
+| `goss_session_set_recording_policy` | `setRecordingPolicy(policy)`, stores how the SDK should record (clip cap, min clip, single/multi-clip segments, loop, speed preset, mic mute, save-original, stabilization); the engine never drives the recorder | all SDKs |
+| `goss_session_recording_policy` | `recordingPolicy()`, reads the normalized policy back for the SDK to apply to the platform recorder | all SDKs |
+| `goss_session_set_capture_ui` | `setCaptureUi(ui)`, stores the capture chrome the app draws (grid, level, shutter mode, self-timer, night mode, front-screen flash); the front-screen flash is a fill the app draws, never baked into the captured frame | all SDKs |
+| `goss_session_capture_ui` | `captureUi()`, reads the normalized capture-UI intent back | all SDKs |
+
+### Brush
+
+Screen and world-anchored freehand drawing. The engine owns stroke state and
+the undo/redo stacks; the app feeds points and pulls the finished triangle
+ribbon for the renderer to draw.
+
+| ABI function | Public operation | Scope |
+|---|---|---|
+| `goss_session_brush_set_style` | `brushSetStyle(r, g, b, a, width)`, colour and width for the next stroke | all SDKs |
+| `goss_session_brush_set_mode` | `brushSetMode(mode)`, preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon (additive) | all SDKs |
+| `goss_session_brush_begin` / `_point` / `_end` | `brushBegin()` / `brushPoint(x, y)` / `brushEnd()`, a stroke in normalized screen space | all SDKs |
+| `goss_session_brush_undo` / `_redo` / `_clear` | `brushUndo()` / `brushRedo()` / `brushClear()`, the stroke stacks | all SDKs |
+| `goss_session_brush_erase_at` | `brushEraseAt(x, y, radius)`, removes committed strokes within radius of a point (refused mid-stroke), returning the count | all SDKs |
+| `goss_session_brush_vertices` | `brushVertices(out, capacityFloats)`, pulls the triangle ribbon (x, y, r, g, b, a per vertex); a null out reports the float count to size for | all SDKs |
+| `goss_session_ar_brush_set_style` / `_set_mode` | `arBrushSetStyle(r, g, b, a, width)` / `arBrushSetMode(mode)`, the world-anchored brush's style and preset | world-tracking SDKs |
+| `goss_session_ar_brush_begin` / `_point` / `_end` | `arBrushBegin()` / `arBrushPoint(x, y, z)` / `arBrushEnd()`, a stroke in the world frame the platform reports poses in; nothing draws without live world tracking | world-tracking SDKs |
+| `goss_session_ar_brush_undo` / `_clear` | `arBrushUndo()` / `arBrushClear()`, the world-brush stacks | world-tracking SDKs |
 
 ## Web tracking module
 

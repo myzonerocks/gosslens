@@ -69,6 +69,29 @@ and render run on the same thread.
 are the copy-pasteable version of this, including the `CADisplayLink` loop and
 the NV12 to Metal-texture handoff.
 
+## Camera controls
+
+The engine never drives camera hardware. It holds declarative intent you set,
+normalizes it, and hands it back for you to apply to `AVCaptureDevice`:
+
+    var controls = goss_camera_controls()
+    controls.flash_mode = 2      // 0 off, 1 on, 2 auto
+    controls.zoom_factor = 2      // >= 1, clamped to the device ceiling
+    try session.setCameraControls(controls)
+
+    let applied = try session.cameraControls   // normalized; lock and apply
+    try device.lockForConfiguration()
+    device.videoZoomFactor = CGFloat(applied.zoom_factor)
+    device.unlockForConfiguration()
+
+`goss_camera_controls` also carries torch, focus and exposure mode and points,
+the exposure bias, and the front-camera mirror-save policy. Two companions
+round-trip the same way: `setRecordingPolicy`/`recordingPolicy` (clip cap,
+segment and loop mode, speed preset, mic mute, save-original, stabilization) for
+your `AVAssetWriter`, and `setCaptureUi`/`captureUi` (grid, level, shutter mode,
+self-timer, night mode, front-screen flash) for the capture chrome you draw. The
+engine validates and clamps every field; you read it back and apply it.
+
 ## Lenses
 
 A lens is a manifest plus its assets. Activate one on the session:
@@ -83,6 +106,60 @@ enabled first, or it loads and renders nothing with no error:
 The `.task` bundles (`face_landmarker.task`, `gesture_recognizer.task`,
 `pose_landmarker_full.task`) are separate resources you ship with your app;
 they are not part of the engine archive. Bundle the ones your lenses use.
+
+A lens's triggers can also react to signals you already feed: `camera.zoom`,
+`camera.focus` and `camera.exposure` follow the camera controls above,
+`geo.in_region` follows the geofence below, and `gaze.*` and
+`head.nod`/`head.shake`/`head.tilt` follow the face tracker. The full grammar is
+in [the lens spec](../lenses/SPEC.md).
+
+## Multiple faces
+
+`enableFaceTracking` drives the single internal tracker, and a face-anchored
+lens rides it. To fan that lens out across every face in frame, hand the engine
+the faces you tracked this frame and it instances the anchored render across all
+of them:
+
+    try session.submitFaces(results)          // up to GOSS_FACE_MAX; empty clears
+    let n = try session.faceCount()
+    for i in 0..<n { try session.faceResult(at: i, into: face) }
+
+To pin content to a spot on the face, `faceRegion` returns the tracked point of a
+named attach point - forehead, glabella, nose tip, chin, an eye, a cheek, an ear,
+or a mouth corner:
+
+    let (x, y, _) = try session.faceRegion(.forehead)
+
+## Geofilters
+
+A lens can gate on place. Feed a location fix and describe the region the lens
+belongs to; the engine decides membership on-device and the fix never leaves it:
+
+    try session.submitLocation(latitude: lat, longitude: lon,
+                               accuracyM: acc, timestampUs: ts)
+    try session.setGeofence(latitude: lat, longitude: lon, radiusM: 150)
+
+`setGeofenceBBox` and `setGeofencePolygon` describe a box or a ring instead;
+`setGeoAccuracy` sets the worst fix that still counts as inside, and
+`clearGeofence` drops the gate. Membership drives the lens grammar's
+`geo.in_region` trigger.
+
+## Brush
+
+Freehand strokes composite over the frame. Open a stroke, push normalized points
+as the finger moves, and close it; the engine keeps the undo/redo stack and hands
+back the ribbon (x, y, r, g, b, a per vertex) for your renderer:
+
+    try session.setBrushStyle(red: 1, green: 0.4, blue: 0.6, alpha: 1, width: 0.01)
+    try session.setBrushMode(.neon)     // pen, highlighter, marker, neon
+    try session.beginStroke()
+    try session.addStrokePoint(x: nx, y: ny)
+    try session.endStroke()
+    let ribbon = try session.brushVertices()
+
+`setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x:y:z:)`/`endARStroke` are the
+world-anchored twin: points are pushed in the world frame world tracking reports,
+so a stroke stays fixed in the scene.
 
 ## Lives and calls
 

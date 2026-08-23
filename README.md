@@ -7,9 +7,10 @@ media contract behind a single C ABI. The SDKs own capture, GPU surfaces,
 native hardware media APIs, and platform tracking, and nothing else.
 
 The goal is the full surface a modern camera app expects: beauty and
-makeup, face/hand/body tracking, segmentation, world anchoring, scripted
-and physics-driven lenses, and capture output. All of it on device, with
-no lock-in.
+makeup, multi-face, hand, and body tracking, segmentation, world
+anchoring, scripted and physics-driven lenses, camera controls,
+geofilters, on-frame drawing, and capture output. All of it on device,
+with no lock-in.
 The build order lives in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Everything runs on device. The core makes no network calls and carries no

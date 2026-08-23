@@ -63,6 +63,24 @@ non-OK status falls back to `submitFrameCopy`.
 [`MainActivity`](../sdk/kotlin/demo/src/main/kotlin/com/gosslens/demo/MainActivity.kt)
 is the copy-pasteable version of this, including the surface and camera wiring.
 
+## Camera controls
+
+The engine never drives camera hardware. It holds declarative intent you set,
+normalizes it, and hands it back for you to apply through CameraX:
+
+    session.setCameraControls(GossCameraControls(flashMode = 2, zoomFactor = 2f))
+
+    val applied = session.cameraControls() ?: return
+    cameraControl.setZoomRatio(applied.zoomFactor)
+
+`GossCameraControls` also carries torch, focus and exposure mode and points, the
+exposure bias, and the front-camera mirror-save policy. Two companions round-trip
+the same way: `setRecordingPolicy`/`recordingPolicy` (clip cap, segment and loop
+mode, speed preset, mic mute, save-original, stabilization) for your recorder,
+and `setCaptureUi`/`captureUi` (grid, level, shutter mode, self-timer, night
+mode, front-screen flash) for the capture chrome you draw. The engine validates
+and clamps every field; you read it back and apply it.
+
 ## Lenses
 
 A lens is a manifest plus its assets. Activate one on the session:
@@ -77,6 +95,57 @@ enabled first, or it loads and renders nothing with no error:
 The `.task` bundles (`face_landmarker.task`, `gesture_recognizer.task`,
 `pose_landmarker_full.task`) are separate resources you ship with your app;
 they are not part of the `.so`. Bundle the ones your lenses use.
+
+A lens's triggers can also react to signals you already feed: `camera.zoom`,
+`camera.focus` and `camera.exposure` follow the camera controls above,
+`geo.in_region` follows the geofence below, and `gaze.*` and
+`head.nod`/`head.shake`/`head.tilt` follow the face tracker. The full grammar is
+in [the lens spec](../lenses/SPEC.md).
+
+## Multiple faces
+
+`enableFaceTracking` drives the single internal tracker, and a face-anchored
+lens rides it. To fan that lens out across every face in frame, hand the engine
+the faces you tracked this frame:
+
+    session.submitFaces(results)              // up to FACE_MAX; empty clears
+    for (i in 0 until session.faceCount()) session.faceResultAt(i, face)
+
+To pin content to a spot on the face, `faceRegion` returns the tracked point of a
+named attach point - forehead, glabella, nose tip, chin, an eye, a cheek, an ear,
+or a mouth corner:
+
+    val p = session.faceRegion(Gosslens.FACE_REGION_FOREHEAD) ?: return
+
+## Geofilters
+
+A lens can gate on place. Feed a location fix and describe the region the lens
+belongs to; the engine decides membership on-device and the fix never leaves it:
+
+    session.submitLocation(latitude, longitude, accuracyM, timestampUs)
+    session.setGeofence(latitude, longitude, radiusM = 150.0)
+
+`setGeofenceBBox` and `setGeofencePolygon` describe a box or a ring instead;
+`setGeoAccuracy` sets the worst fix that still counts as inside, and
+`clearGeofence` drops the gate. Membership drives the lens grammar's
+`geo.in_region` trigger.
+
+## Brush
+
+Freehand strokes composite over the frame. Open a stroke, push normalized points,
+and close it; the engine keeps the undo/redo stack and hands back the ribbon
+(x, y, r, g, b, a per vertex):
+
+    session.setBrushStyle(1f, 0.4f, 0.6f, 1f, 0.01f)
+    session.setBrushMode(GossSession.BrushMode.NEON)
+    session.beginStroke()
+    session.addStrokePoint(nx, ny)
+    session.endStroke()
+    val ribbon = session.brushVertices()
+
+`setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x, y, z)`/`endARStroke` are the
+world-anchored twin: points are pushed in the world frame world tracking reports,
+so a stroke stays fixed in the scene.
 
 ## Lives and calls
 
