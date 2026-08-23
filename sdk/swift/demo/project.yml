@@ -54,6 +54,10 @@ targets:
         type: folder
         buildPhase: resources
         optional: true
+      - path: ../../../.lens-packages/text-overlay
+        type: folder
+        buildPhase: resources
+        optional: true
     dependencies:
       - package: Gosslens
     settings:

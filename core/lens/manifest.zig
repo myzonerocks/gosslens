@@ -164,6 +164,22 @@ pub const SpriteField = struct {
     opacity: f32 = 1.0,
 };
 
+pub const TextField = struct {
+    /// A text.2d node's inline string, the screen rect it fills (same
+    /// normalized coordinates as a sprite), its opacity, and the rgb color
+    /// its glyphs draw in. The engine rasterizes the string with its
+    /// built-in font and draws it like a sprite.
+    content: []const u8 = "",
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+    w: f32 = 1.0,
+    h: f32 = 0.2,
+    opacity: f32 = 1.0,
+    r: u8 = 255,
+    g: u8 = 255,
+    b: u8 = 255,
+};
+
 pub const LayoutField = struct {
     /// A layout.composite node's head arrangement and the camera base's blend.
     /// arrangement 0 custom..5 overlay matches the ABI; key 0 none, 1 matte,
@@ -234,6 +250,9 @@ pub const Node = struct {
     /// Set only on a sprite.2d node: the screen rect and opacity it draws
     /// its image at.
     sprite: ?SpriteField = null,
+    /// Set only on a text.2d node: the string, rect, opacity, and color it
+    /// draws.
+    text: ?TextField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -975,6 +994,37 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             // A sprite.2d node with no sprite block draws its image full-frame.
             sprite_field = .{};
         }
+        var text_field: ?TextField = null;
+        if (getField(object, "text")) |tv| {
+            const tmark = path.push("text");
+            if (!std.mem.eql(u8, node_type, "text.2d")) {
+                try diags.add(path.slice(), "text is a text.2d field, found it on '{s}'", .{node_type});
+            } else if (tv != .object) {
+                try diags.add(path.slice(), "text must be an object", .{});
+            } else {
+                var field: TextField = .{};
+                if (getField(tv.object, "content")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.content = try arena.dupe(u8, s);
+                }
+                if (getField(tv.object, "x")) |v| field.x = @floatCast(numberOf(v) orelse field.x);
+                if (getField(tv.object, "y")) |v| field.y = @floatCast(numberOf(v) orelse field.y);
+                if (getField(tv.object, "w")) |v| field.w = @floatCast(numberOf(v) orelse field.w);
+                if (getField(tv.object, "h")) |v| field.h = @floatCast(numberOf(v) orelse field.h);
+                if (getField(tv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(tv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = @intFromFloat(std.math.clamp(rgb[0], 0.0, 1.0) * 255.0);
+                        field.g = @intFromFloat(std.math.clamp(rgb[1], 0.0, 1.0) * 255.0);
+                        field.b = @intFromFloat(std.math.clamp(rgb[2], 0.0, 1.0) * 255.0);
+                    } else try diags.add(path.slice(), "text color must be three numbers", .{});
+                }
+                text_field = field;
+            }
+            path.pop(tmark);
+        } else if (std.mem.eql(u8, node_type, "text.2d")) {
+            try diags.add(path.slice(), "a text.2d node needs a text block", .{});
+        }
         var layout_field: ?LayoutField = null;
         if (getField(object, "layout")) |lv| {
             const lmark = path.push("layout");
@@ -1220,6 +1270,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .bloom = bloom_field,
             .layout = layout_field,
             .sprite = sprite_field,
+            .text = text_field,
             .script = script_source,
         });
     }
@@ -1963,6 +2014,54 @@ test "a sprite block on a non-sprite node is rejected" {
     var found = false;
     for (result.diags.items) |d| {
         if (std.mem.indexOf(u8, d.message, "sprite is a sprite.2d field") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a text.2d node parses its content, rect, and color" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "label", "type": "text.2d", "inputs": {"frame": "camera"}, "params": {}, "text": {"content": "HELLO", "x": 0.1, "y": 0.8, "w": 0.8, "h": 0.15, "color": [1.0, 0.0, 0.0]}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const tf = manifest.nodes[0].text orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings("HELLO", tf.content);
+    try t.expectApproxEqAbs(@as(f32, 0.8), tf.w, 0.001);
+    try t.expectEqual(@as(u8, 255), tf.r);
+    try t.expectEqual(@as(u8, 0), tf.g);
+}
+
+test "a text.2d node with no text block is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "label", "type": "text.2d", "inputs": {"frame": "camera"}, "params": {}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "a text.2d node needs a text block") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a text block on a non-text node is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "a", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}, "text": {"content": "HI"}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "text is a text.2d field") != null) found = true;
     }
     try t.expect(found);
 }

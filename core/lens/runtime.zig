@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -54,6 +54,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "draw.board")) return .draw_board;
     if (std.mem.eql(u8, type_str, "layout.composite")) return .layout_composite;
     if (std.mem.eql(u8, type_str, "sprite.2d")) return .sprite_2d;
+    if (std.mem.eql(u8, type_str, "text.2d")) return .text_2d;
     return null;
 }
 
@@ -77,7 +78,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d => &.{},
     };
 }
 
@@ -129,6 +130,8 @@ const LensNode = struct {
     /// .sprite_2d only: the screen rect and opacity the node draws its
     /// image at.
     sprite: ?manifest.SpriteField = null,
+    /// .text_2d only: the string, rect, opacity, and color the node draws.
+    text: ?manifest.TextField = null,
     /// .model_gltf only: microseconds since play_animation last fired
     /// for this node, null if it never has. Advances every tick() the
     /// same way a ramp does - once a trigger starts it, not before.
@@ -196,6 +199,17 @@ pub const SpriteNode = struct {
     image_stem: []const u8,
     rect: [4]f32,
     opacity: f32,
+};
+
+/// One text.2d node ready for the caller to rasterize and draw - which
+/// graph node it is, the string it draws, the normalized rect and opacity,
+/// and the rgb color its glyphs take.
+pub const TextNode = struct {
+    graph_index: graph.NodeIndex,
+    content: []const u8,
+    rect: [4]f32,
+    opacity: f32,
+    color: [3]u8,
 };
 
 /// One grade.pass node ready for the caller to draw - which graph node
@@ -414,6 +428,22 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every text.2d node this lens spliced, in execution order, each
+    /// carrying its string, rect, opacity, and color - the caller
+    /// rasterizes the string and draws it like a sprite.
+    pub fn textNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]TextNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(TextNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .text_2d) continue;
+            const tf = node.text orelse manifest.TextField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b } });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every shader.pass, lut.pass, blend.pass, and model.gltf node
     /// this lens spliced, in one real execution-order sequence - the
     /// actual draw order for a chain that mixes any of the four kinds,
@@ -435,7 +465,7 @@ pub const Lens = struct {
                 .model_gltf => .model,
                 .mesh_face => .mesh,
                 .draw_board => .draw_board,
-                .sprite_2d => .sprite,
+                .sprite_2d, .text_2d => .sprite,
                 else => continue,
             };
             try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
@@ -646,6 +676,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .clip_weights = if (node_type == .model_gltf) node.clip_weights else &.{},
             .morph_weights = if (node_type == .model_gltf) node.morph_weights else &.{},
             .sprite = if (node_type == .sprite_2d) node.sprite else null,
+            .text = if (node_type == .text_2d) node.text else null,
             .grade = if (node_type == .grade_pass) node.grade else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .layout = if (node_type == .layout_composite) node.layout else null,

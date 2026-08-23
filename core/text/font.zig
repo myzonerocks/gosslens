@@ -1,0 +1,140 @@
+//! A compact built-in 8x8 bitmap font and a string rasterizer, so a lens
+//! draws text with no font file. Glyphs are eight rows of eight bits (high
+//! bit leftmost) covering space, digits, uppercase, and punctuation.
+//! rasterize lays a string into an RGBA buffer to upload like a sprite.
+
+const std = @import("std");
+
+pub const glyph_px = 8;
+
+/// Eight rows for `ch`, the high bit of each the leftmost column. Unknown
+/// characters (and space) return an empty glyph; lowercase folds up.
+fn glyph(ch: u8) [8]u8 {
+    const c = if (ch >= 'a' and ch <= 'z') ch - 32 else ch;
+    return switch (c) {
+        ' ' => .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+        '!' => .{ 0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00 },
+        '.' => .{ 0, 0, 0, 0, 0, 0, 0x18, 0x18 },
+        ',' => .{ 0, 0, 0, 0, 0, 0x18, 0x18, 0x30 },
+        '-' => .{ 0, 0, 0, 0x7E, 0, 0, 0, 0 },
+        ':' => .{ 0, 0x18, 0x18, 0, 0, 0x18, 0x18, 0 },
+        '?' => .{ 0x3C, 0x66, 0x06, 0x0C, 0x18, 0x00, 0x18, 0x00 },
+        '0' => .{ 0x3C, 0x66, 0x6E, 0x76, 0x66, 0x66, 0x3C, 0x00 },
+        '1' => .{ 0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00 },
+        '2' => .{ 0x3C, 0x66, 0x06, 0x0C, 0x30, 0x60, 0x7E, 0x00 },
+        '3' => .{ 0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x3C, 0x00 },
+        '4' => .{ 0x0C, 0x1C, 0x3C, 0x6C, 0x7E, 0x0C, 0x0C, 0x00 },
+        '5' => .{ 0x7E, 0x60, 0x7C, 0x06, 0x06, 0x66, 0x3C, 0x00 },
+        '6' => .{ 0x1C, 0x30, 0x60, 0x7C, 0x66, 0x66, 0x3C, 0x00 },
+        '7' => .{ 0x7E, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x00 },
+        '8' => .{ 0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x3C, 0x00 },
+        '9' => .{ 0x3C, 0x66, 0x66, 0x3E, 0x06, 0x0C, 0x38, 0x00 },
+        'A' => .{ 0x18, 0x3C, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x00 },
+        'B' => .{ 0x7C, 0x66, 0x66, 0x7C, 0x66, 0x66, 0x7C, 0x00 },
+        'C' => .{ 0x3C, 0x66, 0x60, 0x60, 0x60, 0x66, 0x3C, 0x00 },
+        'D' => .{ 0x78, 0x6C, 0x66, 0x66, 0x66, 0x6C, 0x78, 0x00 },
+        'E' => .{ 0x7E, 0x60, 0x60, 0x7C, 0x60, 0x60, 0x7E, 0x00 },
+        'F' => .{ 0x7E, 0x60, 0x60, 0x7C, 0x60, 0x60, 0x60, 0x00 },
+        'G' => .{ 0x3C, 0x66, 0x60, 0x6E, 0x66, 0x66, 0x3C, 0x00 },
+        'H' => .{ 0x66, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x66, 0x00 },
+        'I' => .{ 0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00 },
+        'J' => .{ 0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x6C, 0x38, 0x00 },
+        'K' => .{ 0x66, 0x6C, 0x78, 0x70, 0x78, 0x6C, 0x66, 0x00 },
+        'L' => .{ 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x7E, 0x00 },
+        'M' => .{ 0x63, 0x77, 0x7F, 0x6B, 0x63, 0x63, 0x63, 0x00 },
+        'N' => .{ 0x66, 0x76, 0x7E, 0x7E, 0x6E, 0x66, 0x66, 0x00 },
+        'O' => .{ 0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00 },
+        'P' => .{ 0x7C, 0x66, 0x66, 0x7C, 0x60, 0x60, 0x60, 0x00 },
+        'Q' => .{ 0x3C, 0x66, 0x66, 0x66, 0x6E, 0x3C, 0x0E, 0x00 },
+        'R' => .{ 0x7C, 0x66, 0x66, 0x7C, 0x78, 0x6C, 0x66, 0x00 },
+        'S' => .{ 0x3C, 0x66, 0x60, 0x3C, 0x06, 0x66, 0x3C, 0x00 },
+        'T' => .{ 0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00 },
+        'U' => .{ 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00 },
+        'V' => .{ 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x00 },
+        'W' => .{ 0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63, 0x00 },
+        'X' => .{ 0x66, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x66, 0x00 },
+        'Y' => .{ 0x66, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x18, 0x00 },
+        'Z' => .{ 0x7E, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x7E, 0x00 },
+        else => .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+}
+
+/// The pixel size of `text` at integer `scale` (each glyph cell is
+/// glyph_px*scale). A one-line, monospace layout.
+pub fn measure(text: []const u8, scale: u32) struct { w: u32, h: u32 } {
+    const s = @max(scale, 1);
+    return .{ .w = @as(u32, @intCast(text.len)) * glyph_px * s, .h = glyph_px * s };
+}
+
+/// Rasterizes `text` into a freshly allocated RGBA buffer: each glyph
+/// pixel set to `color`, every other pixel fully transparent. The caller
+/// owns and frees the returned bytes.
+pub fn rasterize(gpa: std.mem.Allocator, text: []const u8, scale: u32, color: [4]u8) !struct { rgba: []u8, width: u32, height: u32 } {
+    const s = @max(scale, 1);
+    const dim = measure(text, s);
+    const width = @max(dim.w, 1);
+    const height = @max(dim.h, 1);
+    const rgba = try gpa.alloc(u8, width * height * 4);
+    @memset(rgba, 0);
+    for (text, 0..) |ch, ci| {
+        const rows = glyph(ch);
+        const base_x = @as(u32, @intCast(ci)) * glyph_px * s;
+        for (rows, 0..) |row, ry| {
+            var bit: u3 = 0;
+            while (true) : (bit += 1) {
+                if ((row & (@as(u8, 0x80) >> bit)) != 0) {
+                    // Fill the scale*scale block for this set bit.
+                    var dy: u32 = 0;
+                    while (dy < s) : (dy += 1) {
+                        var dx: u32 = 0;
+                        while (dx < s) : (dx += 1) {
+                            const px = base_x + @as(u32, bit) * s + dx;
+                            const py = @as(u32, @intCast(ry)) * s + dy;
+                            const idx = (py * width + px) * 4;
+                            rgba[idx + 0] = color[0];
+                            rgba[idx + 1] = color[1];
+                            rgba[idx + 2] = color[2];
+                            rgba[idx + 3] = color[3];
+                        }
+                    }
+                }
+                if (bit == 7) break;
+            }
+        }
+    }
+    return .{ .rgba = rgba, .width = width, .height = height };
+}
+
+const t = std.testing;
+
+test "measure sizes a monospace line" {
+    const m = measure("ABC", 2);
+    try t.expectEqual(@as(u32, 3 * 8 * 2), m.w);
+    try t.expectEqual(@as(u32, 8 * 2), m.h);
+}
+
+test "rasterize sets glyph pixels opaque and leaves gaps clear" {
+    const out = try rasterize(t.allocator, "I", 1, .{ 255, 0, 0, 255 });
+    defer t.allocator.free(out.rgba);
+    try t.expectEqual(@as(u32, 8), out.width);
+    try t.expectEqual(@as(u32, 8), out.height);
+    // 'I' row 0 is 0x3C: columns 2..5 set, so a lit red pixel there and a
+    // clear one in column 0.
+    try t.expectEqual(@as(u8, 255), out.rgba[(0 * 8 + 2) * 4 + 3]); // set: opaque
+    try t.expectEqual(@as(u8, 255), out.rgba[(0 * 8 + 2) * 4 + 0]); // set: red
+    try t.expectEqual(@as(u8, 0), out.rgba[(0 * 8 + 0) * 4 + 3]); // gap: transparent
+}
+
+test "a blank line still rasterizes without crashing" {
+    const out = try rasterize(t.allocator, "", 1, .{ 255, 255, 255, 255 });
+    defer t.allocator.free(out.rgba);
+    try t.expect(out.width >= 1 and out.height >= 1);
+}
+
+test "lowercase folds to uppercase glyphs" {
+    const lower = try rasterize(t.allocator, "a", 1, .{ 9, 9, 9, 255 });
+    defer t.allocator.free(lower.rgba);
+    const upper = try rasterize(t.allocator, "A", 1, .{ 9, 9, 9, 255 });
+    defer t.allocator.free(upper.rgba);
+    try t.expectEqualSlices(u8, upper.rgba, lower.rgba);
+}

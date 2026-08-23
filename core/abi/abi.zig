@@ -26,6 +26,7 @@ const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
 const comp = @import("layout");
 const geo = @import("geo");
+const font = @import("font");
 const stroke = @import("stroke");
 const wboard = @import("world_board");
 const physics = @import("physics");
@@ -5317,6 +5318,27 @@ fn pollSpriteLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Alloca
     }
 }
 
+/// Rasterizes every spliced text.2d node's string with the built-in font
+/// and uploads it as a texture, storing it and its rect in the same maps
+/// the sprite draw reads - so text draws through the sprite path with no
+/// async load, since rasterization is synchronous.
+fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const r = if (session.engine.renderer) |*rr| rr else return;
+    const texts = try lens.textNodes(gpa, &session.lens_graph);
+    defer gpa.free(texts);
+    for (texts) |txt| {
+        const raster = font.rasterize(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
+        defer gpa.free(raster.rgba);
+        const texture = render.Renderer.createStaticTexture(@intCast(raster.width), @intCast(raster.height), raster.rgba);
+        session.sprite_textures.put(gpa, txt.graph_index, texture) catch {
+            r.destroyTexture(texture);
+            continue;
+        };
+        session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
+    }
+}
+
 /// Starts a background load for every spliced mesh.face node's texture
 /// (assets/<stem>.png) - mirrors createBlendLoaders exactly.
 fn createMeshFaceLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
@@ -5663,6 +5685,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createBlendLoaders(session, gpa, bundle_path);
     try createMeshFaceLoaders(session, gpa, bundle_path);
     try createSpriteLoaders(session, gpa, bundle_path);
+    try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
     try createBloomParams(session, gpa);
