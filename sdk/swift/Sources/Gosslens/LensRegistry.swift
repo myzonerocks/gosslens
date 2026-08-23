@@ -129,6 +129,35 @@ extension GossSession {
         }
     }
 
+    /// Stores the recording policy the SDK applies to the platform recorder.
+    public func setRecordingPolicy(_ policy: goss_recording_policy) throws {
+        var p = policy
+        try checked(goss_session_set_recording_policy(handle, &p))
+    }
+
+    public var recordingPolicy: goss_recording_policy {
+        get throws {
+            var out = goss_recording_policy()
+            try checked(goss_session_recording_policy(handle, &out))
+            return out
+        }
+    }
+
+    /// Stores the capture-UI intent the app renders (grid, timer, night mode, the
+    /// front-screen flash).
+    public func setCaptureUi(_ ui: goss_capture_ui) throws {
+        var u = ui
+        try checked(goss_session_set_capture_ui(handle, &u))
+    }
+
+    public var captureUi: goss_capture_ui {
+        get throws {
+            var out = goss_capture_ui()
+            try checked(goss_session_capture_ui(handle, &out))
+            return out
+        }
+    }
+
     /// Fires a named event the next `tickLens` delivers to the lens's
     /// `event('name')` triggers for one tick. Drive an on-screen effect from an
     /// app moment; the engine knows the name, never its meaning.

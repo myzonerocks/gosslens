@@ -75,7 +75,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 29;
+pub const abi_minor: u16 = 30;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -486,6 +486,10 @@ pub const Session = struct {
     /// does not fire a stale trigger on the first tick after it does.
     cam_focus_pulse: bool = false,
     cam_exposure_pulse: bool = false,
+    /// The recording policy and capture-UI intent the SDK applies: the engine
+    /// validates and stores them, never touching the recorder or drawing the UI.
+    recording_policy: RecordingPolicy = .{},
+    capture_ui: CaptureUiIntent = .{},
     /// Host-fired event names buffered until the next tick, where they reach
     /// the trigger rail for exactly one tick and then clear. Fixed-size, so
     /// firing an event allocates nothing.
@@ -2772,6 +2776,38 @@ pub const CameraControls = extern struct {
     reserved: u32 = 0,
 };
 
+/// How the SDK should record: the engine stores this intent, it never drives
+/// the recorder. Ten 4-byte fields, layout frozen at 40 bytes.
+pub const RecordingPolicy = extern struct {
+    max_duration_ms: u32 = 0, // 0 unlimited, else a hard clip cap
+    min_clip_ms: u32 = 0, // a segment shorter than this is dropped
+    segment_mode: u32 = 0, // 0 single take, 1 multi-clip pause/resume
+    loop_playback: u32 = 0, // 0 off, 1 loop the recorded clip
+    speed_preset: u32 = 0, // 0 1x, 1 0.3x, 2 0.5x, 3 2x, 4 3x
+    mic_muted: u32 = 0, // 0 record mic, 1 mute
+    save_original: u32 = 0, // 0 off, 1 keep the unprocessed take too
+    stabilization: u32 = 0, // 0 off, 1 standard, 2 cinematic
+    reserved0: u32 = 0,
+    reserved1: u32 = 0,
+};
+
+/// The capture chrome the app draws over its own surface: the engine stores the
+/// intent, it never renders the UI. The front-screen flash is a brightness and
+/// warmth fill the app draws, deliberately not baked into the captured frame.
+/// Ten 4-byte fields, layout frozen at 40 bytes.
+pub const CaptureUiIntent = extern struct {
+    grid_mode: u32 = 0, // 0 off, 1 thirds, 2 golden, 3 square/crosshair
+    level_indicator: u32 = 0, // 0 off, 1 on
+    shutter_mode: u32 = 0, // 0 photo, 1 hold-video, 2 handsfree, 3 loop, 4 timer
+    countdown_s: u32 = 0, // self-timer seconds, 0 off
+    night_mode: u32 = 0, // 0 off, 1 on, 2 auto
+    screen_flash_mode: u32 = 0, // 0 off, 1 on, 2 auto (front-screen fill)
+    screen_flash_intensity: f32 = 1.0, // 0..1 brightness of the fill
+    screen_flash_warmth: f32 = 0.5, // 0 cool .. 1 warm
+    reserved0: u32 = 0,
+    reserved1: u32 = 0,
+};
+
 fn clampF32(v: f32, lo: f32, hi: f32) f32 {
     if (std.math.isNan(v)) return lo;
     return std.math.clamp(v, lo, hi);
@@ -2828,6 +2864,71 @@ pub export fn goss_session_camera_controls(session: ?*Session, out: ?*CameraCont
     const s = session orelse return .invalid_argument;
     const o = out orelse return .invalid_argument;
     o.* = s.camera_controls;
+    return .ok;
+}
+
+/// Clamps a recording policy to its valid envelope: the duration cap at ten
+/// minutes (zero staying unlimited), a min clip no longer than the cap, the enum
+/// fields to their ranges, the flags to 0/1, and the reserved slots to zero.
+fn normalizeRecordingPolicy(p: RecordingPolicy) RecordingPolicy {
+    var out = p;
+    out.max_duration_ms = @min(p.max_duration_ms, 600_000);
+    out.min_clip_ms = if (out.max_duration_ms != 0) @min(p.min_clip_ms, out.max_duration_ms) else p.min_clip_ms;
+    out.segment_mode = if (p.segment_mode <= 1) p.segment_mode else 0;
+    out.loop_playback = if (p.loop_playback != 0) 1 else 0;
+    out.speed_preset = if (p.speed_preset <= 4) p.speed_preset else 0;
+    out.mic_muted = if (p.mic_muted != 0) 1 else 0;
+    out.save_original = if (p.save_original != 0) 1 else 0;
+    out.stabilization = if (p.stabilization <= 2) p.stabilization else 0;
+    out.reserved0 = 0;
+    out.reserved1 = 0;
+    return out;
+}
+
+/// Clamps a capture-UI intent to its valid envelope.
+fn normalizeCaptureUi(u: CaptureUiIntent) CaptureUiIntent {
+    var out = u;
+    out.grid_mode = if (u.grid_mode <= 3) u.grid_mode else 0;
+    out.level_indicator = if (u.level_indicator != 0) 1 else 0;
+    out.shutter_mode = if (u.shutter_mode <= 4) u.shutter_mode else 0;
+    out.night_mode = if (u.night_mode <= 2) u.night_mode else 0;
+    out.screen_flash_mode = if (u.screen_flash_mode <= 2) u.screen_flash_mode else 0;
+    out.screen_flash_intensity = clampF32(u.screen_flash_intensity, 0, 1);
+    out.screen_flash_warmth = clampF32(u.screen_flash_warmth, 0, 1);
+    out.reserved0 = 0;
+    out.reserved1 = 0;
+    return out;
+}
+
+/// Stores the SDK's normalized recording policy on the session. Read it back and
+/// apply it to the platform recorder; the engine never records.
+pub export fn goss_session_set_recording_policy(session: ?*Session, policy: ?*const RecordingPolicy) Status {
+    const s = session orelse return .invalid_argument;
+    const p = policy orelse return .invalid_argument;
+    s.recording_policy = normalizeRecordingPolicy(p.*);
+    return .ok;
+}
+
+pub export fn goss_session_recording_policy(session: ?*Session, out: ?*RecordingPolicy) Status {
+    const s = session orelse return .invalid_argument;
+    const o = out orelse return .invalid_argument;
+    o.* = s.recording_policy;
+    return .ok;
+}
+
+/// Stores the SDK's normalized capture-UI intent (grid, timer, night mode, the
+/// front-screen flash). The app draws the chrome; the engine only holds intent.
+pub export fn goss_session_set_capture_ui(session: ?*Session, ui: ?*const CaptureUiIntent) Status {
+    const s = session orelse return .invalid_argument;
+    const u = ui orelse return .invalid_argument;
+    s.capture_ui = normalizeCaptureUi(u.*);
+    return .ok;
+}
+
+pub export fn goss_session_capture_ui(session: ?*Session, out: ?*CaptureUiIntent) Status {
+    const s = session orelse return .invalid_argument;
+    const o = out orelse return .invalid_argument;
+    o.* = s.capture_ui;
     return .ok;
 }
 
@@ -4884,6 +4985,84 @@ test "camera controls set-get round-trips the normalized value" {
     // Null args are rejected, not crashes.
     try t.expectEqual(Status.invalid_argument, goss_session_set_camera_controls(null, &in));
     try t.expectEqual(Status.invalid_argument, goss_session_camera_controls(session, null));
+}
+
+test "recording policy clamps to its envelope and set-get round-trips" {
+    const out = normalizeRecordingPolicy(.{
+        .max_duration_ms = 5_000_000,
+        .min_clip_ms = 9_000_000,
+        .segment_mode = 7,
+        .loop_playback = 42,
+        .speed_preset = 9,
+        .mic_muted = 3,
+        .save_original = 5,
+        .stabilization = 8,
+        .reserved0 = 111,
+        .reserved1 = 222,
+    });
+    try t.expectEqual(@as(u32, 600_000), out.max_duration_ms); // capped at 10 min
+    try t.expectEqual(@as(u32, 600_000), out.min_clip_ms); // clamped to max_duration
+    try t.expectEqual(@as(u32, 0), out.segment_mode); // out of range -> off
+    try t.expectEqual(@as(u32, 1), out.loop_playback); // nonzero -> on
+    try t.expectEqual(@as(u32, 0), out.speed_preset);
+    try t.expectEqual(@as(u32, 1), out.mic_muted);
+    try t.expectEqual(@as(u32, 1), out.save_original);
+    try t.expectEqual(@as(u32, 0), out.stabilization);
+    try t.expectEqual(@as(u32, 0), out.reserved0);
+    try t.expectEqual(@as(u32, 0), out.reserved1);
+
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+    var in: RecordingPolicy = .{ .max_duration_ms = 30_000, .speed_preset = 2, .mic_muted = 1 };
+    try t.expectEqual(Status.ok, goss_session_set_recording_policy(session, &in));
+    var back: RecordingPolicy = undefined;
+    try t.expectEqual(Status.ok, goss_session_recording_policy(session, &back));
+    try t.expectEqual(@as(u32, 30_000), back.max_duration_ms);
+    try t.expectEqual(@as(u32, 2), back.speed_preset);
+    try t.expectEqual(@as(u32, 1), back.mic_muted);
+    try t.expectEqual(Status.invalid_argument, goss_session_set_recording_policy(null, &in));
+    try t.expectEqual(Status.invalid_argument, goss_session_recording_policy(session, null));
+}
+
+test "capture ui clamps to its envelope and set-get round-trips" {
+    const out = normalizeCaptureUi(.{
+        .grid_mode = 9,
+        .level_indicator = 5,
+        .shutter_mode = 8,
+        .countdown_s = 10,
+        .night_mode = 7,
+        .screen_flash_mode = 6,
+        .screen_flash_intensity = 4.0,
+        .screen_flash_warmth = -1.0,
+        .reserved0 = 5,
+        .reserved1 = 6,
+    });
+    try t.expectEqual(@as(u32, 0), out.grid_mode); // out of range -> off
+    try t.expectEqual(@as(u32, 1), out.level_indicator); // nonzero -> on
+    try t.expectEqual(@as(u32, 0), out.shutter_mode);
+    try t.expectEqual(@as(u32, 10), out.countdown_s); // free integer, unchanged
+    try t.expectEqual(@as(u32, 0), out.night_mode);
+    try t.expectEqual(@as(u32, 0), out.screen_flash_mode);
+    try t.expectEqual(@as(f32, 1.0), out.screen_flash_intensity); // clamped to [0,1]
+    try t.expectEqual(@as(f32, 0.0), out.screen_flash_warmth);
+    try t.expectEqual(@as(u32, 0), out.reserved0);
+    try t.expectEqual(@as(u32, 0), out.reserved1);
+
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+    var in: CaptureUiIntent = .{ .grid_mode = 2, .night_mode = 1, .screen_flash_intensity = 0.5 };
+    try t.expectEqual(Status.ok, goss_session_set_capture_ui(session, &in));
+    var back: CaptureUiIntent = undefined;
+    try t.expectEqual(Status.ok, goss_session_capture_ui(session, &back));
+    try t.expectEqual(@as(u32, 2), back.grid_mode);
+    try t.expectEqual(@as(u32, 1), back.night_mode);
+    try t.expectEqual(@as(f32, 0.5), back.screen_flash_intensity);
+    try t.expectEqual(Status.invalid_argument, goss_session_set_capture_ui(null, &in));
+    try t.expectEqual(Status.invalid_argument, goss_session_capture_ui(session, null));
 }
 
 test "engine and session lifecycle is leak-free" {

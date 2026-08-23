@@ -9,7 +9,7 @@
 const std = @import("std");
 const abi = @import("abi");
 
-const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.SessionConfig, abi.RendererDesc, abi.FramePlanes, abi.FaceResult, abi.HandResult, abi.PoseResult, abi.LensSignals, abi.CameraControls };
+const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.SessionConfig, abi.RendererDesc, abi.FramePlanes, abi.FaceResult, abi.HandResult, abi.PoseResult, abi.LensSignals, abi.CameraControls, abi.RecordingPolicy, abi.CaptureUiIntent };
 
 // Exported functions with their frozen C signatures. Kept next to the type
 // manifest so a new export without a manifest entry is caught in review.
@@ -38,6 +38,10 @@ const abi_functions = [_][]const u8{
     "goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)",
     "goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)",
+    "goss_status goss_session_set_recording_policy(goss_session *session, const goss_recording_policy *policy)",
+    "goss_status goss_session_recording_policy(goss_session *session, goss_recording_policy *out)",
+    "goss_status goss_session_set_capture_ui(goss_session *session, const goss_capture_ui *ui)",
+    "goss_status goss_session_capture_ui(goss_session *session, goss_capture_ui *out)",
     "goss_status goss_session_fire_event(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len)",

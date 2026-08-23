@@ -471,6 +471,30 @@ export fn Java_com_gosslens_Gosslens_nativeSetCameraControls(env: *JniEnv, cls: 
     return @intFromEnum(abi.goss_session_set_camera_controls(sessionFromHandle(session), @ptrCast(@alignCast(bytes))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSetRecordingPolicy(env: *JniEnv, cls: jobject, session: i64, buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_set_recording_policy(sessionFromHandle(session), @ptrCast(@alignCast(bytes))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeRecordingPolicy(env: *JniEnv, cls: jobject, session: i64, buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_recording_policy(sessionFromHandle(session), @ptrCast(@alignCast(bytes))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSetCaptureUi(env: *JniEnv, cls: jobject, session: i64, buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_set_capture_ui(sessionFromHandle(session), @ptrCast(@alignCast(bytes))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeCaptureUi(env: *JniEnv, cls: jobject, session: i64, buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_capture_ui(sessionFromHandle(session), @ptrCast(@alignCast(bytes))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeCameraControls(env: *JniEnv, cls: jobject, session: i64, buffer: jobject) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
