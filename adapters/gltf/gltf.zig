@@ -130,6 +130,31 @@ pub const Primitive = struct {
         return count;
     }
 
+    /// The four joint indices skinning each vertex (JOINTS_0). glTF
+    /// stores them as bytes or shorts; read as uints and narrow, since a
+    /// skeleton never carries more joints than a u16 holds.
+    pub fn readJoints(p: Primitive, out: [][4]u16) Error!usize {
+        const accessor = p.findAttribute(c.cgltf_attribute_type_joints) orelse return 0;
+        const count = @min(accessor.*.count, out.len);
+        for (out[0..count], 0..) |*joint, i| {
+            var tmp: [4]c.cgltf_uint = undefined;
+            if (c.cgltf_accessor_read_uint(accessor, i, &tmp, 4) == 0) return error.MalformedAsset;
+            joint.* = .{ @intCast(tmp[0]), @intCast(tmp[1]), @intCast(tmp[2]), @intCast(tmp[3]) };
+        }
+        return count;
+    }
+
+    /// The four skinning weights per vertex (WEIGHTS_0), normalized by
+    /// the asset so a vertex's four weights sum to one.
+    pub fn readWeights(p: Primitive, out: [][4]f32) Error!usize {
+        const accessor = p.findAttribute(c.cgltf_attribute_type_weights) orelse return 0;
+        const count = @min(accessor.*.count, out.len);
+        const floats: [*]f32 = @ptrCast(out.ptr);
+        const unpacked = c.cgltf_accessor_unpack_floats(accessor, floats, count * 4);
+        if (unpacked != count * 4) return error.MalformedAsset;
+        return count;
+    }
+
     pub fn materialIndex(p: Primitive, asset: *const Asset) ?usize {
         const mat = p.raw.material orelse return null;
         const base = asset.data.materials;
@@ -435,6 +460,18 @@ fn sampleQuat(ch: DecodedAnimChannel, t_seconds: f32) math.Quat {
     return math.Quat.slerp(lo, hi, br.factor);
 }
 
+/// A mesh's skin: per-vertex joint indices and weights, per-joint
+/// inverse-bind matrices, and joint names, all owned (no cgltf pointer
+/// survives decode). The render stage deforms each vertex by its four
+/// weighted joints and matches joint names to the tracked skeleton.
+pub const DecodedSkin = struct {
+    joint_count: u32,
+    inverse_bind: []math.Mat4,
+    joint_names: [][]const u8,
+    vertex_joints: [][4]u16,
+    vertex_weights: [][4]f32,
+};
+
 pub const DecodedModel = struct {
     positions: [][3]f32,
     indices: []u32,
@@ -445,6 +482,9 @@ pub const DecodedModel = struct {
     /// no node type samples one.
     base_color: [4]f32,
     animation: ?DecodedAnimation,
+    /// Present only when the mesh's node carries a glTF skin; a static
+    /// model leaves it null and renders on its rigid anchor matrix.
+    skin: ?DecodedSkin = null,
 };
 
 /// Parses a .glb/.gltf's bytes into a plain-data model: the first
@@ -492,7 +532,80 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         if (asset.animationCount() > 0) decoded_animation = try decodeAnimation(gpa, asset.animation(0), tn);
     }
 
-    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animation = decoded_animation };
+    var decoded_skin: ?DecodedSkin = null;
+    errdefer if (decoded_skin) |*sk| freeSkin(gpa, sk);
+    if (target_node) |tn| {
+        if (tn.raw.skin) |skin_raw| decoded_skin = try decodeSkin(gpa, skin_raw, prim, vertex_count);
+    }
+
+    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animation = decoded_animation, .skin = decoded_skin };
+}
+
+/// Reads a glTF skin into owned arrays. A vertex joint index past the
+/// joint count, or a joints/weights stream that does not cover every
+/// vertex, is a malformed asset rather than a silently clamped draw.
+fn decodeSkin(gpa: std.mem.Allocator, skin_raw: *const c.cgltf_skin, prim: Primitive, vertex_count: usize) Error!DecodedSkin {
+    const joint_count: u32 = @intCast(skin_raw.joints_count);
+    if (joint_count == 0) return error.MalformedAsset;
+
+    const inverse_bind = try gpa.alloc(math.Mat4, joint_count);
+    errdefer gpa.free(inverse_bind);
+    if (skin_raw.inverse_bind_matrices) |ibm| {
+        const raw = try gpa.alloc(f32, joint_count * 16);
+        defer gpa.free(raw);
+        if (c.cgltf_accessor_unpack_floats(ibm, raw.ptr, joint_count * 16) != joint_count * 16) return error.MalformedAsset;
+        for (inverse_bind, 0..) |*m, j| {
+            const base = j * 16;
+            for (0..4) |col| {
+                m.cols[col] = .{ raw[base + col * 4], raw[base + col * 4 + 1], raw[base + col * 4 + 2], raw[base + col * 4 + 3] };
+            }
+        }
+    } else {
+        for (inverse_bind) |*m| m.* = math.Mat4.identity;
+    }
+
+    const joint_names = try gpa.alloc([]const u8, joint_count);
+    var names_done: usize = 0;
+    errdefer {
+        for (joint_names[0..names_done]) |nm| gpa.free(nm);
+        gpa.free(joint_names);
+    }
+    for (0..joint_count) |j| {
+        const joint_node = skin_raw.joints[j];
+        const named: []const u8 = if (joint_node != null and joint_node.*.name != null)
+            std.mem.span(@as([*:0]const u8, @ptrCast(joint_node.*.name)))
+        else
+            "";
+        joint_names[j] = try gpa.dupe(u8, named);
+        names_done = j + 1;
+    }
+
+    const vertex_joints = try gpa.alloc([4]u16, vertex_count);
+    errdefer gpa.free(vertex_joints);
+    if (try prim.readJoints(vertex_joints) != vertex_count) return error.MalformedAsset;
+    for (vertex_joints) |vj| {
+        for (vj) |joint_index| if (joint_index >= joint_count) return error.MalformedAsset;
+    }
+
+    const vertex_weights = try gpa.alloc([4]f32, vertex_count);
+    errdefer gpa.free(vertex_weights);
+    if (try prim.readWeights(vertex_weights) != vertex_count) return error.MalformedAsset;
+
+    return .{
+        .joint_count = joint_count,
+        .inverse_bind = inverse_bind,
+        .joint_names = joint_names,
+        .vertex_joints = vertex_joints,
+        .vertex_weights = vertex_weights,
+    };
+}
+
+pub fn freeSkin(gpa: std.mem.Allocator, skin: *const DecodedSkin) void {
+    gpa.free(skin.inverse_bind);
+    for (skin.joint_names) |nm| gpa.free(nm);
+    gpa.free(skin.joint_names);
+    gpa.free(skin.vertex_joints);
+    gpa.free(skin.vertex_weights);
 }
 
 fn decodeAnimation(gpa: std.mem.Allocator, anim: Animation, node: Node) Error!DecodedAnimation {
@@ -540,6 +653,7 @@ pub fn freeDecodedModel(gpa: std.mem.Allocator, model: DecodedModel) void {
     gpa.free(model.positions);
     gpa.free(model.indices);
     if (model.animation) |*anim| freeAnimation(gpa, anim);
+    if (model.skin) |*sk| freeSkin(gpa, sk);
 }
 
 const t = std.testing;
@@ -808,4 +922,105 @@ test "no animations is the common, valid case" {
     defer asset.deinit();
     try t.expectEqual(@as(usize, 0), asset.animationCount());
     try t.expectEqual(@as(usize, 0), asset.materialCount());
+}
+
+// Builds a GLB with a two-joint skin over the triangle: JOINTS_0,
+// WEIGHTS_0, inverse-bind matrices, and two named joint nodes. Joint
+// 1's inverse-bind carries a z translation of 5 so the read is provably
+// not an identity fill.
+fn buildSkinnedGlb(gpa: std.mem.Allocator) ![]u8 {
+    const positions = [3][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 } };
+    const indices = [3]u16{ 0, 1, 2 };
+    const joints = [3][4]u16{ .{ 0, 0, 0, 0 }, .{ 1, 0, 0, 0 }, .{ 0, 1, 0, 0 } };
+    const weights = [3][4]f32{ .{ 1, 0, 0, 0 }, .{ 1, 0, 0, 0 }, .{ 0.5, 0.5, 0, 0 } };
+    const inverse_bind = [2][16]f32{
+        .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 },
+        .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 5, 1 },
+    };
+
+    var bin: std.ArrayList(u8) = .empty;
+    defer bin.deinit(gpa);
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&positions)); // 0..36
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&indices)); // 36..42
+    while (bin.items.len % 4 != 0) try bin.append(gpa, 0); // pad to 44
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&joints)); // 44..68
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&weights)); // 68..116
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&inverse_bind)); // 116..244
+
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{"asset":{{"version":"2.0"}},
+        \\"buffers":[{{"byteLength":{d}}}],
+        \\"bufferViews":[
+        \\{{"buffer":0,"byteOffset":0,"byteLength":36}},
+        \\{{"buffer":0,"byteOffset":36,"byteLength":6}},
+        \\{{"buffer":0,"byteOffset":44,"byteLength":24}},
+        \\{{"buffer":0,"byteOffset":68,"byteLength":48}},
+        \\{{"buffer":0,"byteOffset":116,"byteLength":128}}],
+        \\"accessors":[
+        \\{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+        \\{{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}},
+        \\{{"bufferView":2,"componentType":5123,"count":3,"type":"VEC4"}},
+        \\{{"bufferView":3,"componentType":5126,"count":3,"type":"VEC4"}},
+        \\{{"bufferView":4,"componentType":5126,"count":2,"type":"MAT4"}}],
+        \\"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"JOINTS_0":2,"WEIGHTS_0":3}},"indices":1}}]}}],
+        \\"nodes":[{{"mesh":0,"skin":0,"name":"tri"}},{{"name":"root"}},{{"name":"tip"}}],
+        \\"skins":[{{"joints":[1,2],"inverseBindMatrices":4}}],
+        \\"scenes":[{{"nodes":[0,1,2]}}],"scene":0}}
+    , .{bin.items.len});
+    defer gpa.free(json);
+
+    var json_padded: std.ArrayList(u8) = .empty;
+    defer json_padded.deinit(gpa);
+    try json_padded.appendSlice(gpa, json);
+    while (json_padded.items.len % 4 != 0) try json_padded.append(gpa, ' ');
+
+    var glb: std.ArrayList(u8) = .empty;
+    errdefer glb.deinit(gpa);
+    const total: u32 = @intCast(12 + 8 + json_padded.items.len + 8 + bin.items.len);
+    var scratch: [4]u8 = undefined;
+    std.mem.writeInt(u32, &scratch, 0x46546C67, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 2, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, total, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, @intCast(json_padded.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x4E4F534A, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, json_padded.items);
+    std.mem.writeInt(u32, &scratch, @intCast(bin.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x004E4942, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, bin.items);
+    return glb.toOwnedSlice(gpa);
+}
+
+test "decodes a skinned mesh: joints, weights, inverse binds, and names" {
+    const glb = try buildSkinnedGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+
+    const skin = model.skin orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(u32, 2), skin.joint_count);
+    try t.expectEqualStrings("root", skin.joint_names[0]);
+    try t.expectEqualStrings("tip", skin.joint_names[1]);
+
+    // Identity for joint 0, a z translation of 5 in joint 1's last column.
+    try t.expectEqual(@as(f32, 1.0), skin.inverse_bind[0].cols[0][0]);
+    try t.expectEqual(@as(f32, 5.0), skin.inverse_bind[1].cols[3][2]);
+
+    try t.expectEqual([4]u16{ 1, 0, 0, 0 }, skin.vertex_joints[1]);
+    try t.expectEqual([4]u16{ 0, 1, 0, 0 }, skin.vertex_joints[2]);
+    try t.expectEqual([4]f32{ 0.5, 0.5, 0, 0 }, skin.vertex_weights[2]);
+}
+
+test "a static mesh decodes with no skin" {
+    const glb = try buildTriangleGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expect(model.skin == null);
 }

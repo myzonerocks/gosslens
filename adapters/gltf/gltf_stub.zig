@@ -27,11 +27,20 @@ pub const DecodedAnimation = struct {
     }
 };
 
+pub const DecodedSkin = struct {
+    joint_count: u32,
+    inverse_bind: []math.Mat4,
+    joint_names: [][]const u8,
+    vertex_joints: [][4]u16,
+    vertex_weights: [][4]f32,
+};
+
 pub const DecodedModel = struct {
     positions: [][3]f32,
     indices: []u32,
     base_color: [4]f32,
     animation: ?DecodedAnimation,
+    skin: ?DecodedSkin = null,
 };
 
 pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel {
@@ -48,4 +57,9 @@ pub fn freeDecodedModel(gpa: std.mem.Allocator, model: DecodedModel) void {
 pub fn freeAnimation(gpa: std.mem.Allocator, anim: *const DecodedAnimation) void {
     _ = gpa;
     _ = anim;
+}
+
+pub fn freeSkin(gpa: std.mem.Allocator, skin: *const DecodedSkin) void {
+    _ = gpa;
+    _ = skin;
 }
