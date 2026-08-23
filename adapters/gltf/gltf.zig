@@ -400,27 +400,66 @@ pub const DecodedAnimChannel = struct {
     values: []f32,
 };
 
+/// One sampled pose: the translation, rotation, and scale a node's
+/// animation channels resolve to at a moment. The mixer blends these,
+/// then toMatrix composes the local transform.
+pub const Components = struct {
+    translation: math.Vec3 = .{ 0, 0, 0 },
+    rotation: math.Quat = math.Quat.identity,
+    scale: math.Vec3 = .{ 1, 1, 1 },
+
+    pub fn toMatrix(pose: Components) math.Mat4 {
+        return math.Mat4.mul(math.Mat4.mul(math.Mat4.translation(pose.translation), pose.rotation.toMat4()), math.Mat4.scaling(pose.scale));
+    }
+};
+
+/// Blends sampled poses by weight into one: a weighted average of
+/// translation and scale, a weighted nlerp of rotation with hemisphere
+/// alignment so opposite-sign quaternions add rather than cancel. Weights
+/// are normalized; an empty or all-zero set returns the rest pose.
+pub fn blendComponents(clips: []const Components, weights: []const f32) Components {
+    if (clips.len == 0) return .{};
+    var total: f32 = 0;
+    for (weights[0..clips.len]) |w| total += w;
+    if (total <= 0) return .{};
+    var translation: math.Vec3 = .{ 0, 0, 0 };
+    var scale: math.Vec3 = .{ 0, 0, 0 };
+    var rotation: @Vector(4, f32) = .{ 0, 0, 0, 0 };
+    const reference = clips[0].rotation.v;
+    for (clips, weights[0..clips.len]) |pose, w| {
+        const nw = w / total;
+        translation += @as(math.Vec3, @splat(nw)) * pose.translation;
+        scale += @as(math.Vec3, @splat(nw)) * pose.scale;
+        const aligned = if (@reduce(.Add, reference * pose.rotation.v) < 0) -pose.rotation.v else pose.rotation.v;
+        rotation += @as(@Vector(4, f32), @splat(nw)) * aligned;
+    }
+    return .{ .translation = translation, .rotation = (math.Quat{ .v = rotation }).normalize(), .scale = scale };
+}
+
 pub const DecodedAnimation = struct {
     duration_seconds: f32,
     channels: []DecodedAnimChannel,
 
-    /// The node's local transform at elapsed_seconds, looping every
-    /// duration_seconds - a missing path (no channel drives it) holds
-    /// its identity value, matching how a static glTF node with only a
-    /// rotation channel keeps its authored translation/scale fixed.
-    pub fn sample(anim: *const DecodedAnimation, elapsed_seconds: f32) math.Mat4 {
-        var translation: math.Vec3 = .{ 0, 0, 0 };
-        var rotation = math.Quat.identity;
-        var scale: math.Vec3 = .{ 1, 1, 1 };
+    /// The node's translation, rotation, and scale at elapsed_seconds,
+    /// looping every duration_seconds. A path with no channel holds its
+    /// rest value, so a rotation-only clip keeps the authored translation
+    /// and scale. The mixer blends these before composing.
+    pub fn sampleComponents(anim: *const DecodedAnimation, elapsed_seconds: f32) Components {
+        var out: Components = .{};
         const t_seconds = if (anim.duration_seconds > 0) @mod(elapsed_seconds, anim.duration_seconds) else 0;
         for (anim.channels) |ch| {
             switch (ch.path) {
-                .translation => translation = sampleVec3(ch, t_seconds),
-                .scale => scale = sampleVec3(ch, t_seconds),
-                .rotation => rotation = sampleQuat(ch, t_seconds),
+                .translation => out.translation = sampleVec3(ch, t_seconds),
+                .scale => out.scale = sampleVec3(ch, t_seconds),
+                .rotation => out.rotation = sampleQuat(ch, t_seconds),
             }
         }
-        return math.Mat4.mul(math.Mat4.mul(math.Mat4.translation(translation), rotation.toMat4()), math.Mat4.scaling(scale));
+        return out;
+    }
+
+    /// The node's local transform at elapsed_seconds.
+    pub fn sample(anim: *const DecodedAnimation, elapsed_seconds: f32) math.Mat4 {
+        return anim.sampleComponents(elapsed_seconds).toMatrix();
     }
 };
 
@@ -1023,4 +1062,25 @@ test "a static mesh decodes with no skin" {
     const model = try decodeModel(t.allocator, glb);
     defer freeDecodedModel(t.allocator, model);
     try t.expect(model.skin == null);
+}
+
+test "the animation mixer blends poses by weight" {
+    const rest: Components = .{ .translation = .{ 0, 0, 0 }, .rotation = math.Quat.identity, .scale = .{ 1, 1, 1 } };
+    const shifted: Components = .{ .translation = .{ 4, 0, 0 }, .rotation = math.Quat.identity, .scale = .{ 3, 1, 1 } };
+    const blended = blendComponents(&.{ rest, shifted }, &.{ 0.25, 0.75 });
+    try t.expectApproxEqAbs(@as(f32, 3.0), blended.translation[0], 0.001); // 0.25*0 + 0.75*4
+    try t.expectApproxEqAbs(@as(f32, 2.5), blended.scale[0], 0.001); // 0.25*1 + 0.75*3
+    try t.expect(blended.rotation.approxEq(math.Quat.identity, 0.001));
+
+    // Opposite-sign quaternions are the same rotation; hemisphere
+    // alignment must let them add rather than cancel to a bad normalize.
+    const q = math.Quat.fromAxisAngle(.{ 0, 1, 0 }, 1.0);
+    const neg = math.Quat{ .v = -q.v };
+    const mixed = blendComponents(&.{ .{ .rotation = q }, .{ .rotation = neg } }, &.{ 1, 1 });
+    try t.expect(mixed.rotation.approxEq(q, 0.001));
+
+    // An all-zero weight set returns the rest pose.
+    const zeroed = blendComponents(&.{ shifted, shifted }, &.{ 0, 0 });
+    try t.expectEqual(@as(f32, 0), zeroed.translation[0]);
+    try t.expectEqual(@as(f32, 1), zeroed.scale[0]);
 }
