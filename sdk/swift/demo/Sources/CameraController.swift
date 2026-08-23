@@ -205,14 +205,9 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     }
 
     // The reference lens ships as a bundled folder (project.yml) at
-    // <bundle>/beauty-baseline/manifest.json. material-tint is bundled too:
-    // a material-graph lens whose shader is authored as a node graph, not a
-    // hand-written .glsl. anim-mixer is bundled as well: a model with two
-    // clips whose blend weights ramp between them. morph-blend is bundled
-    // too: a mesh a morph weight deforms. sprite-overlay draws a 2D image
-    // over the frame, and text-overlay draws a rasterized string. Swap the
-    // subdirectory below to "material-tint", "anim-mixer", "morph-blend",
-    // "sprite-overlay", or "text-overlay" to run any of them.
+    // <bundle>/beauty-baseline/manifest.json. Also bundled: material-tint,
+    // anim-mixer, morph-blend, sprite-overlay, text-overlay. Swap the
+    // subdirectory below to any of them to run it.
     private func activateLens() {
         guard let session,
               let url = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "beauty-baseline"),

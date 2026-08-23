@@ -831,11 +831,10 @@ fn morphPositions(out: [][3]f32, rest: []const [3]f32, targets: []const []const 
     }
 }
 
-/// The model node's local matrix this frame: the weighted blend of its
-/// clips' sampled poses. A lens can bind each clip's weight to a live
-/// parameter (clip_weights); with none bound the first clip carries full
-/// weight, so a single-clip model plays exactly as a lone clip did. A
-/// model with no clips draws on its rest transform.
+/// The model node's local matrix this frame: its clips' sampled poses
+/// blended by their bound weights (clip_weights). With none bound the
+/// first clip carries full weight, so a single-clip model is unchanged;
+/// a model with no clips draws on its rest transform.
 fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
     if (loaded.animations.len == 0) return math.Mat4.identity;
     const bound = if (lens) |l| l.bindsClipWeights(graph_index) else false;
