@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.skeleton-rig",
+  "version": "1.0.0",
+  "display_name": "Skeleton Rig",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "bone", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "skeleton"}
+  ],
+  "triggers": []
+}
