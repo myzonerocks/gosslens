@@ -1,4 +1,4 @@
-abi 0.42
+abi 0.43
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -159,6 +159,7 @@ fn goss_status goss_session_submit_frame_copy(goss_session *session, const goss_
 fn goss_degrade_level goss_session_report_frame(goss_session *session, uint32_t frame_time_us, goss_thermal thermal)
 fn goss_degrade_level goss_session_degrade_level(const goss_session *session)
 fn goss_status goss_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix)
+fn goss_status goss_solve_two_bone_ik(const float *root, float upper_len, float lower_len, const float *target, const float *pole, float *out_mid, float *out_end)
 fn goss_status goss_session_enable_face_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)
 fn void goss_session_disable_face_tracking(goss_session *session)
 fn goss_status goss_session_enable_hand_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)

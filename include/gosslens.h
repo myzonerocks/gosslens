@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 42u
+#define GOSS_ABI_MINOR 43u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -459,6 +459,12 @@ goss_status goss_session_submit_frame(goss_session *session, const goss_frame_de
  * range as one column-major homogeneous matrix: rgb = (m * vec4(yuv, 1)).
  * out_matrix holds 16 floats. */
 goss_status goss_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix);
+
+/* Any-thread, pure. Analytic two-bone inverse kinematics for a limb: root, the
+ * upper and lower bone lengths, the target the end effector reaches for, and
+ * the pole the joint bends toward. Writes the mid joint and end positions
+ * (three floats each). An unreachable target extends the limb straight at it. */
+goss_status goss_solve_two_bone_ik(const float *root, float upper_len, float lower_len, const float *target, const float *pole, float *out_mid, float *out_end);
 
 /* Graph thread. The stated CPU path: copies NV12 planes into pooled
  * textures for SDKs whose zero-copy import is not wired yet. The copy is
