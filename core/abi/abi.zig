@@ -4190,6 +4190,20 @@ fn depthAt(s: *const Session, u: f32, v: f32) ?f32 {
     return s.depth_data[y * s.depth_width + x];
 }
 
+/// Derives an occlusion mask from the submitted depth into out, one
+/// value per depth pixel: 1 where content sitting at plane_metres is
+/// visible, 0 where nearer real geometry hides it. A non-positive depth
+/// reads as no occluder. A small bias keeps the plane itself visible.
+fn depthOcclusionMask(s: *const Session, plane_metres: f32, out: []f32) usize {
+    const count = @min(out.len, s.depth_data.len);
+    const bias: f32 = 0.02;
+    for (0..count) |i| {
+        const scene = s.depth_data[i];
+        out[i] = if (scene > 0 and scene < plane_metres - bias) 0 else 1;
+    }
+    return count;
+}
+
 /// Reads the newest hand tracking result into caller memory. Reports
 /// again until the worker has published its first result.
 pub export fn goss_session_hand_result(session: ?*Session, out_result: ?*hand.Result) Status {
@@ -6499,6 +6513,20 @@ test "submitted depth stores the map, resamples on resize, and clears" {
     try t.expectEqual(Status.ok, goss_session_submit_depth(session, null, 0, 0, 0, 0));
     try t.expect(depthAt(session, 0.5, 0.5) == null);
     try t.expectEqual(Status.invalid_argument, goss_session_submit_depth(session, null, 4, 4, 0, 1));
+}
+
+test "depthOcclusionMask hides content behind nearer real geometry" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    // Two pixels nearer than the plane, one beyond it, one invalid (zero).
+    const depth = [_]f32{ 0.5, 2.0, 0.0, 3.0 };
+    try t.expectEqual(Status.ok, goss_session_submit_depth(session, &depth, 2, 2, 0.1, 5.0));
+    var mask: [4]f32 = undefined;
+    try t.expectEqual(@as(usize, 4), depthOcclusionMask(session, 1.0, &mask));
+    try t.expectEqual([4]f32{ 0, 1, 1, 1 }, mask); // 0.5 occludes; 2.0, invalid, 3.0 stay visible
 }
 
 test "face region guards its arguments and refuses with no tracked face" {
