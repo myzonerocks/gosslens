@@ -734,6 +734,7 @@ pub const Session = struct {
     /// model.gltf nodes anchored to the tracked face, by graph index.
     model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     model_body_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    model_skeleton_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     /// model.gltf nodes anchored to the tracked world, by graph index.
     model_world_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     /// One background loader per currently-spliced model.gltf node
@@ -1823,6 +1824,53 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         }
                     }
                 }
+                if (s.model_skeleton_anchors.contains(entry.graph_index)) {
+                    const world_height: f32 = 1.6568542;
+                    const rect_aspect = tiledAspect(s, rect_width, rect_height);
+                    const sx = world_height * rect_aspect / @as(f32, @floatFromInt(width));
+                    const sy = world_height / @as(f32, @floatFromInt(height));
+                    const pixel_to_world: math.Mat4 = .{ .cols = .{
+                        .{ sx, 0, 0, 0 },
+                        .{ 0, -sy, 0, 0 },
+                        .{ 0, 0, -sy, 0 },
+                        .{ -0.5 * world_height * rect_aspect, 0.5 * world_height, 0, 1 },
+                    } };
+                    const base_model_matrix = model_matrix;
+                    var drawn_bone = false;
+                    // One model per bone across every submitted body, or the
+                    // single tracked figure, so the whole skeleton draws as a rig.
+                    if (s.body_count > 0) {
+                        for (s.body_results[0..s.body_count]) |*br| {
+                            for (bone_segments) |seg| {
+                                const sp = segmentPose(&br.landmarks, seg[0], seg[1]) orelse continue;
+                                const m = pixel_to_world.mul(sp).mul(base_model_matrix);
+                                if (!drawn_bone) {
+                                    r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, m, loaded.base_color, rect_aspect);
+                                    drawn_bone = true;
+                                } else {
+                                    r.drawModelMesh(mesh_view, loaded.mesh, m, loaded.base_color, rect_aspect);
+                                }
+                            }
+                        }
+                    } else if (currentPose(s)) |body| {
+                        for (bone_segments) |seg| {
+                            const sp = segmentPose(&body.landmarks, seg[0], seg[1]) orelse continue;
+                            const m = pixel_to_world.mul(sp).mul(base_model_matrix);
+                            if (!drawn_bone) {
+                                r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, m, loaded.base_color, rect_aspect);
+                                drawn_bone = true;
+                            } else {
+                                r.drawModelMesh(mesh_view, loaded.mesh, m, loaded.base_color, rect_aspect);
+                            }
+                        }
+                    }
+                    if (!drawn_bone) r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 const aspect_ratio: f32 = tiledAspect(s, rect_width, rect_height);
                 if (anchored_without_target) {
                     // The anchor's capability degradation: the frame
@@ -1933,6 +1981,7 @@ pub fn destroySession(session: *Session) void {
     session.mesh_face_textures.deinit(session.engine.gpa);
     session.model_face_anchors.deinit(session.engine.gpa);
     session.model_body_anchors.deinit(session.engine.gpa);
+    session.model_skeleton_anchors.deinit(session.engine.gpa);
     session.model_world_anchors.deinit(session.engine.gpa);
     if (session.physics_world) |world| world.destroy();
     session.physics_bodies.deinit(session.engine.gpa);
@@ -4428,6 +4477,7 @@ fn destroyBlendState(session: *Session) void {
 fn destroyMeshFaceState(session: *Session) void {
     session.model_face_anchors.clearRetainingCapacity();
     session.model_body_anchors.clearRetainingCapacity();
+    session.model_skeleton_anchors.clearRetainingCapacity();
     session.model_world_anchors.clearRetainingCapacity();
     if (session.engine.renderer) |*r| {
         _ = r;
@@ -5034,6 +5084,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         if (model.body_anchor) {
             session.model_body_anchors.put(gpa, model.graph_index, {}) catch {};
         }
+        if (model.skeleton_anchor) {
+            session.model_skeleton_anchors.put(gpa, model.graph_index, {}) catch {};
+        }
         if (model.world_anchor) {
             session.model_world_anchors.put(gpa, model.graph_index, {}) catch {};
         }
@@ -5431,6 +5484,41 @@ fn bodyAnchorPose(landmarks: *const [pose.landmark_count * 3]f32) ?math.Mat4 {
         .{ nux * torso, nuy * torso, 0, 0 },
         .{ 0, 0, torso, 0 },
         .{ (sh_cx + hip_cx) * 0.5, (sh_cy + hip_cy) * 0.5, 0, 1 },
+    } };
+}
+
+/// The skeleton's bones as landmark index pairs: limbs, then the shoulder and
+/// hip spans and the torso sides. A skeleton-anchored model draws once per bone.
+const bone_segments = [_][2]usize{
+    .{ 11, 13 }, .{ 13, 15 }, // left upper arm, forearm
+    .{ 12, 14 }, .{ 14, 16 }, // right upper arm, forearm
+    .{ 23, 25 }, .{ 25, 27 }, // left thigh, shin
+    .{ 24, 26 }, .{ 26, 28 }, // right thigh, shin
+    .{ 11, 12 }, .{ 23, 24 }, // shoulders, hips
+    .{ 11, 23 }, .{ 12, 24 }, // torso sides
+};
+
+/// A source-frame-pixel transform placing a unit model along one bone: its long
+/// (y) axis spans the two joints, scaled to the bone length, and its cross
+/// section sits at a fraction of that. Null when the bone is degenerate.
+fn segmentPose(landmarks: *const [pose.landmark_count * 3]f32, a_idx: usize, b_idx: usize) ?math.Mat4 {
+    const ax = landmarks[a_idx * 3];
+    const ay = landmarks[a_idx * 3 + 1];
+    const bx = landmarks[b_idx * 3];
+    const by = landmarks[b_idx * 3 + 1];
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len = @sqrt(dx * dx + dy * dy);
+    if (len <= 0) return null;
+    const ndx = dx / len;
+    const ndy = dy / len;
+    const half = len * 0.5;
+    const thick = @max(len * 0.15, 1.0);
+    return .{ .cols = .{
+        .{ ndy * thick, -ndx * thick, 0, 0 },
+        .{ ndx * half, ndy * half, 0, 0 },
+        .{ 0, 0, thick, 0 },
+        .{ (ax + bx) * 0.5, (ay + by) * 0.5, 0, 1 },
     } };
 }
 

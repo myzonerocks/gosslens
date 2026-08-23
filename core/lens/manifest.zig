@@ -189,6 +189,8 @@ pub const Node = struct {
     face_anchor: bool = false,
     /// True when a model.gltf node anchors to every tracked body.
     body_anchor: bool = false,
+    /// True when a model.gltf node draws once per bone of every tracked body.
+    skeleton_anchor: bool = false,
     /// True when a model.gltf node anchors to the tracked world.
     world_anchor: bool = false,
     /// Set when the manifest gives the node a rigid body.
@@ -766,6 +768,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
 
         var face_anchor = false;
         var body_anchor = false;
+        var skeleton_anchor = false;
         var world_anchor = false;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
@@ -1058,6 +1061,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     face_anchor = true;
                 } else if (std.mem.eql(u8, anchor_name, "body")) {
                     body_anchor = true;
+                } else if (std.mem.eql(u8, anchor_name, "skeleton")) {
+                    skeleton_anchor = true;
                 } else if (std.mem.eql(u8, anchor_name, "world")) {
                     world_anchor = true;
                 } else {
@@ -1103,6 +1108,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
             .body_anchor = body_anchor,
+            .skeleton_anchor = skeleton_anchor,
             .world_anchor = world_anchor,
             .physics = physics_body,
             .cloth = cloth_field,
@@ -1615,6 +1621,19 @@ test "a body anchor parses on a model node" {
     try t.expect(!manifest.nodes[0].face_anchor);
 }
 
+test "a skeleton anchor parses on a model node" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": ["face"], "parameters": [], "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "skeleton"}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expect(manifest.nodes[0].skeleton_anchor);
+    try t.expect(!manifest.nodes[0].body_anchor);
+}
+
 test "an anchor on a non-model node is rejected" {
     const source =
         \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
@@ -1635,7 +1654,7 @@ test "an unknown anchor name is rejected" {
     const source =
         \\{"glf": "1.0", "id": "m", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
         \\ "capabilities": [], "parameters": [], "nodes": [
-        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "skeleton"}
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "elbow"}
         \\ ], "triggers": []}
     ;
     var result = try parseFails(source);
