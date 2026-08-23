@@ -152,6 +152,17 @@ pub const BloomField = struct {
     intensity: f32 = 0.6,
 };
 
+pub const LayoutField = struct {
+    /// A layout.composite node's head arrangement and the camera base's blend.
+    /// arrangement 0 custom..5 overlay matches the ABI; key 0 none, 1 matte,
+    /// 2 chroma; chroma is the key color, similarity its match width.
+    arrangement: u8 = 4,
+    key: u8 = 0,
+    chroma: [3]f32 = .{ 0, 0, 0 },
+    similarity: f32 = 0,
+    opacity: f32 = 1,
+};
+
 pub const PhysicsBody = struct {
     shape: enum { box, sphere },
     /// Box half extents; a sphere reads its radius from [0].
@@ -190,6 +201,8 @@ pub const Node = struct {
     grade: ?GradeField = null,
     /// Set only on a bloom.pass node: its glow threshold and intensity.
     bloom: ?BloomField = null,
+    /// Set only on a layout.composite node: the head arrangement it drives.
+    layout: ?LayoutField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -391,6 +404,23 @@ fn expectArray(diags: *Diagnostics, path: *PathStack, value: ?std.json.Value) er
             break :blk null;
         },
     };
+}
+
+/// A layout.composite arrangement name to its ABI integer (0 custom by default).
+fn arrangementValue(s: []const u8) u8 {
+    if (std.mem.eql(u8, s, "side_by_side")) return 1;
+    if (std.mem.eql(u8, s, "top_bottom")) return 2;
+    if (std.mem.eql(u8, s, "pip")) return 3;
+    if (std.mem.eql(u8, s, "grid")) return 4;
+    if (std.mem.eql(u8, s, "overlay")) return 5;
+    return 0;
+}
+
+/// A composite key-mode name to its integer (0 none by default).
+fn keyModeValue(s: []const u8) u8 {
+    if (std.mem.eql(u8, s, "matte")) return 1;
+    if (std.mem.eql(u8, s, "chroma")) return 2;
+    return 0;
 }
 
 fn numberOf(value: std.json.Value) ?f64 {
@@ -843,6 +873,34 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(bmark);
         }
+        var layout_field: ?LayoutField = null;
+        if (getField(object, "layout")) |lv| {
+            const lmark = path.push("layout");
+            if (!std.mem.eql(u8, node_type, "layout.composite")) {
+                try diags.add(path.slice(), "layout is a layout.composite field, found it on '{s}'", .{node_type});
+            } else if (lv != .object) {
+                try diags.add(path.slice(), "layout must be an object", .{});
+            } else {
+                var field: LayoutField = .{};
+                if (getField(lv.object, "arrangement")) |v| {
+                    if (v == .string) field.arrangement = arrangementValue(v.string);
+                }
+                if (getField(lv.object, "key")) |v| {
+                    if (v == .string) field.key = keyModeValue(v.string);
+                }
+                if (getField(lv.object, "chroma")) |v| {
+                    if (v == .array and v.array.items.len >= 3) {
+                        field.chroma[0] = @floatCast(numberOf(v.array.items[0]) orelse 0);
+                        field.chroma[1] = @floatCast(numberOf(v.array.items[1]) orelse 0);
+                        field.chroma[2] = @floatCast(numberOf(v.array.items[2]) orelse 0);
+                    }
+                }
+                if (getField(lv.object, "similarity")) |v| field.similarity = @floatCast(numberOf(v) orelse field.similarity);
+                if (getField(lv.object, "opacity")) |v| field.opacity = @floatCast(numberOf(v) orelse field.opacity);
+                layout_field = field;
+            }
+            path.pop(lmark);
+        }
         if (getField(object, "hair")) |hair_value| {
             const hair_mark = path.push("hair");
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -1046,6 +1104,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .particles = particle_field,
             .grade = grade_field,
             .bloom = bloom_field,
+            .layout = layout_field,
             .script = script_source,
         });
     }

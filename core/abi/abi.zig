@@ -75,7 +75,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 28;
+pub const abi_minor: u16 = 29;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -3974,8 +3974,37 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroySounds(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
+    applyLensLayout(session);
     setupScript(session);
     applyLensEffects(session, effects);
+}
+
+/// Drives the head composite from the active lens's layout.composite node, if it
+/// has one: its arrangement becomes the active layout and its blend the camera
+/// base's, marked so it clears when the lens changes. A previous lens-driven
+/// layout never carries over to a new lens.
+fn applyLensLayout(s: *Session) void {
+    if (s.layout_from_lens) {
+        s.layout_active = null;
+        s.camera_opacity = 1;
+        s.camera_key = 0;
+        s.camera_chroma = .{ 0, 0, 0, 0 };
+        s.layout_from_lens = false;
+    }
+    const lens = if (s.active_lens) |*l| l else return;
+    const lf = lens.layoutComposite() orelse return;
+    const total: u8 = s.source_count + 1;
+    s.layout_active = switch (lf.arrangement) {
+        1 => comp.Layout.sideBySide(total),
+        2 => comp.Layout.topBottom(total),
+        3 => comp.Layout.pip(.{ 0.62, 0.62, 0.34, 0.34 }),
+        5 => comp.Layout.overlay(total),
+        else => comp.Layout.grid(total),
+    };
+    s.camera_opacity = std.math.clamp(lf.opacity, 0, 1);
+    s.camera_key = @min(lf.key, 2);
+    s.camera_chroma = .{ lf.chroma[0], lf.chroma[1], lf.chroma[2], if (lf.similarity > 0) lf.similarity else 0 };
+    s.layout_from_lens = true;
 }
 
 const script_fuel_per_tick: u32 = 2_000_000;
@@ -4675,6 +4704,13 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroySounds(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
+    if (s.layout_from_lens) {
+        s.layout_active = null;
+        s.camera_opacity = 1;
+        s.camera_key = 0;
+        s.camera_chroma = .{ 0, 0, 0, 0 };
+        s.layout_from_lens = false;
+    }
 }
 
 /// Reads a live parameter of the active lens by name, including whatever a
