@@ -520,7 +520,11 @@ pub const DecodedModel = struct {
     /// baseColorImageIndex), and deliberately not consumed here yet -
     /// no node type samples one.
     base_color: [4]f32,
-    animation: ?DecodedAnimation,
+    /// Every animation clip that drives this mesh's node, in glTF order,
+    /// keeping only clips that carry at least one channel on the node.
+    /// Empty when the asset has no animation. The mixer blends these by
+    /// weight; with no weights bound the model plays the first clip.
+    animations: []DecodedAnimation,
     /// Present only when the mesh's node carries a glTF skin; a static
     /// model leaves it null and renders on its rigid anchor matrix.
     skin: ?DecodedSkin = null,
@@ -528,8 +532,8 @@ pub const DecodedModel = struct {
 
 /// Parses a .glb/.gltf's bytes into a plain-data model: the first
 /// mesh's first primitive's geometry, its material's flat tint, and -
-/// if the first node referencing that mesh has one - the first
-/// animation's channels driving that same node. Suitable for the same
+/// for the first node referencing that mesh - every animation's
+/// channels driving that same node, in glTF order. Suitable for the same
 /// off-thread decode step image.decode already runs for a lens's other
 /// assets (see adapters/asset's generic Loader): no cgltf pointer
 /// outlives this call, everything returned is independently owned.
@@ -565,10 +569,22 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         }
     }
 
-    var decoded_animation: ?DecodedAnimation = null;
-    errdefer if (decoded_animation) |*anim| freeAnimation(gpa, anim);
+    var animations: std.ArrayList(DecodedAnimation) = .empty;
+    errdefer {
+        for (animations.items) |*anim| freeAnimation(gpa, anim);
+        animations.deinit(gpa);
+    }
     if (target_node) |tn| {
-        if (asset.animationCount() > 0) decoded_animation = try decodeAnimation(gpa, asset.animation(0), tn);
+        for (0..asset.animationCount()) |ai| {
+            const clip = try decodeAnimation(gpa, asset.animation(ai), tn);
+            // An animation that never touches this node decodes to no
+            // channels; drop it so the mixer only holds clips that move it.
+            if (clip.channels.len == 0) {
+                freeAnimation(gpa, &clip);
+                continue;
+            }
+            try animations.append(gpa, clip);
+        }
     }
 
     var decoded_skin: ?DecodedSkin = null;
@@ -577,7 +593,7 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         if (tn.raw.skin) |skin_raw| decoded_skin = try decodeSkin(gpa, skin_raw, prim, vertex_count);
     }
 
-    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animation = decoded_animation, .skin = decoded_skin };
+    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animations = try animations.toOwnedSlice(gpa), .skin = decoded_skin };
 }
 
 /// Reads a glTF skin into owned arrays. A vertex joint index past the
@@ -688,10 +704,16 @@ pub fn freeAnimation(gpa: std.mem.Allocator, anim: *const DecodedAnimation) void
     gpa.free(anim.channels);
 }
 
+/// Frees a decoded clip list and every clip it owns.
+pub fn freeAnimations(gpa: std.mem.Allocator, anims: []DecodedAnimation) void {
+    for (anims) |*anim| freeAnimation(gpa, anim);
+    gpa.free(anims);
+}
+
 pub fn freeDecodedModel(gpa: std.mem.Allocator, model: DecodedModel) void {
     gpa.free(model.positions);
     gpa.free(model.indices);
-    if (model.animation) |*anim| freeAnimation(gpa, anim);
+    freeAnimations(gpa, model.animations);
     if (model.skin) |*sk| freeSkin(gpa, sk);
 }
 
@@ -961,6 +983,113 @@ test "no animations is the common, valid case" {
     defer asset.deinit();
     try t.expectEqual(@as(usize, 0), asset.animationCount());
     try t.expectEqual(@as(usize, 0), asset.materialCount());
+}
+
+// Builds a GLB whose one node carries two clips over a shared timeline:
+// clip 0 translates it, clip 1 scales it. Both target node 0, so the
+// mixer holds both.
+fn buildTwoClipGlb(gpa: std.mem.Allocator) ![]u8 {
+    const positions = [3][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 } };
+    const indices = [3]u16{ 0, 1, 2 };
+    const times = [3]f32{ 0.0, 1.0, 2.0 };
+    const translation = [3][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 2, 0 } };
+    const scale = [3][3]f32{ .{ 1, 1, 1 }, .{ 2, 1, 1 }, .{ 3, 1, 1 } };
+
+    var bin: std.ArrayList(u8) = .empty;
+    defer bin.deinit(gpa);
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&positions)); // 0..36
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&indices)); // 36..42
+    while (bin.items.len % 4 != 0) try bin.append(gpa, 0); // pad to 44
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&times)); // 44..56
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&translation)); // 56..92
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&scale)); // 92..128
+    while (bin.items.len % 4 != 0) try bin.append(gpa, 0);
+
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{"asset":{{"version":"2.0"}},
+        \\"buffers":[{{"byteLength":{d}}}],
+        \\"bufferViews":[
+        \\{{"buffer":0,"byteOffset":0,"byteLength":36}},
+        \\{{"buffer":0,"byteOffset":36,"byteLength":6}},
+        \\{{"buffer":0,"byteOffset":44,"byteLength":12}},
+        \\{{"buffer":0,"byteOffset":56,"byteLength":36}},
+        \\{{"buffer":0,"byteOffset":92,"byteLength":36}}],
+        \\"accessors":[
+        \\{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+        \\{{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}},
+        \\{{"bufferView":2,"componentType":5126,"count":3,"type":"SCALAR"}},
+        \\{{"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"}},
+        \\{{"bufferView":4,"componentType":5126,"count":3,"type":"VEC3"}}],
+        \\"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1}}]}}],
+        \\"nodes":[{{"mesh":0,"name":"tri"}}],
+        \\"animations":[
+        \\{{"samplers":[{{"input":2,"output":3,"interpolation":"LINEAR"}}],
+        \\"channels":[{{"sampler":0,"target":{{"node":0,"path":"translation"}}}}]}},
+        \\{{"samplers":[{{"input":2,"output":4,"interpolation":"LINEAR"}}],
+        \\"channels":[{{"sampler":0,"target":{{"node":0,"path":"scale"}}}}]}}],
+        \\"scenes":[{{"nodes":[0]}}],"scene":0}}
+    , .{bin.items.len});
+    defer gpa.free(json);
+
+    var json_padded: std.ArrayList(u8) = .empty;
+    defer json_padded.deinit(gpa);
+    try json_padded.appendSlice(gpa, json);
+    while (json_padded.items.len % 4 != 0) try json_padded.append(gpa, ' ');
+
+    var glb: std.ArrayList(u8) = .empty;
+    errdefer glb.deinit(gpa);
+    const total: u32 = @intCast(12 + 8 + json_padded.items.len + 8 + bin.items.len);
+    var scratch: [4]u8 = undefined;
+    std.mem.writeInt(u32, &scratch, 0x46546C67, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 2, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, total, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, @intCast(json_padded.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x4E4F534A, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, json_padded.items);
+    std.mem.writeInt(u32, &scratch, @intCast(bin.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x004E4942, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, bin.items);
+    return glb.toOwnedSlice(gpa);
+}
+
+test "decodeModel surfaces one clip for a single-animation model" {
+    const glb = try buildAnimatedGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 1), model.animations.len);
+}
+
+test "decodeModel surfaces every clip that drives the node" {
+    const glb = try buildTwoClipGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 2), model.animations.len);
+
+    // Clip 0 translates: at t=1 the node is at x=1, unscaled.
+    const a = model.animations[0].sampleComponents(1.0);
+    try t.expectApproxEqAbs(@as(f32, 1.0), a.translation[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 1.0), a.scale[0], 0.001);
+    // Clip 1 scales: at t=1 the node is at scale.x=2, untranslated.
+    const b = model.animations[1].sampleComponents(1.0);
+    try t.expectApproxEqAbs(@as(f32, 0.0), b.translation[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 2.0), b.scale[0], 0.001);
+}
+
+test "a static mesh with no animation surfaces an empty clip list" {
+    const glb = try buildTriangleGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 0), model.animations.len);
 }
 
 // Builds a GLB with a two-joint skin over the triangle: JOINTS_0,

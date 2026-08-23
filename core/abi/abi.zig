@@ -785,12 +785,34 @@ const SkinnedRig = struct {
     joint_targets: []JointTarget,
 };
 
+/// The most clips one model node blends in a frame. A model with more
+/// clips than this keeps them all decoded, but only the first this many
+/// contribute to the blended pose - far above any real rig's clip count.
+const max_blend_clips = 16;
+
 const LoadedModel = struct {
     mesh: render.Renderer.ModelMesh,
     base_color: [4]f32,
-    animation: ?gltf.DecodedAnimation,
+    animations: []gltf.DecodedAnimation,
     rig: ?SkinnedRig = null,
 };
+
+/// The model node's local matrix this frame: the weighted blend of its
+/// clips' sampled poses. With no weight source bound the first clip
+/// carries full weight, so a single-clip model plays exactly as a lone
+/// clip did; a model with no clips draws on its rest transform.
+fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32) math.Mat4 {
+    if (loaded.animations.len == 0) return math.Mat4.identity;
+    if (loaded.animations.len == 1) return loaded.animations[0].sample(elapsed_seconds);
+    var poses: [max_blend_clips]gltf.Components = undefined;
+    var weights: [max_blend_clips]f32 = undefined;
+    const n = @min(loaded.animations.len, max_blend_clips);
+    for (0..n) |ci| {
+        poses[ci] = loaded.animations[ci].sampleComponents(elapsed_seconds);
+        weights[ci] = if (ci == 0) 1.0 else 0.0;
+    }
+    return gltf.blendComponents(poses[0..n], weights[0..n]).toMatrix();
+}
 
 fn abiAllocator() std.mem.Allocator {
     // wasm_allocator grows memory through a raw wasm memory.grow
@@ -1737,7 +1759,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
                 const elapsed_us = if (s.active_lens) |*lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
                 const elapsed_seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0;
-                var model_matrix = if (loaded.animation) |*anim| anim.sample(elapsed_seconds) else math.Mat4.identity;
+                var model_matrix = modelPoseMatrix(loaded, elapsed_seconds);
                 if (s.physics_bodies.get(entry.graph_index)) |body_id| {
                     if (s.physics_world) |world| {
                         if (world.bodyPose(body_id)) |body_pose| {
@@ -4710,7 +4732,7 @@ fn destroyModelState(session: *Session) void {
     var mesh_it = session.model_meshes.valueIterator();
     while (mesh_it.next()) |loaded| {
         render.Renderer.destroyModelMesh(loaded.mesh);
-        if (loaded.animation) |*anim| gltf.freeAnimation(session.engine.gpa, anim);
+        gltf.freeAnimations(session.engine.gpa, loaded.animations);
         if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
     session.model_meshes.clearRetainingCapacity();
@@ -5403,7 +5425,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             const mesh = r.createModelMesh(decoded.positions, decoded.indices) catch {
                 gpa.free(decoded.positions);
                 gpa.free(decoded.indices);
-                if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
+                gltf.freeAnimations(gpa, decoded.animations);
                 if (decoded.skin) |*sk| gltf.freeSkin(gpa, sk);
                 finished.append(gpa, entry.key_ptr.*) catch {};
                 continue;
@@ -5420,7 +5442,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             session.model_meshes.put(gpa, entry.key_ptr.*, .{
                 .mesh = mesh,
                 .base_color = decoded.base_color,
-                .animation = decoded.animation,
+                .animations = decoded.animations,
                 .rig = rig,
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
@@ -5428,7 +5450,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                     var owned = rg;
                     destroySkinnedRig(gpa, &owned);
                 }
-                if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
+                gltf.freeAnimations(gpa, decoded.animations);
             };
             finished.append(gpa, entry.key_ptr.*) catch {};
         } else if (loader.hasFailed()) {
