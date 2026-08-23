@@ -119,6 +119,11 @@ corner:
 
     const p = session.faceRegion(GossFaceRegion.Forehead);
 
+`bodyJoint` is the body-skeleton equivalent, pinning to a shoulder, wrist, or
+knee of the tracked figure:
+
+    const joint = session.bodyJoint(GossBodyJoint.LeftWrist);
+
 The face tracker also drives the `gaze.*` and `head.nod`/`head.shake`/`head.tilt`
 lens triggers; `camera.*` follow the camera controls and `geo.in_region` the
 geofence below. The full grammar is in [the lens spec](../lenses/SPEC.md).

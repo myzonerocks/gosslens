@@ -52,6 +52,7 @@ object Gosslens {
     internal external fun nativePoseResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeFacePose(session: Long, matrixBuffer: ByteBuffer): Int
     internal external fun nativeFaceRegion(session: Long, region: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativeBodyJoint(session: Long, joint: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeTrackFrame(
         session: Long,
         yBuffer: ByteBuffer,
@@ -156,6 +157,21 @@ object Gosslens {
     const val FACE_REGION_MOUTH_CENTER = 10
     const val FACE_REGION_LEFT_MOUTH_CORNER = 11
     const val FACE_REGION_RIGHT_MOUTH_CORNER = 12
+
+    // Named attach points on the tracked body skeleton for bodyJoint.
+    const val BODY_JOINT_HEAD = 0
+    const val BODY_JOINT_LEFT_SHOULDER = 1
+    const val BODY_JOINT_RIGHT_SHOULDER = 2
+    const val BODY_JOINT_LEFT_ELBOW = 3
+    const val BODY_JOINT_RIGHT_ELBOW = 4
+    const val BODY_JOINT_LEFT_WRIST = 5
+    const val BODY_JOINT_RIGHT_WRIST = 6
+    const val BODY_JOINT_LEFT_HIP = 7
+    const val BODY_JOINT_RIGHT_HIP = 8
+    const val BODY_JOINT_LEFT_KNEE = 9
+    const val BODY_JOINT_RIGHT_KNEE = 10
+    const val BODY_JOINT_LEFT_ANKLE = 11
+    const val BODY_JOINT_RIGHT_ANKLE = 12
     const val HAND_LANDMARK_COUNT = 21
     const val HAND_MAX = 2
     const val HAND_RESULT_BYTES = 560
@@ -570,6 +586,16 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * named FACE_REGION_*, or null until a face is tracked. */
     fun faceRegion(region: Int): FloatArray? {
         if (Gosslens.nativeFaceRegion(handle, region, faceRegionBuffer) != 0) return null
+        faceRegionBuffer.rewind()
+        val out = FloatArray(3)
+        faceRegionBuffer.asFloatBuffer().get(out, 0, 3)
+        return out
+    }
+
+    /** The tracked point (x, y in frame pixels, z in the same scale) of a
+     * named BODY_JOINT_*, or null until a body is tracked. */
+    fun bodyJoint(joint: Int): FloatArray? {
+        if (Gosslens.nativeBodyJoint(handle, joint, faceRegionBuffer) != 0) return null
         faceRegionBuffer.rewind()
         val out = FloatArray(3)
         faceRegionBuffer.asFloatBuffer().get(out, 0, 3)

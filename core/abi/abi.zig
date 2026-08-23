@@ -75,7 +75,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 32;
+pub const abi_minor: u16 = 33;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -3764,6 +3764,22 @@ pub export fn goss_session_pose_result(session: ?*Session, out_result: ?*pose.Re
     return .ok;
 }
 
+/// Writes the tracked body's named skeleton joint point (x, y in frame
+/// pixels, z in the same scale) into out_xyz, so a lens pins content to a
+/// shoulder, a wrist, or a knee. invalid_argument on an unknown joint;
+/// again with no worker, no body, or presence below the tracked threshold.
+pub export fn goss_session_body_joint(session: ?*Session, joint: u32, out_xyz: ?*[3]f32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_xyz orelse return .invalid_argument;
+    const j = pose.Joint.fromU32(joint) orelse return .invalid_argument;
+    const worker = s.pose_tracking orelse return .again;
+    var result: pose.Result = undefined;
+    if (!tracking.pose_worker.readResult(worker, &result)) return .again;
+    if (result.landmark_count_out == 0 or result.presence < 0.5) return .again;
+    out.* = pose.jointPoint(&result.landmarks, j);
+    return .ok;
+}
+
 /// Fits the canonical face onto the newest tracked landmarks and writes
 /// the head transform - canonical metric space into frame pixels - as a
 /// column-major 4x4. Reports again until a face is tracked or while the
@@ -5445,6 +5461,21 @@ test "face region guards its arguments and refuses with no tracked face" {
     try t.expectEqual(Status.invalid_argument, goss_session_face_region(session, 99, &out));
     // A valid region with no worker reports again, never a stale point.
     try t.expectEqual(Status.again, goss_session_face_region(session, 0, &out));
+}
+
+test "body joint guards its arguments and refuses with no tracked body" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var out: [3]f32 = undefined;
+    // Null session/out and an unknown joint are rejected, not crashes.
+    try t.expectEqual(Status.invalid_argument, goss_session_body_joint(null, 0, &out));
+    try t.expectEqual(Status.invalid_argument, goss_session_body_joint(session, 0, null));
+    try t.expectEqual(Status.invalid_argument, goss_session_body_joint(session, 99, &out));
+    // A valid joint with no worker reports again, never a stale point.
+    try t.expectEqual(Status.again, goss_session_body_joint(session, 0, &out));
 }
 
 test "head euler decomposes identity to zero and the detector separates nod from shake" {

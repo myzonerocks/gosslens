@@ -48,6 +48,43 @@ comptime {
     std.debug.assert(@sizeOf(Result) == 688);
 }
 
+/// Named attach points on the tracked body skeleton, so a lens can pin
+/// content to a shoulder, a wrist, or a knee without knowing the mesh
+/// indices. The left/right labels are the subject's own.
+pub const Joint = enum(u32) {
+    head = 0,
+    left_shoulder = 1,
+    right_shoulder = 2,
+    left_elbow = 3,
+    right_elbow = 4,
+    left_wrist = 5,
+    right_wrist = 6,
+    left_hip = 7,
+    right_hip = 8,
+    left_knee = 9,
+    right_knee = 10,
+    left_ankle = 11,
+    right_ankle = 12,
+
+    pub fn fromU32(value: u32) ?Joint {
+        return switch (value) {
+            0...12 => @enumFromInt(value),
+            else => null,
+        };
+    }
+};
+
+/// The skeleton landmark each joint resolves to, in the model's own order.
+const joint_landmark = [_]u16{ 0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28 };
+
+/// The tracked point for a joint: x, y in frame pixels and z in the same
+/// scale, read straight from the pose landmarks (the flat [count*3] array a
+/// pose result carries).
+pub fn jointPoint(landmarks: *const [landmark_count * 3]f32, joint: Joint) [3]f32 {
+    const base = @as(usize, joint_landmark[@intFromEnum(joint)]) * 3;
+    return .{ landmarks[base], landmarks[base + 1], landmarks[base + 2] };
+}
+
 fn handUpRotation(dx: f32, dy: f32) f32 {
     return normalizeRadians(target_angle - std.math.atan2(-dy, dx));
 }
@@ -121,6 +158,26 @@ fn score01(raw: f32) f32 {
 }
 
 const t = std.testing;
+
+test "every body joint maps to an in-range landmark and reads its point" {
+    var landmarks: [landmark_count * 3]f32 = undefined;
+    for (0..landmark_count) |i| {
+        landmarks[i * 3] = @floatFromInt(i);
+        landmarks[i * 3 + 1] = @floatFromInt(i * 2);
+        landmarks[i * 3 + 2] = @floatFromInt(i * 3);
+    }
+    inline for (std.meta.fields(Joint)) |field| {
+        const joint: Joint = @enumFromInt(field.value);
+        const idx = joint_landmark[field.value];
+        try t.expect(idx < landmark_count);
+        const p = jointPoint(&landmarks, joint);
+        try t.expectEqual(@as(f32, @floatFromInt(idx)), p[0]);
+        try t.expectEqual(@as(f32, @floatFromInt(idx * 2)), p[1]);
+        try t.expectEqual(@as(f32, @floatFromInt(idx * 3)), p[2]);
+    }
+    try t.expectEqual(Joint.right_ankle, Joint.fromU32(12).?);
+    try t.expectEqual(@as(?Joint, null), Joint.fromU32(13));
+}
 
 test "an upright detection produces an unrotated crop of double the alignment distance" {
     var detection = std.mem.zeroes(detector.pose.Detection);

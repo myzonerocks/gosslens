@@ -43,6 +43,8 @@ const reference_lenses = [_]struct { name: []const u8, segmentation_model: []con
 const baseline_path = "lenses/conformance-baseline.txt";
 const corpus_path = ".models/corpus/face_frontal_b.jpg";
 const face_bundle_path = ".models/face_landmarker.task";
+const body_corpus_path = ".models/corpus/body_standing.jpg";
+const pose_bundle_path = ".models/pose_landmarker_full.task";
 const multiclass_model_path = ".models/selfie_multiclass.tflite";
 const single_class_model_path = ".models/selfie_segmenter.tflite";
 const beauty_resource_path = ".vendor/gpupixel/src";
@@ -738,6 +740,69 @@ fn proveFaceRegions(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     std.debug.print("conformance: PROOF named face regions land on the right anatomy (ear span {d:.1}, eye span {d:.1})\n", .{ ear_span, eye_span });
     return true;
 }
+
+/// Proves the named body joints land on the right anatomy of a real standing
+/// figure: head above shoulders above hips above knees above ankles down the
+/// image, so a swapped landmark or a mis-indexed joint would fail.
+fn proveBodyJoints(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const pose_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, pose_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(pose_bytes);
+    if (abi.goss_session_enable_pose_tracking(session, pose_bytes.ptr, pose_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL body-joint tracking enable\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, body_corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+    var result: abi.PoseResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_pose_result(session, &result) == .again or result.landmark_count_out == 0) {
+        std.Thread.yield() catch {};
+        polls += 1;
+        if (polls > 100_000_000) return error.PoseResultTimedOut;
+    }
+
+    var p: [13][3]f32 = undefined;
+    var jointi: u32 = 0;
+    while (jointi < 13) : (jointi += 1) {
+        if (abi.goss_session_body_joint(session, jointi, &p[jointi]) != .ok) {
+            std.debug.print("conformance: FAIL body joint {d} not read\n", .{jointi});
+            return false;
+        }
+    }
+    // Down the image (y grows down): head, then the shoulder pair, the hip
+    // pair, the knee pair, and the ankle pair, each below the last.
+    const head_y = p[0][1];
+    const shoulder_y = (p[1][1] + p[2][1]) * 0.5;
+    const hip_y = (p[7][1] + p[8][1]) * 0.5;
+    const knee_y = (p[9][1] + p[10][1]) * 0.5;
+    const ankle_y = (p[11][1] + p[12][1]) * 0.5;
+    if (!(head_y < shoulder_y and shoulder_y < hip_y and hip_y < knee_y and knee_y < ankle_y)) {
+        std.debug.print("conformance: FAIL body joints out of order (head {d:.1} shoulder {d:.1} hip {d:.1} knee {d:.1} ankle {d:.1})\n", .{ head_y, shoulder_y, hip_y, knee_y, ankle_y });
+        return false;
+    }
+    std.debug.print("conformance: PROOF named body joints land on the right anatomy (head {d:.1} to ankle {d:.1})\n", .{ head_y, ankle_y });
+    return true;
+}
+
 /// Proves lens physics end to end: a dropped marker settles onto the
 /// slab across advancing frame timestamps, the settled frame differs
 /// from the falling frame, and two runs land bit-identical.
@@ -3636,6 +3701,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveWorldAnchor(gpa, engine)) return 1;
     if (!try proveMultiFaceFanOut(gpa, engine)) return 1;
     if (!try proveFaceRegions(gpa, engine)) return 1;
+    if (!try proveBodyJoints(gpa, engine)) return 1;
     if (!try provePhysicsDrop(gpa, engine)) return 1;
     if (!try provePhysicsChain(gpa, engine)) return 1;
     if (!try proveClothFlag(gpa, engine)) return 1;

@@ -65,6 +65,24 @@ public enum GossFaceRegion: UInt32 {
     case rightMouthCorner = 12
 }
 
+/// A named attach point on the tracked body skeleton, for `bodyJoint`. The
+/// left/right labels are the subject's own.
+public enum GossBodyJoint: UInt32 {
+    case head = 0
+    case leftShoulder = 1
+    case rightShoulder = 2
+    case leftElbow = 3
+    case rightElbow = 4
+    case leftWrist = 5
+    case rightWrist = 6
+    case leftHip = 7
+    case rightHip = 8
+    case leftKnee = 9
+    case rightKnee = 10
+    case leftAnkle = 11
+    case rightAnkle = 12
+}
+
 /// One reusable hand tracking readout, up to two hands per frame.
 /// handedness is the model's score that the hand is a right hand; hand
 /// h's point p sits at (h * landmarkCount + p) * 3 in landmarks.
@@ -223,6 +241,17 @@ extension GossSession {
         var xyz: [Float] = [0, 0, 0]
         try xyz.withUnsafeMutableBufferPointer { buffer in
             try checked(goss_session_face_region(handle, region.rawValue, buffer.baseAddress))
+        }
+        return (xyz[0], xyz[1], xyz[2])
+    }
+
+    /// The tracked point (x, y in frame pixels, z in the same scale) of a named
+    /// body skeleton joint, so a lens pins content to a shoulder, a wrist, or a
+    /// knee. Throws .again until a body is tracked.
+    public func bodyJoint(_ joint: GossBodyJoint) throws -> (x: Float, y: Float, z: Float) {
+        var xyz: [Float] = [0, 0, 0]
+        try xyz.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_body_joint(handle, joint.rawValue, buffer.baseAddress))
         }
         return (xyz[0], xyz[1], xyz[2])
     }
