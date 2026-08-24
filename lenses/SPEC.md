@@ -270,6 +270,11 @@ other fields then override, so `{"preset": "fire"}` is a finished flame and
   each particle as a small 3D shape sized by `"size"` rather than a flat
   billboard, its `"mesh_shape"` one of `"octahedron"` (default), `"cube"`, or
   `"tetra"`.
+- Sub-emitter: `"sub_count"` (0 to 64) children each particle bursts into
+  when it dies, on an even outward spray, with `"sub_speed"` and
+  `"sub_lifetime"` for their launch and life - a firework shell opening into
+  sparks. The children fade and fall on their own; pair with `"fade"` so
+  spent sparks vanish.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the

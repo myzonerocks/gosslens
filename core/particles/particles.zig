@@ -83,6 +83,12 @@ pub const Field = struct {
     glow: bool = false,
     /// Sprite image stem (assets/<stem>.png); null is the soft round default.
     sprite: ?[]const u8 = null,
+    /// Sub-emitter: children each parent spawns in an outward burst when it
+    /// dies - a firework's shell bursting into sparks. Zero is no sub-emitter.
+    sub_count: u32 = 0,
+    /// Launch speed and lifetime of a burst child.
+    sub_speed: f32 = 3.0,
+    sub_lifetime: f32 = 0.8,
 };
 
 /// A deterministic per-index value in [0, 1), salted so several independent
@@ -143,6 +149,9 @@ pub const System = struct {
     /// only when a trail is on; the newest slot per particle is `head`.
     history: []f32 = &.{},
     head: u32 = 0,
+    /// Burst children, `sub_count` per parent, laid out parent-major and dead
+    /// until their parent dies and spawns them. Empty with no sub-emitter.
+    children: []Particle = &.{},
 
     /// Trail slots per particle, at least one, so the trail math never divides
     /// by zero when a trail is off.
@@ -157,6 +166,10 @@ pub const System = struct {
         if (field.trail > 1) {
             sys.history = try gpa.alloc(f32, @as(usize, field.count) * field.trail * 3);
         }
+        if (field.sub_count > 0) {
+            sys.children = try gpa.alloc(Particle, @as(usize, field.count) * field.sub_count);
+            for (sys.children) |*ch| ch.* = .{ .pos = .{ 0, 0, 0 }, .vel = .{ 0, 0, 0 }, .life = -1, .max_life = field.sub_lifetime, .seed = 0 };
+        }
         sys.emitAll();
         return sys;
     }
@@ -164,6 +177,34 @@ pub const System = struct {
     pub fn deinit(self: *System) void {
         self.gpa.free(self.particles);
         if (self.history.len > 0) self.gpa.free(self.history);
+        if (self.children.len > 0) self.gpa.free(self.children);
+    }
+
+    /// Total particles the host draws: the emitters plus any burst children.
+    pub fn renderCount(self: *const System) usize {
+        return self.particles.len + self.children.len;
+    }
+
+    /// Spawns parent i's burst children at `origin`, each on a deterministic
+    /// outward ray so the shell opens into an even sphere of sparks.
+    fn burstChildren(self: *System, i: usize, origin: [3]f32) void {
+        const c = self.field.sub_count;
+        if (c == 0) return;
+        var k: u32 = 0;
+        while (k < c) : (k += 1) {
+            const t = (@as(f32, @floatFromInt(k)) + 0.5) / @as(f32, @floatFromInt(c));
+            const z = 1.0 - 2.0 * t;
+            const r = @sqrt(@max(0.0, 1.0 - z * z));
+            const a = t * std.math.tau * @as(f32, @floatFromInt(c));
+            const speed = self.field.sub_speed;
+            self.children[i * c + k] = .{
+                .pos = origin,
+                .vel = .{ @cos(a) * r * speed, z * speed, @sin(a) * r * speed },
+                .life = self.field.sub_lifetime,
+                .max_life = self.field.sub_lifetime,
+                .seed = hash01(i * c + k, 7.0),
+            };
+        }
     }
 
     /// Fills every trail slot of particle i with pos, so a fresh or respawned
@@ -276,6 +317,8 @@ pub const System = struct {
         for (self.particles, 0..) |*p, i| {
             p.life -= dt;
             if (p.life <= 0) {
+                // The step it crosses from alive to dead, the shell bursts.
+                if (f.sub_count > 0 and p.life + dt > 0) self.burstChildren(i, p.pos);
                 if (f.oneshot) {
                     p.life = 0;
                     continue;
@@ -391,6 +434,22 @@ pub const System = struct {
                     }
                 }
             }
+        }
+        // Advance the burst children: a plain oneshot fall, no respawn.
+        for (self.children) |*ch| {
+            if (ch.life <= 0) continue;
+            ch.life -= dt;
+            if (ch.life <= 0) continue;
+            ch.vel[1] -= f.gravity * dt;
+            if (f.drag > 0) {
+                const damp = @max(0.0, 1.0 - f.drag * dt);
+                ch.vel[0] *= damp;
+                ch.vel[1] *= damp;
+                ch.vel[2] *= damp;
+            }
+            ch.pos[0] += ch.vel[0] * dt;
+            ch.pos[1] += ch.vel[1] * dt;
+            ch.pos[2] += ch.vel[2] * dt;
         }
         // Record this frame's positions into the trail ring, one slot on.
         if (self.history.len > 0) {
@@ -508,6 +567,12 @@ pub const System = struct {
             out[i * 3 + 1] = p.pos[1];
             out[i * 3 + 2] = p.pos[2];
         }
+        const base = self.particles.len;
+        for (self.children, 0..) |ch, j| {
+            out[(base + j) * 3 + 0] = ch.pos[0];
+            out[(base + j) * 3 + 1] = ch.pos[1];
+            out[(base + j) * 3 + 2] = ch.pos[2];
+        }
     }
 
     /// Writes six vertices per particle (a camera-facing quad) into out (count
@@ -516,10 +581,15 @@ pub const System = struct {
     /// into a rotated, sized, faded, stretched, flip-booked sprite.
     pub fn writeBillboards(self: *const System, out: []f32) void {
         const corners = [6]f32{ 0, 1, 2, 0, 2, 3 };
-        for (self.particles, 0..) |p, i| {
+        writeParticleBillboards(self.particles, out, 0, corners);
+        writeParticleBillboards(self.children, out, self.particles.len, corners);
+    }
+
+    fn writeParticleBillboards(list: []const Particle, out: []f32, offset: usize, corners: [6]f32) void {
+        for (list, 0..) |p, i| {
             const frac = std.math.clamp(p.life / p.max_life, 0.0, 1.0);
             for (corners, 0..) |corner, k| {
-                const base = (i * 6 + k) * 8;
+                const base = ((offset + i) * 6 + k) * 8;
                 out[base + 0] = p.pos[0];
                 out[base + 1] = p.pos[1];
                 out[base + 2] = p.pos[2];
@@ -549,6 +619,35 @@ test "the particle system is deterministic and moves under gravity" {
         try std.testing.expectEqual(pa.pos[2], pb.pos[2]);
     }
     try std.testing.expect(a.particles[0].pos[1] != 0);
+}
+
+test "a sub-emitter bursts children when its parents die, deterministically" {
+    const field = Field{ .count = 4, .gravity = 2.0, .speed = 1.0, .lifetime = 0.5, .oneshot = true, .sub_count = 8, .sub_speed = 2.0, .sub_lifetime = 1.0 };
+    var sys = try System.init(std.testing.allocator, field);
+    defer sys.deinit();
+    try std.testing.expectEqual(@as(usize, 32), sys.children.len);
+    // Before the parents' half-second life is up, no child has spawned.
+    for (0..8) |_| sys.step(1.0 / 60.0);
+    var alive_early: usize = 0;
+    for (sys.children) |ch| {
+        if (ch.life > 0) alive_early += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), alive_early);
+    // Past the parents' lifetime the shells have burst into live sparks.
+    for (0..40) |_| sys.step(1.0 / 60.0);
+    var alive_after: usize = 0;
+    for (sys.children) |ch| {
+        if (ch.life > 0) alive_after += 1;
+    }
+    try std.testing.expect(alive_after > 0);
+    // A second identical run lands every child in the same place.
+    var sys2 = try System.init(std.testing.allocator, field);
+    defer sys2.deinit();
+    for (0..48) |_| sys2.step(1.0 / 60.0);
+    for (sys.children, sys2.children) |a, b| {
+        try std.testing.expectEqual(a.pos[0], b.pos[0]);
+        try std.testing.expectEqual(a.pos[1], b.pos[1]);
+    }
 }
 
 test "every emission pattern and force is deterministic and non-degenerate" {

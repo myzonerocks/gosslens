@@ -2013,7 +2013,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         if (sys.field.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
                         cool_color = base_color;
                         if (sys.field.cool) |c_| cool_color = .{ c_[0], c_[1], c_[2], 1.0 };
-                        const count = sys.field.count;
+                        const count: u32 = @intCast(sys.renderCount());
                         if (fade) {
                             const sprite_px: f32 = if (sys.field.size > 0) @floatFromInt(sys.field.size) else 8.0;
                             // Size at death relative to birth (1 = unchanged), and
@@ -6123,7 +6123,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
                 const pattern = particlePattern(pf.pattern);
-                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .curl = pf.curl, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .bounce = pf.bounce, .colliders = pf.colliders, .box_colliders = pf.box_colliders, .plane_colliders = pf.plane_colliders, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .trail = pf.trail, .pattern = pattern })) |sys| {
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .curl = pf.curl, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .bounce = pf.bounce, .colliders = pf.colliders, .box_colliders = pf.box_colliders, .plane_colliders = pf.plane_colliders, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .trail = pf.trail, .sub_count = pf.sub_count, .sub_speed = pf.sub_speed, .sub_lifetime = pf.sub_lifetime, .pattern = pattern })) |sys| {
                     // A trail draws a fading billboard per particle per trail
                     // slot; a fading fountain one quad per particle; a plain one
                     // a single point each. Trails and fades share the billboard
@@ -6160,7 +6160,8 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                         }
                     } else {
                         const faded = pf.fade or pf.trail > 1;
-                        const vertex_count: u32 = if (pf.trail > 1) @intCast(sys.trailVertexCount()) else if (pf.fade) pf.count * 6 else pf.count;
+                        const render_count: u32 = @intCast(sys.renderCount());
+                        const vertex_count: u32 = if (pf.trail > 1) @intCast(sys.trailVertexCount()) else if (pf.fade) render_count * 6 else render_count;
                         if (r.createParticleMesh(vertex_count, faded)) |mesh| {
                             session.particle_systems.put(gpa, model.graph_index, sys) catch {
                                 var s2 = sys;

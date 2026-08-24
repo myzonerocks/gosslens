@@ -169,6 +169,11 @@ pub const ParticleField = struct {
     /// The 3D shape a mesh particle draws: "octahedron" (default), "cube", or
     /// "tetra". Borrowed for the system's lifetime.
     mesh_shape: []const u8 = "octahedron",
+    /// Sub-emitter: children each particle bursts into when it dies (a firework
+    /// shell opening into sparks), plus their launch speed and lifetime. 0 off.
+    sub_count: u32 = 0,
+    sub_speed: f32 = 3.0,
+    sub_lifetime: f32 = 0.8,
 };
 
 /// The prebuilt VFX asset library: a named preset expands to a tuned particle
@@ -1163,6 +1168,13 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         } else try diags.add(path.slice(), "particles mesh_shape must be octahedron, cube, or tetra", .{});
                     }
                 }
+                if (getField(pv.object, "sub_count")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer <= 64) field.sub_count = @intCast(v.integer) else {
+                        try diags.add(path.slice(), "particles sub_count must be an integer 0..64", .{});
+                    }
+                }
+                if (getField(pv.object, "sub_speed")) |v| field.sub_speed = @floatCast(numberOf(v) orelse field.sub_speed);
+                if (getField(pv.object, "sub_lifetime")) |v| field.sub_lifetime = @floatCast(numberOf(v) orelse field.sub_lifetime);
                 particle_field = field;
             }
             path.pop(pmark);
