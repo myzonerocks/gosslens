@@ -433,7 +433,9 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   `body.jump` / `body.wave` (true for one tick when a hop or a raised-hand wave
   completes), `body.dance` (true while rhythmic whole-body motion lasts),
   `timer('name')` (seconds since the
-  timer's last reset, see actions below), `tap`, `param('name')`.
+  timer's last reset, see actions below), `device.in_volume` (true while the
+  tracked device is inside the lens's `volume` region, see below), `tap`,
+  `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
   numeric or boolean literal.
 - Boolean combinators: `&&`, `||`, `!`, grouped with parens.
@@ -442,6 +444,13 @@ That is the entire grammar. No arithmetic between two signals, no function
 calls beyond the fixed signal readers above, no string concatenation, no
 loops. A `when` expression nests at most 8 deep (parens or combinators);
 deeper fails validation closed.
+
+A `device.in_volume` signal reads a top-level `"volume"` region on the
+manifest: `{"center": [x, y, z], "radius": r}` for a sphere or `{"center":
+[x, y, z], "half": [hx, hy, hz]}` for an axis-aligned box, in world space. The
+engine tests the submitted device pose against it on-device each tick and only
+the inside/outside boolean reaches the lens; the pose itself never crosses the
+ABI. With no world tracking or no volume declared, the signal reads false.
 
 ### 6.2 Actions
 

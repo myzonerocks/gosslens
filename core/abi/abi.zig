@@ -6987,6 +6987,16 @@ fn detectBodyActions(s: *Session) struct { jump: bool, wave: bool, dance: bool }
     return .{ .jump = jump, .wave = wave, .dance = dancing };
 }
 
+/// Whether a world-space point is inside a lens trigger volume - a sphere when
+/// its radius is set, otherwise an axis-aligned box of its half-extents.
+fn volumeContains(vol: manifest.Volume, p: [3]f32) bool {
+    const dx = p[0] - vol.center[0];
+    const dy = p[1] - vol.center[1];
+    const dz = p[2] - vol.center[2];
+    if (vol.radius > 0) return dx * dx + dy * dy + dz * dz <= vol.radius * vol.radius;
+    return @abs(dx) <= vol.half[0] and @abs(dy) <= vol.half[1] and @abs(dz) <= vol.half[2];
+}
+
 pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
@@ -7050,6 +7060,13 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     }
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
+        // The device's world position is the translation column of the pose;
+        // a lens with a trigger volume fires device.in_volume while it is
+        // inside the region, computed on-device (the pose never reaches a lens).
+        if (s.active_lens.?.manifest.volume) |vol| {
+            const wfc = s.world.state.world_from_camera;
+            live_signals.device_in_volume = volumeContains(vol, .{ wfc[12], wfc[13], wfc[14] });
+        }
     }
     if (s.location_engine_fed) {
         if (s.geofence) |region| {

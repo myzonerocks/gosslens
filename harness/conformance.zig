@@ -1970,6 +1970,47 @@ fn proveEventTrigger(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a trigger volume through the public ABI: a lens with a device.in_volume
+/// trigger and a manifest volume leaves its parameter at default while the
+/// submitted world pose sits outside the region and fires the action once the
+/// device is inside it - the pose never crosses the ABI, only the membership.
+fn proveVolumeTrigger(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const manifest =
+        \\{"glf":"1.0","id":"goss.reference.volume-trigger","version":"1.0.0","display_name":"Volume Trigger","engine_compat":">=0.5","capabilities":[],"parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],"nodes":[{"id":"grade","type":"grade.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[{"when":"device.in_volume","action":{"kind":"param_set","target":"intensity","to":1.0}}],"volume":{"center":[0.0,0.0,0.0],"radius":0.6}}
+    ;
+    const pname = "intensity";
+
+    // A world pose whose translation is well outside the radius-0.6 sphere.
+    var outside_pose = identity_pose;
+    outside_pose[12] = 2.0;
+
+    const cases = [_]struct { pose: [16]f32, want: f32 }{
+        .{ .pose = outside_pose, .want = 0.0 },
+        .{ .pose = identity_pose, .want = 1.0 }, // translation at the origin, inside
+    };
+    for (cases) |case| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        if (abi.goss_session_activate_lens(session, manifest.ptr, manifest.len) != .ok) {
+            std.debug.print("conformance: FAIL volume-trigger lens activation\n", .{});
+            return false;
+        }
+        var state: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = case.pose, .projection = identity_pose, .timestamp_us = 1000 };
+        if (abi.goss_session_submit_world(session, &state, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+        var sig = std.mem.zeroes(abi.LensSignals);
+        _ = abi.goss_session_tick_lens(session, 16000, &sig);
+        var value: f32 = -1;
+        _ = abi.goss_session_parameter_value(session, pname, pname.len, &value);
+        if (value != case.want) {
+            std.debug.print("conformance: FAIL volume trigger: wanted {d}, got {d}\n", .{ case.want, value });
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF a trigger volume fires device.in_volume only while the world pose is inside the region\n", .{});
+    return true;
+}
+
 /// Proves multi-source composition through the public ABI: a side-by-side
 /// layout puts the camera (a red frame) in the left half and a named source (a
 /// green frame) in the right half of the captured output, deterministically.
@@ -5818,6 +5859,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("camera controls");
     if (!try proveEventTrigger(gpa, engine)) return 1;
     watchHold("event trigger");
+    if (!try proveVolumeTrigger(gpa, engine)) return 1;
+    watchHold("volume trigger");
     if (!try proveLayoutComposite(gpa, engine)) return 1;
     watchHold("layout composite");
     if (!try proveCompositeOpacity(gpa, engine)) return 1;

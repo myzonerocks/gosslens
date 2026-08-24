@@ -419,6 +419,15 @@ pub const EngineRange = struct {
     }
 };
 
+/// A lens-level trigger region the tracked device is tested against each tick,
+/// feeding the device.in_volume trigger signal. A sphere when `radius` > 0,
+/// otherwise an axis-aligned box of `half`-extents, both centered at `center`.
+pub const Volume = struct {
+    center: [3]f32 = .{ 0, 0, 0 },
+    radius: f32 = 0,
+    half: [3]f32 = .{ 0, 0, 0 },
+};
+
 pub const Manifest = struct {
     arena: std.heap.ArenaAllocator,
     glf_minor: u16,
@@ -430,6 +439,7 @@ pub const Manifest = struct {
     parameters: []const Parameter,
     nodes: []const Node,
     triggers: []const Trigger,
+    volume: ?Volume = null,
 
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
@@ -1801,6 +1811,29 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
         const mark = path.push("triggers");
         if (try expectArray(diags, &path, getField(root, "triggers"))) |array| {
             manifest.triggers = try parseTriggers(arena, diags, &path, array) orelse &.{};
+        }
+        path.pop(mark);
+    }
+    if (getField(root, "volume")) |vv| {
+        const mark = path.push("volume");
+        if (vv != .object) {
+            try diags.add(path.slice(), "volume must be an object", .{});
+        } else {
+            var vol: Volume = .{};
+            if (getField(vv.object, "center")) |c| {
+                if (!readVec3(c, &vol.center)) try diags.add(path.slice(), "volume center must be three numbers", .{});
+            }
+            if (getField(vv.object, "radius")) |r| {
+                vol.radius = std.math.clamp(@as(f32, @floatCast(numberOf(r) orelse 0)), 0.0, 1000.0);
+            }
+            if (getField(vv.object, "half")) |h| {
+                if (!readVec3(h, &vol.half)) try diags.add(path.slice(), "volume half must be three numbers", .{});
+            }
+            if (vol.radius <= 0 and vol.half[0] <= 0 and vol.half[1] <= 0 and vol.half[2] <= 0) {
+                try diags.add(path.slice(), "volume needs a positive radius (sphere) or half extents (box)", .{});
+            } else {
+                manifest.volume = vol;
+            }
         }
         path.pop(mark);
     }
