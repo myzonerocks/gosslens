@@ -106,6 +106,7 @@ pub const Renderer = struct {
     dof_program: c.bgfx_program_handle_t,
     fog_program: c.bgfx_program_handle_t,
     outline_program: c.bgfx_program_handle_t,
+    trail_program: c.bgfx_program_handle_t,
     grade_program: c.bgfx_program_handle_t,
     bloom_extract_program: c.bgfx_program_handle_t,
     bloom_composite_program: c.bgfx_program_handle_t,
@@ -151,6 +152,8 @@ pub const Renderer = struct {
     dof_uniform: c.bgfx_uniform_handle_t,
     fog_uniform: c.bgfx_uniform_handle_t,
     outline_uniform: c.bgfx_uniform_handle_t,
+    tex_prev: c.bgfx_uniform_handle_t,
+    trail_uniform: c.bgfx_uniform_handle_t,
     grade_params_uniform: c.bgfx_uniform_handle_t,
     composite_params_uniform: c.bgfx_uniform_handle_t,
     composite_chroma_uniform: c.bgfx_uniform_handle_t,
@@ -300,6 +303,7 @@ pub const Renderer = struct {
         const dof_program = try loadDofProgram();
         const fog_program = try loadFogProgram();
         const outline_program = try loadOutlineProgram();
+        const trail_program = try loadTrailProgram();
         const grade_program = try loadGradeProgram();
         const bloom_extract_program = try loadBloomExtractProgram();
         const bloom_composite_program = try loadBloomCompositeProgram();
@@ -372,6 +376,7 @@ pub const Renderer = struct {
             .dof_program = dof_program,
             .fog_program = fog_program,
             .outline_program = outline_program,
+            .trail_program = trail_program,
             .grade_program = grade_program,
             .bloom_extract_program = bloom_extract_program,
             .bloom_composite_program = bloom_composite_program,
@@ -407,6 +412,8 @@ pub const Renderer = struct {
             .dof_uniform = c.bgfx_create_uniform("u_dof", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .fog_uniform = c.bgfx_create_uniform("u_fog", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .outline_uniform = c.bgfx_create_uniform("u_outline", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .tex_prev = c.bgfx_create_uniform("s_texPrev", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .trail_uniform = c.bgfx_create_uniform("u_trail", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .grade_params_uniform = c.bgfx_create_uniform("u_grade", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .composite_params_uniform = c.bgfx_create_uniform("u_composite", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .composite_chroma_uniform = c.bgfx_create_uniform("u_chroma", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -537,6 +544,18 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_outline_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_outline_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_outline_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// trail.pass's own fixed motion-trail program: the current frame on
+    /// unit 0 and the previous frame on unit 1, blended into an echo.
+    pub fn loadTrailProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_trail_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_trail_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_trail_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_trail_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -709,6 +728,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.dof_uniform);
         c.bgfx_destroy_uniform(r.fog_uniform);
         c.bgfx_destroy_uniform(r.outline_uniform);
+        c.bgfx_destroy_uniform(r.tex_prev);
+        c.bgfx_destroy_uniform(r.trail_uniform);
         c.bgfx_destroy_uniform(r.grade_params_uniform);
         c.bgfx_destroy_uniform(r.composite_params_uniform);
         c.bgfx_destroy_uniform(r.composite_chroma_uniform);
@@ -731,6 +752,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.dof_program);
         c.bgfx_destroy_program(r.fog_program);
         c.bgfx_destroy_program(r.outline_program);
+        c.bgfx_destroy_program(r.trail_program);
         c.bgfx_destroy_program(r.grade_program);
         c.bgfx_destroy_program(r.composite_program);
         c.bgfx_destroy_program(r.bloom_extract_program);
@@ -1231,6 +1253,18 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.outline_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.outline_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws a motion-trail pass into view_id: the current frame on unit 0
+    /// and the previous frame on unit 1, blended into an echo by `amount`.
+    pub fn submitTrailPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, prev_texture: c.bgfx_texture_handle_t, amount: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_prev, prev_texture, std.math.maxInt(u32));
+        const params = [4]f32{ amount, 0, 0, 0 };
+        c.bgfx_set_uniform(r.trail_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.trail_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one lens grade.pass node as a full-screen pass into view_id:

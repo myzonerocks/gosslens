@@ -292,6 +292,14 @@ pub const Renderer = struct {
         _ = threshold;
     }
 
+    pub fn submitTrailPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, prev_texture: TextureHandle, amount: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = prev_texture;
+        _ = amount;
+    }
+
     pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
         _ = r;
         _ = view_id;

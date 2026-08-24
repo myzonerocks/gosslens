@@ -36,7 +36,7 @@ completeness and merges as a single squash PR.
 
 Ahead, in roughly the order it lands:
 
-- [ ] Dedicated post-effect passes: a depth-of-field pass driven by the host's submitted depth ships (dof.pass, proven), and halftone and a tilt-shift focus author as material graphs; motion blur and screen-space reflections over the same depth rail are next
+- [ ] Dedicated post-effect passes: a depth-of-field pass driven by the host's submitted depth ships (dof.pass, proven), depth fog and a depth-edge outline ship over the same depth rail (fog.pass and outline.pass, proven), a motion trail echoes the previous frame (trail.pass, proven), and halftone and a tilt-shift focus author as material graphs; screen-space reflections over the depth rail are next
 - [ ] Text and 2D depth: video and image-sequence textures (MP4, GIF, frame sequences), an environment map and skybox, and gradient, shadow, stroke and extruded 3D text over the sprite and text nodes already shipped
 - [ ] A node-based VFX graph - a spawn, update and output editor over the particle system - and richer 3D-mesh emitters
 - [ ] Tracking depth: multi-face results, eye and gaze tracking with iris landmarks, a hand-gesture grammar as trigger signals, a humanoid body rig with named joints and attach points, and new trackers for pet faces and feet

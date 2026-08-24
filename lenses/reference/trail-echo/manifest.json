@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.trail-echo",
+  "version": "1.0.0",
+  "display_name": "Motion Trail",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "trail", "type": "trail.pass", "inputs": {"frame": "camera"}, "params": {}, "trail": {"amount": 0.6}}
+  ],
+  "triggers": []
+}

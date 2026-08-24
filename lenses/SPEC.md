@@ -276,6 +276,14 @@ while flat depth stays untouched. Like `dof.pass` and `fog.pass` it reads the
 host's depth, holds the frame through with none submitted, ships no asset,
 and defaults its fields.
 
+A `"trail.pass"` node is a motion-trail post-effect. It carries a `"trail":
+{"amount"}` block: `amount` (0..1) is how much of the previous frame the
+current one keeps, so moving subjects smear a fading echo behind them while a
+still frame is left untouched. It needs no host input - the frame it echoes is
+the one it drew last, seeded from the current frame the first time so the first
+frame shows no echo - so it is always ready. `amount` is optional with an
+engine default, and it ships no asset.
+
 A `"draw.board"` node draws the session's brush board at its own place in the
 chain: the frame passes through, then every committed stroke draws over it, neon
 strokes additively and the rest on alpha. It ships no asset, carries no params,

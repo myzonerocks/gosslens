@@ -4946,6 +4946,91 @@ fn proveOutlinePass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the trail.pass echoes the previous frame. Right after the scene
+/// cuts from A to B the frame still carries A's echo, so it differs from the
+/// same B once the echo has settled to B alone - both captures are frame B,
+/// so the trail is the only difference between them.
+fn proveTrailPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/trail-echo";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: trail-echo proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes_a = try rgbaToNv12(gpa, corpus.frame);
+    defer planes_a.deinit(gpa);
+
+    // Frame B: a solid fill at the same size as A, so a trailed B and a
+    // settled B differ only by A's echo, never by a size change resetting
+    // the trail's previous-frame buffer.
+    const w = corpus.frame.width;
+    const h = corpus.frame.height;
+    const rgba_b = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(rgba_b);
+    var i: usize = 0;
+    while (i < rgba_b.len) : (i += 4) {
+        rgba_b[i] = 220;
+        rgba_b[i + 1] = 30;
+        rgba_b[i + 2] = 200;
+        rgba_b[i + 3] = 255;
+    }
+    const frame_b: sampler.Frame = .{ .pixels = .{ .rgba8 = rgba_b }, .width = w, .height = h };
+    const planes_b = try rgbaToNv12(gpa, frame_b);
+    defer planes_b.deinit(gpa);
+
+    const desc: abi.FrameDesc = .{
+        .width = w,
+        .height = h,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (w + 1) / 2;
+
+    // Settle on frame A so the trail's previous-frame buffer holds A.
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes_a.y.ptr, w, planes_a.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Cut to frame B: the very next frame still echoes A.
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes_b.y.ptr, w, planes_b.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    engine.renderer.?.requestScreenshot("zig-out/conformance-trail-echo");
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // B is now the previous frame too, so the echo has settled to B alone.
+    engine.renderer.?.requestScreenshot("zig-out/conformance-trail-settled");
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const echo_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-trail-echo.tga", gpa, .limited(8 << 20));
+    defer gpa.free(echo_tga);
+    const settled_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-trail-settled.tga", gpa, .limited(8 << 20));
+    defer gpa.free(settled_tga);
+
+    if (std.mem.eql(u8, echo_tga, settled_tga)) {
+        std.debug.print("conformance: FAIL trail-echo: the frame after a scene cut carried no echo of the frame before it\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF trail-echo blends the previous frame: the frame right after a cut differs from the same frame once the echo has settled\n", .{});
+    return true;
+}
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -5047,6 +5132,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("fog pass");
     if (!try proveOutlinePass(gpa, engine)) return 1;
     watchHold("outline pass");
+    if (!try proveTrailPass(gpa, engine)) return 1;
+    watchHold("trail pass");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

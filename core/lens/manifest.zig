@@ -179,6 +179,12 @@ pub const OutlineField = struct {
     threshold: f32 = 0.08,
 };
 
+pub const TrailField = struct {
+    /// A trail.pass node's echo amount (0..1): how much of the previous
+    /// frame blends into this one, so moving content leaves a motion trail.
+    amount: f32 = 0.6,
+};
+
 pub const SpriteField = struct {
     /// A sprite.2d node's screen rect in normalized coordinates (origin
     /// top-left, 0..1 across the frame) and its draw opacity. The default
@@ -292,6 +298,8 @@ pub const Node = struct {
     fog: ?FogField = null,
     /// Set only on an outline.pass node: its line color and depth threshold.
     outline: ?OutlineField = null,
+    /// Set only on a trail.pass node: its motion-trail echo amount.
+    trail: ?TrailField = null,
     /// Set only on a layout.composite node: the head arrangement it drives.
     layout: ?LayoutField = null,
     /// Set only on a sprite.2d node: the screen rect and opacity it draws
@@ -1085,6 +1093,22 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "outline.pass")) {
             outline_field = .{};
         }
+        var trail_field: ?TrailField = null;
+        if (getField(object, "trail")) |tv| {
+            const tmark = path.push("trail");
+            if (!std.mem.eql(u8, node_type, "trail.pass")) {
+                try diags.add(path.slice(), "trail is a trail.pass field, found it on '{s}'", .{node_type});
+            } else if (tv != .object) {
+                try diags.add(path.slice(), "trail must be an object", .{});
+            } else {
+                var field: TrailField = .{};
+                if (getField(tv.object, "amount")) |v| field.amount = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.amount)), 0.0, 1.0);
+                trail_field = field;
+            }
+            path.pop(tmark);
+        } else if (std.mem.eql(u8, node_type, "trail.pass")) {
+            trail_field = .{};
+        }
         var sprite_field: ?SpriteField = null;
         if (getField(object, "sprite")) |sv| {
             const smark = path.push("sprite");
@@ -1395,6 +1419,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .dof = dof_field,
             .fog = fog_field,
             .outline = outline_field,
+            .trail = trail_field,
             .layout = layout_field,
             .sprite = sprite_field,
             .text = text_field,
