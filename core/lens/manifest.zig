@@ -324,6 +324,9 @@ pub const PhysicsBody = struct {
     /// Triangle indices (three per face) for a concave `mesh` collider; empty
     /// otherwise.
     mesh_indices: []const u32 = &.{},
+    /// A `mesh` body with no explicit points derives its collider from the
+    /// node's own glb geometry, once that finishes decoding.
+    mesh_from_glb: bool = false,
     position: [3]f32,
     /// Orientation in euler degrees (x, y, z), so an elongated shape can lie
     /// on its side or a static collider can tilt. Zero is upright.
@@ -1682,6 +1685,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         shape_ok = false;
                     }
                 }
+                // A mesh body with no explicit points takes its collider from
+                // the node's own decoded glb geometry.
+                if (body.shape == .mesh and body.hull_points.len == 0) body.mesh_from_glb = true;
                 if (getField(physics_value.object, "friction")) |friction_value| {
                     switch (friction_value) {
                         .float => |f| body.friction = @floatCast(f),

@@ -2837,6 +2837,77 @@ fn provePhysicsWorldMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Settles a physics scene after its glb geometry has decoded: a first frame
+/// plus pumpUntilLoaded builds any glb-derived collider before the sim runs (no
+/// frame advances it during the wait), so the fall is deterministic whatever
+/// the decode timing. Captures at frame 85.
+fn settledGlbPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const warm: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
+    if (abi.goss_session_submit_frame_copy(session, &warm, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    pumpUntilLoaded(engine, session);
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves a mesh collider auto-built from a node's own glb: a ball dropped onto
+/// a slab whose collider is the slab glb's own decoded geometry comes to rest on
+/// it, where the same slab with no physics lets the ball fall straight past.
+/// Bit-stable across runs.
+fn provePhysicsGlbCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var caught: []u8 = &.{};
+    defer if (caught.len > 0) gpa.free(caught);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledGlbPhysicsCapture(gpa, engine, ".lens-packages/glb-collider");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            caught = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the glb-collider scene is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const loose = try settledGlbPhysicsCapture(gpa, engine, ".lens-packages/glb-collider-loose");
+    defer gpa.free(loose);
+    if (std.mem.eql(u8, caught, loose)) {
+        std.debug.print("conformance: FAIL the glb-derived collider did not catch the ball\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rests on a collider built from a slab's own glb geometry where the same slab with no physics lets it fall past, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -6729,6 +6800,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try provePhysics2dWorld(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "world-mesh")) {
             if (!try provePhysicsWorldMesh(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "glb-collider")) {
+            if (!try provePhysicsGlbCollider(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -6835,6 +6908,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics 2d world");
     if (!try provePhysicsWorldMesh(gpa, engine)) return 1;
     watchHold("physics world mesh");
+    if (!try provePhysicsGlbCollider(gpa, engine)) return 1;
+    watchHold("physics glb collider");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

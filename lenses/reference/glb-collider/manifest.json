@@ -1,0 +1,16 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.glb-collider",
+  "version": "1.0.0",
+  "display_name": "GLB Collider",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "slab", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "physics": {"body": "mesh", "position": [0, -0.3, 0], "motion": "static", "friction": 0.7}},
+    {"id": "ball", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "physics": {"body": "sphere", "size": [0.12, 0, 0], "position": [0.0, 0.5, 0], "motion": "dynamic", "friction": 0.4}}
+  ],
+  "triggers": []
+}

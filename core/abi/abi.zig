@@ -456,6 +456,15 @@ const GpuParticleNode = struct {
     field: manifest.ParticleField,
 };
 
+/// A deferred mesh collider: the placement to build the body at once the
+/// node's glb geometry finishes decoding.
+const PendingGlbCollider = struct {
+    position: [3]f32,
+    rotation: [4]f32,
+    friction: f32,
+    restitution: f32,
+};
+
 pub const Session = struct {
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
     /// once fed, its level and beat outrank the host's tick value.
@@ -470,6 +479,9 @@ pub const Session = struct {
     /// model node declares a body; poses drive those model matrices.
     physics_world: ?physics.World = null,
     physics_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    /// Mesh colliders whose geometry is the node's own glb: their body is built
+    /// once the glb decodes, from the decoded positions, at these placements.
+    pending_glb_colliders: std.AutoHashMapUnmanaged(graph.NodeIndex, PendingGlbCollider) = .empty,
     /// Cloth nodes: the solver body and the dynamic render mesh, by
     /// graph index. Cloth replaces the glb mesh with a simulated grid.
     cloth_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
@@ -2584,6 +2596,7 @@ pub fn destroySession(session: *Session) void {
     session.model_world_anchors.deinit(session.engine.gpa);
     if (session.physics_world) |world| world.destroy();
     session.physics_bodies.deinit(session.engine.gpa);
+    session.pending_glb_colliders.deinit(session.engine.gpa);
     session.cloth_bodies.deinit(session.engine.gpa);
     session.cloth_meshes.deinit(session.engine.gpa);
     session.cloth_cols.deinit(session.engine.gpa);
@@ -5325,6 +5338,7 @@ fn destroyMeshFaceState(session: *Session) void {
     if (session.physics_world) |world| world.destroy();
     session.physics_world = null;
     session.physics_bodies.clearRetainingCapacity();
+    session.pending_glb_colliders.clearRetainingCapacity();
     var loader_it = session.mesh_face_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
     session.mesh_face_loaders.clearRetainingCapacity();
@@ -6339,7 +6353,12 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 if (session.physics_world) |world| {
                     const motion: physics.Motion = if (body.kinematic) .kinematic else if (body.dynamic) .dynamic else .static;
                     const rotation = eulerDegreesToQuat(body.rotation);
-                    const id = switch (body.shape) {
+                    const id = if (body.shape == .mesh and body.mesh_from_glb) id: {
+                        // The collider is the node's own glb; build it once the
+                        // geometry decodes (pollModelLoaders), not now.
+                        session.pending_glb_colliders.put(gpa, model.graph_index, .{ .position = body.position, .rotation = rotation, .friction = body.friction, .restitution = body.restitution }) catch {};
+                        break :id physics.invalid_body;
+                    } else switch (body.shape) {
                         .hull => world.addBodyHull(body.hull_points, body.position, rotation, body.friction, body.restitution, motion, body.planar) catch physics.invalid_body,
                         .mesh => world.addBodyMesh(body.hull_points, body.mesh_indices, body.position, rotation, body.friction, body.restitution) catch physics.invalid_body,
                         else => id: {
@@ -6432,6 +6451,16 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     while (it.next()) |entry| {
         const loader = entry.value_ptr.*;
         if (loader.take()) |decoded| {
+            // A node whose mesh collider is its own glb builds that static body
+            // now, from the just-decoded geometry, before it is freed below.
+            if (session.pending_glb_colliders.get(entry.key_ptr.*)) |pc| {
+                if (session.physics_world) |world| {
+                    if (world.addBodyMesh(decoded.positions, decoded.indices, pc.position, pc.rotation, pc.friction, pc.restitution)) |bid| {
+                        session.physics_bodies.put(gpa, entry.key_ptr.*, bid) catch {};
+                    } else |_| {}
+                }
+                _ = session.pending_glb_colliders.remove(entry.key_ptr.*);
+            }
             // A morphable mesh draws from a dynamic buffer the morph pass
             // re-uploads each frame; a plain mesh uploads once and stays static.
             const has_morph = decoded.morph_targets.len > 0;
