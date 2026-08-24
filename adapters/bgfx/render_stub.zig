@@ -560,6 +560,13 @@ pub const Renderer = struct {
         return .{};
     }
 
+    pub fn createSoftMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !ClothMesh {
+        _ = r;
+        _ = vertex_count;
+        _ = indices;
+        return .{};
+    }
+
     pub fn updateClothMesh(r: *Renderer, mesh: ClothMesh, positions: []const f32) void {
         _ = r;
         _ = mesh;

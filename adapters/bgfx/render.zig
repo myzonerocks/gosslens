@@ -1647,6 +1647,15 @@ pub const Renderer = struct {
         return .{ .position_buffer = position_buffer, .index_buffer = index_buffer, .vertex_count = vertex_count, .index_count = @intCast(indices.items.len) };
     }
 
+    /// Like createClothMesh but for an arbitrary closed surface: a dynamic
+    /// vertex buffer sized to the mesh and a static index buffer of the given
+    /// triangles. Drives soft bodies whose topology is not a grid.
+    pub fn createSoftMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !ClothMesh {
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(vertex_count, &r.layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        return .{ .position_buffer = position_buffer, .index_buffer = index_buffer, .vertex_count = vertex_count, .index_count = @intCast(indices.len) };
+    }
+
     /// Uploads the solver's world-space vertices (three floats each)
     /// into the cloth's dynamic buffer, padding the texcoord to zero.
     pub fn updateClothMesh(r: *Renderer, mesh: ClothMesh, positions: []const f32) void {

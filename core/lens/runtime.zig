@@ -116,6 +116,7 @@ const LensNode = struct {
     world_anchor: bool = false,
     physics: ?manifest.PhysicsBody = null,
     cloth: ?manifest.ClothField = null,
+    balloon: ?manifest.BalloonField = null,
     hair: ?manifest.HairField = null,
     particles: ?manifest.ParticleField = null,
     /// .model_gltf only: a parameter name per animation clip whose live
@@ -197,6 +198,7 @@ pub const ModelNode = struct {
     world_anchor: bool = false,
     physics: ?manifest.PhysicsBody = null,
     cloth: ?manifest.ClothField = null,
+    balloon: ?manifest.BalloonField = null,
     hair: ?manifest.HairField = null,
     particles: ?manifest.ParticleField = null,
 };
@@ -558,7 +560,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .model_gltf) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .hair = node.hair, .particles = node.particles });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -847,6 +849,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .world_anchor = node_type == .model_gltf and node.world_anchor,
             .physics = if (node_type == .model_gltf) node.physics else null,
             .cloth = if (node_type == .model_gltf) node.cloth else null,
+            .balloon = if (node_type == .model_gltf) node.balloon else null,
             .hair = if (node_type == .model_gltf) node.hair else null,
             .particles = if (node_type == .model_gltf) node.particles else null,
             .clip_weights = if (node_type == .model_gltf) node.clip_weights else &.{},

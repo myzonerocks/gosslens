@@ -41,6 +41,7 @@ extern fn goss_physics_constrain_hinge(handle: *anyopaque, a: u32, b: u32, px: f
 extern fn goss_physics_constrain_spring(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, rest_length: f32, frequency: f32, damping: f32) i32;
 extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
 extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, px: f32, py: f32, pz: f32) u32;
+extern fn goss_physics_add_softbody(handle: *anyopaque, verts: [*]const f32, vert_count: u32, faces: [*]const u32, face_count: u32, pressure: f32, pin_top: u32, px: f32, py: f32, pz: f32) u32;
 extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
 extern fn goss_physics_add_hair(handle: *anyopaque, strand_count: u32, verts: u32, length: f32) u32;
 extern fn goss_physics_hair_update(handle: *anyopaque, hair_id: u32, head_transform: [*]const f32, dt: f32) void;
@@ -147,6 +148,16 @@ pub const World = struct {
     /// Adds a pinned-top cloth grid; its deformed vertices drive a mesh.
     pub fn addCloth(world: World, cols: u32, rows: u32, width: f32, height: f32, position: [3]f32) !u32 {
         const id = goss_physics_add_cloth(world.handle, cols, rows, width, height, position[0], position[1], position[2]);
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Adds a closed soft body from a mesh (verts + triangle faces) with an
+    /// internal pressure: positive inflates the volume, zero leaves it limp.
+    /// `pin_top` holds the top cap so it hangs in place. Reads back with clothRead.
+    pub fn addSoftBody(world: World, verts: []const [3]f32, faces: []const u32, pressure: f32, pin_top: bool, position: [3]f32) !u32 {
+        const flat: [*]const f32 = @ptrCast(verts.ptr);
+        const id = goss_physics_add_softbody(world.handle, flat, @intCast(verts.len), faces.ptr, @intCast(faces.len / 3), pressure, @intFromBool(pin_top), position[0], position[1], position[2]);
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -429,6 +440,37 @@ test "a concave mesh collider holds a ball in a valley a hull would fill" {
     // below the y=0.4 lip where a filled hull would hold it.
     try t.expect(ball_pose[13] < 0.25);
     try t.expect(@abs(ball_pose[12]) < 0.2);
+}
+
+test "pressure inflates a closed soft body" {
+    // No gravity, so we measure pure inflation, not a fall.
+    const world = try World.create(0.0);
+    defer world.destroy();
+    const r: f32 = 0.4;
+    const verts = [_][3]f32{ .{ r, 0, 0 }, .{ -r, 0, 0 }, .{ 0, r, 0 }, .{ 0, -r, 0 }, .{ 0, 0, r }, .{ 0, 0, -r } };
+    const faces = [_]u32{ 2, 4, 0, 2, 1, 4, 2, 5, 1, 2, 0, 5, 3, 0, 4, 3, 4, 1, 3, 1, 5, 3, 5, 0 };
+    const inflated = try world.addSoftBody(&verts, &faces, 300.0, false, .{ 0, 0, 0 });
+    const limp = try world.addSoftBody(&verts, &faces, 0.0, false, .{ 2, 0, 0 });
+    for (0..180) |_| world.step(1.0 / 60.0);
+    var ibuf: [6 * 3]f32 = undefined;
+    var lbuf: [6 * 3]f32 = undefined;
+    _ = world.clothRead(inflated, &ibuf);
+    _ = world.clothRead(limp, &lbuf);
+    const ir = maxRadius(&ibuf, .{ 0, 0, 0 });
+    const lr = maxRadius(&lbuf, .{ 2, 0, 0 });
+    try t.expect(ir > lr + 0.1); // pressure pushed the shell out past the limp one
+}
+
+fn maxRadius(buf: []const f32, center: [3]f32) f32 {
+    var m: f32 = 0;
+    var i: usize = 0;
+    while (i + 3 <= buf.len) : (i += 3) {
+        const dx = buf[i] - center[0];
+        const dy = buf[i + 1] - center[1];
+        const dz = buf[i + 2] - center[2];
+        m = @max(m, @sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    return m;
 }
 
 test "two identical worlds land bit-identical poses" {

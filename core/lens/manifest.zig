@@ -82,6 +82,14 @@ pub const HairField = struct {
     length: f32,
 };
 
+pub const BalloonField = struct {
+    /// Rest radius in metres, subdivision level of the sphere shell (0..3),
+    /// and internal pressure: positive inflates, zero leaves it limp.
+    radius: f32,
+    subdivisions: u32,
+    pressure: f32,
+};
+
 pub const ParticleField = struct {
     /// Particle count and the fountain's gravity, launch speed, and lifetime.
     count: u32,
@@ -346,6 +354,8 @@ pub const Node = struct {
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
     cloth: ?ClothField = null,
+    /// Set when the node is a pressurised soft-body balloon instead of a glb.
+    balloon: ?BalloonField = null,
     /// Set when the node is simulated strand hair instead of a glb.
     hair: ?HairField = null,
     /// Set when the node is a particle fountain instead of a glb.
@@ -1481,6 +1491,46 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(cloth_mark);
         }
+        var balloon_field: ?BalloonField = null;
+        if (getField(object, "balloon")) |balloon_value| {
+            const balloon_mark = path.push("balloon");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "balloon is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (balloon_value != .object) {
+                try diags.add(path.slice(), "balloon must be an object", .{});
+            } else {
+                var field: BalloonField = .{ .radius = 0.3, .subdivisions = 2, .pressure = 20.0 };
+                var ok = true;
+                if (getField(balloon_value.object, "radius")) |v| {
+                    switch (v) {
+                        .float => |f| field.radius = @floatCast(f),
+                        .integer => |n| field.radius = @floatFromInt(n),
+                        else => {
+                            try diags.add(path.slice(), "balloon radius must be a number", .{});
+                            ok = false;
+                        },
+                    }
+                }
+                if (getField(balloon_value.object, "subdivisions")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer <= 3) field.subdivisions = @intCast(v.integer) else {
+                        try diags.add(path.slice(), "balloon subdivisions must be an integer 0..3", .{});
+                        ok = false;
+                    }
+                }
+                if (getField(balloon_value.object, "pressure")) |v| {
+                    switch (v) {
+                        .float => |f| field.pressure = @floatCast(f),
+                        .integer => |n| field.pressure = @floatFromInt(n),
+                        else => {
+                            try diags.add(path.slice(), "balloon pressure must be a number", .{});
+                            ok = false;
+                        },
+                    }
+                }
+                if (ok) balloon_field = field;
+            }
+            path.pop(balloon_mark);
+        }
         if (getField(object, "physics")) |physics_value| {
             const physics_mark = path.push("physics");
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -1740,6 +1790,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .world_anchor = world_anchor,
             .physics = physics_body,
             .cloth = cloth_field,
+            .balloon = balloon_field,
             .hair = hair_field,
             .particles = particle_field,
             .clip_weights = clip_weights,

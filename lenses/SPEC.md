@@ -210,6 +210,14 @@ A model.gltf node may instead carry a `"cloth": {"cols", "rows",
 rather than a glb mesh, its deformed vertices drawn each frame. It
 needs no glb asset.
 
+A model.gltf node may instead carry a `"balloon": {"radius",
+"subdivisions", "pressure"}` field: the node becomes a closed soft-body
+shell (a sphere subdivided from an octahedron, top cap pinned so it
+hangs) that its internal `pressure` inflates - a positive pressure
+puffs it out, zero leaves it limp. `radius` is the rest size in metres,
+`subdivisions` (0 to 3) sets the shell resolution; all are optional with
+engine defaults. Like cloth it needs no glb asset.
+
 A model.gltf node may instead carry a `"hair": {"strands", "verts",
 "length"}` field: the node becomes a set of simulated hair strands
 driven by the tracked head pose and drawn as lines rather than a glb

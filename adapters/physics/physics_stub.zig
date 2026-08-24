@@ -156,6 +156,16 @@ pub const World = struct {
         return error.BodyAddFailed;
     }
 
+    pub fn addSoftBody(world: World, verts: []const [3]f32, faces: []const u32, pressure: f32, pin_top: bool, position: [3]f32) !u32 {
+        _ = world;
+        _ = verts;
+        _ = faces;
+        _ = pressure;
+        _ = pin_top;
+        _ = position;
+        return error.BodyAddFailed;
+    }
+
     pub fn clothRead(world: World, body: u32, out: []f32) u32 {
         _ = world;
         _ = body;

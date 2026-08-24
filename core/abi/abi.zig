@@ -6206,6 +6206,31 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             // Cloth generates its own mesh; no glb load.
             continue;
         }
+        if (model.balloon) |balloon| {
+            if (physics.supported) {
+                if (session.physics_world == null) {
+                    session.physics_world = physics.World.create(-9.81) catch null;
+                    session.physics_last_us = 0;
+                }
+                if (session.physics_world) |world| {
+                    if (buildUnitSphere(gpa, balloon.subdivisions, balloon.radius)) |sphere| {
+                        defer sphere.deinit(gpa);
+                        const body = world.addSoftBody(sphere.verts, sphere.indices, balloon.pressure, true, .{ 0, 0.4, 0 }) catch physics.invalid_body;
+                        if (body != physics.invalid_body) {
+                            if (session.engine.renderer) |*r| {
+                                if (r.createSoftMesh(@intCast(sphere.verts.len), sphere.indices)) |mesh| {
+                                    session.cloth_bodies.put(gpa, model.graph_index, body) catch {};
+                                    session.cloth_meshes.put(gpa, model.graph_index, mesh) catch {};
+                                    session.cloth_cols.put(gpa, model.graph_index, @intCast(sphere.verts.len)) catch {};
+                                } else |_| {}
+                            }
+                        }
+                    } else |_| {}
+                }
+            }
+            // The balloon generates its own mesh; no glb load.
+            continue;
+        }
         if (model.physics) |body| {
             if (physics.supported) {
                 if (session.physics_world == null) {
@@ -7036,6 +7061,82 @@ fn volumeContains(vol: manifest.Volume, p: [3]f32) bool {
     const dz = p[2] - vol.center[2];
     if (vol.radius > 0) return dx * dx + dy * dy + dz * dz <= vol.radius * vol.radius;
     return @abs(dx) <= vol.half[0] and @abs(dy) <= vol.half[1] and @abs(dz) <= vol.half[2];
+}
+
+const SphereMesh = struct {
+    verts: [][3]f32,
+    indices: []u32,
+    fn deinit(self: SphereMesh, gpa: std.mem.Allocator) void {
+        gpa.free(self.verts);
+        gpa.free(self.indices);
+    }
+};
+
+/// Builds a closed sphere shell of `radius` by subdividing an octahedron
+/// `subdivisions` times and projecting each vertex onto the sphere, with every
+/// triangle wound outward. Used for a soft-body balloon's mesh and render.
+fn buildUnitSphere(gpa: std.mem.Allocator, subdivisions: u32, radius: f32) !SphereMesh {
+    var verts: std.ArrayList([3]f32) = .empty;
+    errdefer verts.deinit(gpa);
+    var faces: std.ArrayList([3]u32) = .empty;
+    defer faces.deinit(gpa);
+    try verts.appendSlice(gpa, &.{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 }, .{ 0, 0, 1 }, .{ 0, 0, -1 } });
+    try faces.appendSlice(gpa, &.{
+        .{ 2, 0, 4 }, .{ 2, 4, 1 }, .{ 2, 1, 5 }, .{ 2, 5, 0 },
+        .{ 3, 4, 0 }, .{ 3, 1, 4 }, .{ 3, 5, 1 }, .{ 3, 0, 5 },
+    });
+    var s: u32 = 0;
+    while (s < subdivisions) : (s += 1) {
+        var midpoints: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+        defer midpoints.deinit(gpa);
+        var next: std.ArrayList([3]u32) = .empty;
+        errdefer next.deinit(gpa);
+        for (faces.items) |f| {
+            const ab = try edgeMidpoint(gpa, &verts, &midpoints, f[0], f[1]);
+            const bc = try edgeMidpoint(gpa, &verts, &midpoints, f[1], f[2]);
+            const ca = try edgeMidpoint(gpa, &verts, &midpoints, f[2], f[0]);
+            try next.appendSlice(gpa, &.{ .{ f[0], ab, ca }, .{ ab, f[1], bc }, .{ ca, bc, f[2] }, .{ ab, bc, ca } });
+        }
+        faces.deinit(gpa);
+        faces = next;
+    }
+    const indices = try gpa.alloc(u32, faces.items.len * 3);
+    errdefer gpa.free(indices);
+    for (faces.items, 0..) |f, i| {
+        const a = verts.items[f[0]];
+        const b = verts.items[f[1]];
+        const c = verts.items[f[2]];
+        // Wind outward: flip if the triangle normal points toward the centre.
+        const n = cross3(sub3(b, a), sub3(c, a));
+        const outward = n[0] * (a[0] + b[0] + c[0]) + n[1] * (a[1] + b[1] + c[1]) + n[2] * (a[2] + b[2] + c[2]);
+        indices[i * 3] = f[0];
+        indices[i * 3 + 1] = if (outward < 0) f[2] else f[1];
+        indices[i * 3 + 2] = if (outward < 0) f[1] else f[2];
+    }
+    for (verts.items) |*v| v.* = .{ v[0] * radius, v[1] * radius, v[2] * radius };
+    return .{ .verts = try verts.toOwnedSlice(gpa), .indices = indices };
+}
+
+fn sub3(a: [3]f32, b: [3]f32) [3]f32 {
+    return .{ a[0] - b[0], a[1] - b[1], a[2] - b[2] };
+}
+
+fn cross3(a: [3]f32, b: [3]f32) [3]f32 {
+    return .{ a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] };
+}
+
+fn edgeMidpoint(gpa: std.mem.Allocator, verts: *std.ArrayList([3]f32), midpoints: *std.AutoHashMapUnmanaged(u64, u32), a: u32, b: u32) !u32 {
+    const key = (@as(u64, @min(a, b)) << 32) | @as(u64, @max(a, b));
+    if (midpoints.get(key)) |idx| return idx;
+    const va = verts.items[a];
+    const vb = verts.items[b];
+    var mid: [3]f32 = .{ (va[0] + vb[0]) / 2, (va[1] + vb[1]) / 2, (va[2] + vb[2]) / 2 };
+    const len = @sqrt(mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2]);
+    if (len > 0) mid = .{ mid[0] / len, mid[1] / len, mid[2] / len };
+    const idx: u32 = @intCast(verts.items.len);
+    try verts.append(gpa, mid);
+    try midpoints.put(gpa, key, idx);
+    return idx;
 }
 
 /// Turns an euler orientation in degrees (x, y, z) into a quaternion

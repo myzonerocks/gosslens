@@ -422,6 +422,40 @@ extern "C" uint32_t goss_physics_add_cloth(void* handle, uint32_t cols, uint32_t
   return id.IsInvalid() ? UINT32_MAX : id.GetIndexAndSequenceNumber();
 }
 
+// Adds a closed soft body from a mesh (three floats per vertex, three indices
+// per face) with an internal pressure: a positive pressure inflates the volume
+// (a balloon), zero leaves a limp shell. Reads back with cloth_read. Returns
+// the body id, or UINT32_MAX.
+extern "C" uint32_t goss_physics_add_softbody(void* handle, const float* verts, uint32_t vert_count, const uint32_t* faces, uint32_t face_count, float pressure, uint32_t pin_top, float px, float py, float pz) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr || verts == nullptr || faces == nullptr || vert_count < 4 || face_count < 4) return UINT32_MAX;
+  // Pinning holds the top cap so a balloon hangs in place instead of falling.
+  float min_y = verts[1], max_y = verts[1];
+  for (uint32_t i = 0; i < vert_count; ++i) {
+    min_y = std::min(min_y, verts[i * 3 + 1]);
+    max_y = std::max(max_y, verts[i * 3 + 1]);
+  }
+  const float pin_below = max_y - 0.2f * (max_y - min_y);
+  JPH::Ref<JPH::SoftBodySharedSettings> shared = new JPH::SoftBodySharedSettings();
+  for (uint32_t i = 0; i < vert_count; ++i) {
+    const float vy = verts[i * 3 + 1];
+    const float inv_mass = (pin_top != 0 && vy >= pin_below) ? 0.0f : 1.0f;
+    shared->mVertices.push_back(JPH::SoftBodySharedSettings::Vertex(JPH::Float3(verts[i * 3], vy, verts[i * 3 + 2]), JPH::Float3(0, 0, 0), inv_mass));
+  }
+  for (uint32_t f = 0; f < face_count; ++f) {
+    if (faces[f * 3] >= vert_count || faces[f * 3 + 1] >= vert_count || faces[f * 3 + 2] >= vert_count) return UINT32_MAX;
+    shared->AddFace(JPH::SoftBodySharedSettings::Face(faces[f * 3], faces[f * 3 + 1], faces[f * 3 + 2]));
+  }
+  // A softer edge compliance lets the internal pressure inflate the shell.
+  JPH::SoftBodySharedSettings::VertexAttributes attr(1.0e-2f, 1.0e-2f, 1.0e-2f);
+  shared->CreateConstraints(&attr, 1);
+  shared->Optimize();
+  JPH::SoftBodyCreationSettings settings(shared, JPH::RVec3(px, py, pz), JPH::Quat::sIdentity(), layer_moving);
+  settings.mPressure = pressure;
+  const JPH::BodyID id = world->system.GetBodyInterface().CreateAndAddSoftBody(settings, JPH::EActivation::Activate);
+  return id.IsInvalid() ? UINT32_MAX : id.GetIndexAndSequenceNumber();
+}
+
 // Reads the cloth's deformed world-space vertices into out (three
 // floats per vertex, up to max_vertices). Returns the count.
 extern "C" uint32_t goss_physics_cloth_read(void* handle, uint32_t body, float* out, uint32_t max_vertices) {
