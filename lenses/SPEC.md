@@ -393,6 +393,21 @@ like a sprite; it takes the same `"opacity_param"` for a parameter-driven
 fade. A newline in the `content` starts a new line, so a multi-line caption
 fits the rect as several rows. The font covers space, digits, upper- and
 lowercase letters, and common punctuation; any other character draws blank.
+The text block also styles the glyphs: `"gradient"` (an rgb the glyphs fade
+toward at their base, the top staying the main color), `"shadow"` (a soft
+drop shadow), `"stroke"` (an rgb outline), and `"depth"` (a value above zero
+extrudes the glyphs into a rotated 3D block mesh rather than flat sprite text).
+
+A `"video.texture"` node plays an MP4 clip over the frame like a sprite. It
+ships its clip as `assets/<source>.mp4` and carries a `"video": {"source",
+"x", "y", "w", "h", "opacity", "fps", "loop"}` block: the asset stem, the same
+normalized rect and opacity a sprite takes, the playback rate the clip advances
+at off the frame clock, and whether it loops. The engine decodes the clip off
+the platform's hardware decoder, streaming the next frame onto the sprite one
+frame at a time, so playback stays O(1) per frame rather than reopening the
+file. `"fps": 0` holds the first frame; `"loop": false` holds the last frame at
+the end instead of rewinding. Targets without a hardware decoder play a
+deterministic synthetic clip so the node still runs.
 
 A `"layout.composite"` node lets a lens drive the head composite instead of the
 host: it carries a `"layout": {"arrangement", "key", "chroma", "similarity",

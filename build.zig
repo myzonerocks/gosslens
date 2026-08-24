@@ -235,6 +235,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("jpeg", jpegModule(b, target, optimize));
     abi_module.addImport("color", colorModule(b, target, optimize));
     abi_module.addImport("media_recording", recordingModule(b, target, optimize));
+    abi_module.addImport("media_video", mediaVideoModule(b, target, optimize));
     abi_module.addImport("photo", photoModule(b, target, optimize));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
     abi_module.addImport("audio_mix", audioMixModule(b, target, optimize));
@@ -722,6 +723,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("jpeg", jpegModule(b, target, optimize));
         abi_tracking_module.addImport("color", colorModule(b, target, optimize));
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize));
+        abi_tracking_module.addImport("media_video", mediaVideoModule(b, target, optimize));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_tracking_module.addImport("audio_mix", audioMixModule(b, target, optimize));
@@ -941,6 +943,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("color", colorModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
@@ -1122,6 +1125,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("jpeg", conformance_jpeg_module);
         abi_conformance_module.addImport("color", conformance_color_module);
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize));
+        abi_conformance_module.addImport("media_video", mediaVideoModule(b, target, optimize));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_conformance_module.addImport("audio_mix", audioMixModule(b, target, optimize));
@@ -1434,6 +1438,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("jpeg", jpegModule(b, android_target, optimize));
     abi_android.addImport("color", colorModule(b, android_target, optimize));
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
+    abi_android.addImport("media_video", mediaVideoModule(b, android_target, optimize));
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
@@ -1812,6 +1817,36 @@ fn photoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         module.link_libcpp = true;
         module.linkFramework("CoreGraphics", .{});
         module.linkFramework("ImageIO", .{});
+        module.linkFramework("Foundation", .{});
+        if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    }
+    return module;
+}
+
+// Video decode rides the platform's own hardware decoder, streaming a
+// file's frames one at a time so a live texture pulls the next in O(1).
+// Targets without a landed backend get the deterministic synthetic
+// clip, so the playback path still runs and tests.
+fn mediaVideoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const apple = target.result.os.tag == .macos or target.result.os.tag == .ios;
+    const root = if (apple)
+        "adapters/media/video.zig"
+    else
+        "adapters/media/video_stub.zig";
+    const module = b.createModule(.{
+        .root_source_file = b.path(root),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (apple) {
+        module.addCSourceFile(.{
+            .file = b.path("adapters/media/video_apple.mm"),
+            .flags = &.{ "-std=c++17", "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        module.link_libcpp = true;
+        module.linkFramework("AVFoundation", .{});
+        module.linkFramework("CoreMedia", .{});
+        module.linkFramework("CoreVideo", .{});
         module.linkFramework("Foundation", .{});
         if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     }
@@ -3422,6 +3457,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("jpeg", jpegModule(b, ios_target, optimize));
     abi_ios.addImport("color", colorModule(b, ios_target, optimize));
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
+    abi_ios.addImport("media_video", mediaVideoModule(b, ios_target, optimize));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     abi_ios.addImport("audio_mix", audioMixModule(b, ios_target, optimize));
@@ -3995,6 +4031,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("jpeg", jpegModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("color", colorModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("media_video", mediaVideoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_mix", audioMixModule(b, em_target, .ReleaseSmall));

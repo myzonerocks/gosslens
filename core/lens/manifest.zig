@@ -317,6 +317,24 @@ pub const TextField = struct {
     depth: f32 = 0,
 };
 
+pub const VideoField = struct {
+    /// A video.texture node's clip, decoded off the platform's hardware
+    /// decoder and drawn like a sprite. `source` names the asset
+    /// (assets/<source>.mp4); the screen rect and opacity match a sprite's.
+    source: []const u8 = "",
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+    w: f32 = 1.0,
+    h: f32 = 1.0,
+    opacity: f32 = 1.0,
+    /// Playback rate the clip advances at against the lens clock. Zero
+    /// holds the first decoded frame.
+    fps: f32 = 30.0,
+    /// Rewind to the start at the end of the clip rather than holding the
+    /// last frame.
+    loop: bool = true,
+};
+
 pub const LayoutField = struct {
     /// A layout.composite node's head arrangement and the camera base's blend.
     /// arrangement 0 custom..5 overlay matches the ABI; key 0 none, 1 matte,
@@ -443,6 +461,9 @@ pub const Node = struct {
     /// Set only on a text.2d node: the string, rect, opacity, and color it
     /// draws.
     text: ?TextField = null,
+    /// Set only on a video.texture node: the clip source, rect, opacity, and
+    /// playback rate it decodes and draws at.
+    video: ?VideoField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -1488,6 +1509,34 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "text.2d")) {
             try diags.add(path.slice(), "a text.2d node needs a text block", .{});
         }
+        var video_field: ?VideoField = null;
+        if (getField(object, "video")) |vv| {
+            const vmark = path.push("video");
+            if (!std.mem.eql(u8, node_type, "video.texture")) {
+                try diags.add(path.slice(), "video is a video.texture field, found it on '{s}'", .{node_type});
+            } else if (vv != .object) {
+                try diags.add(path.slice(), "video must be an object", .{});
+            } else {
+                var field: VideoField = .{};
+                if (getField(vv.object, "source")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.source = try arena.dupe(u8, s);
+                }
+                if (getField(vv.object, "x")) |v| field.x = @floatCast(numberOf(v) orelse field.x);
+                if (getField(vv.object, "y")) |v| field.y = @floatCast(numberOf(v) orelse field.y);
+                if (getField(vv.object, "w")) |v| field.w = @floatCast(numberOf(v) orelse field.w);
+                if (getField(vv.object, "h")) |v| field.h = @floatCast(numberOf(v) orelse field.h);
+                if (getField(vv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(vv.object, "fps")) |v| field.fps = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.fps)));
+                if (getField(vv.object, "loop")) |v| {
+                    if (v == .bool) field.loop = v.bool;
+                }
+                if (field.source.len == 0) try diags.add(path.slice(), "a video.texture node needs a source", .{});
+                video_field = field;
+            }
+            path.pop(vmark);
+        } else if (std.mem.eql(u8, node_type, "video.texture")) {
+            try diags.add(path.slice(), "a video.texture node needs a video block", .{});
+        }
         var layout_field: ?LayoutField = null;
         if (getField(object, "layout")) |lv| {
             const lmark = path.push("layout");
@@ -1927,6 +1976,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .layout = layout_field,
             .sprite = sprite_field,
             .text = text_field,
+            .video = video_field,
             .script = script_source,
         });
     }

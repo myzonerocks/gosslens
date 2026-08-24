@@ -35,6 +35,7 @@ const script = @import("script");
 const audio_playback = @import("audio_playback");
 const particles = @import("particles");
 const sph = @import("sph");
+const video = @import("media_video");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -858,6 +859,10 @@ pub const Session = struct {
     /// Extruded 3D text nodes: the glyph block mesh and its color, drawn via
     /// the model path, by graph index.
     text3d_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { mesh: render.Renderer.ModelMesh, color: [4]f32 }) = .empty,
+    /// video.texture nodes: the streaming decoder, the dynamic texture its
+    /// frames upload into, and the playback cursor, by graph index. Drawn in
+    /// the sprite branch like an animated sprite, one decoded frame at a time.
+    video_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, VideoPlayback) = .empty,
     /// A sprite/text node's opacity parameter name (a slice into the lens
     /// manifest arena), when it binds one, so the draw reads a live opacity.
     sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
@@ -1534,6 +1539,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // once all its frames have); until then it holds the frame
             // through, never blocking the chain.
             .sprite => s.sprite_textures.contains(entry.graph_index) or s.text3d_meshes.contains(entry.graph_index) or
+                s.video_textures.contains(entry.graph_index) or
                 (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
         };
         if (ready) ready_count += 1;
@@ -1945,7 +1951,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     continue;
                 }
                 var sprite_texture: render.TextureHandle = undefined;
-                if (s.sprite_anims.get(entry.graph_index)) |anim| {
+                if (s.video_textures.getPtr(entry.graph_index)) |vid| {
+                    // A video clip advances its decoded frame off the lens clock,
+                    // uploading the next one into its dynamic texture.
+                    advanceVideo(s, vid);
+                    sprite_texture = vid.texture;
+                } else if (s.sprite_anims.get(entry.graph_index)) |anim| {
                     // An animated sprite cycles its frames off the lens clock;
                     // wait until every frame has landed so the cycle is whole.
                     if (anim.loaded != anim.frames) continue;
@@ -2685,6 +2696,7 @@ pub fn destroySession(session: *Session) void {
     session.sprite_loaders.deinit(session.engine.gpa);
     session.sprite_textures.deinit(session.engine.gpa);
     session.text3d_meshes.deinit(session.engine.gpa);
+    session.video_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
@@ -5496,7 +5508,14 @@ fn destroySpriteState(session: *Session) void {
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
         var mesh_it = session.text3d_meshes.valueIterator();
         while (mesh_it.next()) |t3d| render.Renderer.destroyModelMesh(t3d.mesh);
+        var video_it = session.video_textures.valueIterator();
+        while (video_it.next()) |vid| {
+            r.destroyTexture(vid.texture);
+            vid.decoder.close();
+            session.engine.gpa.free(vid.rgba);
+        }
     }
+    session.video_textures.clearRetainingCapacity();
     session.text3d_meshes.clearRetainingCapacity();
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
@@ -6152,6 +6171,30 @@ const SpriteAnim = struct {
     loaded: u32 = 0,
 };
 
+/// A video.texture node's live playback: the streaming decoder, the
+/// dynamic texture the current frame sits in, a reused decode buffer,
+/// and how many frames have been pulled so the draw only advances when
+/// the lens clock crosses the next frame boundary.
+const VideoPlayback = struct {
+    decoder: video.Decoder,
+    texture: render.TextureHandle,
+    rgba: []u8,
+    width: u32,
+    height: u32,
+    fps: f32,
+    loop: bool,
+    /// Frames pulled and presented so far; the first frame lands at load,
+    /// so this starts at 1.
+    advanced: u64 = 1,
+    /// The frame timestamp playback started from, so the clip advances off
+    /// the same submitted-frame clock physics rides. Unset until the first
+    /// draw stamps it.
+    base_us: i64 = std.math.minInt(i64),
+    /// Set once a non-looping clip runs out, so the draw holds the last
+    /// frame instead of retrying the decoder every frame.
+    ended: bool = false,
+};
+
 /// Loads a sprite.2d node's animated GIF (assets/<stem>.gif) as a video
 /// texture: every frame decodes to a texture up front and a fully-loaded
 /// SpriteAnim the render loop cycles at the clip's own rate. Returns false
@@ -6215,6 +6258,78 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
         session.sprite_loaders.put(gpa, sprite.graph_index, loader) catch {
             loader.deinit();
         };
+    }
+}
+
+/// Opens each video.texture node's clip (assets/<source>.mp4) on the
+/// platform decoder, decodes its first frame into a dynamic texture, and
+/// registers it so the sprite branch draws and advances it. Best-effort
+/// per node: a missing or undecodable clip just leaves the node blank.
+fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const videos = try lens.videoNodes(gpa, &session.lens_graph);
+    defer gpa.free(videos);
+    for (videos) |v| {
+        session.sprite_rects.put(gpa, v.graph_index, .{ v.rect[0], v.rect[1], v.rect[2], v.rect[3], v.opacity }) catch {};
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.mp4", .{ bundle_path, v.source }) catch continue;
+        defer gpa.free(path);
+        var decoder = video.Decoder.open(path) orelse continue;
+        const rgba = gpa.alloc(u8, @as(usize, decoder.width) * decoder.height * 4) catch {
+            decoder.close();
+            continue;
+        };
+        if (decoder.read(rgba) != .frame) {
+            gpa.free(rgba);
+            decoder.close();
+            continue;
+        }
+        const tex = render.Renderer.createDynamicBgraTexture(@intCast(decoder.width), @intCast(decoder.height));
+        render.Renderer.updateDynamicBgraTexture(tex, @intCast(decoder.width), @intCast(decoder.height), rgba);
+        session.video_textures.put(gpa, v.graph_index, .{
+            .decoder = decoder,
+            .texture = tex,
+            .rgba = rgba,
+            .width = decoder.width,
+            .height = decoder.height,
+            .fps = v.fps,
+            .loop = v.loop,
+        }) catch {
+            if (session.engine.renderer) |*r| r.destroyTexture(tex);
+            gpa.free(rgba);
+            decoder.close();
+        };
+    }
+}
+
+/// Pulls decoded frames forward until the texture holds the frame the
+/// lens clock now points at, uploading each. A non-looping clip holds its
+/// last frame; a looping one rewinds. Catch-up is bounded so a long clock
+/// jump cannot stall a frame decoding hundreds of frames.
+fn advanceVideo(s: *Session, vid: *VideoPlayback) void {
+    if (vid.fps <= 0 or vid.ended) return;
+    const current = s.current orelse return;
+    if (vid.base_us == std.math.minInt(i64)) vid.base_us = current.desc.timestamp_us;
+    const elapsed_us = current.desc.timestamp_us - vid.base_us;
+    if (elapsed_us <= 0) return;
+    const target: u64 = @as(u64, @intFromFloat(@as(f64, @floatFromInt(elapsed_us)) / 1_000_000.0 * @as(f64, vid.fps))) + 1;
+    var budget: u32 = 512;
+    while (vid.advanced < target and budget > 0) : (budget -= 1) {
+        switch (vid.decoder.read(vid.rgba)) {
+            .frame => {
+                render.Renderer.updateDynamicBgraTexture(vid.texture, @intCast(vid.width), @intCast(vid.height), vid.rgba);
+                vid.advanced += 1;
+            },
+            .end => {
+                if (!(vid.loop and vid.decoder.reset())) {
+                    vid.ended = true;
+                    break;
+                }
+            },
+            .failed => {
+                vid.ended = true;
+                break;
+            },
+        }
     }
 }
 
@@ -6820,6 +6935,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createEnvLoaders(session, gpa, bundle_path);
     try createMeshFaceLoaders(session, gpa, bundle_path);
     try createSpriteLoaders(session, gpa, bundle_path);
+    try createVideoLoaders(session, gpa, bundle_path);
     try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);

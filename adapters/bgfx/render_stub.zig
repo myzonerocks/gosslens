@@ -152,6 +152,19 @@ pub const Renderer = struct {
         return .{};
     }
 
+    pub fn createDynamicBgraTexture(width: u16, height: u16) TextureHandle {
+        _ = width;
+        _ = height;
+        return .{};
+    }
+
+    pub fn updateDynamicBgraTexture(handle: TextureHandle, width: u16, height: u16, bgra: []const u8) void {
+        _ = handle;
+        _ = width;
+        _ = height;
+        _ = bgra;
+    }
+
     pub fn passthroughProgram(r: *Renderer) ProgramHandle {
         _ = r;
         return .{};

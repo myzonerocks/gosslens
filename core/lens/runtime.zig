@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -61,6 +61,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "layout.composite")) return .layout_composite;
     if (std.mem.eql(u8, type_str, "sprite.2d")) return .sprite_2d;
     if (std.mem.eql(u8, type_str, "text.2d")) return .text_2d;
+    if (std.mem.eql(u8, type_str, "video.texture")) return .video_texture;
     return null;
 }
 
@@ -84,7 +85,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
     };
 }
 
@@ -151,6 +152,9 @@ const LensNode = struct {
     sprite: ?manifest.SpriteField = null,
     /// .text_2d only: the string, rect, opacity, and color the node draws.
     text: ?manifest.TextField = null,
+    /// .video_texture only: the clip source, rect, opacity, and playback rate
+    /// the node decodes and draws at.
+    video: ?manifest.VideoField = null,
     /// .model_gltf only: microseconds since play_animation last fired
     /// for this node, null if it never has. Advances every tick() the
     /// same way a ramp does - once a trigger starts it, not before.
@@ -247,6 +251,18 @@ pub const TextNode = struct {
     /// Extrude the glyphs into a rotated 3D block mesh of this depth; 0 keeps
     /// the flat sprite text.
     depth: f32,
+};
+
+pub const VideoNode = struct {
+    graph_index: graph.NodeIndex,
+    /// The clip's asset stem (assets/<source>.mp4).
+    source: []const u8,
+    rect: [4]f32,
+    opacity: f32,
+    /// The rate the clip advances against the lens clock; 0 holds the first
+    /// frame, and `loop` rewinds at the end rather than holding the last.
+    fps: f32,
+    loop: bool,
 };
 
 /// One grade.pass node ready for the caller to draw - which graph node
@@ -619,6 +635,19 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    pub fn videoNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]VideoNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(VideoNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .video_texture) continue;
+            const vf = node.video orelse continue;
+            try out.append(gpa, .{ .graph_index = node.graph_index, .source = vf.source, .rect = .{ vf.x, vf.y, vf.w, vf.h }, .opacity = vf.opacity, .fps = vf.fps, .loop = vf.loop });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every shader.pass, lut.pass, blend.pass, and model.gltf node
     /// this lens spliced, in one real execution-order sequence - the
     /// actual draw order for a chain that mixes any of the four kinds,
@@ -646,7 +675,7 @@ pub const Lens = struct {
                 .model_gltf => .model,
                 .mesh_face => .mesh,
                 .draw_board => .draw_board,
-                .sprite_2d, .text_2d => .sprite,
+                .sprite_2d, .text_2d, .video_texture => .sprite,
                 else => continue,
             };
             try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
@@ -864,6 +893,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .morph_weights = if (node_type == .model_gltf) node.morph_weights else &.{},
             .sprite = if (node_type == .sprite_2d) node.sprite else null,
             .text = if (node_type == .text_2d) node.text else null,
+            .video = if (node_type == .video_texture) node.video else null,
             .grade = if (node_type == .grade_pass) node.grade else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .dof = if (node_type == .dof_pass) node.dof else null,

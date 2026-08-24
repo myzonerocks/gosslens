@@ -1061,6 +1061,19 @@ pub const Renderer = struct {
         return c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_R8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, c.bgfx_copy(mask.ptr, @intCast(mask.len)), 0);
     }
 
+    /// A mutable BGRA texture whose pixels are replaced each frame - a
+    /// video clip's decoded frame lands here. BGRA8 matches the byte order
+    /// the platform decoders vend, so the upload needs no channel swap.
+    pub fn createDynamicBgraTexture(width: u16, height: u16) TextureHandle {
+        return c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_BGRA8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, null, 0);
+    }
+
+    /// Replaces a dynamic BGRA texture's pixels with a freshly decoded
+    /// frame; bgfx copies the bytes, so the caller may reuse the buffer.
+    pub fn updateDynamicBgraTexture(handle: TextureHandle, width: u16, height: u16, bgra: []const u8) void {
+        c.bgfx_update_texture_2d(handle, 0, 0, 0, 0, width, height, c.bgfx_copy(bgra.ptr, @intCast(bgra.len)), std.math.maxInt(u16));
+    }
+
     /// Full-screen quad geometry and the view's transform, shared by
     /// submitPreview and submitShaderPass - the two differ only in which
     /// program and textures they bind afterward.

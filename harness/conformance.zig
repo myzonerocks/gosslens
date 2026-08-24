@@ -3241,6 +3241,112 @@ fn proveExtrudedText(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Paints one fixture frame: a bright band on a dark field, its column
+/// sweeping left to right across the clip, so a decoded frame reveals how
+/// far playback has advanced.
+fn paintSweepFrame(rgba: []u8, w: u32, h: u32, i: u32, n: u32) void {
+    const span = w - 40;
+    const band: u32 = if (n > 1) (i * span) / (n - 1) else 0;
+    for (0..h) |y| {
+        for (0..w) |x| {
+            const at = (y * w + x) * 4;
+            const on = x >= band and x < band + 40;
+            rgba[at + 0] = if (on) 250 else 24;
+            rgba[at + 1] = if (on) 40 else 24;
+            rgba[at + 2] = if (on) 40 else @intCast((i * 5) % 200);
+            rgba[at + 3] = 255;
+        }
+    }
+}
+
+/// Encodes a short deterministic clip through the recording rail so the
+/// video-texture proof has a real MP4 to decode back. The sweeping band
+/// makes each frame distinct, so playback advancing is observable.
+fn encodeVideoFixture(gpa: std.mem.Allocator, engine: *abi.Engine, path: []const u8) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) return false;
+    if (abi.goss_engine_recording_start(engine, session, path.ptr, path.len, null) != .ok) return false;
+
+    const w: u32 = 400;
+    const h: u32 = 300;
+    const rgba = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(rgba);
+    const total: u32 = 56;
+    for (0..total) |i| {
+        paintSweepFrame(rgba, w, h, @intCast(i), total);
+        const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = rgba }, .width = w, .height = h });
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return false;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_recording_stop(engine) != .ok) return false;
+    const shape = abi.recordingProbe(path) catch return false;
+    // The late capture reads ~27 frames in; the clip must be at least that
+    // long so playback lands mid-clip rather than looping back to the start.
+    return shape.frames >= 32 and shape.width == w and shape.height == h;
+}
+
+fn writeVideoLens(dir: []const u8, clip: []const u8, fps: f32) !void {
+    const manifest_json = try std.fmt.allocPrint(std.heap.page_allocator,
+        \\{{"glf":"1.0","id":"goss.reference.video-texture","version":"1.0.0","display_name":"Video Texture","engine_compat":">=0.5","capabilities":[],"parameters":[],
+        \\ "nodes":[{{"id":"clip","type":"video.texture","inputs":{{"frame":"camera"}},"params":{{}},
+        \\ "video":{{"source":"clip","x":0.2,"y":0.2,"w":0.6,"h":0.6,"fps":{d:.1},"loop":true}}}}],"triggers":[]}}
+    , .{fps});
+    defer std.heap.page_allocator.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/clip.mp4", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = clip });
+}
+
+/// Proves the video texture through a real MP4 round trip: a clip encoded
+/// through the recording rail decodes back onto a sprite. A late frame
+/// differs from an early one (playback advances off the frame clock), the
+/// late frame is bit-stable, and an fps-0 lens holds the first frame.
+fn proveVideoTexture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/video-lens/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/video-static/assets");
+    if (!try encodeVideoFixture(gpa, engine, "zig-out/conformance-video.mp4")) {
+        std.debug.print("conformance: FAIL the video fixture did not encode\n", .{});
+        return false;
+    }
+    const clip = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-video.mp4", gpa, .limited(64 << 20));
+    defer gpa.free(clip);
+    try writeVideoLens("zig-out/video-lens", clip, 10.0);
+    try writeVideoLens("zig-out/video-static", clip, 0.0);
+
+    const early = (try captureFountainAtFrame(gpa, engine, "zig-out/video-lens", 5)) orelse return false;
+    defer gpa.free(early);
+    const late = (try captureFountainAtFrame(gpa, engine, "zig-out/video-lens", 80)) orelse return false;
+    defer gpa.free(late);
+    const late2 = (try captureFountainAtFrame(gpa, engine, "zig-out/video-lens", 80)) orelse return false;
+    defer gpa.free(late2);
+    const held = (try captureFountainAtFrame(gpa, engine, "zig-out/video-static", 80)) orelse return false;
+    defer gpa.free(held);
+
+    if (!std.mem.eql(u8, late, late2)) {
+        std.debug.print("conformance: FAIL the decoded video frame is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, early, late)) {
+        std.debug.print("conformance: FAIL the video did not advance between an early and a late frame\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, late, held)) {
+        std.debug.print("conformance: FAIL a paused (fps 0) clip drew the same frame as a playing one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a recorded MP4 decodes onto a sprite and advances off the lens clock, bit-stable, with a paused clip holding its first frame\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -7151,6 +7257,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveRichText(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "extruded-text")) {
             if (!try proveExtrudedText(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "video-texture")) {
+            if (!try proveVideoTexture(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7273,6 +7381,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("rich text");
     if (!try proveExtrudedText(gpa, engine)) return 1;
     watchHold("extruded text");
+    if (!try proveVideoTexture(gpa, engine)) return 1;
+    watchHold("video texture");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
