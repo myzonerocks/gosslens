@@ -144,6 +144,9 @@ pub const ParticleField = struct {
     colliders: []const [4]f32 = &.{},
     /// Box colliders particles bounce off, each [x, y, z, hx, hy, hz].
     box_colliders: []const [6]f32 = &.{},
+    /// Draw each particle as a small 3D octahedron mesh instead of a flat
+    /// billboard or point, sized by `size`. Off by default.
+    mesh: bool = false,
 };
 
 pub const GradeField = struct {
@@ -1051,6 +1054,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         }
                         if (ok) field.box_colliders = boxes else try diags.add(path.slice(), "particles box_colliders must be arrays of [x, y, z, hx, hy, hz]", .{});
                     } else try diags.add(path.slice(), "particles box_colliders must be an array of up to 16 boxes", .{});
+                }
+                if (getField(pv.object, "mesh")) |v| {
+                    if (v == .bool) field.mesh = v.bool;
                 }
                 particle_field = field;
             }

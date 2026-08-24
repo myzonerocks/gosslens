@@ -1857,6 +1857,20 @@ pub const Renderer = struct {
         c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Draws mesh-mode particles: blits the frame once, then draws the shared
+    /// base mesh at every particle position (xyz triples) scaled by `scale`,
+    /// all into one mesh view, so a cloud of little 3D shapes costs one blit.
+    pub fn submitParticleMeshes(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, positions: []const f32, scale: f32, base_color: [4]f32, aspect_ratio: f32) void {
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+        const n = positions.len / 3;
+        const sm = math.Mat4.scaling(.{ scale, scale, scale });
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const tm = math.Mat4.translation(.{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2] });
+            r.drawModelMesh(mesh_view, mesh, tm.mul(sm), base_color, aspect_ratio);
+        }
+    }
+
     /// Draws a skinned mesh from its dynamic position buffer under the
     /// body anchor matrix, otherwise identical to drawModelMesh.
     pub fn drawSkinnedMesh(r: *Renderer, mesh_view: c.bgfx_view_id_t, mesh: SkinnedMesh, model_matrix: math.Mat4, base_color: [4]f32, aspect_ratio: f32) void {

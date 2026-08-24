@@ -384,6 +384,16 @@ const WorldStore = struct {
 
 const identity16 = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
+// A unit octahedron the mesh-particle draw scales and places at each particle:
+// six axis tips and the eight triangles joining a pole to the equator ring.
+const octahedron_positions = [6][3]f32{
+    .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 }, .{ 0, 0, 1 }, .{ 0, 0, -1 },
+};
+const octahedron_indices = [24]u32{
+    4, 0, 2, 4, 2, 1, 4, 1, 3, 4, 3, 0,
+    5, 2, 0, 5, 1, 2, 5, 3, 1, 5, 0, 3,
+};
+
 const RecordingSlot = struct {
     persistent: render.Renderer.PersistentTexture = .{},
     target: ?render.Renderer.OffscreenTarget = null,
@@ -447,6 +457,9 @@ pub const Session = struct {
     hair_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.HairMesh) = .empty,
     particle_systems: std.AutoHashMapUnmanaged(graph.NodeIndex, particles.System) = .empty,
     particle_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ParticleMesh) = .empty,
+    /// A mesh-mode particle node's shared base octahedron, drawn once per
+    /// particle at its position instead of a billboard.
+    particle_base_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ModelMesh) = .empty,
     /// A fading fountain's own sprite texture, loaded once at activation from
     /// assets/<stem>.png when the particles field names one.
     particle_sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
@@ -1432,7 +1445,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Like blend's mask: the face is a capability input whose
             // absence degrades (no draw), never blocks the chain.
             .mesh => s.mesh_face_textures.contains(entry.graph_index),
-            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index),
+            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index) or s.particle_base_meshes.contains(entry.graph_index),
             // The draw board carries no loaded asset: it passes the frame
             // through and draws the session's brush strokes over it, so it is
             // always ready.
@@ -1865,6 +1878,46 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .model => {
+                if (s.particle_base_meshes.get(entry.graph_index)) |base_mesh| {
+                    drawn += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const rect_w = if (output != null and !is_final) width else output_width;
+                    const rect_h = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                        render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    var base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
+                    var scale: f32 = 0.04;
+                    if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
+                        if (sys.field.pattern == .face) feedFaceEmitters(s, sys, width, height);
+                        if (!s.capture_requested) sys.step(1.0 / 60.0);
+                        if (sys.field.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
+                        const sz: f32 = if (sys.field.size > 0) @floatFromInt(sys.field.size) else 8.0;
+                        scale = sz * 0.005;
+                        const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                        r.tile = if (is_final) s.capture_tile else null;
+                        const count = sys.field.count;
+                        if (s.engine.gpa.alloc(f32, count * 3)) |verts| {
+                            defer s.engine.gpa.free(verts);
+                            sys.writePositions(verts);
+                            r.submitParticleMeshes(blit_view, mesh_view, input_texture, base_mesh, verts, scale, base_color, aspect_ratio);
+                        } else |_| {}
+                    }
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 if (s.particle_meshes.get(entry.graph_index)) |particle_mesh| {
                     drawn += 1;
                     const blit_view = next_view_id;
@@ -2417,6 +2470,7 @@ pub fn destroySession(session: *Session) void {
     session.hair_meshes.deinit(session.engine.gpa);
     session.hair_vcount.deinit(session.engine.gpa);
     session.particle_meshes.deinit(session.engine.gpa);
+    session.particle_base_meshes.deinit(session.engine.gpa);
     session.particle_systems.deinit(session.engine.gpa);
     session.particle_sprite_textures.deinit(session.engine.gpa);
     destroyModelState(session);
@@ -5100,12 +5154,15 @@ fn destroyMeshFaceState(session: *Session) void {
     if (session.engine.renderer) |*r| {
         var pm_it = session.particle_meshes.valueIterator();
         while (pm_it.next()) |mesh| render.Renderer.destroyParticleMesh(mesh.*);
+        var pbm_it = session.particle_base_meshes.valueIterator();
+        while (pbm_it.next()) |mesh| render.Renderer.destroyModelMesh(mesh.*);
         var sprite_it = session.particle_sprite_textures.valueIterator();
         while (sprite_it.next()) |tex| r.destroyTexture(tex.*);
     }
     var ps_it = session.particle_systems.valueIterator();
     while (ps_it.next()) |sys| sys.deinit();
     session.particle_meshes.clearRetainingCapacity();
+    session.particle_base_meshes.clearRetainingCapacity();
     session.particle_systems.clearRetainingCapacity();
     session.particle_sprite_textures.clearRetainingCapacity();
     session.hair_meshes.clearRetainingCapacity();
@@ -5993,18 +6050,35 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     // slot; a fading fountain one quad per particle; a plain one
                     // a single point each. Trails and fades share the billboard
                     // program, so both take the faded mesh path.
-                    const faded = pf.fade or pf.trail > 1;
-                    const vertex_count: u32 = if (pf.trail > 1) @intCast(sys.trailVertexCount()) else if (pf.fade) pf.count * 6 else pf.count;
-                    if (r.createParticleMesh(vertex_count, faded)) |mesh| {
-                        session.particle_systems.put(gpa, model.graph_index, sys) catch {
+                    if (pf.mesh) {
+                        // Mesh mode: each particle draws a shared 3D octahedron,
+                        // so there is no billboard buffer, just the base mesh.
+                        if (r.createModelMesh(&octahedron_positions, &octahedron_indices)) |base| {
+                            session.particle_systems.put(gpa, model.graph_index, sys) catch {
+                                var s2 = sys;
+                                s2.deinit();
+                            };
+                            session.particle_base_meshes.put(gpa, model.graph_index, base) catch {
+                                render.Renderer.destroyModelMesh(base);
+                            };
+                        } else |_| {
                             var s2 = sys;
                             s2.deinit();
-                        };
-                        session.particle_meshes.put(gpa, model.graph_index, mesh) catch {};
-                        if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
-                    } else |_| {
-                        var s2 = sys;
-                        s2.deinit();
+                        }
+                    } else {
+                        const faded = pf.fade or pf.trail > 1;
+                        const vertex_count: u32 = if (pf.trail > 1) @intCast(sys.trailVertexCount()) else if (pf.fade) pf.count * 6 else pf.count;
+                        if (r.createParticleMesh(vertex_count, faded)) |mesh| {
+                            session.particle_systems.put(gpa, model.graph_index, sys) catch {
+                                var s2 = sys;
+                                s2.deinit();
+                            };
+                            session.particle_meshes.put(gpa, model.graph_index, mesh) catch {};
+                            if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
+                        } else |_| {
+                            var s2 = sys;
+                            s2.deinit();
+                        }
                     }
                 } else |_| {}
             }

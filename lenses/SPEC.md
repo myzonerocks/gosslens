@@ -229,8 +229,10 @@ motion, and appearance:
   `"spin"` turns over life, `"stretch"` along the screen velocity (streaks),
   `"glow": true` for additive blending, a `"sprite": "<stem>"` textured with
   `assets/<stem>.png`, `"frames"` to flip-book through a square sprite sheet
-  over life, and `"trail"` to draw that many of each particle's recent
-  positions as a fading ribbon behind it (a comet tail).
+  over life, `"trail"` to draw that many of each particle's recent
+  positions as a fading ribbon behind it (a comet tail), and `"mesh": true`
+  to draw each particle as a small 3D octahedron sized by `"size"` rather than
+  a flat billboard.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the
