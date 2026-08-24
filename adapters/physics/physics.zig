@@ -27,6 +27,7 @@ extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
+extern fn goss_physics_constrain_point(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) i32;
 extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
 extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, px: f32, py: f32, pz: f32) u32;
 extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
@@ -62,6 +63,13 @@ pub const World = struct {
     /// points - the chain link for content hanging off an anchor.
     pub fn constrainDistance(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32, min: f32, max: f32) !void {
         if (goss_physics_constrain_distance(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], min, max) != 0) return error.ConstraintFailed;
+    }
+
+    /// Pins two bodies at a single point (a ball joint): the point stays
+    /// coincident while the bodies rotate freely about it - a pendulum pivot,
+    /// unlike a distance constraint that only bounds separation.
+    pub fn constrainPoint(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32) !void {
+        if (goss_physics_constrain_point(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2]) != 0) return error.ConstraintFailed;
     }
 
     /// Drives a kinematic body toward a pose over dt; chained bodies
@@ -123,6 +131,20 @@ test "a dropped sphere comes to rest on the floor" {
     // Resting height: floor top (0) plus the radius, less the solver's
     // documented penetration slop (0.02 by default).
     try t.expectApproxEqAbs(@as(f32, 0.25), pose[13], 0.03);
+}
+
+test "a point joint pins a body to its pivot instead of letting it fall" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.sphere, .{ 0, 2.0, 0 }, .{ 0.1, 0, 0 }, .static);
+    const hung = try world.addBody(.sphere, .{ 0, 2.0, 0 }, .{ 0.1, 0, 0 }, .dynamic);
+    try world.constrainPoint(anchor, hung, .{ 0, 0, 0 }, .{ 0, 0, 0 });
+
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const pose = try world.bodyPose(hung);
+    // The pivot pins its centre of mass at the anchor, so it never falls the
+    // way an unconstrained body under -9.81 gravity would over four seconds.
+    try t.expectApproxEqAbs(@as(f32, 2.0), pose[13], 0.05);
 }
 
 test "two identical worlds land bit-identical poses" {

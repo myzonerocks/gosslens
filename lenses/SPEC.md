@@ -182,7 +182,10 @@ from the first element), `position` places the body at activation, and
 body, so chained content can hang off it). A body may add
 `"chain": {"to": "<node id>", "length": <meters>}`, a distance
 constraint hanging it off another node's body - earrings off a
-kinematic anchor, a pendant off a bead. Simulation steps at a fixed
+kinematic anchor, a pendant off a bead. Adding `"joint": "point"` to
+the chain links the two at a pivot the body swings freely about (a ball
+joint) instead, and `"joint": "distance"` (the default) bounds their
+separation up to `length`. Simulation steps at a fixed
 rate from frame timestamps, so the same frames replay the same motion;
 on a session without physics support the node holds its initial pose.
 

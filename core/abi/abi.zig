@@ -6245,7 +6245,10 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             for (models) |anchor_model| {
                 if (!std.mem.eql(u8, anchor_model.node_id, chain_to)) continue;
                 const anchor = session.physics_bodies.get(anchor_model.graph_index) orelse break;
-                world.constrainDistance(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, body.chain_length) catch {};
+                switch (body.joint) {
+                    .distance => world.constrainDistance(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, body.chain_length) catch {},
+                    .point => world.constrainPoint(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }) catch {},
+                }
                 break;
             }
         }
