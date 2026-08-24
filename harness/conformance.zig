@@ -5107,6 +5107,100 @@ fn proveSsrPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the env.pass sky pans with the submitted camera pose. The env-sky
+/// bundle draws a sky gradient behind the segmented foreground; tilting the
+/// camera up shifts the gradient, so the pitched-pose frame differs from the
+/// level one while the foreground subject stays put.
+fn proveEnvPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/env-sky";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: env-sky proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    // The analysis path feeds the segmentation worker; the render path feeds
+    // the preview the sky composites over.
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // Render until the segmentation worker publishes its mask, so the sky has
+    // a real background region to fill behind the subject.
+    var mask_polls: usize = 0;
+    while (session.segmentation_texture == null) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        mask_polls += 1;
+        if (mask_polls > 100_000) return error.MaskTimedOut;
+    }
+
+    // A level pose: the camera looks straight ahead, the sky centered.
+    var level: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = identity_pose, .projection = identity_pose, .timestamp_us = 1000 };
+    if (abi.goss_session_submit_world(session, &level, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-env-level");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Tilt up 0.6 rad about x: the camera's forward rises, shifting the sky.
+    const a: f32 = 0.6;
+    const ca = std.math.cos(a);
+    const sa = std.math.sin(a);
+    const pitched_pose = [16]f32{ 1, 0, 0, 0, 0, ca, sa, 0, 0, -sa, ca, 0, 0, 0, 0, 1 };
+    var pitched: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = pitched_pose, .projection = identity_pose, .timestamp_us = 2000 };
+    if (abi.goss_session_submit_world(session, &pitched, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-env-pitched");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const level_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-env-level.tga", gpa, .limited(8 << 20));
+    defer gpa.free(level_tga);
+    const pitched_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-env-pitched.tga", gpa, .limited(8 << 20));
+    defer gpa.free(pitched_tga);
+
+    if (std.mem.eql(u8, level_tga, pitched_tga)) {
+        std.debug.print("conformance: FAIL env-sky: tilting the camera pose did not pan the sky\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF env-sky pans with the pose: tilting the camera up shifts the sky behind the segmented foreground\n", .{});
+    return true;
+}
+
+const identity_pose = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -5212,6 +5306,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("trail pass");
     if (!try proveSsrPass(gpa, engine)) return 1;
     watchHold("ssr pass");
+    if (!try proveEnvPass(gpa, engine)) return 1;
+    watchHold("env pass");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

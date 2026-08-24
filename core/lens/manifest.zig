@@ -193,6 +193,18 @@ pub const SsrField = struct {
     plane: f32 = 0.66,
 };
 
+pub const EnvField = struct {
+    /// An env.pass node's sky gradient (top and bottom rgb, 0..1) and overall
+    /// intensity, drawn behind the segmented foreground. Default a clear day.
+    top_r: f32 = 0.25,
+    top_g: f32 = 0.5,
+    top_b: f32 = 0.9,
+    bottom_r: f32 = 0.85,
+    bottom_g: f32 = 0.9,
+    bottom_b: f32 = 0.98,
+    intensity: f32 = 1.0,
+};
+
 pub const SpriteField = struct {
     /// A sprite.2d node's screen rect in normalized coordinates (origin
     /// top-left, 0..1 across the frame) and its draw opacity. The default
@@ -310,6 +322,8 @@ pub const Node = struct {
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
     ssr: ?SsrField = null,
+    /// Set only on an env.pass node: its sky gradient colors and intensity.
+    env: ?EnvField = null,
     /// Set only on a layout.composite node: the head arrangement it drives.
     layout: ?LayoutField = null,
     /// Set only on a sprite.2d node: the screen rect and opacity it draws
@@ -1136,6 +1150,38 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "ssr.pass")) {
             ssr_field = .{};
         }
+        var env_field: ?EnvField = null;
+        if (getField(object, "env")) |ev| {
+            const emark = path.push("env");
+            if (!std.mem.eql(u8, node_type, "env.pass")) {
+                try diags.add(path.slice(), "env is an env.pass field, found it on '{s}'", .{node_type});
+            } else if (ev != .object) {
+                try diags.add(path.slice(), "env must be an object", .{});
+            } else {
+                var field: EnvField = .{};
+                if (getField(ev.object, "top")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.top_r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.top_g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.top_b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "env top must be three numbers", .{});
+                }
+                if (getField(ev.object, "bottom")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.bottom_r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.bottom_g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.bottom_b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "env bottom must be three numbers", .{});
+                }
+                if (getField(ev.object, "intensity")) |v| field.intensity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.intensity)), 0.0, 2.0);
+                env_field = field;
+            }
+            path.pop(emark);
+        } else if (std.mem.eql(u8, node_type, "env.pass")) {
+            env_field = .{};
+        }
         var sprite_field: ?SpriteField = null;
         if (getField(object, "sprite")) |sv| {
             const smark = path.push("sprite");
@@ -1448,6 +1494,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .outline = outline_field,
             .trail = trail_field,
             .ssr = ssr_field,
+            .env = env_field,
             .layout = layout_field,
             .sprite = sprite_field,
             .text = text_field,

@@ -292,6 +292,16 @@ to scale the reflection by how near the floor is, so a near floor wets while a
 far one stays dry, holding the frame through when no depth is submitted. Both
 fields are optional with engine defaults, and it ships no asset.
 
+An `"env.pass"` node draws a procedural sky behind the segmented foreground.
+It carries an `"env": {"top", "bottom", "intensity"}` block: a gradient from
+`bottom` to `top` (each three 0..1 numbers) scaled by `intensity`, with a sun
+glow, standing in for the environment behind the subject. It composites over
+the segmentation mask the way `blend.pass` does, so the sky fills the
+background and the subject stays put; the submitted camera pose pans the sky as
+the device turns. With no segmentation the mask defaults to all-foreground and
+the sky stays hidden. All fields are optional with engine defaults, and it
+ships no asset. It declares the `"segmentation"` capability.
+
 A `"draw.board"` node draws the session's brush board at its own place in the
 chain: the frame passes through, then every committed stroke draws over it, neon
 strokes additively and the rest on alpha. It ships no asset, carries no params,

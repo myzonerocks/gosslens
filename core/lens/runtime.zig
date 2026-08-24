@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, trail_pass, ssr_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -55,6 +55,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "outline.pass")) return .outline_pass;
     if (std.mem.eql(u8, type_str, "trail.pass")) return .trail_pass;
     if (std.mem.eql(u8, type_str, "ssr.pass")) return .ssr_pass;
+    if (std.mem.eql(u8, type_str, "env.pass")) return .env_pass;
     if (std.mem.eql(u8, type_str, "model.gltf")) return .model_gltf;
     if (std.mem.eql(u8, type_str, "draw.board")) return .draw_board;
     if (std.mem.eql(u8, type_str, "layout.composite")) return .layout_composite;
@@ -83,7 +84,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .trail_pass, .ssr_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d => &.{},
     };
 }
 
@@ -139,6 +140,8 @@ const LensNode = struct {
     trail: ?manifest.TrailField = null,
     /// .ssr_pass only: the node's reflection strength and floor plane.
     ssr: ?manifest.SsrField = null,
+    /// .env_pass only: the node's sky gradient colors and intensity.
+    env: ?manifest.EnvField = null,
     /// .layout_composite only: the head arrangement and camera blend the lens
     /// drives the composite with.
     layout: ?manifest.LayoutField = null,
@@ -280,7 +283,14 @@ pub const SsrPassNode = struct {
     plane: f32,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, trail, ssr, model, mesh, draw_board, sprite };
+pub const EnvPassNode = struct {
+    graph_index: graph.NodeIndex,
+    top: [3]f32,
+    bottom: [3]f32,
+    intensity: f32,
+};
+
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, trail, ssr, env, model, mesh, draw_board, sprite };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -514,6 +524,26 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every env.pass node this lens spliced, in execution order, each
+    /// carrying its sky gradient colors and intensity.
+    pub fn envPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]EnvPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(EnvPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .env_pass) continue;
+            const ev = node.env orelse manifest.EnvField{};
+            try out.append(gpa, .{
+                .graph_index = node.graph_index,
+                .top = .{ ev.top_r, ev.top_g, ev.top_b },
+                .bottom = .{ ev.bottom_r, ev.bottom_g, ev.bottom_b },
+                .intensity = ev.intensity,
+            });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every model.gltf node this lens spliced, in the graph's real
     /// execution order - mirrors shaderPassNodes/lutPassNodes/
     /// blendPassNodes exactly, one more node type over.
@@ -598,6 +628,7 @@ pub const Lens = struct {
                 .outline_pass => .outline,
                 .trail_pass => .trail,
                 .ssr_pass => .ssr,
+                .env_pass => .env,
                 .model_gltf => .model,
                 .mesh_face => .mesh,
                 .draw_board => .draw_board,
@@ -825,6 +856,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .outline = if (node_type == .outline_pass) node.outline else null,
             .trail = if (node_type == .trail_pass) node.trail else null,
             .ssr = if (node_type == .ssr_pass) node.ssr else null,
+            .env = if (node_type == .env_pass) node.env else null,
             .layout = if (node_type == .layout_composite) node.layout else null,
         };
 

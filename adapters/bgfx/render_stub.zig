@@ -309,6 +309,18 @@ pub const Renderer = struct {
         _ = plane;
     }
 
+    pub fn submitEnvPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, top: [3]f32, bottom: [3]f32, intensity: f32, pitch: f32, yaw: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = top;
+        _ = bottom;
+        _ = intensity;
+        _ = pitch;
+        _ = yaw;
+    }
+
     pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
         _ = r;
         _ = view_id;

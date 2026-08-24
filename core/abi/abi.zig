@@ -611,6 +611,9 @@ pub const Session = struct {
     outline_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     /// ssr.pass nodes by graph index: their reflection strength and floor plane.
     ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
+    /// and intensity, seven floats in that order.
+    env_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [7]f32) = .empty,
     /// trail.pass nodes by graph index: their motion-trail echo amount.
     trail_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
     /// The previous composited frame a trail.pass echoes, held across frames
@@ -1408,6 +1411,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Screen-space reflection reads the submitted depth to know how
             // reflective the floor is, degrading the same way dof and fog do.
             .ssr => s.ssr_params.contains(entry.graph_index) and s.depth_texture != null,
+            // The sky draws behind the segmented foreground; like blend it is
+            // ready once its params resolve, degrading to the always-foreground
+            // default mask (no sky visible) when segmentation is absent.
+            .env => s.env_params.contains(entry.graph_index),
             // Only the background image gates readiness - the mask
             // degrades to the renderer's always-foreground default
             // when segmentation is unavailable (SPEC's rule: a node
@@ -1627,6 +1634,28 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitSsrPass(view_id, input_texture, depth_tex, ssr[0], ssr[1]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .env => {
+                const env = s.env_params.get(entry.graph_index) orelse continue;
+                const mask_texture = s.segmentation_texture orelse r.default_mask_texture;
+                // The submitted camera pose drives the sky: its forward
+                // elevation shifts the gradient and its heading slides the sun,
+                // scaled into screen fractions, so the sky pans as the phone
+                // turns. With no pose the identity leaves the sky centered.
+                const cam_pose: math.Mat4 = .{ .cols = @bitCast(s.world.state.world_from_camera) };
+                const euler = headEuler(cam_pose);
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitEnvPass(view_id, input_texture, mask_texture, .{ env[0], env[1], env[2] }, .{ env[3], env[4], env[5] }, env[6], euler.pitch * 0.2, euler.yaw * 0.15915494);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2335,6 +2364,7 @@ pub fn destroySession(session: *Session) void {
     session.outline_params.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
+    session.env_params.deinit(session.engine.gpa);
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.depth_texture) |tex| {
         if (session.engine.renderer) |*r| r.destroyTexture(tex);
@@ -4978,6 +5008,7 @@ fn destroyBlendState(session: *Session) void {
     session.outline_params.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
     session.ssr_params.clearRetainingCapacity();
+    session.env_params.clearRetainingCapacity();
     // The prev-frame target is reused across lenses, but its echo belongs to
     // the lens that just left: drop it so the next trail reseeds cleanly.
     session.prev_frame_valid = false;
@@ -5344,6 +5375,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createOutlineParams(s, gpa) catch {};
     createTrailParams(s, gpa) catch {};
     createSsrParams(s, gpa) catch {};
+    createEnvParams(s, gpa) catch {};
     // A particle fountain also needs no bundle (the CPU sim and its mesh are
     // built from the field alone), so create it here too; the empty bundle
     // path just means a glTF model's own asset never loads, degrading it,
@@ -5448,6 +5480,17 @@ fn createSsrParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(ssrs);
     for (ssrs) |sr| {
         session.ssr_params.put(gpa, sr.graph_index, .{ sr.strength, sr.plane }) catch {};
+    }
+}
+
+/// Resolves every spliced env.pass node's sky gradient and intensity into
+/// session.env_params, once at activation.
+fn createEnvParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const envs = try lens.envPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(envs);
+    for (envs) |ev| {
+        session.env_params.put(gpa, ev.graph_index, .{ ev.top[0], ev.top[1], ev.top[2], ev.bottom[0], ev.bottom[1], ev.bottom[2], ev.intensity }) catch {};
     }
 }
 
@@ -6040,6 +6083,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createOutlineParams(session, gpa);
     try createTrailParams(session, gpa);
     try createSsrParams(session, gpa);
+    try createEnvParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
 }
