@@ -14,6 +14,7 @@
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
 #include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
@@ -209,6 +210,36 @@ extern "C" int32_t goss_physics_constrain_fixed(void* handle, uint32_t body_a, u
   JPH::FixedConstraintSettings settings;
   settings.mSpace = JPH::EConstraintSpace::WorldSpace;
   settings.mAutoDetectPoint = true;
+  world->system.AddConstraint(settings.Create(*a, *b));
+  return 0;
+}
+
+// Hinges two bodies at a world pivot about an axis - the body swings in the
+// one plane perpendicular to the axis (a door or single-axis pendulum).
+extern "C" int32_t goss_physics_constrain_hinge(void* handle, uint32_t body_a, uint32_t body_b, float px, float py, float pz, float hx, float hy, float hz) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr) return -1;
+  JPH::Body* a = nullptr;
+  JPH::Body* b = nullptr;
+  {
+    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
+    if (!lock_a.Succeeded()) return -1;
+    a = &lock_a.GetBody();
+  }
+  {
+    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
+    if (!lock_b.Succeeded()) return -1;
+    b = &lock_b.GetBody();
+  }
+  JPH::Vec3 axis = JPH::Vec3(hx, hy, hz).Normalized();
+  // A reference direction not parallel to the axis, so the normal is stable.
+  JPH::Vec3 ref = (std::abs(axis.GetY()) < 0.99f) ? JPH::Vec3(0, 1, 0) : JPH::Vec3(1, 0, 0);
+  JPH::Vec3 normal = axis.Cross(ref).Normalized();
+  JPH::HingeConstraintSettings settings;
+  settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+  settings.mPoint1 = settings.mPoint2 = JPH::RVec3(px, py, pz);
+  settings.mHingeAxis1 = settings.mHingeAxis2 = axis;
+  settings.mNormalAxis1 = settings.mNormalAxis2 = normal;
   world->system.AddConstraint(settings.Create(*a, *b));
   return 0;
 }

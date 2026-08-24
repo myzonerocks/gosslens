@@ -6249,6 +6249,12 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     .distance => world.constrainDistance(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, body.chain_length) catch {},
                     .point => world.constrainPoint(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }) catch {},
                     .fixed => world.constrainFixed(anchor, child) catch {},
+                    .hinge => {
+                        // Hinge about z at the anchor's world position, so the
+                        // child swings in the anchor's xy plane only.
+                        const pivot = if (anchor_model.physics) |ap| ap.position else .{ 0, 0, 0 };
+                        world.constrainHinge(anchor, child, pivot, .{ 0, 0, 1 }) catch {};
+                    },
                 }
                 break;
             }

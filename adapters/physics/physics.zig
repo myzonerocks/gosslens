@@ -29,6 +29,7 @@ extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
 extern fn goss_physics_constrain_point(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) i32;
 extern fn goss_physics_constrain_fixed(handle: *anyopaque, a: u32, b: u32) i32;
+extern fn goss_physics_constrain_hinge(handle: *anyopaque, a: u32, b: u32, px: f32, py: f32, pz: f32, hx: f32, hy: f32, hz: f32) i32;
 extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
 extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, px: f32, py: f32, pz: f32) u32;
 extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
@@ -78,6 +79,13 @@ pub const World = struct {
     /// anchor, unlike a point joint that lets it swing.
     pub fn constrainFixed(world: World, a: u32, b: u32) !void {
         if (goss_physics_constrain_fixed(world.handle, a, b) != 0) return error.ConstraintFailed;
+    }
+
+    /// Hinges two bodies at a world pivot about an axis: the body swings in the
+    /// one plane perpendicular to the axis (a door or single-axis pendulum),
+    /// unlike a point joint that swings every way.
+    pub fn constrainHinge(world: World, a: u32, b: u32, pivot: [3]f32, axis: [3]f32) !void {
+        if (goss_physics_constrain_hinge(world.handle, a, b, pivot[0], pivot[1], pivot[2], axis[0], axis[1], axis[2]) != 0) return error.ConstraintFailed;
     }
 
     /// Drives a kinematic body toward a pose over dt; chained bodies
@@ -166,6 +174,26 @@ test "a point joint holds against a kinematic anchor" {
     // A kinematic anchor pins the constraint the same as a static one; the
     // body must not free-fall away from y = 2.
     try t.expectApproxEqAbs(@as(f32, 2.0), pose[13], 0.05);
+}
+
+test "a hinge joint swings a body in one plane about its axis" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.box, .{ 0, 2.0, 0 }, .{ 0.05, 0.05, 0.05 }, .kinematic);
+    // The pendant starts out along +x in the anchor's z = 0 plane; a z-axis
+    // hinge lets it swing down in that plane but pins its depth so it never
+    // leaves z = 0 (rotation about z preserves the depth coordinate).
+    const pend = try world.addBody(.sphere, .{ 0.5, 2.0, 0 }, .{ 0.08, 0, 0 }, .dynamic);
+    try world.constrainHinge(anchor, pend, .{ 0, 2.0, 0 }, .{ 0, 0, 1 });
+
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const p = try world.bodyPose(pend);
+    // The hinge pins the depth exactly to its plane (z stays 0, the distinctive
+    // single-axis behavior), and the pendant swings down under gravity within
+    // its swing radius about the pivot.
+    try t.expectApproxEqAbs(@as(f32, 0.0), p[14], 0.01);
+    try t.expect(p[13] < 1.9);
+    try t.expect(@abs(p[12]) <= 0.55);
 }
 
 test "a fixed joint welds a body rigidly to its anchor" {

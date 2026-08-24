@@ -72,6 +72,15 @@ pub const World = struct {
         return error.WorldCreateFailed;
     }
 
+    pub fn constrainHinge(world: World, a: u32, b: u32, pivot: [3]f32, axis: [3]f32) !void {
+        _ = world;
+        _ = a;
+        _ = b;
+        _ = pivot;
+        _ = axis;
+        return error.WorldCreateFailed;
+    }
+
     pub fn moveBody(world: World, body: u32, position: [3]f32, dt_seconds: f32) void {
         _ = world;
         _ = body;

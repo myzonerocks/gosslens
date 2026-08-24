@@ -2637,6 +2637,49 @@ fn provePhysicsFixed(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the hinge joint: a pendant hinged about a z axis at its anchor swings
+/// in one plane and settles where the point and fixed joints do not, its rigid
+/// single-axis arm reaching a different frame than any of the others, each
+/// bit-stable across runs.
+fn provePhysicsHinge(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var hinge_settled: []u8 = &.{};
+    defer if (hinge_settled.len > 0) gpa.free(hinge_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-hinge");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            hinge_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL physics hinge is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const point_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-pivot");
+    defer gpa.free(point_settled);
+    const fixed_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-fixed");
+    defer gpa.free(fixed_settled);
+    if (std.mem.eql(u8, hinge_settled, point_settled)) {
+        std.debug.print("conformance: FAIL the hinge joint settled the same as the point joint\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, hinge_settled, fixed_settled)) {
+        std.debug.print("conformance: FAIL the hinge joint settled the same as the fixed joint\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a hinge joint swings a pendant in one plane, settling where the point and fixed joints do not, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -5947,6 +5990,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics pivot");
     if (!try provePhysicsFixed(gpa, engine)) return 1;
     watchHold("physics fixed");
+    if (!try provePhysicsHinge(gpa, engine)) return 1;
+    watchHold("physics hinge");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
