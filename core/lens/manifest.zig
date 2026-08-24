@@ -144,9 +144,12 @@ pub const ParticleField = struct {
     colliders: []const [4]f32 = &.{},
     /// Box colliders particles bounce off, each [x, y, z, hx, hy, hz].
     box_colliders: []const [6]f32 = &.{},
-    /// Draw each particle as a small 3D octahedron mesh instead of a flat
-    /// billboard or point, sized by `size`. Off by default.
+    /// Draw each particle as a small 3D mesh instead of a flat billboard or
+    /// point, sized by `size`. Off by default.
     mesh: bool = false,
+    /// The 3D shape a mesh particle draws: "octahedron" (default), "cube", or
+    /// "tetra". Borrowed for the system's lifetime.
+    mesh_shape: []const u8 = "octahedron",
 };
 
 pub const GradeField = struct {
@@ -1057,6 +1060,13 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "mesh")) |v| {
                     if (v == .bool) field.mesh = v.bool;
+                }
+                if (getField(pv.object, "mesh_shape")) |v| {
+                    if (try expectString(diags, path, v)) |sname| {
+                        if (std.mem.eql(u8, sname, "octahedron") or std.mem.eql(u8, sname, "cube") or std.mem.eql(u8, sname, "tetra")) {
+                            field.mesh_shape = try arena.dupe(u8, sname);
+                        } else try diags.add(path.slice(), "particles mesh_shape must be octahedron, cube, or tetra", .{});
+                    }
                 }
                 particle_field = field;
             }

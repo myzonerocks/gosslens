@@ -394,6 +394,23 @@ const octahedron_indices = [24]u32{
     5, 2, 0, 5, 1, 2, 5, 3, 1, 5, 0, 3,
 };
 
+// A unit cube: eight corners and the two triangles of each of its six faces.
+const cube_positions = [8][3]f32{
+    .{ -1, -1, -1 }, .{ 1, -1, -1 }, .{ 1, 1, -1 }, .{ -1, 1, -1 },
+    .{ -1, -1, 1 },  .{ 1, -1, 1 },  .{ 1, 1, 1 },  .{ -1, 1, 1 },
+};
+const cube_indices = [36]u32{
+    0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
+    0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7,
+    0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+};
+
+// A unit tetrahedron: four corners and its four triangular faces.
+const tetra_positions = [4][3]f32{
+    .{ 1, 1, 1 }, .{ 1, -1, -1 }, .{ -1, 1, -1 }, .{ -1, -1, 1 },
+};
+const tetra_indices = [12]u32{ 0, 1, 2, 0, 3, 1, 0, 2, 3, 1, 3, 2 };
+
 const RecordingSlot = struct {
     persistent: render.Renderer.PersistentTexture = .{},
     target: ?render.Renderer.OffscreenTarget = null,
@@ -6051,9 +6068,11 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     // a single point each. Trails and fades share the billboard
                     // program, so both take the faded mesh path.
                     if (pf.mesh) {
-                        // Mesh mode: each particle draws a shared 3D octahedron,
-                        // so there is no billboard buffer, just the base mesh.
-                        if (r.createModelMesh(&octahedron_positions, &octahedron_indices)) |base| {
+                        // Mesh mode: each particle draws a shared 3D shape, so
+                        // there is no billboard buffer, just the base mesh.
+                        const base_positions: []const [3]f32 = if (std.mem.eql(u8, pf.mesh_shape, "cube")) &cube_positions else if (std.mem.eql(u8, pf.mesh_shape, "tetra")) &tetra_positions else &octahedron_positions;
+                        const base_indices: []const u32 = if (std.mem.eql(u8, pf.mesh_shape, "cube")) &cube_indices else if (std.mem.eql(u8, pf.mesh_shape, "tetra")) &tetra_indices else &octahedron_indices;
+                        if (r.createModelMesh(base_positions, base_indices)) |base| {
                             session.particle_systems.put(gpa, model.graph_index, sys) catch {
                                 var s2 = sys;
                                 s2.deinit();

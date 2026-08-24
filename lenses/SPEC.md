@@ -231,8 +231,9 @@ motion, and appearance:
   `assets/<stem>.png`, `"frames"` to flip-book through a square sprite sheet
   over life, `"trail"` to draw that many of each particle's recent
   positions as a fading ribbon behind it (a comet tail), and `"mesh": true`
-  to draw each particle as a small 3D octahedron sized by `"size"` rather than
-  a flat billboard.
+  to draw each particle as a small 3D shape sized by `"size"` rather than a
+  flat billboard, its `"mesh_shape"` one of `"octahedron"` (default), `"cube"`,
+  or `"tetra"`.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the
