@@ -2595,6 +2595,48 @@ fn provePhysicsPivot(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the fixed joint: a pendant welded to its anchor rides it rigidly,
+/// settling at a place neither the distance chain nor the freely-swinging point
+/// joint reaches, deterministically and bit-stable across runs.
+fn provePhysicsFixed(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var fixed_settled: []u8 = &.{};
+    defer if (fixed_settled.len > 0) gpa.free(fixed_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-fixed");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            fixed_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL physics fixed is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const chain_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-chain");
+    defer gpa.free(chain_settled);
+    const pivot_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-pivot");
+    defer gpa.free(pivot_settled);
+    if (std.mem.eql(u8, fixed_settled, chain_settled)) {
+        std.debug.print("conformance: FAIL the fixed joint settled the same as the distance chain\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, fixed_settled, pivot_settled)) {
+        std.debug.print("conformance: FAIL the fixed joint settled the same as the point joint\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a fixed joint welds a pendant to its anchor, settling where neither the distance chain nor the point joint does, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -5903,6 +5945,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics chain");
     if (!try provePhysicsPivot(gpa, engine)) return 1;
     watchHold("physics pivot");
+    if (!try provePhysicsFixed(gpa, engine)) return 1;
+    watchHold("physics fixed");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

@@ -13,6 +13,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
+#include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
 #include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
@@ -184,6 +185,30 @@ extern "C" int32_t goss_physics_constrain_point(void* handle, uint32_t body_a, u
   settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
   settings.mPoint1 = JPH::RVec3(ax, ay, az);
   settings.mPoint2 = JPH::RVec3(bx, by, bz);
+  world->system.AddConstraint(settings.Create(*a, *b));
+  return 0;
+}
+
+// Welds two bodies together rigidly at their current relative pose - a fixed
+// joint: no relative translation or rotation, so the body rides its anchor.
+extern "C" int32_t goss_physics_constrain_fixed(void* handle, uint32_t body_a, uint32_t body_b) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr) return -1;
+  JPH::Body* a = nullptr;
+  JPH::Body* b = nullptr;
+  {
+    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
+    if (!lock_a.Succeeded()) return -1;
+    a = &lock_a.GetBody();
+  }
+  {
+    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
+    if (!lock_b.Succeeded()) return -1;
+    b = &lock_b.GetBody();
+  }
+  JPH::FixedConstraintSettings settings;
+  settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+  settings.mAutoDetectPoint = true;
   world->system.AddConstraint(settings.Create(*a, *b));
   return 0;
 }

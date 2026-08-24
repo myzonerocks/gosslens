@@ -28,6 +28,7 @@ extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
 extern fn goss_physics_constrain_point(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) i32;
+extern fn goss_physics_constrain_fixed(handle: *anyopaque, a: u32, b: u32) i32;
 extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
 extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, px: f32, py: f32, pz: f32) u32;
 extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
@@ -70,6 +71,13 @@ pub const World = struct {
     /// unlike a distance constraint that only bounds separation.
     pub fn constrainPoint(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32) !void {
         if (goss_physics_constrain_point(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2]) != 0) return error.ConstraintFailed;
+    }
+
+    /// Welds two bodies together rigidly at their current relative pose (a
+    /// fixed joint): no relative translation or rotation, so the body rides its
+    /// anchor, unlike a point joint that lets it swing.
+    pub fn constrainFixed(world: World, a: u32, b: u32) !void {
+        if (goss_physics_constrain_fixed(world.handle, a, b) != 0) return error.ConstraintFailed;
     }
 
     /// Drives a kinematic body toward a pose over dt; chained bodies
@@ -145,6 +153,34 @@ test "a point joint pins a body to its pivot instead of letting it fall" {
     // The pivot pins its centre of mass at the anchor, so it never falls the
     // way an unconstrained body under -9.81 gravity would over four seconds.
     try t.expectApproxEqAbs(@as(f32, 2.0), pose[13], 0.05);
+}
+
+test "a point joint holds against a kinematic anchor" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.box, .{ 0, 2.0, 0 }, .{ 0.05, 0.05, 0.05 }, .kinematic);
+    const hung = try world.addBody(.sphere, .{ 0, 2.0, 0 }, .{ 0.1, 0, 0 }, .dynamic);
+    try world.constrainPoint(anchor, hung, .{ 0, 0, 0 }, .{ 0, 0, 0 });
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const pose = try world.bodyPose(hung);
+    // A kinematic anchor pins the constraint the same as a static one; the
+    // body must not free-fall away from y = 2.
+    try t.expectApproxEqAbs(@as(f32, 2.0), pose[13], 0.05);
+}
+
+test "a fixed joint welds a body rigidly to its anchor" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.box, .{ 0, 2.0, 0 }, .{ 0.05, 0.05, 0.05 }, .static);
+    // The dynamic body sits offset from the anchor; a fixed joint must hold
+    // that exact offset (no swing toward the anchor, no fall under gravity).
+    const welded = try world.addBody(.sphere, .{ 0.5, 2.0, 0 }, .{ 0.1, 0, 0 }, .dynamic);
+    try world.constrainFixed(anchor, welded);
+
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const pose = try world.bodyPose(welded);
+    try t.expectApproxEqAbs(@as(f32, 0.5), pose[12], 0.05); // keeps its x offset
+    try t.expectApproxEqAbs(@as(f32, 2.0), pose[13], 0.05); // does not fall
 }
 
 test "two identical worlds land bit-identical poses" {
