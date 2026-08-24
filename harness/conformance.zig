@@ -5255,6 +5255,22 @@ fn proveMorphBlend(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 }
 
 /// Proves a sprite.2d node draws its image over the frame. The static
+/// Renders frames until every async image and model load has landed, so a
+/// screenshot reads a deterministic frame no matter how the loader threads were
+/// scheduled. Caps the wait so a genuinely stuck load still fails loudly.
+fn pumpUntilLoaded(engine: *abi.Engine, session: anytype) void {
+    var frames: u32 = 0;
+    while (abi.loadsPending(session) > 0 and frames < 600) : (frames += 1) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    // A few more frames so the freshly-uploaded textures are drawn.
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+}
+
 /// sprite-overlay bundle draws a badge in a centre rect; its output must
 /// differ from the same frame with no lens, so the sprite really composited.
 fn proveSpriteDraw(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
@@ -5301,10 +5317,7 @@ fn proveSpriteDraw(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
             return false;
         }
         if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
-        for (0..15) |_| {
-            _ = abi.goss_engine_render_frame(engine, session);
-            c.glfwPollEvents();
-        }
+        pumpUntilLoaded(engine, session);
         engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-drawn");
         for (0..5) |_| {
             _ = abi.goss_engine_render_frame(engine, session);
@@ -5499,10 +5512,7 @@ fn proveSpriteFade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const half_w = (planes.width + 1) / 2;
     if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
 
-    for (0..12) |_| {
-        _ = abi.goss_engine_render_frame(engine, session);
-        c.glfwPollEvents();
-    }
+    pumpUntilLoaded(engine, session);
     engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-fade-before");
     for (0..5) |_| {
         _ = abi.goss_engine_render_frame(engine, session);
@@ -5576,10 +5586,7 @@ fn proveSpriteAnim(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 
     // Let both frames decode (no tick, so the clock stays at zero), then
     // screenshot frame 0.
-    for (0..16) |_| {
-        _ = abi.goss_engine_render_frame(engine, session);
-        c.glfwPollEvents();
-    }
+    pumpUntilLoaded(engine, session);
     engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-anim-frame0");
     for (0..5) |_| {
         _ = abi.goss_engine_render_frame(engine, session);
@@ -5654,11 +5661,8 @@ fn proveGifSprite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const half_w = (planes.width + 1) / 2;
     if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
 
-    // The GIF decodes to textures at activation, so frame 0 is ready at once.
-    for (0..8) |_| {
-        _ = abi.goss_engine_render_frame(engine, session);
-        c.glfwPollEvents();
-    }
+    // The GIF decodes to textures at activation; wait for the load to land.
+    pumpUntilLoaded(engine, session);
     engine.renderer.?.requestScreenshot("zig-out/conformance-gif-frame0");
     for (0..5) |_| {
         _ = abi.goss_engine_render_frame(engine, session);

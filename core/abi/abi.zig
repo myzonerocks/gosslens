@@ -4574,6 +4574,21 @@ pub export fn goss_session_face_count(session: ?*Session, out_count: ?*u32) Stat
     return .ok;
 }
 
+/// How many of the active lens's image and model assets are still decoding on
+/// their loader threads. Zero once every asset has landed, so the harness can
+/// wait for a deterministic frame before it reads the output.
+pub fn loadsPending(session: ?*Session) u32 {
+    const s = session orelse return 0;
+    var n: usize = s.sprite_loaders.count() + s.model_loaders.count() + s.lut_loaders.count() + s.blend_loaders.count() + s.env_loaders.count() + s.mesh_face_loaders.count();
+    var it = s.sprite_anims.valueIterator();
+    while (it.next()) |anim| {
+        for (anim.loaders) |maybe| {
+            if (maybe != null) n += 1;
+        }
+    }
+    return @intCast(n);
+}
+
 /// Reads the index-th submitted face. invalid_argument once index reaches
 /// face_count, so a caller loops zero to face_count to visit every face.
 pub export fn goss_session_face_result_at(session: ?*Session, index: u32, out_result: ?*face.Result) Status {
