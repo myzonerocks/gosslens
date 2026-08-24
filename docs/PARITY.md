@@ -31,7 +31,7 @@ CaptureOutput, Events.
 | Lens scripting (QuickJS-ng, sandboxed, deterministic) | proven in the host harness: a script drives a parameter from a signal, bit-stable | built, QuickJS-ng linked, no hardware yet | built, QuickJS-ng linked for wasm |
 | Lens audio playback (miniaudio, deterministic mixer) | proven in the host harness: a play_sound trigger mixes a voice, silent before, bit-stable after | built, miniaudio linked, no hardware yet | built, miniaudio linked for wasm |
 | Post-effect nodes (blur, parametric grade, bloom) | proven in the host harness, each with a reference lens and a conformance proof | built, no hardware yet | built |
-| Depth post-passes (depth-of-field, depth fog by the host's depth) | proven in the host harness: a depth gradient blurs off the focus plane and hazes the far side, each with a reference lens and a proof | built, no hardware yet | built |
+| Depth post-passes (depth-of-field, depth fog, depth-edge outline) | proven in the host harness: a depth gradient blurs off the focus plane and hazes the far side, a depth step draws a toon outline, each with a reference lens and a proof | built, no hardware yet | built |
 | Material graph shaders (node-graph fragment shaders lowered to GLSL) | proven in the host harness: authored graphs compile and render, with reference lenses and a conformance proof | built, no hardware yet | built |
 | glTF animation mixer and morph targets (weights bound to parameters) | proven in the host harness: clip and morph weights blend the pose, each with a reference lens and a proof | built, no hardware yet | built |
 | 2D sprite and text nodes (image overlay, built-in-font text) | proven in the host harness, each with a reference lens and a proof | built, no hardware yet | built |

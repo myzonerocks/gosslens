@@ -268,6 +268,14 @@ so distant geometry sinks into haze while near content stays clear. Like
 `dof.pass` it reads the host's depth and holds the frame through when none
 is submitted, ships no asset, and defaults its fields.
 
+An `"outline.pass"` node is a depth-edge outline post-effect. It carries an
+`"outline": {"color", "threshold"}` block: where the submitted depth jumps
+between neighboring pixels by more than `threshold` it draws `color` (three
+0..1 numbers) over the frame, so silhouettes and creases get a toon outline
+while flat depth stays untouched. Like `dof.pass` and `fog.pass` it reads the
+host's depth, holds the frame through with none submitted, ships no asset,
+and defaults its fields.
+
 A `"draw.board"` node draws the session's brush board at its own place in the
 chain: the frame passes through, then every committed stroke draws over it, neon
 strokes additively and the rest on alpha. It ships no asset, carries no params,

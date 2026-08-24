@@ -4862,6 +4862,90 @@ fn proveFogPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the outline.pass draws where depth jumps, not merely where it
+/// varies. The outline-edge bundle, given a flat depth, leaves the frame be
+/// (no edge), but given a depth with a sharp step draws a line along it, so
+/// the stepped frame differs from the flat one.
+fn proveOutlinePass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/outline-edge";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: outline-edge proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // A realistic-resolution depth so the outline's small uv tap spans a
+    // texel; heap-allocated to keep it off the stack.
+    const dw: u32 = 256;
+    const dh: u32 = 256;
+    const flat = try gpa.alloc(f32, dw * dh);
+    defer gpa.free(flat);
+    const stepd = try gpa.alloc(f32, dw * dh);
+    defer gpa.free(stepd);
+
+    // Flat depth: no edges, so the outline pass leaves the frame alone.
+    for (flat) |*d| d.* = 2.0;
+    if (abi.goss_session_submit_depth(session, flat.ptr, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-outline-flat");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // A depth with a sharp step down the middle: an outline draws along it.
+    for (0..dh) |y| {
+        for (0..dw) |x| {
+            stepd[y * dw + x] = if (x < dw / 2) 0.5 else 4.0;
+        }
+    }
+    if (abi.goss_session_submit_depth(session, stepd.ptr, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-outline-step");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const flat_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-flat.tga", gpa, .limited(8 << 20));
+    defer gpa.free(flat_tga);
+    const step_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-step.tga", gpa, .limited(8 << 20));
+    defer gpa.free(step_tga);
+
+    if (std.mem.eql(u8, flat_tga, step_tga)) {
+        std.debug.print("conformance: FAIL outline-edge: a depth step drew no outline over flat depth\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF outline-edge draws on depth steps: a stepped depth outlines where flat depth does not\n", .{});
+    return true;
+}
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -4961,6 +5045,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("dof pass");
     if (!try proveFogPass(gpa, engine)) return 1;
     watchHold("fog pass");
+    if (!try proveOutlinePass(gpa, engine)) return 1;
+    watchHold("outline pass");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

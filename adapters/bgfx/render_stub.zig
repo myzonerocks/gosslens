@@ -283,6 +283,15 @@ pub const Renderer = struct {
         _ = density;
     }
 
+    pub fn submitOutlinePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, depth_texture: TextureHandle, color: [3]f32, threshold: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = depth_texture;
+        _ = color;
+        _ = threshold;
+    }
+
     pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
         _ = r;
         _ = view_id;

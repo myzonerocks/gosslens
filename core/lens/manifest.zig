@@ -170,6 +170,15 @@ pub const FogField = struct {
     density: f32 = 1.0,
 };
 
+pub const OutlineField = struct {
+    /// An outline.pass node's line color (rgb, 0..1) and the depth jump
+    /// between neighbors above which an outline draws. Default a black line.
+    r: f32 = 0.0,
+    g: f32 = 0.0,
+    b: f32 = 0.0,
+    threshold: f32 = 0.08,
+};
+
 pub const SpriteField = struct {
     /// A sprite.2d node's screen rect in normalized coordinates (origin
     /// top-left, 0..1 across the frame) and its draw opacity. The default
@@ -281,6 +290,8 @@ pub const Node = struct {
     dof: ?DofField = null,
     /// Set only on a fog.pass node: its fog color and density.
     fog: ?FogField = null,
+    /// Set only on an outline.pass node: its line color and depth threshold.
+    outline: ?OutlineField = null,
     /// Set only on a layout.composite node: the head arrangement it drives.
     layout: ?LayoutField = null,
     /// Set only on a sprite.2d node: the screen rect and opacity it draws
@@ -1050,6 +1061,30 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "fog.pass")) {
             fog_field = .{};
         }
+        var outline_field: ?OutlineField = null;
+        if (getField(object, "outline")) |ov| {
+            const omark = path.push("outline");
+            if (!std.mem.eql(u8, node_type, "outline.pass")) {
+                try diags.add(path.slice(), "outline is an outline.pass field, found it on '{s}'", .{node_type});
+            } else if (ov != .object) {
+                try diags.add(path.slice(), "outline must be an object", .{});
+            } else {
+                var field: OutlineField = .{};
+                if (getField(ov.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "outline color must be three numbers", .{});
+                }
+                if (getField(ov.object, "threshold")) |v| field.threshold = @floatCast(numberOf(v) orelse field.threshold);
+                outline_field = field;
+            }
+            path.pop(omark);
+        } else if (std.mem.eql(u8, node_type, "outline.pass")) {
+            outline_field = .{};
+        }
         var sprite_field: ?SpriteField = null;
         if (getField(object, "sprite")) |sv| {
             const smark = path.push("sprite");
@@ -1359,6 +1394,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .bloom = bloom_field,
             .dof = dof_field,
             .fog = fog_field,
+            .outline = outline_field,
             .layout = layout_field,
             .sprite = sprite_field,
             .text = text_field,

@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -52,6 +52,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "bloom.pass")) return .bloom_pass;
     if (std.mem.eql(u8, type_str, "dof.pass")) return .dof_pass;
     if (std.mem.eql(u8, type_str, "fog.pass")) return .fog_pass;
+    if (std.mem.eql(u8, type_str, "outline.pass")) return .outline_pass;
     if (std.mem.eql(u8, type_str, "model.gltf")) return .model_gltf;
     if (std.mem.eql(u8, type_str, "draw.board")) return .draw_board;
     if (std.mem.eql(u8, type_str, "layout.composite")) return .layout_composite;
@@ -80,7 +81,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d => &.{},
     };
 }
 
@@ -130,6 +131,8 @@ const LensNode = struct {
     dof: ?manifest.DofField = null,
     /// .fog_pass only: the node's fog color and density.
     fog: ?manifest.FogField = null,
+    /// .outline_pass only: the node's line color and depth threshold.
+    outline: ?manifest.OutlineField = null,
     /// .layout_composite only: the head arrangement and camera blend the lens
     /// drives the composite with.
     layout: ?manifest.LayoutField = null,
@@ -254,7 +257,13 @@ pub const FogPassNode = struct {
     density: f32,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, model, mesh, draw_board, sprite };
+pub const OutlinePassNode = struct {
+    graph_index: graph.NodeIndex,
+    color: [3]f32,
+    threshold: f32,
+};
+
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, model, mesh, draw_board, sprite };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -443,6 +452,21 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every outline.pass node this lens spliced, in execution order, each
+    /// carrying its line color and depth threshold.
+    pub fn outlinePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]OutlinePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(OutlinePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .outline_pass) continue;
+            const o = node.outline orelse manifest.OutlineField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ o.r, o.g, o.b }, .threshold = o.threshold });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every model.gltf node this lens spliced, in the graph's real
     /// execution order - mirrors shaderPassNodes/lutPassNodes/
     /// blendPassNodes exactly, one more node type over.
@@ -524,6 +548,7 @@ pub const Lens = struct {
                 .bloom_pass => .bloom,
                 .dof_pass => .dof,
                 .fog_pass => .fog,
+                .outline_pass => .outline,
                 .model_gltf => .model,
                 .mesh_face => .mesh,
                 .draw_board => .draw_board,
@@ -748,6 +773,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .dof = if (node_type == .dof_pass) node.dof else null,
             .fog = if (node_type == .fog_pass) node.fog else null,
+            .outline = if (node_type == .outline_pass) node.outline else null,
             .layout = if (node_type == .layout_composite) node.layout else null,
         };
 
