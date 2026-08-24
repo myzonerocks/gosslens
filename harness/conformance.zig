@@ -3053,6 +3053,42 @@ fn provePhysicsSoftBody(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves 2D physics: a planar body on a z-sloped incline is confined to the
+/// z plane and rests in view where the same body free in 3D slides off in z, so
+/// the planar constraint drives a 2D world, each bit-stable across runs.
+fn provePhysicsPlanar(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var planar_settled: []u8 = &.{};
+    defer if (planar_settled.len > 0) gpa.free(planar_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-planar");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            planar_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the planar body is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const free_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-free3d");
+    defer gpa.free(free_settled);
+    if (std.mem.eql(u8, planar_settled, free_settled)) {
+        std.debug.print("conformance: FAIL the planar body settled the same as the free 3D one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a planar body holds in the z plane where the same body free in 3D slides off in z, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -6523,6 +6559,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics balloon");
     if (!try provePhysicsSoftBody(gpa, engine)) return 1;
     watchHold("physics soft body");
+    if (!try provePhysicsPlanar(gpa, engine)) return 1;
+    watchHold("physics planar");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

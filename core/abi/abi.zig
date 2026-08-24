@@ -6267,7 +6267,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                 .capsule => .capsule,
                                 .hull, .mesh => unreachable,
                             };
-                            break :id world.addBodyMaterial(shape, body.position, body.size, rotation, body.friction, body.restitution, motion) catch physics.invalid_body;
+                            break :id world.addBodyMaterial(shape, body.position, body.size, rotation, body.friction, body.restitution, motion, body.planar) catch physics.invalid_body;
                         },
                     };
                     if (id != physics.invalid_body) {

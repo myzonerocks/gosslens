@@ -124,8 +124,10 @@ extern "C" void goss_physics_world_destroy(void* handle) {
 // of the cylinder part). A rotation orients the body so a capsule or
 // cylinder can lie on its side. motion: 0 static, 1 dynamic, 2 kinematic
 // (the engine drives it; chained bodies follow).
-// Places a finished shape as a body at a pose with a surface material.
-static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
+// Places a finished shape as a body at a pose with a surface material. When
+// planar is set the body's motion is confined to the z = 0 plane (it may
+// translate in x/y and spin about z only) - a 2D world inside the 3D engine.
+static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
   const JPH::EMotionType motion_type = motion == 1   ? JPH::EMotionType::Dynamic
                                        : motion == 2 ? JPH::EMotionType::Kinematic
                                                      : JPH::EMotionType::Static;
@@ -137,12 +139,13 @@ static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, flo
                                      motion_type, moving ? layer_moving : layer_static);
   settings.mFriction = friction;
   settings.mRestitution = restitution;
+  if (planar != 0) settings.mAllowedDOFs = JPH::EAllowedDOFs::Plane2D;
   const JPH::BodyID id = world->system.GetBodyInterface().CreateAndAddBody(
       settings, moving ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
   return id.IsInvalid() ? UINT32_MAX : id.GetIndexAndSequenceNumber();
 }
 
-static uint32_t create_body(World* world, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
+static uint32_t create_body(World* world, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
   if (world == nullptr) return UINT32_MAX;
   JPH::Ref<JPH::Shape> body_shape;
   if (shape == 0) {
@@ -156,7 +159,7 @@ static uint32_t create_body(World* world, uint32_t shape, float px, float py, fl
   } else {
     return UINT32_MAX;
   }
-  return finalize_body(world, body_shape, px, py, pz, qx, qy, qz, qw, friction, restitution, motion);
+  return finalize_body(world, body_shape, px, py, pz, qx, qy, qz, qw, friction, restitution, motion, planar);
 }
 
 // Jolt's own defaults for a body that does not name a material.
@@ -165,19 +168,20 @@ static const float default_restitution = 0.0f;
 
 // Adds a body at an identity orientation. Returns the body id, or UINT32_MAX.
 extern "C" uint32_t goss_physics_body_add(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, uint32_t motion) {
-  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, 0, 0, 0, 1, default_friction, default_restitution, motion);
+  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, 0, 0, 0, 1, default_friction, default_restitution, motion, 0);
 }
 
 // Adds a body rotated by a quaternion, so an elongated shape can lie on its
 // side or a static collider can tilt. Returns the body id, or UINT32_MAX.
 extern "C" uint32_t goss_physics_body_add_oriented(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, uint32_t motion) {
-  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, default_friction, default_restitution, motion);
+  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, default_friction, default_restitution, motion, 0);
 }
 
-// Adds a body with a rotation and a surface material: friction (0 slippery,
-// ~1 grippy) and restitution (0 dead, 1 bouncy). Returns the body id.
-extern "C" uint32_t goss_physics_body_add_material(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
-  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, friction, restitution, motion);
+// Adds a body with a rotation, a surface material (friction 0 slippery ~1
+// grippy, restitution 0 dead 1 bouncy), and an optional planar constraint that
+// confines it to the z = 0 plane for a 2D world. Returns the body id.
+extern "C" uint32_t goss_physics_body_add_material(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
+  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, friction, restitution, motion, planar);
 }
 
 // Adds a body whose collision shape is the convex hull of a set of local-space
@@ -194,7 +198,7 @@ extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points
   JPH::ConvexHullShapeSettings settings(hull_points);
   JPH::ShapeSettings::ShapeResult result = settings.Create();
   if (result.HasError()) return UINT32_MAX;
-  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, motion);
+  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, motion, 0);
 }
 
 // Adds a static body whose collider is a concave triangle mesh: `points`
@@ -217,7 +221,7 @@ extern "C" uint32_t goss_physics_body_add_mesh(void* handle, const float* points
   JPH::MeshShapeSettings settings(vertices, triangles);
   JPH::ShapeSettings::ShapeResult result = settings.Create();
   if (result.HasError()) return UINT32_MAX;
-  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, 0);
+  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, 0, 0);
 }
 
 // Links two bodies with a distance constraint between local attach

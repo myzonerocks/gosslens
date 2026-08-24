@@ -185,7 +185,9 @@ four `[x, y, z]` and its collider is their convex hull, a `mesh` lists
 always static, `position` places the body at activation, an optional
 `rotation` in euler degrees lays an elongated body on its side or tilts a
 collider, optional `friction` (0 slippery, ~1 grippy) and `restitution`
-(0 dead, 1 bouncy) set its surface material, and
+(0 dead, 1 bouncy) set its surface material, `"planar": true` confines a
+body to the z=0 plane (it moves in x and y and spins about z only) for a
+2D world laid into the scene, and
 `motion` is `dynamic`, `static`, or `kinematic` (the engine holds the
 body, so chained content can hang off it). A body may add
 `"chain": {"to": "<node id>", "length": <meters>}`, a distance

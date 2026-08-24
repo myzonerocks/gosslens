@@ -329,6 +329,9 @@ pub const PhysicsBody = struct {
     /// (0 dead, 1 bouncy). Defaults match the engine's plain body.
     friction: f32 = 0.2,
     restitution: f32 = 0.0,
+    /// Confine the body to the z = 0 plane (x/y motion and z spin only) for a
+    /// 2D world laid into the 3D scene.
+    planar: bool = false,
     dynamic: bool,
     /// The engine drives this body's pose from its anchor each frame;
     /// chained bodies hang off it.
@@ -1685,6 +1688,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         .float => |f| body.restitution = @floatCast(f),
                         .integer => |n| body.restitution = @floatFromInt(n),
                         else => try diags.add(path.slice(), "physics restitution must be a number", .{}),
+                    }
+                }
+                if (getField(physics_value.object, "planar")) |planar_value| {
+                    if (planar_value == .bool) body.planar = planar_value.bool else {
+                        try diags.add(path.slice(), "physics planar must be a boolean", .{});
                     }
                 }
                 if (getField(physics_value.object, "motion")) |motion_value| {

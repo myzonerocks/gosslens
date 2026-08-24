@@ -29,7 +29,7 @@ extern fn goss_physics_world_create(gravity_y: f32) ?*anyopaque;
 extern fn goss_physics_world_destroy(handle: *anyopaque) void;
 extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, motion: u32) u32;
 extern fn goss_physics_body_add_oriented(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, motion: u32) u32;
-extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32) u32;
+extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
 extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32) u32;
 extern fn goss_physics_body_add_mesh(handle: *anyopaque, points: [*]const f32, point_count: u32, indices: [*]const u32, index_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
@@ -74,9 +74,10 @@ pub const World = struct {
     }
 
     /// Adds a rotated body with a surface material: friction (0 slippery,
-    /// ~1 grippy) and restitution (0 dead, 1 bouncy).
-    pub fn addBodyMaterial(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion) !u32 {
-        const id = goss_physics_body_add_material(world.handle, @intFromEnum(shape), position[0], position[1], position[2], size[0], size[1], size[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution, @intFromEnum(motion));
+    /// ~1 grippy) and restitution (0 dead, 1 bouncy). `planar` confines it to
+    /// the z = 0 plane (x/y translation and z spin only) for a 2D world.
+    pub fn addBodyMaterial(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
+        const id = goss_physics_body_add_material(world.handle, @intFromEnum(shape), position[0], position[1], position[2], size[0], size[1], size[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution, @intFromEnum(motion), @intFromBool(planar));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -366,12 +367,12 @@ test "friction decides whether a body grips a slope or slides down it" {
     defer world.destroy();
     // A wide slab tilted a quarter turn's eighth (25 degrees about z) is a ramp.
     const tilt = [4]f32{ 0, 0, 0.21644, 0.97630 };
-    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.5, 0.05, 0.8 }, tilt, 1.0, 0.0, .static);
+    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.5, 0.05, 0.8 }, tilt, 1.0, 0.0, .static, false);
     // Two blocks set on the ramp aligned to it, apart in z so they never touch:
     // one grippy, one nearly frictionless. Blocks slide rather than roll, so
     // friction alone decides whether they hold or run down.
-    const gripper = try world.addBodyMaterial(.box, .{ -0.1, 0.2, -0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 2.0, 0.0, .dynamic);
-    const slider = try world.addBodyMaterial(.box, .{ -0.1, 0.2, 0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 0.02, 0.0, .dynamic);
+    const gripper = try world.addBodyMaterial(.box, .{ -0.1, 0.2, -0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 2.0, 0.0, .dynamic, false);
+    const slider = try world.addBodyMaterial(.box, .{ -0.1, 0.2, 0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 0.02, 0.0, .dynamic, false);
     for (0..180) |_| world.step(1.0 / 60.0);
     const gripper_pose = try world.bodyPose(gripper);
     const slider_pose = try world.bodyPose(slider);
@@ -403,8 +404,8 @@ test "restitution decides whether a ball bounces back or lands dead" {
     const world = try World.create(-9.81);
     defer world.destroy();
     _ = try world.addBody(.box, .{ 0, -0.1, 0 }, .{ 4, 0.1, 4 }, .static); // floor top at y = 0
-    const bouncy = try world.addBodyMaterial(.sphere, .{ -0.5, 1.0, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.9, .dynamic);
-    const dead = try world.addBodyMaterial(.sphere, .{ 0.5, 1.0, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.0, .dynamic);
+    const bouncy = try world.addBodyMaterial(.sphere, .{ -0.5, 1.0, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.9, .dynamic, false);
+    const dead = try world.addBodyMaterial(.sphere, .{ 0.5, 1.0, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.0, .dynamic, false);
     // After the first impact the bouncy ball rebounds high while the dead one
     // just settles, so their peak heights over the rebound window diverge.
     var bouncy_peak: f32 = 0;
@@ -490,6 +491,22 @@ test "an unpinned soft body rests on a rigid floor" {
     while (i + 3 <= buf.len) : (i += 3) min_y = @min(min_y, buf[i + 1]);
     try t.expect(min_y > -0.15); // did not fall through
     try t.expect(min_y < 0.3); // actually came down and rests near the floor
+}
+
+test "a planar body is confined to the z plane where a 3D body slides off in z" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    // An incline tilted about x, so its slope runs in z: a free body slides in
+    // z, a planar body cannot leave the z = 0 plane.
+    const tilt_x = [4]f32{ 0.2588, 0, 0, 0.9659 }; // 30 degrees about x
+    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.0, 0.05, 1.0 }, tilt_x, 1.0, 0.0, .static, false);
+    const free3d = try world.addBodyMaterial(.box, .{ -0.3, 0.5, 0 }, .{ 0.08, 0.08, 0.08 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, false);
+    const planar = try world.addBodyMaterial(.box, .{ 0.3, 0.5, 0 }, .{ 0.08, 0.08, 0.08 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, true);
+    for (0..180) |_| world.step(1.0 / 60.0);
+    const p3 = try world.bodyPose(free3d);
+    const pp = try world.bodyPose(planar);
+    try t.expect(@abs(pp[14]) < 0.1); // planar held in the z = 0 plane
+    try t.expect(@abs(p3[14]) > 0.3); // the free body ran off in z
 }
 
 test "two identical worlds land bit-identical poses" {
