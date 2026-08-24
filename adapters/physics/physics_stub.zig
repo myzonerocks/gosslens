@@ -65,7 +65,7 @@ pub const World = struct {
         return error.BodyAddFailed;
     }
 
-    pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion) !u32 {
+    pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
         _ = world;
         _ = points;
         _ = position;
@@ -73,6 +73,7 @@ pub const World = struct {
         _ = friction;
         _ = restitution;
         _ = motion;
+        _ = planar;
         return error.BodyAddFailed;
     }
 

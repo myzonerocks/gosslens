@@ -589,13 +589,23 @@ pub const Renderer = struct {
         seeded: bool = false,
     };
 
+    pub const ParticleForces = struct {
+        drag: f32 = 0,
+        turbulence: f32 = 0,
+        wind: [3]f32 = .{ 0, 0, 0 },
+        curl: f32 = 0,
+        attract: [3]f32 = .{ 0, 0, 0 },
+        attract_strength: f32 = 0,
+        vortex: f32 = 0,
+    };
+
     pub fn createGpuParticleSim(r: *Renderer, count: u32) ?GpuParticleSim {
         _ = r;
         _ = count;
         return null;
     }
 
-    pub fn dispatchGpuParticles(r: *Renderer, view: u16, sim: *GpuParticleSim, dt: f32, gravity: f32, speed: f32, lifetime: f32) void {
+    pub fn dispatchGpuParticles(r: *Renderer, view: u16, sim: *GpuParticleSim, dt: f32, gravity: f32, speed: f32, lifetime: f32, forces: ParticleForces) void {
         _ = r;
         _ = view;
         _ = sim;
@@ -603,6 +613,7 @@ pub const Renderer = struct {
         _ = gravity;
         _ = speed;
         _ = lifetime;
+        _ = forces;
     }
 
     pub fn destroyGpuParticleSim(sim: GpuParticleSim) void {

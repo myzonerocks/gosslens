@@ -124,6 +124,9 @@ pub const Renderer = struct {
     particle_compute_program: ?c.bgfx_program_handle_t,
     sim_params_uniform: c.bgfx_uniform_handle_t,
     sim_params2_uniform: c.bgfx_uniform_handle_t,
+    sim_params3_uniform: c.bgfx_uniform_handle_t,
+    sim_params4_uniform: c.bgfx_uniform_handle_t,
+    sim_params5_uniform: c.bgfx_uniform_handle_t,
     /// A single-vec4 vertex layout, the stride the particle state buffer binds
     /// to the compute shader as.
     vec4_layout: c.bgfx_vertex_layout_t,
@@ -419,6 +422,9 @@ pub const Renderer = struct {
             .particle_compute_program = particle_compute_program,
             .sim_params_uniform = c.bgfx_create_uniform("u_simParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .sim_params2_uniform = c.bgfx_create_uniform("u_simParams2", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .sim_params3_uniform = c.bgfx_create_uniform("u_simParams3", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .sim_params4_uniform = c.bgfx_create_uniform("u_simParams4", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .sim_params5_uniform = c.bgfx_create_uniform("u_simParams5", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .vec4_layout = vec4_layout,
             .brush_program = brush_program,
             .makeup_index_buffer = makeup_index_buffer,
@@ -1826,6 +1832,18 @@ pub const Renderer = struct {
         seeded: bool = false,
     };
 
+    /// The forces the compute step applies beyond gravity, matching the CPU
+    /// particle field so the two paths stay in step.
+    pub const ParticleForces = struct {
+        drag: f32 = 0,
+        turbulence: f32 = 0,
+        wind: [3]f32 = .{ 0, 0, 0 },
+        curl: f32 = 0,
+        attract: [3]f32 = .{ 0, 0, 0 },
+        attract_strength: f32 = 0,
+        vortex: f32 = 0,
+    };
+
     /// Creates the GPU sim's buffers for `count` particles, or null when the
     /// compute program is not built for this backend (the CPU sim runs instead).
     pub fn createGpuParticleSim(r: *Renderer, count: u32) ?GpuParticleSim {
@@ -1838,14 +1856,20 @@ pub const Renderer = struct {
     /// Runs one sim step on the GPU: binds the state and billboard buffers, sets
     /// the params, and dispatches a thread group per 64 particles. The first
     /// call seeds the state (emit); later calls integrate.
-    pub fn dispatchGpuParticles(r: *Renderer, view: c.bgfx_view_id_t, sim: *GpuParticleSim, dt: f32, gravity: f32, speed: f32, lifetime: f32) void {
+    pub fn dispatchGpuParticles(r: *Renderer, view: c.bgfx_view_id_t, sim: *GpuParticleSim, dt: f32, gravity: f32, speed: f32, lifetime: f32, forces: ParticleForces) void {
         const program = r.particle_compute_program orelse return;
         const seed_flag: f32 = if (sim.seeded) 0.0 else 1.0;
         sim.seeded = true;
         const p1 = [4]f32{ dt, gravity, @floatFromInt(sim.count), seed_flag };
-        const p2 = [4]f32{ speed, lifetime, 0, 0 };
+        const p2 = [4]f32{ speed, lifetime, forces.drag, forces.turbulence };
+        const p3 = [4]f32{ forces.wind[0], forces.wind[1], forces.wind[2], forces.curl };
+        const p4 = [4]f32{ forces.attract[0], forces.attract[1], forces.attract[2], forces.attract_strength };
+        const p5 = [4]f32{ forces.vortex, 0, 0, 0 };
         c.bgfx_set_uniform(r.sim_params_uniform, &p1, 1);
         c.bgfx_set_uniform(r.sim_params2_uniform, &p2, 1);
+        c.bgfx_set_uniform(r.sim_params3_uniform, &p3, 1);
+        c.bgfx_set_uniform(r.sim_params4_uniform, &p4, 1);
+        c.bgfx_set_uniform(r.sim_params5_uniform, &p5, 1);
         c.bgfx_set_compute_dynamic_vertex_buffer(0, sim.state_buffer, c.BGFX_ACCESS_READWRITE);
         c.bgfx_set_compute_dynamic_vertex_buffer(1, sim.billboard.position_buffer, c.BGFX_ACCESS_WRITE);
         const groups = (sim.count + 63) / 64;

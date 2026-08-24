@@ -30,7 +30,7 @@ extern fn goss_physics_world_destroy(handle: *anyopaque) void;
 extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, motion: u32) u32;
 extern fn goss_physics_body_add_oriented(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, motion: u32) u32;
 extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
-extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32) u32;
+extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
 extern fn goss_physics_body_add_mesh(handle: *anyopaque, points: [*]const f32, point_count: u32, indices: [*]const u32, index_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
@@ -84,9 +84,9 @@ pub const World = struct {
 
     /// Adds a body whose shape is the convex hull of `points` (local space),
     /// an arbitrary faceted collider. Needs at least four points.
-    pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion) !u32 {
+    pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
         const flat: [*]const f32 = @ptrCast(points.ptr);
-        const id = goss_physics_body_add_hull(world.handle, flat, @intCast(points.len), position[0], position[1], position[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution, @intFromEnum(motion));
+        const id = goss_physics_body_add_hull(world.handle, flat, @intCast(points.len), position[0], position[1], position[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution, @intFromEnum(motion), @intFromBool(planar));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -391,7 +391,7 @@ test "a convex hull collider gives a ball a slope to roll down" {
         .{ -0.6, 0.0, -0.4 }, .{ 0.6, 0.0, -0.4 }, .{ 0.6, 0.6, -0.4 },
         .{ -0.6, 0.0, 0.4 },  .{ 0.6, 0.0, 0.4 },  .{ 0.6, 0.6, 0.4 },
     };
-    _ = try world.addBodyHull(&wedge, .{ 0, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0, .static);
+    _ = try world.addBodyHull(&wedge, .{ 0, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0, .static, false);
     // A ball set on the high side of the ramp rolls down to -x and off the low
     // edge; on a flat floor it would have stayed put.
     const ball = try world.addBody(.sphere, .{ 0.4, 1.0, 0 }, .{ 0.12, 0, 0 }, .dynamic);
@@ -507,6 +507,39 @@ test "a planar body is confined to the z plane where a 3D body slides off in z" 
     const pp = try world.bodyPose(planar);
     try t.expect(@abs(pp[14]) < 0.1); // planar held in the z = 0 plane
     try t.expect(@abs(p3[14]) > 0.3); // the free body ran off in z
+}
+
+test "a planar hull collider is confined to the z plane where a free hull slides off in z" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const tilt_x = [4]f32{ 0.2588, 0, 0, 0.9659 }; // 30 degrees about x
+    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.0, 0.05, 1.0 }, tilt_x, 1.0, 0.0, .static, false);
+    const cube = [_][3]f32{
+        .{ -0.08, -0.08, -0.08 }, .{ 0.08, -0.08, -0.08 }, .{ 0.08, 0.08, -0.08 }, .{ -0.08, 0.08, -0.08 },
+        .{ -0.08, -0.08, 0.08 },  .{ 0.08, -0.08, 0.08 },  .{ 0.08, 0.08, 0.08 },  .{ -0.08, 0.08, 0.08 },
+    };
+    const free3d = try world.addBodyHull(&cube, .{ -0.3, 0.5, 0 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, false);
+    const planar = try world.addBodyHull(&cube, .{ 0.3, 0.5, 0 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, true);
+    for (0..180) |_| world.step(1.0 / 60.0);
+    const p3 = try world.bodyPose(free3d);
+    const pp = try world.bodyPose(planar);
+    try t.expect(@abs(pp[14]) < 0.1); // the planar polygon held in the z = 0 plane
+    try t.expect(@abs(p3[14]) > 0.3); // the free polygon ran off in z
+}
+
+test "a 2D spring between two planar bodies stays in the plane while it stretches" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    // A planar anchor and a planar bob, joined by a soft spring: gravity pulls
+    // the bob down, the spring stretches, and both stay in the z = 0 plane.
+    const anchor = try world.addBodyMaterial(.sphere, .{ 0, 0.8, 0 }, .{ 0.03, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0, .kinematic, true);
+    const bob = try world.addBodyMaterial(.sphere, .{ 0.2, 0.8, 0 }, .{ 0.05, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0, .dynamic, true);
+    try world.constrainSpring(anchor, bob, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.3, 2.0, 0.2);
+    for (0..180) |_| world.step(1.0 / 60.0);
+    const pa = try world.bodyPose(anchor);
+    const pb = try world.bodyPose(bob);
+    try t.expect(@abs(pb[14]) < 0.05); // the bob stays in the plane
+    try t.expect(pb[13] < pa[13] - 0.1); // gravity stretched the spring, bob hangs below the anchor
 }
 
 test "two identical worlds land bit-identical poses" {

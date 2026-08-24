@@ -1,0 +1,21 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.two-d-world-free",
+  "version": "1.0.0",
+  "display_name": "2D World Free",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "incline", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "physics": {"body": "box", "size": [1.0, 0.05, 1.0], "position": [0, -0.3, 0], "rotation": [30, 0, 0], "motion": "static", "friction": 1.0}},
+    {"id": "circle", "type": "model.gltf", "inputs": {"frame": "incline"}, "params": {},
+     "physics": {"body": "sphere", "size": [0.09, 0, 0], "position": [-0.3, 0.5, 0], "motion": "dynamic", "friction": 0.02, "planar": false}},
+    {"id": "polygon", "type": "model.gltf", "inputs": {"frame": "incline"}, "params": {},
+     "physics": {"body": "hull",
+                 "points": [[-0.08, -0.08, -0.08], [0.08, -0.08, -0.08], [0.08, 0.08, -0.08], [-0.08, 0.08, -0.08],
+                            [-0.08, -0.08, 0.08], [0.08, -0.08, 0.08], [0.08, 0.08, 0.08], [-0.08, 0.08, 0.08]],
+                 "position": [0.3, 0.5, 0], "motion": "dynamic", "friction": 0.02, "planar": false}}
+  ],
+  "triggers": []
+}

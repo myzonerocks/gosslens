@@ -2723,6 +2723,43 @@ fn provePhysicsSpring(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a 2D world of planar colliders: a planar sphere (circle) and a planar
+/// hull (polygon) drop onto a tilted incline. Confined to the plane they hold
+/// their ground where the free version of the same scene slides off in the
+/// third axis (the 2D spring and confinement are pinned by the module tests).
+fn provePhysics2dWorld(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var planar_settled: []u8 = &.{};
+    defer if (planar_settled.len > 0) gpa.free(planar_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/two-d-world");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            planar_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the 2D world is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const free_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/two-d-world-free");
+    defer gpa.free(free_settled);
+    if (std.mem.eql(u8, planar_settled, free_settled)) {
+        std.debug.print("conformance: FAIL the 2D world settled the same as the unconstrained 3D version\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a 2D world of a circle collider and a polygon collider holds its plane on a tilted incline where the free 3D scene slides off it, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -3633,6 +3670,10 @@ fn frameDiffFraction(a: []const u8, b: []const u8, delta: u8) f32 {
 }
 
 fn captureFountain(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []const u8) !?[]u8 {
+    return captureFountainAtFrame(gpa, engine, pkg, 85);
+}
+
+fn captureFountainAtFrame(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []const u8, capture_frame: usize) !?[]u8 {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
@@ -3648,7 +3689,7 @@ fn captureFountain(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []const u8)
         if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
-        if (i == 85) {
+        if (i == capture_frame) {
             settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
             errdefer gpa.free(settled);
             var w: u32 = 0;
@@ -3694,6 +3735,58 @@ fn proveGpuParticles(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a GPU-compute fountain renders on the compute path, stable across runs and tracking the CPU fountain\n", .{});
+    return true;
+}
+
+/// Proves the GPU compute path runs the force set beyond gravity: the exact-op
+/// forces (drag, wind, an attractor, a vortex) drive the fountain far from plain
+/// gravity yet pixel-identical to the CPU, and turbulence and curl churn the
+/// compute render further. Bit-stable across runs.
+fn proveGpuForces(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const pkg = ".lens-packages/gpu-swirl";
+        if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) return false;
+        if (abi.activeGpuParticleSims(session) == 0) {
+            std.debug.print("conformance: gpu-forces skipped - no compute backend here, the CPU sim runs and is already proven\n", .{});
+            return true;
+        }
+    }
+    const gpu0 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/gpu-swirl", 55)) orelse return false;
+    defer gpa.free(gpu0);
+    const gpu1 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/gpu-swirl", 55)) orelse return false;
+    defer gpa.free(gpu1);
+    if (!std.mem.eql(u8, gpu0, gpu1)) {
+        std.debug.print("conformance: FAIL the GPU swirl is not stable across runs\n", .{});
+        return false;
+    }
+    const plain = (try captureFountainAtFrame(gpa, engine, ".lens-packages/gpu-fountain", 55)) orelse return false;
+    defer gpa.free(plain);
+    const cpu = (try captureFountainAtFrame(gpa, engine, ".lens-packages/cpu-swirl", 55)) orelse return false;
+    defer gpa.free(cpu);
+    const churn = (try captureFountainAtFrame(gpa, engine, ".lens-packages/gpu-churn", 55)) orelse return false;
+    defer gpa.free(churn);
+    // The exact-op force set (drag, wind, an attractor and a vortex) drives the
+    // fountain into a form far from plain gravity.
+    if (frameDiffFraction(gpu0, plain, 16) < 0.15) {
+        std.debug.print("conformance: FAIL the GPU force set did not visibly change the fountain from plain gravity\n", .{});
+        return false;
+    }
+    // Those forces are exact float ops, so the GPU compute path lands pixel-for-
+    // pixel on the CPU sim running the identical config.
+    if (frameDiffFraction(gpu0, cpu, 16) > 0.005) {
+        std.debug.print("conformance: FAIL the GPU swirl does not track the CPU swirl\n", .{});
+        return false;
+    }
+    // Turbulence and curl (transcendental forces) also drive the compute path:
+    // adding them to the same swirl visibly churns the render.
+    if (frameDiffFraction(churn, gpu0, 16) < 0.03) {
+        std.debug.print("conformance: FAIL turbulence and curl did not act on the GPU compute path\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the GPU compute path runs the force set beyond gravity - drag, wind, an attractor and a vortex driving the fountain far from plain gravity and pixel-identical to the CPU, with turbulence and curl churning it further\n", .{});
     return true;
 }
 
@@ -6546,6 +6639,25 @@ pub fn main(init_args: std.process.Init) !u8 {
     }
     std.debug.print("conformance: PROOF all reference lenses match the pinned baseline\n", .{});
 
+    // A focused run exercises one proof (or a small group) without the full
+    // suite, so a single proof can be iterated at its own cost. It reads its
+    // selector from zig-out/conf-only.txt; absent that file the suite runs.
+    if (std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conf-only.txt", gpa, .limited(64)) catch null) |raw| {
+        defer gpa.free(raw);
+        const only = std.mem.trim(u8, raw, " \n\r\t");
+        if (std.mem.eql(u8, only, "gpu-forces")) {
+            if (!try proveGpuParticles(gpa, engine)) return 1;
+            if (!try proveGpuForces(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "2d-world")) {
+            if (!try provePhysics2dWorld(gpa, engine)) return 1;
+        } else {
+            std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
+            return 1;
+        }
+        std.debug.print("conformance: focused run {s} complete\n", .{only});
+        return 0;
+    }
+
     if (!try proveTriggerAnimFires(gpa, engine)) return 1;
     watchHold("trigger anim fires");
     if (!try proveMixerBlend(gpa, engine)) return 1;
@@ -6640,6 +6752,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics soft body");
     if (!try provePhysicsPlanar(gpa, engine)) return 1;
     watchHold("physics planar");
+    if (!try provePhysics2dWorld(gpa, engine)) return 1;
+    watchHold("physics 2d world");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
@@ -6698,6 +6812,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("sub emitter");
     if (!try proveGpuParticles(gpa, engine)) return 1;
     watchHold("gpu particles");
+    if (!try proveGpuForces(gpa, engine)) return 1;
+    watchHold("gpu forces");
     if (!try proveParticleCollider(gpa, engine)) return 1;
     watchHold("particle collider");
     if (!try proveMeshParticles(gpa, engine)) return 1;

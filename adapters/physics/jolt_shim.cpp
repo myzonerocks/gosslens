@@ -187,7 +187,7 @@ extern "C" uint32_t goss_physics_body_add_material(void* handle, uint32_t shape,
 // Adds a body whose collision shape is the convex hull of a set of local-space
 // points (three floats each) - an arbitrary faceted collider. Returns the body
 // id, or UINT32_MAX if the hull could not be built.
-extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points, uint32_t point_count, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
+extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points, uint32_t point_count, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
   auto* world = static_cast<World*>(handle);
   if (world == nullptr || points == nullptr || point_count < 4) return UINT32_MAX;
   JPH::Array<JPH::Vec3> hull_points;
@@ -198,7 +198,7 @@ extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points
   JPH::ConvexHullShapeSettings settings(hull_points);
   JPH::ShapeSettings::ShapeResult result = settings.Create();
   if (result.HasError()) return UINT32_MAX;
-  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, motion, 0);
+  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, motion, planar);
 }
 
 // Adds a static body whose collider is a concave triangle mesh: `points`

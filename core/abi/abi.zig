@@ -2089,7 +2089,16 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     const pf = node.field;
                     // A capture is a snapshot; only a live frame advances the sim.
                     if (!s.capture_requested) {
-                        r.dispatchGpuParticles(compute_view, &node.sim, 1.0 / 60.0, pf.gravity, pf.speed, pf.lifetime);
+                        const forces: render.Renderer.ParticleForces = .{
+                            .drag = pf.drag,
+                            .turbulence = pf.turbulence,
+                            .wind = pf.wind,
+                            .curl = pf.curl,
+                            .attract = pf.attract orelse .{ 0, 0, 0 },
+                            .attract_strength = if (pf.attract != null) pf.attract_strength else 0,
+                            .vortex = pf.vortex,
+                        };
+                        r.dispatchGpuParticles(compute_view, &node.sim, 1.0 / 60.0, pf.gravity, pf.speed, pf.lifetime, forces);
                     }
                     var base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
                     if (pf.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
@@ -6331,7 +6340,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     const motion: physics.Motion = if (body.kinematic) .kinematic else if (body.dynamic) .dynamic else .static;
                     const rotation = eulerDegreesToQuat(body.rotation);
                     const id = switch (body.shape) {
-                        .hull => world.addBodyHull(body.hull_points, body.position, rotation, body.friction, body.restitution, motion) catch physics.invalid_body,
+                        .hull => world.addBodyHull(body.hull_points, body.position, rotation, body.friction, body.restitution, motion, body.planar) catch physics.invalid_body,
                         .mesh => world.addBodyMesh(body.hull_points, body.mesh_indices, body.position, rotation, body.friction, body.restitution) catch physics.invalid_body,
                         else => id: {
                             const shape: physics.Shape = switch (body.shape) {
