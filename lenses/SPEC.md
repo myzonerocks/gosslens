@@ -181,7 +181,8 @@ is box half extents (a sphere reads its radius from the first element; a
 cylinder or capsule reads radius from the first and half height from the
 second), `position` places the body at activation, an optional
 `rotation` in euler degrees lays an elongated body on its side or tilts a
-collider, and
+collider, optional `friction` (0 slippery, ~1 grippy) and `restitution`
+(0 dead, 1 bouncy) set its surface material, and
 `motion` is `dynamic`, `static`, or `kinematic` (the engine holds the
 body, so chained content can hang off it). A body may add
 `"chain": {"to": "<node id>", "length": <meters>}`, a distance

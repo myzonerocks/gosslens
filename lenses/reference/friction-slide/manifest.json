@@ -1,0 +1,18 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.friction-slide",
+  "version": "1.0.0",
+  "display_name": "Friction Slide",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "floor", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "physics": {"body": "box", "size": [1.0, 0.05, 1.0], "position": [0, -0.55, 0], "motion": "static", "friction": 1.0}},
+    {"id": "incline", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "physics": {"body": "box", "size": [0.7, 0.04, 0.5], "position": [0, -0.1, 0], "rotation": [0, 0, 20], "motion": "static", "friction": 1.0}},
+    {"id": "body", "type": "model.gltf", "inputs": {"frame": "floor"}, "params": {},
+     "physics": {"body": "box", "size": [0.09, 0.09, 0.09], "position": [0.3, 0.25, 0], "rotation": [0, 0, 20], "motion": "dynamic", "friction": 0.02}}
+  ],
+  "triggers": []
+}

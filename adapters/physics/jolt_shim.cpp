@@ -122,7 +122,7 @@ extern "C" void goss_physics_world_destroy(void* handle) {
 // of the cylinder part). A rotation orients the body so a capsule or
 // cylinder can lie on its side. motion: 0 static, 1 dynamic, 2 kinematic
 // (the engine drives it; chained bodies follow).
-static uint32_t create_body(World* world, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, uint32_t motion) {
+static uint32_t create_body(World* world, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
   if (world == nullptr) return UINT32_MAX;
   JPH::Ref<JPH::Shape> body_shape;
   if (shape == 0) {
@@ -145,20 +145,32 @@ static uint32_t create_body(World* world, uint32_t shape, float px, float py, fl
   rotation = rotation.Normalized();
   JPH::BodyCreationSettings settings(body_shape, JPH::RVec3(px, py, pz), rotation,
                                      motion_type, moving ? layer_moving : layer_static);
+  settings.mFriction = friction;
+  settings.mRestitution = restitution;
   const JPH::BodyID id = world->system.GetBodyInterface().CreateAndAddBody(
       settings, moving ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
   return id.IsInvalid() ? UINT32_MAX : id.GetIndexAndSequenceNumber();
 }
 
+// Jolt's own defaults for a body that does not name a material.
+static const float default_friction = 0.2f;
+static const float default_restitution = 0.0f;
+
 // Adds a body at an identity orientation. Returns the body id, or UINT32_MAX.
 extern "C" uint32_t goss_physics_body_add(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, uint32_t motion) {
-  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, 0, 0, 0, 1, motion);
+  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, 0, 0, 0, 1, default_friction, default_restitution, motion);
 }
 
 // Adds a body rotated by a quaternion, so an elongated shape can lie on its
 // side or a static collider can tilt. Returns the body id, or UINT32_MAX.
 extern "C" uint32_t goss_physics_body_add_oriented(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, uint32_t motion) {
-  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, motion);
+  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, default_friction, default_restitution, motion);
+}
+
+// Adds a body with a rotation and a surface material: friction (0 slippery,
+// ~1 grippy) and restitution (0 dead, 1 bouncy). Returns the body id.
+extern "C" uint32_t goss_physics_body_add_material(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
+  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, friction, restitution, motion);
 }
 
 // Links two bodies with a distance constraint between local attach

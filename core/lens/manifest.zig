@@ -291,6 +291,10 @@ pub const PhysicsBody = struct {
     /// Orientation in euler degrees (x, y, z), so an elongated shape can lie
     /// on its side or a static collider can tilt. Zero is upright.
     rotation: [3]f32 = .{ 0, 0, 0 },
+    /// Surface material: friction (0 slippery, ~1 grippy) and restitution
+    /// (0 dead, 1 bouncy). Defaults match the engine's plain body.
+    friction: f32 = 0.2,
+    restitution: f32 = 0.0,
     dynamic: bool,
     /// The engine drives this body's pose from its anchor each frame;
     /// chained bodies hang off it.
@@ -1516,6 +1520,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     if (!readVec3(rotation_value, &body.rotation)) {
                         try diags.add(path.slice(), "physics rotation must be three numbers (euler degrees)", .{});
                         shape_ok = false;
+                    }
+                }
+                if (getField(physics_value.object, "friction")) |friction_value| {
+                    switch (friction_value) {
+                        .float => |f| body.friction = @floatCast(f),
+                        .integer => |n| body.friction = @floatFromInt(n),
+                        else => try diags.add(path.slice(), "physics friction must be a number", .{}),
+                    }
+                }
+                if (getField(physics_value.object, "restitution")) |restitution_value| {
+                    switch (restitution_value) {
+                        .float => |f| body.restitution = @floatCast(f),
+                        .integer => |n| body.restitution = @floatFromInt(n),
+                        else => try diags.add(path.slice(), "physics restitution must be a number", .{}),
                     }
                 }
                 if (getField(physics_value.object, "motion")) |motion_value| {

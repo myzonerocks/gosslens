@@ -2834,6 +2834,42 @@ fn provePhysicsJiggle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves per-body material: the same block set on the same slope holds near
+/// where it sits when it is grippy but runs to the base when it is slippery, so
+/// friction alone changes where it settles, each bit-stable across runs.
+fn provePhysicsFriction(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var grip_settled: []u8 = &.{};
+    defer if (grip_settled.len > 0) gpa.free(grip_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/friction-grip");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            grip_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the grippy block is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const slide_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/friction-slide");
+    defer gpa.free(slide_settled);
+    if (std.mem.eql(u8, grip_settled, slide_settled)) {
+        std.debug.print("conformance: FAIL the grippy block settled the same as the slippery one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a grippy block holds on a slope where a slippery one of the same shape runs to the base, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -6154,6 +6190,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics shape capsule");
     if (!try provePhysicsJiggle(gpa, engine)) return 1;
     watchHold("physics jiggle");
+    if (!try provePhysicsFriction(gpa, engine)) return 1;
+    watchHold("physics friction");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

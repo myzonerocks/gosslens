@@ -6221,11 +6221,13 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                         .capsule => .capsule,
                     };
                     const rotation = eulerDegreesToQuat(body.rotation);
-                    const id = world.addBodyOriented(
+                    const id = world.addBodyMaterial(
                         shape,
                         body.position,
                         body.size,
                         rotation,
+                        body.friction,
+                        body.restitution,
                         motion,
                     ) catch physics.invalid_body;
                     if (id != physics.invalid_body) {
