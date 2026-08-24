@@ -142,6 +142,8 @@ pub const ParticleField = struct {
     spin: f32 = 0,
     /// Sphere colliders particles bounce off, each [x, y, z, radius].
     colliders: []const [4]f32 = &.{},
+    /// Box colliders particles bounce off, each [x, y, z, hx, hy, hz].
+    box_colliders: []const [6]f32 = &.{},
 };
 
 pub const GradeField = struct {
@@ -499,6 +501,18 @@ fn readVec3(value: std.json.Value, out: *[3]f32) bool {
 
 fn readVec4(value: std.json.Value, out: *[4]f32) bool {
     if (value != .array or value.array.items.len != 4) return false;
+    for (value.array.items, 0..) |item, i| {
+        out[i] = switch (item) {
+            .float => |f| @floatCast(f),
+            .integer => |n| @floatFromInt(n),
+            else => return false,
+        };
+    }
+    return true;
+}
+
+fn readVec6(value: std.json.Value, out: *[6]f32) bool {
+    if (value != .array or value.array.items.len != 6) return false;
     for (value.array.items, 0..) |item, i| {
         out[i] = switch (item) {
             .float => |f| @floatCast(f),
@@ -1027,6 +1041,16 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         }
                         if (ok) field.colliders = cols else try diags.add(path.slice(), "particles colliders must be arrays of [x, y, z, radius]", .{});
                     } else try diags.add(path.slice(), "particles colliders must be an array of up to 16 spheres", .{});
+                }
+                if (getField(pv.object, "box_colliders")) |v| {
+                    if (v == .array and v.array.items.len <= 16) {
+                        const boxes = try arena.alloc([6]f32, v.array.items.len);
+                        var ok = true;
+                        for (v.array.items, 0..) |bv, bi| {
+                            if (!readVec6(bv, &boxes[bi])) ok = false;
+                        }
+                        if (ok) field.box_colliders = boxes else try diags.add(path.slice(), "particles box_colliders must be arrays of [x, y, z, hx, hy, hz]", .{});
+                    } else try diags.add(path.slice(), "particles box_colliders must be an array of up to 16 boxes", .{});
                 }
                 particle_field = field;
             }

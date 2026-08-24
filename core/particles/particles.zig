@@ -44,6 +44,11 @@ pub const Field = struct {
     /// velocity reflected (half speed kept), so particles skate over invisible
     /// obstacles. Borrowed for the system's lifetime; empty is no colliders.
     colliders: []const [4]f32 = &.{},
+    /// Axis-aligned box colliders particles bounce off, each center xyz plus
+    /// half-extents xyz. A particle driven inside is pushed out along its
+    /// least-penetrated face and that velocity component reflected (half speed
+    /// kept). Borrowed for the system's lifetime; empty is no box colliders.
+    box_colliders: []const [6]f32 = &.{},
     /// Emit everything once and let it die, rather than respawning forever.
     oneshot: bool = false,
     // Rendering hints the sim itself ignores, carried for the host.
@@ -339,6 +344,28 @@ pub const System = struct {
                     }
                 }
             }
+            for (f.box_colliders) |box| {
+                const lx = box[3] - @abs(p.pos[0] - box[0]);
+                const ly = box[4] - @abs(p.pos[1] - box[1]);
+                const lz = box[5] - @abs(p.pos[2] - box[2]);
+                // Inside on every axis means penetrating; push out along the
+                // face with the least penetration and reflect that component.
+                if (lx > 0 and ly > 0 and lz > 0) {
+                    if (lx <= ly and lx <= lz) {
+                        const s: f32 = if (p.pos[0] < box[0]) -1.0 else 1.0;
+                        p.pos[0] = box[0] + s * box[3];
+                        if (p.vel[0] * s < 0) p.vel[0] = -p.vel[0] * 0.5;
+                    } else if (ly <= lz) {
+                        const s: f32 = if (p.pos[1] < box[1]) -1.0 else 1.0;
+                        p.pos[1] = box[1] + s * box[4];
+                        if (p.vel[1] * s < 0) p.vel[1] = -p.vel[1] * 0.5;
+                    } else {
+                        const s: f32 = if (p.pos[2] < box[2]) -1.0 else 1.0;
+                        p.pos[2] = box[2] + s * box[5];
+                        if (p.vel[2] * s < 0) p.vel[2] = -p.vel[2] * 0.5;
+                    }
+                }
+            }
         }
         // Record this frame's positions into the trail ring, one slot on.
         if (self.history.len > 0) {
@@ -503,6 +530,25 @@ test "particles bounce off a sphere collider and never enter it" {
     for (a.particles, b.particles) |pa, pb| {
         const d2 = pa.pos[0] * pa.pos[0] + pa.pos[1] * pa.pos[1] + pa.pos[2] * pa.pos[2];
         try std.testing.expect(d2 >= 0.5 * 0.5 - 1e-4); // outside the sphere
+        try std.testing.expectEqual(pa.pos[1], pb.pos[1]); // deterministic
+    }
+}
+
+test "particles bounce off a box collider and never enter it" {
+    const box = [_][6]f32{.{ 0.0, 0.0, 0.0, 0.4, 0.4, 0.4 }};
+    const field = Field{ .count = 64, .pattern = .rain, .speed = 3.0, .lifetime = 6.0, .gravity = 4.0, .box_colliders = &box };
+    var a = try System.init(std.testing.allocator, field);
+    defer a.deinit();
+    var b = try System.init(std.testing.allocator, field);
+    defer b.deinit();
+    for (0..180) |_| {
+        a.step(1.0 / 60.0);
+        b.step(1.0 / 60.0);
+    }
+    for (a.particles, b.particles) |pa, pb| {
+        // Never strictly inside the box (allow the exact surface).
+        const inside = @abs(pa.pos[0]) < 0.4 - 1e-3 and @abs(pa.pos[1]) < 0.4 - 1e-3 and @abs(pa.pos[2]) < 0.4 - 1e-3;
+        try std.testing.expect(!inside);
         try std.testing.expectEqual(pa.pos[1], pb.pos[1]); // deterministic
     }
 }
