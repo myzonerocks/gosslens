@@ -67,6 +67,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const navmesh_module = b.createModule(.{
+        .root_source_file = b.path("core/nav/navmesh.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // The host export layer carries the render stub: unit tests cannot
     // exercise Metal, and the harness plus device demos are the executable
     // truth for the real backend. Platform libraries built by the ios step
@@ -390,6 +396,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(material_tests).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particles_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = navmesh_module })).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
     test_step.dependOn(&b.addRunArtifact(gif_tests).step);
