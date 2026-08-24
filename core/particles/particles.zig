@@ -27,6 +27,9 @@ pub const Field = struct {
     wind: [3]f32 = .{ 0, 0, 0 },
     /// Deterministic swirl amplitude added to velocity from position.
     turbulence: f32 = 0,
+    /// Curl-noise amplitude: a divergence-free swirl sampled from a smooth
+    /// vector potential, the organic churn smoke and fire ride. Zero is off.
+    curl: f32 = 0,
     /// A point every particle is pulled toward, and how strongly - a gravity
     /// well or magnet. Null is no attractor.
     attract: ?[3]f32 = null,
@@ -68,6 +71,35 @@ fn hash01(i: usize, salt: f32) f32 {
     const x = @as(f32, @floatFromInt(i)) * 0.6180339887 + salt * 1.324717957;
     const s = @sin(x * 127.1 + salt * 311.7) * 43758.5453;
     return s - @floor(s);
+}
+
+/// A smooth vector potential sampled at a world position. Its curl (below) is
+/// divergence-free by construction, so particles driven by it swirl and fold
+/// without sources or sinks - the hallmark of curl-noise motion.
+fn potential(p: [3]f32) [3]f32 {
+    return .{
+        @sin(p[1] * 1.7 + p[2] * 1.3),
+        @sin(p[2] * 1.9 + p[0] * 1.1),
+        @sin(p[0] * 1.5 + p[1] * 2.1),
+    };
+}
+
+/// The curl of `potential` at p, by central differences - the velocity a
+/// curl-noise field imparts, divergence-free so nothing piles up or thins out.
+fn curlNoise(p: [3]f32) [3]f32 {
+    const e: f32 = 0.15;
+    const px1 = potential(.{ p[0] + e, p[1], p[2] });
+    const px0 = potential(.{ p[0] - e, p[1], p[2] });
+    const py1 = potential(.{ p[0], p[1] + e, p[2] });
+    const py0 = potential(.{ p[0], p[1] - e, p[2] });
+    const pz1 = potential(.{ p[0], p[1], p[2] + e });
+    const pz0 = potential(.{ p[0], p[1], p[2] - e });
+    const inv = 1.0 / (2.0 * e);
+    return .{
+        ((py1[2] - py0[2]) - (pz1[1] - pz0[1])) * inv,
+        ((pz1[0] - pz0[0]) - (px1[2] - px0[2])) * inv,
+        ((px1[1] - px0[1]) - (py1[0] - py0[0])) * inv,
+    };
 }
 
 pub const Particle = struct {
@@ -211,6 +243,12 @@ pub const System = struct {
                 p.vel[0] += @sin(p.pos[1] * 7.0 + p.seed * 13.0) * f.turbulence * dt;
                 p.vel[2] += @cos(p.pos[0] * 7.0 + p.seed * 17.0) * f.turbulence * dt;
             }
+            if (f.curl != 0) {
+                const cn = curlNoise(p.pos);
+                p.vel[0] += cn[0] * f.curl * dt;
+                p.vel[1] += cn[1] * f.curl * dt;
+                p.vel[2] += cn[2] * f.curl * dt;
+            }
             if (f.attract) |target| {
                 const dx = target[0] - p.pos[0];
                 const dy = target[1] - p.pos[1];
@@ -291,7 +329,7 @@ test "the particle system is deterministic and moves under gravity" {
 test "every emission pattern and force is deterministic and non-degenerate" {
     const points = [_][3]f32{ .{ 0.1, 0.2, 0 }, .{ -0.1, 0.15, 0 } };
     for ([_]Pattern{ .fountain, .rain, .burst, .ring, .cone, .sphere, .box, .disc, .hemisphere, .face }) |pattern| {
-        const field = Field{ .count = 64, .speed = 2.0, .lifetime = 2.0, .pattern = pattern, .drag = 0.5, .turbulence = 1.0, .wind = .{ 0.2, 0, 0 }, .vortex = 1.5, .attract = .{ 0, 0.5, 0 }, .attract_strength = 1.0, .floor = -0.8 };
+        const field = Field{ .count = 64, .speed = 2.0, .lifetime = 2.0, .pattern = pattern, .drag = 0.5, .turbulence = 1.0, .curl = 2.0, .wind = .{ 0.2, 0, 0 }, .vortex = 1.5, .attract = .{ 0, 0.5, 0 }, .attract_strength = 1.0, .floor = -0.8 };
         var s = try System.init(std.testing.allocator, field);
         defer s.deinit();
         s.setEmitters(&points);
@@ -304,4 +342,32 @@ test "every emission pattern and force is deterministic and non-degenerate" {
         }
         try std.testing.expect(moved);
     }
+}
+
+test "curl noise is divergence-free and swirls particles off the plain path" {
+    // The curl of a smooth potential has (near) zero divergence: the sum of
+    // its diagonal derivatives cancels, so a curl-noise field neither sources
+    // nor sinks particles.
+    const p = [3]f32{ 0.3, -0.2, 0.5 };
+    const e: f32 = 0.15;
+    const dxx = curlNoise(.{ p[0] + e, p[1], p[2] })[0] - curlNoise(.{ p[0] - e, p[1], p[2] })[0];
+    const dyy = curlNoise(.{ p[0], p[1] + e, p[2] })[1] - curlNoise(.{ p[0], p[1] - e, p[2] })[1];
+    const dzz = curlNoise(.{ p[0], p[1], p[2] + e })[2] - curlNoise(.{ p[0], p[1], p[2] - e })[2];
+    try std.testing.expect(@abs(dxx + dyy + dzz) < 1e-2);
+
+    // Curl on visibly bends the path away from curl off, deterministically.
+    const base = Field{ .count = 96, .speed = 1.5, .lifetime = 3.0, .pattern = .fountain };
+    var off = try System.init(std.testing.allocator, base);
+    defer off.deinit();
+    var on = try System.init(std.testing.allocator, .{ .count = 96, .speed = 1.5, .lifetime = 3.0, .pattern = .fountain, .curl = 3.0 });
+    defer on.deinit();
+    for (0..60) |_| {
+        off.step(1.0 / 60.0);
+        on.step(1.0 / 60.0);
+    }
+    var diverged = false;
+    for (off.particles, on.particles) |a, b| {
+        if (a.pos[0] != b.pos[0] or a.pos[2] != b.pos[2]) diverged = true;
+    }
+    try std.testing.expect(diverged);
 }

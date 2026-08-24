@@ -5979,7 +5979,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
                 const pattern = particlePattern(pf.pattern);
-                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .pattern = pattern })) |sys| {
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .curl = pf.curl, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .pattern = pattern })) |sys| {
                     // A fading fountain draws six-vertex sprite quads; a plain
                     // one draws one point per particle.
                     const vertex_count = if (pf.fade) pf.count * 6 else pf.count;

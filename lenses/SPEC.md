@@ -215,10 +215,11 @@ motion, and appearance:
   nothing without a tracked subject.
 - Motion: `"gravity"`, `"speed"` and `"lifetime"` (each with a 0..1
   `"speed_spread"` / `"lifetime_spread"` to vary it per particle), `"drag"`
-  (air resistance), `"wind": [x, y, z]`, `"turbulence"` (swirl), `"attract":
-  [x, y, z]` with `"attract_strength"` (a gravity well), `"vortex"` (orbital
-  swirl), `"floor"` (a height particles bounce off), and `"oneshot"` (emit
-  once and die out rather than looping).
+  (air resistance), `"wind": [x, y, z]`, `"turbulence"` (swirl), `"curl"`
+  (a divergence-free curl-noise swirl, the organic churn of smoke and fire),
+  `"attract": [x, y, z]` with `"attract_strength"` (a gravity well),
+  `"vortex"` (orbital swirl), `"floor"` (a height particles bounce off), and
+  `"oneshot"` (emit once and die out rather than looping).
 - Appearance (with `"fade": true` each particle is a camera-facing sprite,
   otherwise a one-pixel point): `"size"` px at birth with an optional
   `"size_end"`, `"color": [r, g, b]` crossing to a `"cool"` colour over life,
