@@ -303,6 +303,7 @@ ribbon for the renderer to draw.
 | `goss_session_ar_brush_set_style` / `_set_mode` | `arBrushSetStyle(r, g, b, a, width)` / `arBrushSetMode(mode)`, the world-anchored brush's style and preset | world-tracking SDKs |
 | `goss_session_ar_brush_begin` / `_point` / `_end` | `arBrushBegin()` / `arBrushPoint(x, y, z)` / `arBrushEnd()`, a stroke in the world frame the platform reports poses in; nothing draws without live world tracking | world-tracking SDKs |
 | `goss_session_ar_brush_undo` / `_clear` | `arBrushUndo()` / `arBrushClear()`, the world-brush stacks | world-tracking SDKs |
+| `goss_session_grab` / `_release` | `grab(x, y, z)` grabs the nearest dynamic physics body to a world point and drags it there, driving it kinematically so it gathers throw velocity; `release()` lets it fly off dynamic again | all SDKs |
 
 ## Web tracking module
 

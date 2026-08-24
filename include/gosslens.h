@@ -772,6 +772,13 @@ goss_status goss_session_ar_brush_end(goss_session *session);
 goss_status goss_session_ar_brush_undo(goss_session *session);
 goss_status goss_session_ar_brush_clear(goss_session *session);
 
+/* Grab and throw. goss_session_grab moves the nearest dynamic physics body to a
+ * world point and, while it holds one, drags it there; the body is driven
+ * kinematically each tick so it follows the pointer and gathers the velocity it
+ * throws with. goss_session_release lets it go back to dynamic, flinging it. */
+goss_status goss_session_grab(goss_session *session, float x, float y, float z);
+goss_status goss_session_release(goss_session *session);
+
 /* Graph thread. Runs the beauty chain over one RGBA frame on the calling
  * thread, reading the newest tracking result for the landmark driven
  * effects when face tracking is enabled. The stated CPU path; live

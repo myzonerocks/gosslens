@@ -144,6 +144,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_ar_brush_end(goss_session *session)",
     "goss_status goss_session_ar_brush_undo(goss_session *session)",
     "goss_status goss_session_ar_brush_clear(goss_session *session)",
+    "goss_status goss_session_grab(goss_session *session, float x, float y, float z)",
+    "goss_status goss_session_release(goss_session *session)",
     "goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)",
     "goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)",
     "goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
@@ -482,6 +484,11 @@ pub const Session = struct {
     /// Mesh colliders whose geometry is the node's own glb: their body is built
     /// once the glb decodes, from the decoded positions, at these placements.
     pending_glb_colliders: std.AutoHashMapUnmanaged(graph.NodeIndex, PendingGlbCollider) = .empty,
+    /// Dynamic bodies a pointer can grab, the currently grabbed one (driven
+    /// kinematically to grab_target each tick), and where it is being dragged.
+    grabbable_bodies: std.ArrayListUnmanaged(u32) = .empty,
+    grab_body: ?u32 = null,
+    grab_target: [3]f32 = .{ 0, 0, 0 },
     /// Cloth nodes: the solver body and the dynamic render mesh, by
     /// graph index. Cloth replaces the glb mesh with a simulated grid.
     cloth_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
@@ -2597,6 +2604,7 @@ pub fn destroySession(session: *Session) void {
     if (session.physics_world) |world| world.destroy();
     session.physics_bodies.deinit(session.engine.gpa);
     session.pending_glb_colliders.deinit(session.engine.gpa);
+    session.grabbable_bodies.deinit(session.engine.gpa);
     session.cloth_bodies.deinit(session.engine.gpa);
     session.cloth_meshes.deinit(session.engine.gpa);
     session.cloth_cols.deinit(session.engine.gpa);
@@ -2923,6 +2931,9 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
                 const now_us = current.desc.timestamp_us;
                 if (s.physics_last_us != 0 and now_us > s.physics_last_us) {
                     const dt: f32 = @as(f32, @floatFromInt(now_us - s.physics_last_us)) / 1_000_000.0;
+                    // A grabbed body is dragged toward the pointer each tick; the
+                    // kinematic move imparts the velocity it throws with on release.
+                    if (s.grab_body) |gid| world.moveBody(gid, s.grab_target, @min(dt, 0.25));
                     world.step(@min(dt, 0.25));
                 }
                 s.physics_last_us = now_us;
@@ -4240,6 +4251,50 @@ pub export fn goss_session_ar_brush_undo(session: ?*Session) Status {
     return .ok;
 }
 
+/// Grabs the nearest dynamic body to a world point and drags it there; while
+/// something is grabbed the point just updates the drag target. The body is
+/// driven kinematically each tick, so it follows the pointer and builds the
+/// velocity it will throw with.
+pub export fn goss_session_grab(session: ?*Session, x: f32, y: f32, z: f32) Status {
+    const s = session orelse return .invalid_argument;
+    if (s.physics_world) |world| {
+        if (s.grab_body == null) {
+            var best: ?u32 = null;
+            var best_d2: f32 = 0.36;
+            for (s.grabbable_bodies.items) |id| {
+                const body_pose = world.bodyPose(id) catch continue;
+                const dx = body_pose[12] - x;
+                const dy = body_pose[13] - y;
+                const dz = body_pose[14] - z;
+                const d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 < best_d2) {
+                    best_d2 = d2;
+                    best = id;
+                }
+            }
+            if (best) |id| {
+                world.setBodyMotion(id, .kinematic);
+                s.grab_body = id;
+            }
+        }
+        s.grab_target = .{ x, y, z };
+    }
+    return .ok;
+}
+
+/// Releases the grabbed body back to dynamic, so it flies off carrying the
+/// velocity the drag gave it - the throw.
+pub export fn goss_session_release(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    if (s.physics_world) |world| {
+        if (s.grab_body) |id| {
+            world.setBodyMotion(id, .dynamic);
+            s.grab_body = null;
+        }
+    }
+    return .ok;
+}
+
 pub export fn goss_session_ar_brush_clear(session: ?*Session) Status {
     const s = session orelse return .invalid_argument;
     s.ar_board.clear();
@@ -5339,6 +5394,8 @@ fn destroyMeshFaceState(session: *Session) void {
     session.physics_world = null;
     session.physics_bodies.clearRetainingCapacity();
     session.pending_glb_colliders.clearRetainingCapacity();
+    session.grabbable_bodies.clearRetainingCapacity();
+    session.grab_body = null;
     var loader_it = session.mesh_face_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
     session.mesh_face_loaders.clearRetainingCapacity();
@@ -6374,6 +6431,8 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     };
                     if (id != physics.invalid_body) {
                         session.physics_bodies.put(gpa, model.graph_index, id) catch {};
+                        // A dynamic body can be grabbed and thrown by a pointer.
+                        if (body.dynamic and !body.kinematic) session.grabbable_bodies.append(gpa, id) catch {};
                     }
                 }
             }

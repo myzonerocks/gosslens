@@ -148,6 +148,12 @@ pub const World = struct {
         _ = dt_seconds;
     }
 
+    pub fn setBodyMotion(world: World, body: u32, motion: Motion) void {
+        _ = world;
+        _ = body;
+        _ = motion;
+    }
+
     pub fn addCloth(world: World, cols: u32, rows: u32, width: f32, height: f32, position: [3]f32) !u32 {
         _ = world;
         _ = cols;

@@ -2908,6 +2908,80 @@ fn provePhysicsGlbCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Settles a physics scene, optionally driving a grab: once the ball has come
+/// to rest, grab it, drag it up and to the side over several frames, and let
+/// go, so it is flung. Captures at frame 85.
+fn settledGrabCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8, do_grab: bool) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        if (do_grab) {
+            if (i == 12) _ = abi.goss_session_grab(session, 0.0, -0.13, 0.0);
+            if (i > 12 and i < 36) {
+                const t = @as(f32, @floatFromInt(i - 12)) / 24.0;
+                _ = abi.goss_session_grab(session, 0.35 * t, -0.13 + 0.72 * t, 0.0);
+            }
+            if (i == 36) _ = abi.goss_session_release(session);
+        }
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves grab and throw: a pointer grabs the resting ball, drags it up and
+/// aside, and releases it so it flies off - the settled frame lands far from
+/// the same scene left untouched, where the ball just rests. Bit-stable.
+fn proveGrabThrow(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var thrown: []u8 = &.{};
+    defer if (thrown.len > 0) gpa.free(thrown);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledGrabCapture(gpa, engine, ".lens-packages/grab-scene", true);
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            thrown = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the grab-throw is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const rested = try settledGrabCapture(gpa, engine, ".lens-packages/grab-scene", false);
+    defer gpa.free(rested);
+    if (std.mem.eql(u8, thrown, rested)) {
+        std.debug.print("conformance: FAIL the grab did not move the ball\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a pointer grabs the resting ball, drags it and throws it clear of where it rests untouched, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -6802,6 +6876,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try provePhysicsWorldMesh(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "glb-collider")) {
             if (!try provePhysicsGlbCollider(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "grab-throw")) {
+            if (!try proveGrabThrow(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -6910,6 +6986,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics world mesh");
     if (!try provePhysicsGlbCollider(gpa, engine)) return 1;
     watchHold("physics glb collider");
+    if (!try proveGrabThrow(gpa, engine)) return 1;
+    watchHold("grab throw");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

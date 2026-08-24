@@ -318,4 +318,6 @@ extension GossSession {
     public func endARStroke() throws { try checked(goss_session_ar_brush_end(handle)) }
     public func undoARStroke() throws { try checked(goss_session_ar_brush_undo(handle)) }
     public func clearARStrokes() throws { try checked(goss_session_ar_brush_clear(handle)) }
+    public func grab(x: Float, y: Float, z: Float) throws { try checked(goss_session_grab(handle, x, y, z)) }
+    public func release() throws { try checked(goss_session_release(handle)) }
 }

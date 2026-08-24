@@ -367,6 +367,18 @@ extern "C" void goss_physics_body_move(void* handle, uint32_t body, float px, fl
   world->system.GetBodyInterface().MoveKinematic(JPH::BodyID(body), JPH::RVec3(px, py, pz), JPH::Quat::sIdentity(), dt_seconds);
 }
 
+// Switches a body's motion type at runtime: a dynamic body grabbed into a
+// kinematic drag, then released back to dynamic to fly off with the velocity
+// the drag imparted.
+extern "C" void goss_physics_body_set_motion(void* handle, uint32_t body, uint32_t motion) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr) return;
+  const JPH::EMotionType motion_type = motion == 1   ? JPH::EMotionType::Dynamic
+                                       : motion == 2 ? JPH::EMotionType::Kinematic
+                                                     : JPH::EMotionType::Static;
+  world->system.GetBodyInterface().SetMotionType(JPH::BodyID(body), motion_type, JPH::EActivation::Activate);
+}
+
 // Fixed 60 Hz substeps accumulated from dt, the determinism contract.
 extern "C" void goss_physics_step(void* handle, float dt_seconds) {
   auto* world = static_cast<World*>(handle);

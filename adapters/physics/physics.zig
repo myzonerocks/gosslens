@@ -33,6 +33,7 @@ extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, px: f32
 extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
 extern fn goss_physics_body_add_mesh(handle: *anyopaque, points: [*]const f32, point_count: u32, indices: [*]const u32, index_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
+extern fn goss_physics_body_set_motion(handle: *anyopaque, body: u32, motion: u32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
 extern fn goss_physics_constrain_point(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) i32;
@@ -144,6 +145,13 @@ pub const World = struct {
     /// swing after it.
     pub fn moveBody(world: World, body: u32, position: [3]f32, dt_seconds: f32) void {
         goss_physics_body_move(world.handle, body, position[0], position[1], position[2], dt_seconds);
+    }
+
+    /// Switches a body's motion type at runtime - a dynamic body grabbed into
+    /// a kinematic drag, then released back to dynamic so it flies off with
+    /// the velocity the drag imparted.
+    pub fn setBodyMotion(world: World, body: u32, motion: Motion) void {
+        goss_physics_body_set_motion(world.handle, body, @intFromEnum(motion));
     }
 
     /// Adds a pinned-top cloth grid; its deformed vertices drive a mesh.

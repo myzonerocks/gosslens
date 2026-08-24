@@ -798,6 +798,18 @@ export fn Java_com_gosslens_Gosslens_nativeArBrushClear(env: *JniEnv, cls: jobje
     return @intFromEnum(abi.goss_session_ar_brush_clear(sessionFromHandle(session)));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeGrab(env: *JniEnv, cls: jobject, session: i64, x: f32, y: f32, z: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_grab(sessionFromHandle(session), x, y, z));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeRelease(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_release(sessionFromHandle(session)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;
