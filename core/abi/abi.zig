@@ -18,6 +18,7 @@ const segmentation = @import("segmentation");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
 const png = @import("png");
+const gif = @import("gif");
 const jpeg = @import("jpeg");
 const color = @import("color");
 const media_recording = @import("media_recording");
@@ -26,6 +27,7 @@ const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
 const comp = @import("layout");
 const geo = @import("geo");
+const font = @import("font");
 const stroke = @import("stroke");
 const wboard = @import("world_board");
 const physics = @import("physics");
@@ -599,6 +601,29 @@ pub const Session = struct {
     depth_height: u32 = 0,
     depth_near: f32 = 0,
     depth_far: f32 = 0,
+    /// The submitted depth normalized into an R8 texture the dof.pass
+    /// samples, refreshed each submit_depth. Null until depth arrives.
+    depth_texture: ?render.TextureHandle = null,
+    /// dof.pass nodes by graph index: their focus plane and blur strength.
+    dof_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// fog.pass nodes by graph index: their fog color (rgb) and density.
+    fog_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// outline.pass nodes by graph index: their line color (rgb) and threshold.
+    outline_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// ssr.pass nodes by graph index: their reflection strength and floor plane.
+    ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
+    /// and intensity, seven floats in that order.
+    env_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [7]f32) = .empty,
+    /// trail.pass nodes by graph index: their motion-trail echo amount.
+    trail_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The previous composited frame a trail.pass echoes, held across frames
+    /// and re-copied each frame; sized to the frame and null until a trail
+    /// node draws. `prev_frame_valid` gates the first frame (no echo yet).
+    prev_frame_target: ?render.Renderer.OffscreenTarget = null,
+    prev_frame_w: u16 = 0,
+    prev_frame_h: u16 = 0,
+    prev_frame_valid: bool = false,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -735,6 +760,13 @@ pub const Session = struct {
     /// One bgfx texture per blend.pass node whose background finished
     /// loading.
     blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// One equirect loader per env.pass node that ships an environment image,
+    /// still in flight - mirrors blend_loaders. A node with no image (or a
+    /// load that fails) simply falls back to the gradient sky.
+    env_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
+    /// One bgfx texture per env.pass node whose equirect image finished
+    /// loading, sampled by the camera pose instead of the gradient.
+    env_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// The parametric color grade of each spliced grade.pass node, packed
     /// as (exposure, contrast, saturation, temperature) - resolved once at
     /// activation since grade.pass ships no asset and needs no loader.
@@ -744,6 +776,18 @@ pub const Session = struct {
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     mesh_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// sprite.2d nodes: the image load in flight, its resolved texture, and
+    /// the normalized rect+opacity {x,y,w,h,opacity} the node draws at.
+    sprite_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
+    sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    sprite_rects: std.AutoHashMapUnmanaged(graph.NodeIndex, [5]f32) = .empty,
+    /// A sprite/text node's opacity parameter name (a slice into the lens
+    /// manifest arena), when it binds one, so the draw reads a live opacity.
+    sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
+    /// An animated sprite's frame state, when it declares frames > 1: the
+    /// per-frame loads in flight, the textures they land in, and the rate
+    /// the draw cycles them at off the lens clock.
+    sprite_anims: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteAnim) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
     model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     model_body_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
@@ -785,12 +829,63 @@ const SkinnedRig = struct {
     joint_targets: []JointTarget,
 };
 
+/// The most clips one model node blends in a frame. A model with more
+/// clips than this keeps them all decoded, but only the first this many
+/// contribute to the blended pose - far above any real rig's clip count.
+const max_blend_clips = 16;
+
+/// The most morph targets one model node blends in a frame; only the
+/// first this many carry a weight. Above the 52 an ARKit face rig uses.
+const max_morph_targets = 64;
+
 const LoadedModel = struct {
     mesh: render.Renderer.ModelMesh,
     base_color: [4]f32,
-    animation: ?gltf.DecodedAnimation,
+    animations: []gltf.DecodedAnimation,
     rig: ?SkinnedRig = null,
+    /// Per-vertex position deltas, one array per morph target, kept so a
+    /// lens can blend them into the mesh by weight. Empty for a mesh with
+    /// no blendshapes.
+    morph_targets: []const []const [3]f32 = &.{},
+    /// A morphable mesh keeps its rest positions and a scratch buffer to
+    /// deform into each frame; its `mesh` is a dynamic model mesh. Both
+    /// empty for a mesh with no morph targets.
+    morph_rest: []const [3]f32 = &.{},
+    morph_scratch: [][3]f32 = &.{},
 };
+
+/// Deforms rest positions by a weighted sum of morph target deltas into
+/// `out`: out[v] = rest[v] + sum_t weight[t] * target[t][v]. Weights come
+/// from the lens; a zero weight leaves that target out at no cost.
+fn morphPositions(out: [][3]f32, rest: []const [3]f32, targets: []const []const [3]f32, weights: []const f32) void {
+    for (out, rest) |*o, base| o.* = base;
+    for (targets, weights) |target, w| {
+        if (w == 0) continue;
+        for (out, target) |*o, delta| {
+            o[0] += w * delta[0];
+            o[1] += w * delta[1];
+            o[2] += w * delta[2];
+        }
+    }
+}
+
+/// The model node's local matrix this frame: its clips' sampled poses
+/// blended by their bound weights (clip_weights). With none bound the
+/// first clip carries full weight, so a single-clip model is unchanged;
+/// a model with no clips draws on its rest transform.
+fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
+    if (loaded.animations.len == 0) return math.Mat4.identity;
+    const bound = if (lens) |l| l.bindsClipWeights(graph_index) else false;
+    if (!bound and loaded.animations.len == 1) return loaded.animations[0].sample(elapsed_seconds);
+    var poses: [max_blend_clips]gltf.Components = undefined;
+    var weights: [max_blend_clips]f32 = undefined;
+    const n = @min(loaded.animations.len, max_blend_clips);
+    for (0..n) |ci| {
+        poses[ci] = loaded.animations[ci].sampleComponents(elapsed_seconds);
+        weights[ci] = if (bound) (lens.?.clipWeight(graph_index, ci) orelse 0) else (if (ci == 0) @as(f32, 1.0) else 0.0);
+    }
+    return gltf.blendComponents(poses[0..n], weights[0..n]).toMatrix();
+}
 
 fn abiAllocator() std.mem.Allocator {
     // wasm_allocator grows memory through a raw wasm memory.grow
@@ -878,6 +973,19 @@ fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
     e.capture_staging = try render.Renderer.createReadbackTexture(width, height);
     e.capture_width = width;
     e.capture_height = height;
+}
+
+/// (Re)creates the session-owned previous-frame target a trail.pass echoes,
+/// only when the frame size changes or it doesn't exist yet. A resize drops
+/// the stale echo (prev_frame_valid=false) so the next frame reseeds instead
+/// of stretching a mismatched copy across the new size.
+fn ensureTrailPrev(s: *Session, width: u16, height: u16) !void {
+    if (s.prev_frame_w == width and s.prev_frame_h == height and s.prev_frame_target != null) return;
+    if (s.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.prev_frame_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.prev_frame_w = width;
+    s.prev_frame_h = height;
+    s.prev_frame_valid = false;
 }
 
 /// Whether the live preview needs the GPU beauty compositing bridge
@@ -1297,6 +1405,24 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .grade => s.grade_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
+            // Depth of field needs the host's depth: with none submitted the
+            // node holds the frame through, the standard capability degradation.
+            .dof => s.dof_params.contains(entry.graph_index) and s.depth_texture != null,
+            // Depth fog degrades the same way: it needs the submitted depth.
+            .fog => s.fog_params.contains(entry.graph_index) and s.depth_texture != null,
+            // The depth-edge outline needs the submitted depth to find edges.
+            .outline => s.outline_params.contains(entry.graph_index) and s.depth_texture != null,
+            // A motion trail owns the frame it echoes (a session target it
+            // seeds from the current frame on the first pass), so it is ready
+            // as soon as its echo amount is resolved - no host input to gate on.
+            .trail => s.trail_params.contains(entry.graph_index),
+            // Screen-space reflection reads the submitted depth to know how
+            // reflective the floor is, degrading the same way dof and fog do.
+            .ssr => s.ssr_params.contains(entry.graph_index) and s.depth_texture != null,
+            // The sky draws behind the segmented foreground; like blend it is
+            // ready once its params resolve, degrading to the always-foreground
+            // default mask (no sky visible) when segmentation is absent.
+            .env => s.env_params.contains(entry.graph_index),
             // Only the background image gates readiness - the mask
             // degrades to the renderer's always-foreground default
             // when segmentation is unavailable (SPEC's rule: a node
@@ -1311,6 +1437,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // through and draws the session's brush strokes over it, so it is
             // always ready.
             .draw_board => true,
+            // A sprite draws once its image has decoded (an animated sprite
+            // once all its frames have); until then it holds the frame
+            // through, never blocking the chain.
+            .sprite => s.sprite_textures.contains(entry.graph_index) or
+                (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
         };
         if (ready) ready_count += 1;
     }
@@ -1452,6 +1583,142 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (!is_final) next_slot += 1;
                 }
             },
+            .dof => {
+                const params = s.dof_params.get(entry.graph_index) orelse continue;
+                const depth_tex = s.depth_texture orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitDofPass(view_id, input_texture, depth_tex, params[0], params[1]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .fog => {
+                const fog = s.fog_params.get(entry.graph_index) orelse continue;
+                const depth_tex = s.depth_texture orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitFogPass(view_id, input_texture, depth_tex, .{ fog[0], fog[1], fog[2] }, fog[3]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .outline => {
+                const line = s.outline_params.get(entry.graph_index) orelse continue;
+                const depth_tex = s.depth_texture orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitOutlinePass(view_id, input_texture, depth_tex, .{ line[0], line[1], line[2] }, line[3]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .ssr => {
+                const ssr = s.ssr_params.get(entry.graph_index) orelse continue;
+                const depth_tex = s.depth_texture orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitSsrPass(view_id, input_texture, depth_tex, ssr[0], ssr[1]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .env => {
+                const env = s.env_params.get(entry.graph_index) orelse continue;
+                const mask_texture = s.segmentation_texture orelse r.default_mask_texture;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                if (s.env_textures.get(entry.graph_index)) |env_tex| {
+                    // With an equirect image loaded, sample it by the pose. Its
+                    // basis rows turn each pixel's view ray into world space, so
+                    // the environment pans with the device; the upper 3x3 of the
+                    // column-major pose reads out as rows here.
+                    const wfc = s.world.state.world_from_camera;
+                    const rot = [3][4]f32{
+                        .{ wfc[0], wfc[4], wfc[8], 0 },
+                        .{ wfc[1], wfc[5], wfc[9], 0 },
+                        .{ wfc[2], wfc[6], wfc[10], 0 },
+                    };
+                    const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                    r.submitEnvmapPass(view_id, input_texture, env_tex, mask_texture, rot, env[6], aspect);
+                } else {
+                    // No image: the procedural sky, its gradient shifted by the
+                    // pose pitch and sun slid by the yaw into screen fractions.
+                    const cam_pose: math.Mat4 = .{ .cols = @bitCast(s.world.state.world_from_camera) };
+                    const euler = headEuler(cam_pose);
+                    r.submitEnvPass(view_id, input_texture, mask_texture, .{ env[0], env[1], env[2] }, .{ env[3], env[4], env[5] }, env[6], euler.pitch * 0.2, euler.yaw * 0.15915494);
+                }
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .trail => {
+                const amount = s.trail_params.get(entry.graph_index) orelse continue;
+                ensureTrailPrev(s, width, height) catch continue;
+                const prev = s.prev_frame_target orelse continue;
+                drawn += 1;
+                // First frame has no earlier frame to echo: seed prev with the
+                // current one on a lower view so the blend is a no-op, not a
+                // garbage echo. The copy is a passthrough draw (a render target
+                // is no blit destination on every backend), like the rest of the chain.
+                if (!s.prev_frame_valid) {
+                    const seed_view = next_view_id;
+                    next_view_id += 1;
+                    r.tile = null;
+                    render.Renderer.setViewTarget(seed_view, prev, width, height);
+                    r.submitShaderPass(seed_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                    s.prev_frame_valid = true;
+                }
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitTrailPass(view_id, input_texture, prev.texture, amount);
+                // Keep this frame for the next one's echo. The copy runs on the
+                // immediately following view so a later chain stage reusing this
+                // ping-pong slot can't overwrite the frame before it is stored.
+                const store_view = next_view_id;
+                next_view_id += 1;
+                r.tile = null;
+                render.Renderer.setViewTarget(store_view, prev, width, height);
+                r.submitShaderPass(store_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
             .bloom => {
                 const bloom = s.bloom_params.get(entry.graph_index) orelse continue;
                 const scratch0 = e.bloom_targets[0] orelse continue;
@@ -1544,6 +1811,54 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         r.submitFaceMesh(view_id, input_texture, mesh_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), 1.0);
                     }
                 }
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .sprite => {
+                var sprite_texture: render.TextureHandle = undefined;
+                if (s.sprite_anims.get(entry.graph_index)) |anim| {
+                    // An animated sprite cycles its frames off the lens clock;
+                    // wait until every frame has landed so the cycle is whole.
+                    if (anim.loaded != anim.frames) continue;
+                    const active_us = if (s.active_lens) |*lens| lens.elapsedUs() else 0;
+                    const frame_idx: u64 = @intFromFloat(@as(f64, @floatFromInt(active_us)) / 1_000_000.0 * @as(f64, anim.fps));
+                    sprite_texture = anim.textures[@intCast(frame_idx % anim.frames)];
+                } else {
+                    sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
+                }
+                const rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
+                drawn += 1;
+                const blit_view = next_view_id;
+                next_view_id += 1;
+                const sprite_view = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                const out_w: u16 = if (is_final) output_width else width;
+                const out_h: u16 = if (is_final) output_height else height;
+                // The frame passes through whole on the blit view, then the
+                // sprite draws over it at its own rect on a second view (a
+                // separate view because it narrows the view rect).
+                if (output) |target| render.Renderer.setViewTarget(blit_view, target, out_w, out_h) else render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                if (output) |target| render.Renderer.setViewTarget(sprite_view, target, out_w, out_h) else render.Renderer.setViewTarget(sprite_view, null, output_width, output_height);
+                const full_w: f32 = @floatFromInt(if (output != null) out_w else output_width);
+                const full_h: f32 = @floatFromInt(if (output != null) out_h else output_height);
+                const dx: u16 = @intFromFloat(std.math.clamp(rect[0], 0, 1) * full_w);
+                const dy: u16 = @intFromFloat(std.math.clamp(rect[1], 0, 1) * full_h);
+                const dw: u16 = @intFromFloat(std.math.clamp(rect[2], 0, 1) * full_w);
+                const dh: u16 = @intFromFloat(std.math.clamp(rect[3], 0, 1) * full_h);
+                // A bound opacity parameter overrides the static one each frame.
+                var sprite_opacity = rect[4];
+                if (s.sprite_opacity_params.get(entry.graph_index)) |pname| {
+                    if (s.active_lens) |*lens| {
+                        if (lens.paramValue(pname)) |v| sprite_opacity = std.math.clamp(v, 0, 1);
+                    }
+                }
+                r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, sprite_opacity);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -1735,9 +2050,24 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
                     render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
                 }
-                const elapsed_us = if (s.active_lens) |*lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
+                const active_lens: ?*const runtime.Lens = if (s.active_lens) |*lens| lens else null;
+                const elapsed_us = if (active_lens) |lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
                 const elapsed_seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0;
-                var model_matrix = if (loaded.animation) |*anim| anim.sample(elapsed_seconds) else math.Mat4.identity;
+                var model_matrix = modelPoseMatrix(loaded, elapsed_seconds, active_lens, entry.graph_index);
+                // A morphable mesh deforms its rest positions by the lens's
+                // bound morph weights and re-uploads once, before any anchor
+                // path draws it; an unbound mesh keeps its rest shape.
+                if (loaded.morph_targets.len > 0 and loaded.morph_scratch.len > 0) {
+                    if (active_lens) |lens| {
+                        if (lens.bindsMorphWeights(entry.graph_index)) {
+                            var weights: [max_morph_targets]f32 = undefined;
+                            const n = @min(loaded.morph_targets.len, max_morph_targets);
+                            for (0..n) |ti| weights[ti] = lens.morphWeight(entry.graph_index, ti);
+                            morphPositions(loaded.morph_scratch, loaded.morph_rest, loaded.morph_targets[0..n], weights[0..n]);
+                            r.updateModelMesh(loaded.mesh, loaded.morph_scratch);
+                        }
+                    }
+                }
                 if (s.physics_bodies.get(entry.graph_index)) |body_id| {
                     if (s.physics_world) |world| {
                         if (world.bodyPose(body_id)) |body_pose| {
@@ -2040,10 +2370,28 @@ pub fn destroySession(session: *Session) void {
     session.lut_loaders.deinit(session.engine.gpa);
     session.lut_textures.deinit(session.engine.gpa);
     destroyBlendState(session);
+    destroySpriteState(session);
     destroyMeshFaceState(session);
     session.blend_loaders.deinit(session.engine.gpa);
     session.blend_textures.deinit(session.engine.gpa);
+    session.env_loaders.deinit(session.engine.gpa);
+    session.env_textures.deinit(session.engine.gpa);
+    session.sprite_loaders.deinit(session.engine.gpa);
+    session.sprite_textures.deinit(session.engine.gpa);
+    session.sprite_rects.deinit(session.engine.gpa);
+    session.sprite_opacity_params.deinit(session.engine.gpa);
+    session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
+    session.dof_params.deinit(session.engine.gpa);
+    session.fog_params.deinit(session.engine.gpa);
+    session.outline_params.deinit(session.engine.gpa);
+    session.trail_params.deinit(session.engine.gpa);
+    session.ssr_params.deinit(session.engine.gpa);
+    session.env_params.deinit(session.engine.gpa);
+    if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.depth_texture) |tex| {
+        if (session.engine.renderer) |*r| r.destroyTexture(tex);
+    }
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
@@ -2359,7 +2707,9 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
     if (session) |s| {
         pollLutLoaders(s, r, s.engine.gpa);
         pollBlendLoaders(s, r, s.engine.gpa);
+        pollEnvLoaders(s, r, s.engine.gpa);
         pollMeshFaceLoaders(s, r, s.engine.gpa);
+        pollSpriteLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
         pollDepthOcclusion(s);
@@ -2445,6 +2795,8 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
 
     pollLutLoaders(s, r, s.engine.gpa);
     pollBlendLoaders(s, r, s.engine.gpa);
+    pollEnvLoaders(s, r, s.engine.gpa);
+    pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollDepthOcclusion(s);
@@ -2557,6 +2909,8 @@ test "swapRedBlue turns rgba into bgra" {
 fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollLutLoaders(s, r, s.engine.gpa);
     pollBlendLoaders(s, r, s.engine.gpa);
+    pollEnvLoaders(s, r, s.engine.gpa);
+    pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollDepthOcclusion(s);
@@ -4161,6 +4515,10 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
         s.depth_data = &.{};
         s.depth_width = 0;
         s.depth_height = 0;
+        if (s.depth_texture) |old| {
+            if (s.engine.renderer) |*r| r.destroyTexture(old);
+            s.depth_texture = null;
+        }
         return .ok;
     }
     const src = depth orelse return .invalid_argument;
@@ -4178,7 +4536,25 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
     s.depth_height = height;
     s.depth_near = near;
     s.depth_far = far;
+    updateDepthTexture(s, gpa);
     return .ok;
+}
+
+/// Normalizes the submitted depth (near..far metres) into an R8 texture the
+/// dof.pass samples, replacing the previous frame's. A best-effort upload:
+/// on allocation failure the old texture stays, so the pass just holds.
+fn updateDepthTexture(s: *Session, gpa: std.mem.Allocator) void {
+    const r = if (s.engine.renderer) |*rr| rr else return;
+    if (s.depth_data.len == 0) return;
+    const bytes = gpa.alloc(u8, s.depth_data.len) catch return;
+    defer gpa.free(bytes);
+    const span = if (s.depth_far > s.depth_near) s.depth_far - s.depth_near else 1.0;
+    for (s.depth_data, bytes) |d, *b| {
+        const n = std.math.clamp((d - s.depth_near) / span, 0.0, 1.0);
+        b.* = @intFromFloat(n * 255.0);
+    }
+    if (s.depth_texture) |old| r.destroyTexture(old);
+    s.depth_texture = render.Renderer.createMaskTexture(@intCast(s.depth_width), @intCast(s.depth_height), bytes);
 }
 
 /// The depth (metres) at a normalized frame coordinate, nearest sample,
@@ -4651,9 +5027,50 @@ fn destroyBlendState(session: *Session) void {
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
     }
     session.blend_textures.clearRetainingCapacity();
+
+    var env_loader_it = session.env_loaders.valueIterator();
+    while (env_loader_it.next()) |loader| loader.*.deinit();
+    session.env_loaders.clearRetainingCapacity();
+    if (session.engine.renderer) |*r| {
+        var env_texture_it = session.env_textures.valueIterator();
+        while (env_texture_it.next()) |handle| r.destroyTexture(handle.*);
+    }
+    session.env_textures.clearRetainingCapacity();
     // grade.pass and bloom.pass hold only plain params, nothing to free.
     session.grade_params.clearRetainingCapacity();
+    session.dof_params.clearRetainingCapacity();
+    session.fog_params.clearRetainingCapacity();
+    session.outline_params.clearRetainingCapacity();
+    session.trail_params.clearRetainingCapacity();
+    session.ssr_params.clearRetainingCapacity();
+    session.env_params.clearRetainingCapacity();
+    // The prev-frame target is reused across lenses, but its echo belongs to
+    // the lens that just left: drop it so the next trail reseeds cleanly.
+    session.prev_frame_valid = false;
     session.bloom_params.clearRetainingCapacity();
+}
+
+fn destroySpriteState(session: *Session) void {
+    var loader_it = session.sprite_loaders.valueIterator();
+    while (loader_it.next()) |loader| loader.*.deinit();
+    session.sprite_loaders.clearRetainingCapacity();
+    if (session.engine.renderer) |*r| {
+        var texture_it = session.sprite_textures.valueIterator();
+        while (texture_it.next()) |handle| r.destroyTexture(handle.*);
+    }
+    session.sprite_textures.clearRetainingCapacity();
+    session.sprite_rects.clearRetainingCapacity();
+    session.sprite_opacity_params.clearRetainingCapacity();
+    var anim_it = session.sprite_anims.valueIterator();
+    while (anim_it.next()) |anim| {
+        for (anim.loaders) |maybe| if (maybe) |l| l.deinit();
+        if (session.engine.renderer) |*r| {
+            for (anim.textures) |tex| if (tex.idx != render.invalid_handle) r.destroyTexture(tex);
+        }
+        session.engine.gpa.free(anim.loaders);
+        session.engine.gpa.free(anim.textures);
+    }
+    session.sprite_anims.clearRetainingCapacity();
 }
 
 fn destroyMeshFaceState(session: *Session) void {
@@ -4710,7 +5127,10 @@ fn destroyModelState(session: *Session) void {
     var mesh_it = session.model_meshes.valueIterator();
     while (mesh_it.next()) |loaded| {
         render.Renderer.destroyModelMesh(loaded.mesh);
-        if (loaded.animation) |*anim| gltf.freeAnimation(session.engine.gpa, anim);
+        gltf.freeAnimations(session.engine.gpa, loaded.animations);
+        gltf.freeMorphTargets(session.engine.gpa, loaded.morph_targets);
+        if (loaded.morph_rest.len > 0) session.engine.gpa.free(loaded.morph_rest);
+        if (loaded.morph_scratch.len > 0) session.engine.gpa.free(loaded.morph_scratch);
         if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
     session.model_meshes.clearRetainingCapacity();
@@ -4739,6 +5159,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyShaderPrograms(session);
     destroyLutState(session);
     destroyBlendState(session);
+    destroySpriteState(session);
     destroyMeshFaceState(session);
     destroyModelState(session);
     destroyChainOrder(session);
@@ -4984,6 +5405,12 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // that need packaged assets stay not-ready until a directory load.
     createGradeParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
+    createDofParams(s, gpa) catch {};
+    createFogParams(s, gpa) catch {};
+    createOutlineParams(s, gpa) catch {};
+    createTrailParams(s, gpa) catch {};
+    createSsrParams(s, gpa) catch {};
+    createEnvParams(s, gpa) catch {};
     // A particle fountain also needs no bundle (the CPU sim and its mesh are
     // built from the field alone), so create it here too; the empty bundle
     // path just means a glTF model's own asset never loads, degrading it,
@@ -5033,6 +5460,72 @@ fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(grades);
     for (grades) |g| {
         session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
+    }
+}
+
+/// Resolves every spliced dof.pass node's focus and strength into
+/// session.dof_params, once at activation - mirrors createGradeParams.
+fn createDofParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const dofs = try lens.dofPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(dofs);
+    for (dofs) |d| {
+        session.dof_params.put(gpa, d.graph_index, .{ d.focus, d.strength }) catch {};
+    }
+}
+
+/// Resolves every spliced fog.pass node's color and density into
+/// session.fog_params, once at activation - mirrors createDofParams.
+fn createFogParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const fogs = try lens.fogPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(fogs);
+    for (fogs) |f| {
+        session.fog_params.put(gpa, f.graph_index, .{ f.color[0], f.color[1], f.color[2], f.density }) catch {};
+    }
+}
+
+/// Resolves every spliced outline.pass node's color and threshold into
+/// session.outline_params, once at activation - mirrors createFogParams.
+fn createOutlineParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const outlines = try lens.outlinePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(outlines);
+    for (outlines) |o| {
+        session.outline_params.put(gpa, o.graph_index, .{ o.color[0], o.color[1], o.color[2], o.threshold }) catch {};
+    }
+}
+
+/// Resolves every spliced trail.pass node's echo amount into
+/// session.trail_params, once at activation - mirrors createOutlineParams.
+fn createTrailParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const trails = try lens.trailPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(trails);
+    for (trails) |tr| {
+        session.trail_params.put(gpa, tr.graph_index, tr.amount) catch {};
+    }
+}
+
+/// Resolves every spliced ssr.pass node's reflection strength and floor
+/// plane into session.ssr_params, once at activation.
+fn createSsrParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const ssrs = try lens.ssrPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(ssrs);
+    for (ssrs) |sr| {
+        session.ssr_params.put(gpa, sr.graph_index, .{ sr.strength, sr.plane }) catch {};
+    }
+}
+
+/// Resolves every spliced env.pass node's sky gradient and intensity into
+/// session.env_params, once at activation.
+fn createEnvParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const envs = try lens.envPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(envs);
+    for (envs) |ev| {
+        session.env_params.put(gpa, ev.graph_index, .{ ev.top[0], ev.top[1], ev.top[2], ev.bottom[0], ev.bottom[1], ev.bottom[2], ev.intensity }) catch {};
     }
 }
 
@@ -5142,6 +5635,216 @@ fn pollBlendLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     }
     for (finished.items) |graph_index| {
         if (session.blend_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
+/// Starts an equirect load for every env.pass node that ships an environment
+/// image (assets/<stem>.png) - mirrors createBlendLoaders. A node with no
+/// image, or one whose file is absent, keeps its gradient sky.
+fn createEnvLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const envs = try lens.envPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(envs);
+    for (envs) |ev| {
+        const stem = ev.image_stem orelse continue;
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        session.env_loaders.put(gpa, ev.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Turns every finished (or failed) env-image load into a texture (or drops
+/// it) - mirrors pollBlendLoaders.
+fn pollEnvLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.env_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+            gpa.free(decoded.rgba);
+            session.env_textures.put(gpa, entry.key_ptr.*, texture) catch {
+                r.destroyTexture(texture);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.env_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
+/// An animated sprite's frame state: the per-frame loads in flight, the
+/// textures they resolve into (in frame order), and the count landed so
+/// far, plus the rate the draw cycles them at.
+const SpriteAnim = struct {
+    frames: u32,
+    fps: f32,
+    loaders: []?*asset.ImageLoader,
+    textures: []render.TextureHandle,
+    loaded: u32 = 0,
+};
+
+/// Loads a sprite.2d node's animated GIF (assets/<stem>.gif) as a video
+/// texture: every frame decodes to a texture up front and a fully-loaded
+/// SpriteAnim the render loop cycles at the clip's own rate. Returns false
+/// when the node ships no GIF, so the caller falls back to a PNG.
+fn tryStartGifSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, sprite: runtime.SpriteNode) bool {
+    if (session.engine.renderer == null) return false;
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.gif", .{ bundle_path, sprite.image_stem }) catch return false;
+    defer gpa.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(32 << 20)) catch return false;
+    defer gpa.free(bytes);
+    const decoded = gif.decode(gpa, bytes) catch return false;
+    defer decoded.deinit(gpa);
+    const n: u32 = @intCast(decoded.frames.len);
+    if (n == 0) return false;
+
+    const loaders = gpa.alloc(?*asset.ImageLoader, 0) catch return false;
+    const textures = gpa.alloc(render.TextureHandle, n) catch {
+        gpa.free(loaders);
+        return false;
+    };
+    for (decoded.frames, 0..) |frame, i| {
+        textures[i] = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), frame);
+    }
+    // Cycle at the clip's own rate: the mean frame delay in centiseconds,
+    // defaulting to a lively rate when the file leaves it unset.
+    var total_cs: u32 = 0;
+    for (decoded.delays_cs) |d| total_cs += d;
+    const avg_cs: f32 = @as(f32, @floatFromInt(total_cs)) / @as(f32, @floatFromInt(n));
+    const fps: f32 = if (avg_cs > 0) 100.0 / avg_cs else 12.0;
+
+    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = fps, .loaders = loaders, .textures = textures, .loaded = n }) catch {
+        if (session.engine.renderer) |*r| for (textures) |tex| r.destroyTexture(tex);
+        gpa.free(loaders);
+        gpa.free(textures);
+        return false;
+    };
+    return true;
+}
+
+/// Starts a background load for every spliced sprite.2d node's image
+/// (assets/<stem>.png, or assets/<stem>_<i>.png for an animated sprite)
+/// and records the rect it draws at - mirrors createBlendLoaders, plus the
+/// static rect the render loop needs.
+fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const sprites = try lens.spriteNodes(gpa, &session.lens_graph);
+    defer gpa.free(sprites);
+    for (sprites) |sprite| {
+        session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
+        if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
+        // An animated GIF upgrades the node to a video texture; a node with no
+        // GIF falls through to the still or image-sequence PNG path.
+        if (tryStartGifSprite(session, gpa, bundle_path, sprite)) continue;
+        if (sprite.frames > 1) {
+            startSpriteAnim(session, gpa, bundle_path, sprite);
+            continue;
+        }
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, sprite.image_stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        session.sprite_loaders.put(gpa, sprite.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Kicks off one image load per frame of an animated sprite
+/// (assets/<stem>_<i>.png) into a fresh SpriteAnim, so pollSpriteLoaders
+/// can fill its texture list as the frames land.
+fn startSpriteAnim(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, sprite: runtime.SpriteNode) void {
+    const n = sprite.frames;
+    const loaders = gpa.alloc(?*asset.ImageLoader, n) catch return;
+    const textures = gpa.alloc(render.TextureHandle, n) catch {
+        gpa.free(loaders);
+        return;
+    };
+    @memset(loaders, null);
+    @memset(textures, .{ .idx = render.invalid_handle });
+    for (0..n) |i| {
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}_{d}.png", .{ bundle_path, sprite.image_stem, i }) catch continue;
+        defer gpa.free(path);
+        loaders[i] = asset.ImageLoader.start(gpa, path) catch null;
+    }
+    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = sprite.fps, .loaders = loaders, .textures = textures }) catch {
+        for (loaders) |maybe| if (maybe) |l| l.deinit();
+        gpa.free(loaders);
+        gpa.free(textures);
+    };
+}
+
+/// Turns every sprite image load that finished (or failed) since the last
+/// frame into a real texture (or drops it) - mirrors pollBlendLoaders.
+fn pollSpriteLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.sprite_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+            gpa.free(decoded.rgba);
+            session.sprite_textures.put(gpa, entry.key_ptr.*, texture) catch {
+                r.destroyTexture(texture);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.sprite_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+
+    // Animated sprites carry one loader per frame; land each into its slot.
+    var anim_it = session.sprite_anims.iterator();
+    while (anim_it.next()) |entry| {
+        const anim = entry.value_ptr;
+        for (anim.loaders, 0..) |*maybe, i| {
+            const loader = maybe.* orelse continue;
+            if (loader.take()) |decoded| {
+                anim.textures[i] = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+                gpa.free(decoded.rgba);
+                anim.loaded += 1;
+                loader.deinit();
+                maybe.* = null;
+            } else if (loader.hasFailed()) {
+                loader.deinit();
+                maybe.* = null;
+            }
+        }
+    }
+}
+
+/// Rasterizes every spliced text.2d node's string with the built-in font
+/// and uploads it as a texture, storing it and its rect in the same maps
+/// the sprite draw reads - so text draws through the sprite path with no
+/// async load, since rasterization is synchronous.
+fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const r = if (session.engine.renderer) |*rr| rr else return;
+    const texts = try lens.textNodes(gpa, &session.lens_graph);
+    defer gpa.free(texts);
+    for (texts) |txt| {
+        const raster = font.rasterize(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
+        defer gpa.free(raster.rgba);
+        const texture = render.Renderer.createStaticTexture(@intCast(raster.width), @intCast(raster.height), raster.rgba);
+        session.sprite_textures.put(gpa, txt.graph_index, texture) catch {
+            r.destroyTexture(texture);
+            continue;
+        };
+        session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
+        if (txt.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, txt.graph_index, txt.opacity_param) catch {};
     }
 }
 
@@ -5400,11 +6103,18 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     while (it.next()) |entry| {
         const loader = entry.value_ptr.*;
         if (loader.take()) |decoded| {
-            const mesh = r.createModelMesh(decoded.positions, decoded.indices) catch {
+            // A morphable mesh draws from a dynamic buffer the morph pass
+            // re-uploads each frame; a plain mesh uploads once and stays static.
+            const has_morph = decoded.morph_targets.len > 0;
+            const mesh = (if (has_morph)
+                r.createDynamicModelMesh(decoded.positions, decoded.indices)
+            else
+                r.createModelMesh(decoded.positions, decoded.indices)) catch {
                 gpa.free(decoded.positions);
                 gpa.free(decoded.indices);
-                if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
+                gltf.freeAnimations(gpa, decoded.animations);
                 if (decoded.skin) |*sk| gltf.freeSkin(gpa, sk);
+                gltf.freeMorphTargets(gpa, decoded.morph_targets);
                 finished.append(gpa, entry.key_ptr.*) catch {};
                 continue;
             };
@@ -5415,20 +6125,39 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 (buildSkinnedRig(r, gpa, decoded.positions, decoded.indices, sk) catch null)
             else
                 null;
-            gpa.free(decoded.positions);
+            // A morph mesh keeps its rest positions to deform against and a
+            // scratch buffer for the deformed output; a plain mesh drops them.
+            var morph_rest: []const [3]f32 = &.{};
+            var morph_scratch: [][3]f32 = &.{};
+            if (has_morph) {
+                if (gpa.alloc([3]f32, decoded.positions.len)) |scratch| {
+                    morph_rest = decoded.positions;
+                    morph_scratch = scratch;
+                } else |_| {
+                    gpa.free(decoded.positions);
+                }
+            } else {
+                gpa.free(decoded.positions);
+            }
             gpa.free(decoded.indices);
             session.model_meshes.put(gpa, entry.key_ptr.*, .{
                 .mesh = mesh,
                 .base_color = decoded.base_color,
-                .animation = decoded.animation,
+                .animations = decoded.animations,
                 .rig = rig,
+                .morph_targets = decoded.morph_targets,
+                .morph_rest = morph_rest,
+                .morph_scratch = morph_scratch,
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
                 if (rig) |rg| {
                     var owned = rg;
                     destroySkinnedRig(gpa, &owned);
                 }
-                if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
+                gltf.freeAnimations(gpa, decoded.animations);
+                gltf.freeMorphTargets(gpa, decoded.morph_targets);
+                if (morph_rest.len > 0) gpa.free(morph_rest);
+                if (morph_scratch.len > 0) gpa.free(morph_scratch);
             };
             finished.append(gpa, entry.key_ptr.*) catch {};
         } else if (loader.hasFailed()) {
@@ -5463,10 +6192,19 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
     try createBlendLoaders(session, gpa, bundle_path);
+    try createEnvLoaders(session, gpa, bundle_path);
     try createMeshFaceLoaders(session, gpa, bundle_path);
+    try createSpriteLoaders(session, gpa, bundle_path);
+    try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
     try createBloomParams(session, gpa);
+    try createDofParams(session, gpa);
+    try createFogParams(session, gpa);
+    try createOutlineParams(session, gpa);
+    try createTrailParams(session, gpa);
+    try createSsrParams(session, gpa);
+    try createEnvParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
 }
@@ -5488,6 +6226,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyShaderPrograms(s);
     destroyLutState(s);
     destroyBlendState(s);
+    destroySpriteState(s);
     destroyMeshFaceState(s);
     destroyModelState(s);
     destroyChainOrder(s);
@@ -5779,6 +6518,28 @@ test "skinPositions blends weighted joint transforms and renormalizes" {
     try t.expectApproxEqAbs(@as(f32, 6), out[0][0], 0.001);
     // Fully joint 1: the origin shifted straight to x=10.
     try t.expectApproxEqAbs(@as(f32, 10), out[1][0], 0.001);
+}
+
+test "morphPositions adds weighted target deltas to the rest pose" {
+    const rest = [_][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 } };
+    const smile = [_][3]f32{ .{ 0, 1, 0 }, .{ 0, 1, 0 } };
+    const blink = [_][3]f32{ .{ 0, 0, 2 }, .{ 0, 0, 0 } };
+    const targets = [_][]const [3]f32{ &smile, &blink };
+    var out: [2][3]f32 = undefined;
+
+    // Half smile, quarter blink: vertex 0 rises 0.5 in y and 0.5 in z.
+    morphPositions(&out, &rest, &targets, &.{ 0.5, 0.25 });
+    try t.expectApproxEqAbs(@as(f32, 0.0), out[0][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), out[0][1], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), out[0][2], 0.001);
+    // Vertex 1 keeps its x, takes half the smile's y, no blink.
+    try t.expectApproxEqAbs(@as(f32, 1.0), out[1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), out[1][1], 0.001);
+
+    // All weights zero returns the rest pose untouched.
+    morphPositions(&out, &rest, &targets, &.{ 0.0, 0.0 });
+    try t.expectApproxEqAbs(@as(f32, 1.0), out[1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.0), out[1][1], 0.001);
 }
 
 /// Lowercases into buf and drops a "mixamorig:" style prefix (anything

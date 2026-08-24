@@ -1,0 +1,23 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.material-pixelate",
+  "version": "1.0.0",
+  "display_name": "Material Pixelate",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "pix", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {},
+     "material": {"output": 7, "nodes": [
+       {"kind": "uv"},
+       {"kind": "constant", "type": "vec2", "params": [32.0, 32.0]},
+       {"kind": "multiply", "inputs": [0, 1]},
+       {"kind": "floor", "inputs": [2]},
+       {"kind": "divide", "inputs": [3, 1]},
+       {"kind": "texture", "name": "texColor"},
+       {"kind": "sample", "inputs": [5, 4]},
+       {"kind": "output", "inputs": [6]}
+     ]}}
+  ],
+  "triggers": []
+}

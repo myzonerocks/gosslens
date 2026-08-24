@@ -28,7 +28,7 @@ mylens.glens/
   manifest.json          required, described below
   shaders/                *.glsl source, plus *.<profile>.bin next to each
                           one once packaged (section 7) - metal/spirv/essl
-  assets/                 *.gltf, *.glb, *.png, LUTs, referenced by relative path
+  assets/                 *.gltf, *.glb, *.png, *.gif clips, LUTs, by relative path
   sounds/                 *.wav, *.mp3, *.flac, *.ogg, played by a play_sound trigger
 ```
 
@@ -156,6 +156,24 @@ projection; while tracking is anything but full, the node draws
 nothing. `anchor` is rejected on every other node type, and `"face"`,
 `"body"`, `"skeleton"`, and `"world"` are the only anchors GLF 1.0 defines.
 
+A `model.gltf` node may add `"clip_weights"`: an array of parameter names,
+one per animation clip in the order the glTF declares them. Each frame the
+runtime samples every clip at the node's playback time and blends their
+poses by those parameters' live values, a weighted mean of translation and
+scale and a weighted nlerp of rotation, so a lens crossfades between
+animations by moving the weights. Ramp them with `param_ramp` (6.3) for an
+eased transition. Each name must be a declared parameter, a clip past the
+list weighs nothing, and with no `clip_weights` the node plays its first
+clip unchanged.
+
+A `model.gltf` node may add `"morph_weights"`: an array of parameter names,
+one per morph target (blendshape) in the order the glTF declares them. Each
+frame the runtime deforms the mesh by the weighted sum of those targets'
+per-vertex deltas, the weights taken from the named parameters' live values,
+so ramping a weight opens a blendshape (a smile, a blink). Each name must be
+a declared parameter, a target past the list contributes nothing, and with
+no `morph_weights` the mesh draws unmorphed.
+
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
 pose drives the model matrix once simulation starts. `body` is `box`
 or `sphere`, `size` is box half extents (a sphere reads its radius
@@ -234,12 +252,93 @@ over the frame scaled by `intensity`, so bright areas bleed a soft halo.
 Both fields are optional with engine defaults. Like `blur.pass` and
 `grade.pass` it ships no asset and is always ready.
 
+A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
+{"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
+the host's submitted depth near..far range) and `strength` how sharply the
+frame softens with distance from it, so geometry nearer or farther than the
+focus plane blurs while the plane reads crisp. It reads the depth the host
+submits; with no depth it holds the frame through, the standard capability
+degradation. Both fields are optional with engine defaults, and it ships no
+asset.
+
+A `"fog.pass"` node is a depth fog post-effect. It carries a `"fog":
+{"color", "density"}` block: the frame fades toward `color` (three 0..1
+numbers) by how far its submitted depth is, `density` scaling the falloff,
+so distant geometry sinks into haze while near content stays clear. Like
+`dof.pass` it reads the host's depth and holds the frame through when none
+is submitted, ships no asset, and defaults its fields.
+
+An `"outline.pass"` node is a depth-edge outline post-effect. It carries an
+`"outline": {"color", "threshold"}` block: where the submitted depth jumps
+between neighboring pixels by more than `threshold` it draws `color` (three
+0..1 numbers) over the frame, so silhouettes and creases get a toon outline
+while flat depth stays untouched. Like `dof.pass` and `fog.pass` it reads the
+host's depth, holds the frame through with none submitted, ships no asset,
+and defaults its fields.
+
+A `"trail.pass"` node is a motion-trail post-effect. It carries a `"trail":
+{"amount"}` block: `amount` (0..1) is how much of the previous frame the
+current one keeps, so moving subjects smear a fading echo behind them while a
+still frame is left untouched. It needs no host input - the frame it echoes is
+the one it drew last, seeded from the current frame the first time so the first
+frame shows no echo - so it is always ready. `amount` is optional with an
+engine default, and it ships no asset.
+
+An `"ssr.pass"` node is a screen-space reflection post-effect. It carries an
+`"ssr": {"strength", "plane"}` block: `plane` (0..1 down the frame) is the
+horizon below which the scene mirrors into a reflective floor, and `strength`
+(0..1) how strongly the reflection shows. It reads the host's submitted depth
+to scale the reflection by how near the floor is, so a near floor wets while a
+far one stays dry, holding the frame through when no depth is submitted. Both
+fields are optional with engine defaults, and it ships no asset.
+
+An `"env.pass"` node draws the environment behind the segmented foreground.
+It carries an `"env": {"top", "bottom", "intensity"}` block: a gradient from
+`bottom` to `top` (each three 0..1 numbers) scaled by `intensity`, with a sun
+glow, standing in for the environment behind the subject. It composites over
+the segmentation mask the way `blend.pass` does, so the environment fills the
+background and the subject stays put; the submitted camera pose pans it as the
+device turns. If the node ships an equirect image at `assets/<id>.png` it
+samples that panorama by the pose-turned view ray instead of the gradient,
+upgrading in place once the image loads. With no segmentation the mask defaults
+to all-foreground and the environment stays hidden. The color fields are
+optional with engine defaults, the image is optional, and it declares the
+`"segmentation"` capability.
+
 A `"draw.board"` node draws the session's brush board at its own place in the
 chain: the frame passes through, then every committed stroke draws over it, neon
 strokes additively and the rest on alpha. It ships no asset, carries no params,
 and is always ready, since the strokes come from the host's draw input, not the
 bundle. Without a `draw.board` node the board still draws as a final overlay; the
 node only lets a lens place it earlier so later passes act on the drawing too.
+
+A `"sprite.2d"` node draws a 2D image over the frame at its own place in the
+chain. It ships its image as `assets/<id>.png` and carries a `"sprite":
+{"x", "y", "w", "h", "opacity"}` block: a rect in normalized frame
+coordinates (origin top-left, 0..1 across the frame) and a draw opacity,
+all optional and defaulting to the full frame at full opacity. The image
+alpha-composites within the rect over whatever the chain has drawn so far,
+so a sprite reads as a sticker or badge pinned to the frame. An
+`"opacity_param"` names a parameter whose live value overrides the opacity
+each frame, so a param_ramp fades the sprite or a beat trigger pulses it. A
+`"frames"` count above one makes the sprite animated: it loads
+`assets/<id>_0.png` through `assets/<id>_(frames-1).png` and cycles them at
+`"fps"` off the lens clock. Shipping the image as an animated GIF at
+`assets/<id>.gif` instead plays the clip as a video texture: the engine
+decodes its frames and cycles them at the clip's own frame timing, so a
+sticker animates without a param or a frame count. Until its image decodes
+(all frames, for an animated sprite) the node holds the frame through, never
+blocking the chain.
+
+A `"text.2d"` node draws a line of text over the frame. It carries a `"text":
+{"content", "x", "y", "w", "h", "opacity", "color"}` block: the string to
+draw, the same normalized rect and opacity a sprite takes, and an rgb color
+(three 0..1 numbers) for the glyphs. The engine rasterizes the string with a
+built-in font, so a text node ships no asset, and composites it into the rect
+like a sprite; it takes the same `"opacity_param"` for a parameter-driven
+fade. A newline in the `content` starts a new line, so a multi-line caption
+fits the rect as several rows. The font covers space, digits, upper- and
+lowercase letters, and common punctuation; any other character draws blank.
 
 A `"layout.composite"` node lets a lens drive the head composite instead of the
 host: it carries a `"layout": {"arrangement", "key", "chroma", "similarity",
@@ -269,7 +368,7 @@ The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
 passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing,
-the draw board, the layout composite, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
+the draw board, the layout composite, the 2D sprite, the 2D text, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
 the bottom; without a tracked face the node draws nothing, the standard
 capability degradation).
@@ -348,14 +447,16 @@ paragraph.
 
 ### 6.3 Parameter animation
 
-Two curve primitives, chosen per `param_ramp`: `linear` (duration_ms, from
-current value to target) and `spring` (stiffness, damping, target; a
-standard critically-damped-tunable spring integrated at the fixed graph
-timestep, not wall-clock, so it is frame-rate independent and
-deterministic across platforms for the conformance harness). No custom
-easing curves in GLF 1.0; if a future version adds them, they arrive as a
-minor-version-gated new `curve` field a 1.0 runtime tolerates and ignores,
-falling back to `linear`.
+Curve primitives, chosen per `param_ramp`: `linear` (duration_ms, from
+current value to target); the easing curves `ease_in_quad`,
+`ease_out_quad`, `ease_in_out_quad`, `ease_in_out_cubic`, and
+`ease_in_out_sine` (all duration_ms, shaping the same progress through
+their curve so the ramp still lands exactly on target when its time is
+up); and `spring` (stiffness, damping, target; a standard
+critically-damped-tunable spring integrated at the fixed graph timestep,
+not wall-clock, so it is frame-rate independent and deterministic across
+platforms for the conformance harness). An unknown `curve` value fails
+validation.
 
 ## 7. Assets
 
@@ -393,6 +494,51 @@ business carrying a C++ shader compiler toolchain just to run
 user-authored effects, and a bundle that fails to compile is caught at
 package time by the same validator a lens author already runs, not
 discovered by an end user's device.
+
+### 7.1 Material graphs
+
+Instead of writing a fragment shader by hand, a `shader.pass` node may
+carry a `material` block: a node graph the engine lowers to a fragment
+shader and compiles at package time, exactly like an authored one. The
+block is an `output` index and a `nodes` array. Each node is an object
+with a `kind` and, as its kind needs, `inputs` (indices into the array),
+`params` (up to four numbers), a `name` (a texture or uniform binding),
+and a `type` (the value type of a `constant` or `uniform`: `float`,
+`vec2`, `vec3`, `vec4`):
+
+```json
+{"type": "shader.pass", "inputs": {"frame": "camera"},
+ "material": {"output": 4, "nodes": [
+   {"kind": "uv"},
+   {"kind": "texture", "name": "texColor"},
+   {"kind": "sample", "inputs": [1, 0]},
+   {"kind": "constant", "type": "vec4", "params": [1.0, 0.5, 0.2, 1.0]},
+   {"kind": "multiply", "inputs": [2, 3]},
+   {"kind": "output", "inputs": [4]}]}}
+```
+
+The graph is a typed DAG. Sources take no inputs: `uv` (the frame
+coordinate), `time`, `constant`, `uniform` (host-set by name), and
+`texture` (a sampler bound by name, `texColor` being the frame itself).
+`sample` reads a texture at a coordinate. Arithmetic (`add`, `subtract`,
+`multiply`, `divide`, `power`, `min`, `max`, `mod`) and the vector and
+scalar functions (`dot`, `normalize`, `length`, `saturate`, `abs`,
+`floor`, `fract`, `sin`, `cos`, `clamp`, `step`, `smoothstep`, `mix`)
+carry their operands' types through. `split` takes one channel out of a
+vector, `combine3`/`combine4` build a vector from floats, and `lambert`
+and `fresnel` shade from a normal, light, or view. The single `output`
+node takes a `vec4` and is the graph's root.
+
+Validation rejects a graph with a cycle, a dangling input, a wrong
+argument count, or a type mismatch, naming the offending node. A valid
+graph lowers to the same GLSL contract as an authored shader and
+compiles to every profile the same way, so a material a lens authors is
+a real compiled shader on the device, not an interpreter. A vignette,
+posterize, pixelate, or edge effect is a material graph with no dedicated
+shader; see the `material-tint`, `material-vignette`, `material-posterize`,
+`material-pixelate`, and `material-edge` reference lenses. Neighbour
+sampling (an edge detector reads offset `uv` and compares) works too, so
+a material graph is not limited to per-pixel math.
 
 glTF/GLB assets bind through the engine's existing cgltf adapter: the same
 allocator-bridged parse, the same refusal of external file references (a glTF

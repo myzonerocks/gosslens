@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.ssr-floor",
+  "version": "1.0.0",
+  "display_name": "Reflective Floor",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "ssr", "type": "ssr.pass", "inputs": {"frame": "camera"}, "params": {}, "ssr": {"strength": 0.7, "plane": 0.5}}
+  ],
+  "triggers": []
+}

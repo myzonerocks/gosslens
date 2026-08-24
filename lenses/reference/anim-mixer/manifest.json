@@ -1,0 +1,19 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.anim-mixer",
+  "version": "1.0.0",
+  "display_name": "Anim Mixer",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [
+    {"name": "spin_w", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0},
+    {"name": "slide_w", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}
+  ],
+  "nodes": [
+    {"id": "body", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "clip_weights": ["spin_w", "slide_w"]}
+  ],
+  "triggers": [
+    {"when": "timer('x') >= 0.3", "action": {"kind": "param_ramp", "target": "spin_w", "to": 0.0, "duration_ms": 100, "curve": "ease_in_out_quad"}},
+    {"when": "timer('x') >= 0.3", "action": {"kind": "param_ramp", "target": "slide_w", "to": 1.0, "duration_ms": 100, "curve": "ease_in_out_quad"}}
+  ]
+}

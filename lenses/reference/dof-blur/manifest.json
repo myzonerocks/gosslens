@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.dof-blur",
+  "version": "1.0.0",
+  "display_name": "DoF Blur",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "dof", "type": "dof.pass", "inputs": {"frame": "camera"}, "params": {}, "dof": {"focus": 0.5, "strength": 10.0}}
+  ],
+  "triggers": []
+}

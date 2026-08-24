@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.sprite-overlay",
+  "version": "1.0.0",
+  "display_name": "Sprite Overlay",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.3, "y": 0.3, "w": 0.4, "h": 0.4, "opacity": 1.0}}
+  ],
+  "triggers": []
+}

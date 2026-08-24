@@ -204,8 +204,10 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         }
     }
 
-    // The reference lens ships as a bundled folder (project.yml) keeping
-    // its own name, so its manifest sits at <bundle>/beauty-baseline/manifest.json.
+    // The reference lens ships as a bundled folder (project.yml) at
+    // <bundle>/beauty-baseline/manifest.json. Also bundled: material-tint,
+    // anim-mixer, morph-blend, sprite-overlay, text-overlay. Swap the
+    // subdirectory below to any of them to run it.
     private func activateLens() {
         guard let session,
               let url = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "beauty-baseline"),

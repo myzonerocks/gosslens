@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.fog-depth",
+  "version": "1.0.0",
+  "display_name": "Depth Fog",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "fog", "type": "fog.pass", "inputs": {"frame": "camera"}, "params": {}, "fog": {"color": [0.8, 0.85, 0.9], "density": 1.5}}
+  ],
+  "triggers": []
+}

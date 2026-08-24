@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, model_gltf, mesh_face, draw_board, layout_composite };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -50,9 +50,17 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "blur.pass")) return .blur_pass;
     if (std.mem.eql(u8, type_str, "grade.pass")) return .grade_pass;
     if (std.mem.eql(u8, type_str, "bloom.pass")) return .bloom_pass;
+    if (std.mem.eql(u8, type_str, "dof.pass")) return .dof_pass;
+    if (std.mem.eql(u8, type_str, "fog.pass")) return .fog_pass;
+    if (std.mem.eql(u8, type_str, "outline.pass")) return .outline_pass;
+    if (std.mem.eql(u8, type_str, "trail.pass")) return .trail_pass;
+    if (std.mem.eql(u8, type_str, "ssr.pass")) return .ssr_pass;
+    if (std.mem.eql(u8, type_str, "env.pass")) return .env_pass;
     if (std.mem.eql(u8, type_str, "model.gltf")) return .model_gltf;
     if (std.mem.eql(u8, type_str, "draw.board")) return .draw_board;
     if (std.mem.eql(u8, type_str, "layout.composite")) return .layout_composite;
+    if (std.mem.eql(u8, type_str, "sprite.2d")) return .sprite_2d;
+    if (std.mem.eql(u8, type_str, "text.2d")) return .text_2d;
     return null;
 }
 
@@ -76,7 +84,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d => &.{},
     };
 }
 
@@ -110,13 +118,38 @@ const LensNode = struct {
     cloth: ?manifest.ClothField = null,
     hair: ?manifest.HairField = null,
     particles: ?manifest.ParticleField = null,
+    /// .model_gltf only: a parameter name per animation clip whose live
+    /// value is that clip's blend weight; empty plays the first clip.
+    /// Slices into the retained manifest arena, not separately owned.
+    clip_weights: []const []const u8 = &.{},
+    /// .model_gltf only: a parameter name per morph target whose live
+    /// value is that target's blend weight; empty leaves the mesh
+    /// unmorphed. Slices into the retained manifest arena.
+    morph_weights: []const []const u8 = &.{},
     /// .grade_pass only: the node's parametric color grade.
     grade: ?manifest.GradeField = null,
     /// .bloom_pass only: the node's glow threshold and intensity.
     bloom: ?manifest.BloomField = null,
+    /// .dof_pass only: the node's focus plane and blur strength.
+    dof: ?manifest.DofField = null,
+    /// .fog_pass only: the node's fog color and density.
+    fog: ?manifest.FogField = null,
+    /// .outline_pass only: the node's line color and depth threshold.
+    outline: ?manifest.OutlineField = null,
+    /// .trail_pass only: the node's motion-trail echo amount.
+    trail: ?manifest.TrailField = null,
+    /// .ssr_pass only: the node's reflection strength and floor plane.
+    ssr: ?manifest.SsrField = null,
+    /// .env_pass only: the node's sky gradient colors and intensity.
+    env: ?manifest.EnvField = null,
     /// .layout_composite only: the head arrangement and camera blend the lens
     /// drives the composite with.
     layout: ?manifest.LayoutField = null,
+    /// .sprite_2d only: the screen rect and opacity the node draws its
+    /// image at.
+    sprite: ?manifest.SpriteField = null,
+    /// .text_2d only: the string, rect, opacity, and color the node draws.
+    text: ?manifest.TextField = null,
     /// .model_gltf only: microseconds since play_animation last fired
     /// for this node, null if it never has. Advances every tick() the
     /// same way a ramp does - once a trigger starts it, not before.
@@ -176,6 +209,36 @@ pub const MeshFaceNode = struct {
     texture_stem: []const u8,
 };
 
+/// One sprite.2d node ready for the caller to load and draw - which graph
+/// node it is, the image (assets/<stem>.png) it draws, and the normalized
+/// screen rect and opacity it draws at.
+pub const SpriteNode = struct {
+    graph_index: graph.NodeIndex,
+    image_stem: []const u8,
+    rect: [4]f32,
+    opacity: f32,
+    /// A parameter name whose live value overrides opacity each frame, or
+    /// empty for the static opacity.
+    opacity_param: []const u8,
+    /// Frame count and rate for an animated sprite; frames == 1 is static.
+    frames: u32,
+    fps: f32,
+};
+
+/// One text.2d node ready for the caller to rasterize and draw - which
+/// graph node it is, the string it draws, the normalized rect and opacity,
+/// and the rgb color its glyphs take.
+pub const TextNode = struct {
+    graph_index: graph.NodeIndex,
+    content: []const u8,
+    rect: [4]f32,
+    opacity: f32,
+    color: [3]u8,
+    /// A parameter name whose live value overrides opacity each frame, or
+    /// empty for the static opacity.
+    opacity_param: []const u8,
+};
+
 /// One grade.pass node ready for the caller to draw - which graph node
 /// it is, and its parametric color grade packed as (exposure, contrast,
 /// saturation, temperature) for the renderer's u_grade uniform.
@@ -191,7 +254,46 @@ pub const BloomPassNode = struct {
     bloom: [4]f32,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, model, mesh, draw_board };
+pub const DofPassNode = struct {
+    graph_index: graph.NodeIndex,
+    focus: f32,
+    strength: f32,
+};
+
+pub const FogPassNode = struct {
+    graph_index: graph.NodeIndex,
+    color: [3]f32,
+    density: f32,
+};
+
+pub const OutlinePassNode = struct {
+    graph_index: graph.NodeIndex,
+    color: [3]f32,
+    threshold: f32,
+};
+
+pub const TrailPassNode = struct {
+    graph_index: graph.NodeIndex,
+    amount: f32,
+};
+
+pub const SsrPassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+    plane: f32,
+};
+
+pub const EnvPassNode = struct {
+    graph_index: graph.NodeIndex,
+    top: [3]f32,
+    bottom: [3]f32,
+    intensity: f32,
+    /// The equirect environment image's stem (assets/<stem>.png) when the
+    /// node ships one, null for a plain gradient sky.
+    image_stem: ?[]const u8,
+};
+
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, trail, ssr, env, model, mesh, draw_board, sprite };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -229,6 +331,9 @@ pub const Lens = struct {
     /// reads, not a value a trigger's action starts).
     timer_names: [][]u8,
     timer_elapsed_us: []u64,
+    /// Microseconds since activation, advanced every tick - a free-running
+    /// lens clock, the time source an animated sprite cycles its frames on.
+    elapsed_us: u64 = 0,
     /// tick()'s working and output storage, sized once at activation so
     /// the per-frame path allocates nothing: timer snapshot, per-param
     /// touch flags, and room for every parameter-bound effect at once.
@@ -347,6 +452,102 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every dof.pass node this lens spliced, in execution order, each
+    /// carrying its focus plane and blur strength.
+    pub fn dofPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]DofPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(DofPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .dof_pass) continue;
+            const d = node.dof orelse manifest.DofField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .focus = d.focus, .strength = d.strength });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every fog.pass node this lens spliced, in execution order, each
+    /// carrying its fog color and density.
+    pub fn fogPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]FogPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(FogPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .fog_pass) continue;
+            const f = node.fog orelse manifest.FogField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ f.r, f.g, f.b }, .density = f.density });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every outline.pass node this lens spliced, in execution order, each
+    /// carrying its line color and depth threshold.
+    pub fn outlinePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]OutlinePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(OutlinePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .outline_pass) continue;
+            const o = node.outline orelse manifest.OutlineField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ o.r, o.g, o.b }, .threshold = o.threshold });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every trail.pass node this lens spliced, in execution order, each
+    /// carrying its motion-trail echo amount.
+    pub fn trailPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]TrailPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(TrailPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .trail_pass) continue;
+            const tr = node.trail orelse manifest.TrailField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .amount = tr.amount });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every ssr.pass node this lens spliced, in execution order, each
+    /// carrying its reflection strength and floor plane.
+    pub fn ssrPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]SsrPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(SsrPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .ssr_pass) continue;
+            const sr = node.ssr orelse manifest.SsrField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = sr.strength, .plane = sr.plane });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every env.pass node this lens spliced, in execution order, each
+    /// carrying its sky gradient colors and intensity.
+    pub fn envPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]EnvPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(EnvPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .env_pass) continue;
+            const ev = node.env orelse manifest.EnvField{};
+            try out.append(gpa, .{
+                .graph_index = node.graph_index,
+                .top = .{ ev.top_r, ev.top_g, ev.top_b },
+                .bottom = .{ ev.bottom_r, ev.bottom_g, ev.bottom_b },
+                .intensity = ev.intensity,
+                .image_stem = node.asset_stem,
+            });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every model.gltf node this lens spliced, in the graph's real
     /// execution order - mirrors shaderPassNodes/lutPassNodes/
     /// blendPassNodes exactly, one more node type over.
@@ -376,6 +577,38 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every sprite.2d node this lens spliced, in execution order, each
+    /// carrying its image stem, screen rect, and opacity - mirrors the
+    /// other per-kind accessors.
+    pub fn spriteNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]SpriteNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(SpriteNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .sprite_2d) continue;
+            const sp = node.sprite orelse manifest.SpriteField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .frames = sp.frames, .fps = sp.fps });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every text.2d node this lens spliced, in execution order, each
+    /// carrying its string, rect, opacity, and color - the caller
+    /// rasterizes the string and draws it like a sprite.
+    pub fn textNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]TextNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(TextNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .text_2d) continue;
+            const tf = node.text orelse manifest.TextField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every shader.pass, lut.pass, blend.pass, and model.gltf node
     /// this lens spliced, in one real execution-order sequence - the
     /// actual draw order for a chain that mixes any of the four kinds,
@@ -394,9 +627,16 @@ pub const Lens = struct {
                 .blur_pass => .blur,
                 .grade_pass => .grade,
                 .bloom_pass => .bloom,
+                .dof_pass => .dof,
+                .fog_pass => .fog,
+                .outline_pass => .outline,
+                .trail_pass => .trail,
+                .ssr_pass => .ssr,
+                .env_pass => .env,
                 .model_gltf => .model,
                 .mesh_face => .mesh,
                 .draw_board => .draw_board,
+                .sprite_2d, .text_2d => .sprite,
                 else => continue,
             };
             try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
@@ -421,6 +661,45 @@ pub const Lens = struct {
     pub fn modelElapsedUs(self: *const Lens, graph_index: graph.NodeIndex) ?u64 {
         const node = self.findNode(graph_index) orelse return null;
         return node.model_elapsed_us;
+    }
+
+    /// Microseconds since this lens activated, advanced every tick.
+    pub fn elapsedUs(self: *const Lens) u64 {
+        return self.elapsed_us;
+    }
+
+    /// The blend weight the model.gltf node at graph_index binds to its
+    /// clip at clip_index: the live value of the bound parameter, 0 for a
+    /// clip past the bound list. Null when the node binds no weights, so
+    /// the caller falls back to playing the first clip at full weight.
+    pub fn clipWeight(self: *const Lens, graph_index: graph.NodeIndex, clip_index: usize) ?f32 {
+        const node = self.findNode(graph_index) orelse return null;
+        if (node.clip_weights.len == 0) return null;
+        if (clip_index >= node.clip_weights.len) return 0;
+        return self.paramValue(node.clip_weights[clip_index]) orelse 0;
+    }
+
+    /// Whether the model.gltf node at graph_index binds any clip weights,
+    /// so the caller knows to blend rather than take the single-clip path.
+    pub fn bindsClipWeights(self: *const Lens, graph_index: graph.NodeIndex) bool {
+        const node = self.findNode(graph_index) orelse return false;
+        return node.clip_weights.len > 0;
+    }
+
+    /// The blend weight the model.gltf node at graph_index binds to its
+    /// morph target at target_index: the bound parameter's live value, 0
+    /// for a target past the bound list or when the node binds none.
+    pub fn morphWeight(self: *const Lens, graph_index: graph.NodeIndex, target_index: usize) f32 {
+        const node = self.findNode(graph_index) orelse return 0;
+        if (target_index >= node.morph_weights.len) return 0;
+        return self.paramValue(node.morph_weights[target_index]) orelse 0;
+    }
+
+    /// Whether the model.gltf node at graph_index binds any morph weights,
+    /// so the caller knows to deform the mesh this frame.
+    pub fn bindsMorphWeights(self: *const Lens, graph_index: graph.NodeIndex) bool {
+        const node = self.findNode(graph_index) orelse return false;
+        return node.morph_weights.len > 0;
     }
 
     /// The inline source of this lens's script node, or null if it has none.
@@ -558,7 +837,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .graph_index = graph_index,
             .node_type = node_type,
             .asset_stem = switch (node_type) {
-                .shader_pass, .lut_pass, .blend_pass, .model_gltf, .mesh_face => node.id,
+                .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .sprite_2d => node.id,
                 else => null,
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
@@ -570,8 +849,18 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .cloth = if (node_type == .model_gltf) node.cloth else null,
             .hair = if (node_type == .model_gltf) node.hair else null,
             .particles = if (node_type == .model_gltf) node.particles else null,
+            .clip_weights = if (node_type == .model_gltf) node.clip_weights else &.{},
+            .morph_weights = if (node_type == .model_gltf) node.morph_weights else &.{},
+            .sprite = if (node_type == .sprite_2d) node.sprite else null,
+            .text = if (node_type == .text_2d) node.text else null,
             .grade = if (node_type == .grade_pass) node.grade else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
+            .dof = if (node_type == .dof_pass) node.dof else null,
+            .fog = if (node_type == .fog_pass) node.fog else null,
+            .outline = if (node_type == .outline_pass) node.outline else null,
+            .trail = if (node_type == .trail_pass) node.trail else null,
+            .ssr = if (node_type == .ssr_pass) node.ssr else null,
+            .env = if (node_type == .env_pass) node.env else null,
             .layout = if (node_type == .layout_composite) node.layout else null,
         };
 
@@ -702,6 +991,7 @@ fn clampToParam(p: manifest.Parameter, value: f32) f32 {
 /// still not wired to anything (real remaining work, tracked
 /// separately from this lens's own scope).
 pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const AppliedEffect {
+    lens.elapsed_us +|= real_dt_us;
     for (lens.timer_elapsed_us) |*elapsed| elapsed.* += real_dt_us;
     for (lens.timer_names, lens.timer_elapsed_us, 0..) |name, elapsed_us, i| {
         lens.tick_timer_values[i] = .{ .name = name, .seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0 };
@@ -760,8 +1050,10 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
             const idx = paramIndex(lens, action.target) orelse return;
             const target = clampToParam(lens.manifest.parameters[idx], action.to);
             lens.ramps[idx] = switch (action.curve) {
-                .linear => animation.Ramp.startLinear(lens.param_values[idx], target, action.duration_ms),
                 .spring => animation.Ramp.startSpring(lens.param_values[idx], target, action.stiffness, action.damping),
+                // linear and every easing curve are time-based; the tags match
+                // animation.Curve one to one, so map by name.
+                else => |c| animation.Ramp.startEased(lens.param_values[idx], target, action.duration_ms, std.meta.stringToEnum(animation.Curve, @tagName(c)).?),
             };
         },
         .play_animation => {
@@ -840,6 +1132,105 @@ test "a param bound to a node reports its default as the initial effect value" {
     try t.expectEqual(@as(usize, 1), effects.len);
     try t.expectEqual(EffectSlot.thin_face, effects[0].effect);
     try t.expectEqual(@as(f32, 0.0), effects[0].value);
+}
+
+const clip_weight_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.mixer", "version": "1.0.0", "display_name": "Mixer",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [
+    \\    {"name": "walk", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0},
+    \\    {"name": "run", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+    \\  "nodes": [
+    \\    {"id": "body", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "clip_weights": ["walk", "run"]}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a model node reads its clip weights from the parameters it binds" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, clip_weight_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    try t.expectEqual(NodeType.model_gltf, lens.nodes[0].node_type);
+    const gi = lens.nodes[0].graph_index;
+    try t.expect(lens.bindsClipWeights(gi));
+    try t.expectEqual(@as(f32, 1.0), lens.clipWeight(gi, 0).?); // walk default
+    try t.expectEqual(@as(f32, 0.0), lens.clipWeight(gi, 1).?); // run default
+    try t.expectEqual(@as(f32, 0.0), lens.clipWeight(gi, 2).?); // a clip past the list weighs nothing
+
+    lens.setParam("run", 0.75);
+    try t.expectEqual(@as(f32, 0.75), lens.clipWeight(gi, 1).?);
+}
+
+const morph_weight_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.morph", "version": "1.0.0", "display_name": "Morph",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [
+    \\    {"name": "smile", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0},
+    \\    {"name": "blink", "type": "float", "default": 0.25, "min": 0.0, "max": 1.0}],
+    \\  "nodes": [
+    \\    {"id": "face", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "morph_weights": ["smile", "blink"]}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a model node reads its morph weights from the parameters it binds" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, morph_weight_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    try t.expectEqual(NodeType.model_gltf, lens.nodes[0].node_type);
+    const gi = lens.nodes[0].graph_index;
+    try t.expect(lens.bindsMorphWeights(gi));
+    try t.expectEqual(@as(f32, 0.0), lens.morphWeight(gi, 0)); // smile default
+    try t.expectEqual(@as(f32, 0.25), lens.morphWeight(gi, 1)); // blink default
+    try t.expectEqual(@as(f32, 0.0), lens.morphWeight(gi, 2)); // a target past the list weighs nothing
+
+    lens.setParam("smile", 1.0);
+    try t.expectEqual(@as(f32, 1.0), lens.morphWeight(gi, 0));
+}
+
+const sprite_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.sprite", "version": "1.0.0", "display_name": "Sprite",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.2, "y": 0.3, "w": 0.4, "h": 0.5, "opacity": 0.6}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a sprite node surfaces its stem, rect, and opacity" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, sprite_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    try t.expectEqual(NodeType.sprite_2d, lens.nodes[0].node_type);
+    const sprites = try lens.spriteNodes(t.allocator, &g);
+    defer t.allocator.free(sprites);
+    try t.expectEqual(@as(usize, 1), sprites.len);
+    try t.expectEqualStrings("badge", sprites[0].image_stem);
+    try t.expectApproxEqAbs(@as(f32, 0.2), sprites[0].rect[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), sprites[0].rect[3], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.6), sprites[0].opacity, 0.001);
 }
 
 const shader_pass_manifest =

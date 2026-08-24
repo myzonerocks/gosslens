@@ -1,0 +1,29 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.material-vignette",
+  "version": "1.0.0",
+  "display_name": "Material Vignette",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "vig", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {},
+     "material": {"output": 13, "nodes": [
+       {"kind": "uv"},
+       {"kind": "constant", "type": "vec2", "params": [0.5, 0.5]},
+       {"kind": "subtract", "inputs": [0, 1]},
+       {"kind": "length", "inputs": [2]},
+       {"kind": "constant", "type": "float", "params": [0.3, 0.0, 0.0, 0.0]},
+       {"kind": "constant", "type": "float", "params": [0.8, 0.0, 0.0, 0.0]},
+       {"kind": "smoothstep", "inputs": [4, 5, 3]},
+       {"kind": "constant", "type": "float", "params": [1.0, 0.0, 0.0, 0.0]},
+       {"kind": "subtract", "inputs": [7, 6]},
+       {"kind": "texture", "name": "texColor"},
+       {"kind": "sample", "inputs": [9, 0]},
+       {"kind": "combine4", "inputs": [8, 8, 8, 7]},
+       {"kind": "multiply", "inputs": [10, 11]},
+       {"kind": "output", "inputs": [12]}
+     ]}}
+  ],
+  "triggers": []
+}

@@ -3890,6 +3890,36 @@ fn proveMaskDegradation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // material-tint authors its shader as a node graph; packaging lowered
+    // and compiled it. Render it twice: it must load, run, and draw real
+    // tinted content deterministically.
+    try renderOnce(gpa, engine, ".lens-packages/material-tint", "zig-out/conformance-material-a", null);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/material-tint", "zig-out/conformance-material-b", null);
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-material-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-material-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL a material-graph shader is not deterministic\n", .{});
+        return false;
+    }
+    var lo: u8 = 255;
+    var hi: u8 = 0;
+    for (a[18..]) |byte| {
+        lo = @min(lo, byte);
+        hi = @max(hi, byte);
+    }
+    if (hi - lo < 10) {
+        std.debug.print("conformance: FAIL the material shader drew a flat frame, it never sampled the input\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a lens-authored material graph compiles, loads, and renders real content deterministically\n", .{});
+    return true;
+}
+
 fn proveSceneSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // The deeplab scene segmenter infers 21 classes at 257 x 257 - both
     // past the portrait segmenters' shape. It must load, resample onto
@@ -4140,6 +4170,1201 @@ fn proveTriggerAnimFires(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the mixer blends clips by their bound weights. The anim-mixer
+/// bundle holds a spin clip and a slide clip whose weights start on the
+/// spin clip (quad centered) and ramp onto the slide clip (quad offset in
+/// +x), so screenshots before and after the ramp must differ.
+fn proveMixerBlend(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/anim-mixer";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: anim-mixer proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+
+    // Let the async .glb land, then screenshot the rest pose: full weight
+    // on the spin clip, the quad centered.
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const before_path: [:0]const u8 = "zig-out/conformance-anim-mixer-before";
+    engine.renderer.?.requestScreenshot(before_path.ptr);
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Tick past the triggers' 0.3s threshold and the 100ms ramp so the
+    // weight moves fully onto the slide clip.
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 600_000) : (elapsed_us += dt_us) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) {
+            std.debug.print("conformance: anim-mixer proof: tick refused\n", .{});
+            return false;
+        }
+    }
+
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const after_path: [:0]const u8 = "zig-out/conformance-anim-mixer-after";
+    engine.renderer.?.requestScreenshot(after_path.ptr);
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const before = try std.Io.Dir.cwd().readFileAlloc(harness_io, before_path ++ ".tga", gpa, .limited(8 << 20));
+    defer gpa.free(before);
+    const after = try std.Io.Dir.cwd().readFileAlloc(harness_io, after_path ++ ".tga", gpa, .limited(8 << 20));
+    defer gpa.free(after);
+
+    if (std.mem.eql(u8, before, after)) {
+        std.debug.print("conformance: FAIL anim-mixer: shifting the clip weights left the pose unchanged\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF anim-mixer blends its clips by weight: ramping onto the slide clip visibly moves the pose\n", .{});
+    return true;
+}
+
+/// Proves a lens deforms a mesh by its bound morph weights. The morph-blend
+/// bundle's quad carries one morph target that expands it; its weight starts
+/// at zero and a param_ramp drives it to one, so screenshots before and
+/// after the ramp must differ.
+fn proveMorphBlend(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/morph-blend";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: morph-blend proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+
+    // Let the async .glb land, then screenshot the rest mesh: weight zero,
+    // the quad at its base size.
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const before_path: [:0]const u8 = "zig-out/conformance-morph-blend-before";
+    engine.renderer.?.requestScreenshot(before_path.ptr);
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Tick past the trigger's 0.3s threshold and the 100ms ramp so the
+    // morph weight reaches one and the quad expands.
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 600_000) : (elapsed_us += dt_us) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) {
+            std.debug.print("conformance: morph-blend proof: tick refused\n", .{});
+            return false;
+        }
+    }
+
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const after_path: [:0]const u8 = "zig-out/conformance-morph-blend-after";
+    engine.renderer.?.requestScreenshot(after_path.ptr);
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const before = try std.Io.Dir.cwd().readFileAlloc(harness_io, before_path ++ ".tga", gpa, .limited(8 << 20));
+    defer gpa.free(before);
+    const after = try std.Io.Dir.cwd().readFileAlloc(harness_io, after_path ++ ".tga", gpa, .limited(8 << 20));
+    defer gpa.free(after);
+
+    if (std.mem.eql(u8, before, after)) {
+        std.debug.print("conformance: FAIL morph-blend: driving the morph weight left the mesh unchanged\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF morph-blend deforms its mesh by weight: ramping the morph weight visibly expands the quad\n", .{});
+    return true;
+}
+
+/// Proves a sprite.2d node draws its image over the frame. The static
+/// sprite-overlay bundle draws a badge in a centre rect; its output must
+/// differ from the same frame with no lens, so the sprite really composited.
+fn proveSpriteDraw(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+
+    // Baseline: the frame through a session with no lens.
+    {
+        const plain = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(plain);
+        if (abi.goss_session_submit_frame_copy(plain, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        for (0..8) |_| {
+            _ = abi.goss_engine_render_frame(engine, plain);
+            c.glfwPollEvents();
+        }
+        engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-plain");
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, plain);
+            c.glfwPollEvents();
+        }
+        settle(engine);
+    }
+
+    // The sprite lens, given time for its image to decode, then screenshot.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        const bundle_path = ".lens-packages/sprite-overlay";
+        const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+        if (activated != .ok) {
+            std.debug.print("conformance: sprite-overlay proof: activate: {s}\n", .{@tagName(activated)});
+            return false;
+        }
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        for (0..15) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-drawn");
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        settle(engine);
+    }
+
+    const plain = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-plain.tga", gpa, .limited(8 << 20));
+    defer gpa.free(plain);
+    const drawn = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-drawn.tga", gpa, .limited(8 << 20));
+    defer gpa.free(drawn);
+
+    if (std.mem.eql(u8, plain, drawn)) {
+        std.debug.print("conformance: FAIL sprite-overlay: the sprite produced no visible change over the plain frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF sprite-overlay draws its image over the frame: the composited output differs from the plain frame\n", .{});
+    return true;
+}
+
+/// Proves a text.2d node rasterizes and draws its string. The text-overlay
+/// bundle draws a label over the frame; its output must differ from the
+/// same frame with no lens, so the built-in font really composited.
+fn proveTextDraw(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+
+    // Baseline: the frame through a session with no lens.
+    {
+        const plain = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(plain);
+        if (abi.goss_session_submit_frame_copy(plain, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        for (0..8) |_| {
+            _ = abi.goss_engine_render_frame(engine, plain);
+            c.glfwPollEvents();
+        }
+        engine.renderer.?.requestScreenshot("zig-out/conformance-text-plain");
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, plain);
+            c.glfwPollEvents();
+        }
+        settle(engine);
+    }
+
+    // The text lens: its string rasterizes at activation, so it draws right away.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        const bundle_path = ".lens-packages/text-overlay";
+        const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+        if (activated != .ok) {
+            std.debug.print("conformance: text-overlay proof: activate: {s}\n", .{@tagName(activated)});
+            return false;
+        }
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        for (0..8) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        engine.renderer.?.requestScreenshot("zig-out/conformance-text-drawn");
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        settle(engine);
+    }
+
+    const plain = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-text-plain.tga", gpa, .limited(8 << 20));
+    defer gpa.free(plain);
+    const drawn = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-text-drawn.tga", gpa, .limited(8 << 20));
+    defer gpa.free(drawn);
+
+    if (std.mem.eql(u8, plain, drawn)) {
+        std.debug.print("conformance: FAIL text-overlay: the text produced no visible change over the plain frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF text-overlay rasterizes and draws its string: the composited output differs from the plain frame\n", .{});
+    return true;
+}
+
+/// Proves a material graph can clip the frame to a region: the material-clip
+/// bundle keeps the frame inside a centre rect and blacks out the rest
+/// through a step/mix graph, so its output must differ from the plain frame.
+fn proveMaterialClip(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+
+    {
+        const plain = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(plain);
+        if (abi.goss_session_submit_frame_copy(plain, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        for (0..8) |_| {
+            _ = abi.goss_engine_render_frame(engine, plain);
+            c.glfwPollEvents();
+        }
+        engine.renderer.?.requestScreenshot("zig-out/conformance-clip-plain");
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, plain);
+            c.glfwPollEvents();
+        }
+        settle(engine);
+    }
+
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        const bundle_path = ".lens-packages/material-clip";
+        const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+        if (activated != .ok) {
+            std.debug.print("conformance: material-clip proof: activate: {s}\n", .{@tagName(activated)});
+            return false;
+        }
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        for (0..8) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        engine.renderer.?.requestScreenshot("zig-out/conformance-clip-drawn");
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        settle(engine);
+    }
+
+    const plain = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-clip-plain.tga", gpa, .limited(8 << 20));
+    defer gpa.free(plain);
+    const drawn = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-clip-drawn.tga", gpa, .limited(8 << 20));
+    defer gpa.free(drawn);
+
+    if (std.mem.eql(u8, plain, drawn)) {
+        std.debug.print("conformance: FAIL material-clip: clipping the frame to a region produced no visible change\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF material-clip clips the frame to a region: the composited output differs from the plain frame\n", .{});
+    return true;
+}
+
+/// Proves a sprite's opacity follows a bound parameter. The sprite-fade
+/// bundle draws a badge at full opacity, then a param_ramp fades its
+/// opacity_param to zero, so the frame before the ramp (badge visible) and
+/// after (badge gone) must differ.
+fn proveSpriteFade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/sprite-fade";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: sprite-fade proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    for (0..12) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-fade-before");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 600_000) : (elapsed_us += dt_us) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) {
+            std.debug.print("conformance: sprite-fade proof: tick refused\n", .{});
+            return false;
+        }
+    }
+
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-fade-after");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const before = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-fade-before.tga", gpa, .limited(8 << 20));
+    defer gpa.free(before);
+    const after = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-fade-after.tga", gpa, .limited(8 << 20));
+    defer gpa.free(after);
+
+    if (std.mem.eql(u8, before, after)) {
+        std.debug.print("conformance: FAIL sprite-fade: fading the opacity parameter left the frame unchanged\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF sprite-fade follows its opacity parameter: ramping it to zero fades the badge out\n", .{});
+    return true;
+}
+
+/// Proves an animated sprite cycles its frames off the lens clock. The
+/// sprite-anim bundle draws a two-frame badge at 8 fps; the frame at
+/// elapsed zero and the frame after ticking a quarter second (past one
+/// frame period) draw different images, so the two must differ.
+fn proveSpriteAnim(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/sprite-anim";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: sprite-anim proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // Let both frames decode (no tick, so the clock stays at zero), then
+    // screenshot frame 0.
+    for (0..16) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-anim-frame0");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Advance the lens clock into the second frame's window (one frame
+    // period at 8 fps is 125ms; ~180ms lands on frame 1, not a wrap back
+    // to frame 0 as a full 250ms two-period tick would).
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 180_000) : (elapsed_us += dt_us) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) {
+            std.debug.print("conformance: sprite-anim proof: tick refused\n", .{});
+            return false;
+        }
+    }
+
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-anim-frame1");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const frame0 = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-anim-frame0.tga", gpa, .limited(8 << 20));
+    defer gpa.free(frame0);
+    const frame1 = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sprite-anim-frame1.tga", gpa, .limited(8 << 20));
+    defer gpa.free(frame1);
+
+    if (std.mem.eql(u8, frame0, frame1)) {
+        std.debug.print("conformance: FAIL sprite-anim: advancing the clock did not change the sprite frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF sprite-anim cycles its frames off the lens clock: advancing the clock draws a different frame\n", .{});
+    return true;
+}
+
+/// Proves a sprite.2d node plays an animated GIF as a video texture. The
+/// gif-sprite bundle ships clip.gif, a bar sweeping across six frames; the
+/// hand-written decoder turns it into textures the sprite cycles off the lens
+/// clock, so advancing the clock draws a different frame.
+fn proveGifSprite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/gif-sprite";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: gif-sprite proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // The GIF decodes to textures at activation, so frame 0 is ready at once.
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-gif-frame0");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // The clip runs at 12.5 fps (80ms a frame); 120ms lands on frame 1, its
+    // bar swept to a new column, not a wrap back to frame 0.
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 120_000) : (elapsed_us += dt_us) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) return error.TickRefused;
+    }
+
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-gif-frame1");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const frame0 = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-gif-frame0.tga", gpa, .limited(8 << 20));
+    defer gpa.free(frame0);
+    const frame1 = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-gif-frame1.tga", gpa, .limited(8 << 20));
+    defer gpa.free(frame1);
+
+    if (std.mem.eql(u8, frame0, frame1)) {
+        std.debug.print("conformance: FAIL gif-sprite: advancing the clock did not change the GIF frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF gif-sprite plays its clip off the lens clock: advancing the clock draws a different decoded GIF frame\n", .{});
+    return true;
+}
+
+/// Proves the dof.pass blurs by the submitted depth. The dof-blur bundle
+/// holds the frame through until depth arrives (its capability is absent),
+/// then, given a near-to-far depth gradient, softens everything off the
+/// focus plane, so the frame with depth differs from the frame without.
+fn proveDofPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/dof-blur";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: dof-blur proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // No depth yet: the dof.pass holds the frame through.
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-dof-nodepth");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // A near-to-far depth gradient across the frame: only the middle sits at
+    // the focus plane, so the sides blur.
+    const dw: u32 = 32;
+    const dh: u32 = 32;
+    var depth: [dw * dh]f32 = undefined;
+    for (0..dh) |y| {
+        for (0..dw) |x| {
+            const t01 = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(dw - 1));
+            depth[y * dw + x] = 0.1 + t01 * 4.9;
+        }
+    }
+    if (abi.goss_session_submit_depth(session, &depth, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-dof-depth");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const nodepth = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-dof-nodepth.tga", gpa, .limited(8 << 20));
+    defer gpa.free(nodepth);
+    const withdepth = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-dof-depth.tga", gpa, .limited(8 << 20));
+    defer gpa.free(withdepth);
+
+    if (std.mem.eql(u8, nodepth, withdepth)) {
+        std.debug.print("conformance: FAIL dof-blur: submitting depth did not change the frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF dof-blur softens by depth: the frame with a depth gradient differs from the frame without depth\n", .{});
+    return true;
+}
+
+/// Proves the fog.pass fades the frame toward its fog color by the submitted
+/// depth. The fog-depth bundle holds the frame through until depth arrives,
+/// then, given a near-to-far gradient, sinks the far side into haze, so the
+/// frame with depth differs from the frame without.
+fn proveFogPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/fog-depth";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: fog-depth proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-fog-nodepth");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const dw: u32 = 32;
+    const dh: u32 = 32;
+    var depth: [dw * dh]f32 = undefined;
+    for (0..dh) |y| {
+        for (0..dw) |x| {
+            const t01 = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(dw - 1));
+            depth[y * dw + x] = 0.1 + t01 * 4.9;
+        }
+    }
+    if (abi.goss_session_submit_depth(session, &depth, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-fog-depth");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const nodepth = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-fog-nodepth.tga", gpa, .limited(8 << 20));
+    defer gpa.free(nodepth);
+    const withdepth = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-fog-depth.tga", gpa, .limited(8 << 20));
+    defer gpa.free(withdepth);
+
+    if (std.mem.eql(u8, nodepth, withdepth)) {
+        std.debug.print("conformance: FAIL fog-depth: submitting depth did not change the frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF fog-depth fades by depth: the frame with a depth gradient differs from the frame without depth\n", .{});
+    return true;
+}
+
+/// Proves the outline.pass draws where depth jumps, not merely where it
+/// varies. The outline-edge bundle, given a flat depth, leaves the frame be
+/// (no edge), but given a depth with a sharp step draws a line along it, so
+/// the stepped frame differs from the flat one.
+fn proveOutlinePass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/outline-edge";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: outline-edge proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // A realistic-resolution depth so the outline's small uv tap spans a
+    // texel; heap-allocated to keep it off the stack.
+    const dw: u32 = 256;
+    const dh: u32 = 256;
+    const flat = try gpa.alloc(f32, dw * dh);
+    defer gpa.free(flat);
+    const stepd = try gpa.alloc(f32, dw * dh);
+    defer gpa.free(stepd);
+
+    // Flat depth: no edges, so the outline pass leaves the frame alone.
+    for (flat) |*d| d.* = 2.0;
+    if (abi.goss_session_submit_depth(session, flat.ptr, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-outline-flat");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // A depth with a sharp step down the middle: an outline draws along it.
+    for (0..dh) |y| {
+        for (0..dw) |x| {
+            stepd[y * dw + x] = if (x < dw / 2) 0.5 else 4.0;
+        }
+    }
+    if (abi.goss_session_submit_depth(session, stepd.ptr, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-outline-step");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const flat_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-flat.tga", gpa, .limited(8 << 20));
+    defer gpa.free(flat_tga);
+    const step_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-step.tga", gpa, .limited(8 << 20));
+    defer gpa.free(step_tga);
+
+    if (std.mem.eql(u8, flat_tga, step_tga)) {
+        std.debug.print("conformance: FAIL outline-edge: a depth step drew no outline over flat depth\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF outline-edge draws on depth steps: a stepped depth outlines where flat depth does not\n", .{});
+    return true;
+}
+
+/// Proves the trail.pass echoes the previous frame. Right after the scene
+/// cuts from A to B the frame still carries A's echo, so it differs from the
+/// same B once the echo has settled to B alone - both captures are frame B,
+/// so the trail is the only difference between them.
+fn proveTrailPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/trail-echo";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: trail-echo proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes_a = try rgbaToNv12(gpa, corpus.frame);
+    defer planes_a.deinit(gpa);
+
+    // Frame B: a solid fill at the same size as A, so a trailed B and a
+    // settled B differ only by A's echo, never by a size change resetting
+    // the trail's previous-frame buffer.
+    const w = corpus.frame.width;
+    const h = corpus.frame.height;
+    const rgba_b = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(rgba_b);
+    var i: usize = 0;
+    while (i < rgba_b.len) : (i += 4) {
+        rgba_b[i] = 220;
+        rgba_b[i + 1] = 30;
+        rgba_b[i + 2] = 200;
+        rgba_b[i + 3] = 255;
+    }
+    const frame_b: sampler.Frame = .{ .pixels = .{ .rgba8 = rgba_b }, .width = w, .height = h };
+    const planes_b = try rgbaToNv12(gpa, frame_b);
+    defer planes_b.deinit(gpa);
+
+    const desc: abi.FrameDesc = .{
+        .width = w,
+        .height = h,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (w + 1) / 2;
+
+    // Settle on frame A so the trail's previous-frame buffer holds A.
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes_a.y.ptr, w, planes_a.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Cut to frame B: the very next frame still echoes A.
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes_b.y.ptr, w, planes_b.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    engine.renderer.?.requestScreenshot("zig-out/conformance-trail-echo");
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // B is now the previous frame too, so the echo has settled to B alone.
+    engine.renderer.?.requestScreenshot("zig-out/conformance-trail-settled");
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const echo_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-trail-echo.tga", gpa, .limited(8 << 20));
+    defer gpa.free(echo_tga);
+    const settled_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-trail-settled.tga", gpa, .limited(8 << 20));
+    defer gpa.free(settled_tga);
+
+    if (std.mem.eql(u8, echo_tga, settled_tga)) {
+        std.debug.print("conformance: FAIL trail-echo: the frame after a scene cut carried no echo of the frame before it\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF trail-echo blends the previous frame: the frame right after a cut differs from the same frame once the echo has settled\n", .{});
+    return true;
+}
+
+/// Proves the ssr.pass reflects by the submitted depth. The ssr-floor bundle
+/// mirrors the scene into the floor below the horizon, scaled by how near the
+/// depth reads: a far, dry floor leaves the frame alone, a near one wets it
+/// with a reflection, so the near-depth frame differs from the far one.
+fn proveSsrPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/ssr-floor";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: ssr-floor proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    const dw: u32 = 64;
+    const dh: u32 = 64;
+    const depth = try gpa.alloc(f32, dw * dh);
+    defer gpa.free(depth);
+
+    // A far, dry floor: depth at the far plane reads no reflection.
+    for (depth) |*d| d.* = 5.0;
+    if (abi.goss_session_submit_depth(session, depth.ptr, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-ssr-dry");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // A near floor: the same region now wets with a mirrored reflection.
+    for (depth) |*d| d.* = 0.1;
+    if (abi.goss_session_submit_depth(session, depth.ptr, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-ssr-wet");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const dry_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-ssr-dry.tga", gpa, .limited(8 << 20));
+    defer gpa.free(dry_tga);
+    const wet_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-ssr-wet.tga", gpa, .limited(8 << 20));
+    defer gpa.free(wet_tga);
+
+    if (std.mem.eql(u8, dry_tga, wet_tga)) {
+        std.debug.print("conformance: FAIL ssr-floor: a near depth wet no reflection over the far, dry floor\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF ssr-floor reflects by depth: a near floor wets with a mirrored reflection where a far one stays dry\n", .{});
+    return true;
+}
+
+/// Proves the env.pass sky pans with the submitted camera pose. The env-sky
+/// bundle draws a sky gradient behind the segmented foreground; tilting the
+/// camera up shifts the gradient, so the pitched-pose frame differs from the
+/// level one while the foreground subject stays put.
+fn proveEnvPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/env-sky";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: env-sky proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    // The analysis path feeds the segmentation worker; the render path feeds
+    // the preview the sky composites over.
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // Render until the segmentation worker publishes its mask, so the sky has
+    // a real background region to fill behind the subject.
+    var mask_polls: usize = 0;
+    while (session.segmentation_texture == null) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        mask_polls += 1;
+        if (mask_polls > 100_000) return error.MaskTimedOut;
+    }
+
+    // A level pose: the camera looks straight ahead, the sky centered.
+    var level: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = identity_pose, .projection = identity_pose, .timestamp_us = 1000 };
+    if (abi.goss_session_submit_world(session, &level, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-env-level");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Tilt up 0.6 rad about x: the camera's forward rises, shifting the sky.
+    const a: f32 = 0.6;
+    const ca = std.math.cos(a);
+    const sa = std.math.sin(a);
+    const pitched_pose = [16]f32{ 1, 0, 0, 0, 0, ca, sa, 0, 0, -sa, ca, 0, 0, 0, 0, 1 };
+    var pitched: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = pitched_pose, .projection = identity_pose, .timestamp_us = 2000 };
+    if (abi.goss_session_submit_world(session, &pitched, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-env-pitched");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const level_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-env-level.tga", gpa, .limited(8 << 20));
+    defer gpa.free(level_tga);
+    const pitched_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-env-pitched.tga", gpa, .limited(8 << 20));
+    defer gpa.free(pitched_tga);
+
+    if (std.mem.eql(u8, level_tga, pitched_tga)) {
+        std.debug.print("conformance: FAIL env-sky: tilting the camera pose did not pan the sky\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF env-sky pans with the pose: tilting the camera up shifts the sky behind the segmented foreground\n", .{});
+    return true;
+}
+
+/// Proves env.pass's image variant samples an equirect by the pose. The
+/// env-map bundle ships a sky.png with a sun at one longitude; yawing the
+/// camera pans it, so the yawed frame differs from the level one while the
+/// segmented foreground stays put.
+fn proveEnvmapPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/env-map";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: env-map proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // Render until both the segmentation mask and the equirect image have
+    // landed, so the pass takes its image path over a real background.
+    var polls: usize = 0;
+    while (session.segmentation_texture == null or session.env_textures.count() == 0) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000) return error.EnvMapTimedOut;
+    }
+
+    var level: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = identity_pose, .projection = identity_pose, .timestamp_us = 1000 };
+    if (abi.goss_session_submit_world(session, &level, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-envmap-level");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Yaw 1.0 rad about y: the camera turns, panning the equirect sideways.
+    const b: f32 = 1.0;
+    const cb = std.math.cos(b);
+    const sb = std.math.sin(b);
+    const yawed_pose = [16]f32{ cb, 0, -sb, 0, 0, 1, 0, 0, sb, 0, cb, 0, 0, 0, 0, 1 };
+    var yawed: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = yawed_pose, .projection = identity_pose, .timestamp_us = 2000 };
+    if (abi.goss_session_submit_world(session, &yawed, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-envmap-yawed");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const level_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-envmap-level.tga", gpa, .limited(8 << 20));
+    defer gpa.free(level_tga);
+    const yawed_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-envmap-yawed.tga", gpa, .limited(8 << 20));
+    defer gpa.free(yawed_tga);
+
+    if (std.mem.eql(u8, level_tga, yawed_tga)) {
+        std.debug.print("conformance: FAIL env-map: yawing the camera did not pan the equirect\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF env-map samples the equirect by pose: yawing the camera pans the environment behind the foreground\n", .{});
+    return true;
+}
+
+const identity_pose = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -4221,10 +5446,42 @@ pub fn main(init_args: std.process.Init) !u8 {
 
     if (!try proveTriggerAnimFires(gpa, engine)) return 1;
     watchHold("trigger anim fires");
+    if (!try proveMixerBlend(gpa, engine)) return 1;
+    watchHold("anim mixer blend");
+    if (!try proveMorphBlend(gpa, engine)) return 1;
+    watchHold("morph blend");
+    if (!try proveSpriteDraw(gpa, engine)) return 1;
+    watchHold("sprite overlay");
+    if (!try proveTextDraw(gpa, engine)) return 1;
+    watchHold("text overlay");
+    if (!try proveMaterialClip(gpa, engine)) return 1;
+    watchHold("material clip");
+    if (!try proveSpriteFade(gpa, engine)) return 1;
+    watchHold("sprite fade");
+    if (!try proveSpriteAnim(gpa, engine)) return 1;
+    watchHold("sprite anim");
+    if (!try proveDofPass(gpa, engine)) return 1;
+    watchHold("dof pass");
+    if (!try proveFogPass(gpa, engine)) return 1;
+    watchHold("fog pass");
+    if (!try proveOutlinePass(gpa, engine)) return 1;
+    watchHold("outline pass");
+    if (!try proveTrailPass(gpa, engine)) return 1;
+    watchHold("trail pass");
+    if (!try proveSsrPass(gpa, engine)) return 1;
+    watchHold("ssr pass");
+    if (!try proveEnvPass(gpa, engine)) return 1;
+    watchHold("env pass");
+    if (!try proveEnvmapPass(gpa, engine)) return 1;
+    watchHold("env map");
+    if (!try proveGifSprite(gpa, engine)) return 1;
+    watchHold("gif sprite");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;
     watchHold("mask degradation");
+    if (!try proveMaterialGraph(gpa, engine)) return 1;
+    watchHold("material graph");
     if (!try proveSceneSegmentation(gpa, engine)) return 1;
     watchHold("scene segmentation");
     if (!try proveVideoRecording(gpa, engine)) return 1;

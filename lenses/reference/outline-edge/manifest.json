@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.outline-edge",
+  "version": "1.0.0",
+  "display_name": "Depth Outline",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "outline", "type": "outline.pass", "inputs": {"frame": "camera"}, "params": {}, "outline": {"color": [0.0, 0.0, 0.0], "threshold": 0.1}}
+  ],
+  "triggers": []
+}

@@ -130,6 +130,33 @@ pub const Primitive = struct {
         return count;
     }
 
+    /// How many morph targets this primitive carries (blendshapes: each
+    /// is a set of per-vertex position deltas added in by its weight).
+    pub fn morphTargetCount(p: Primitive) usize {
+        return p.raw.targets_count;
+    }
+
+    /// Reads morph target `index`'s POSITION deltas into `out`, one vec3
+    /// per vertex, returning how many were read. A target without a
+    /// POSITION attribute reads nothing.
+    pub fn readMorphTargetPositions(p: Primitive, index: usize, out: [][3]f32) Error!usize {
+        if (index >= p.raw.targets_count) return 0;
+        const target = p.raw.targets[index];
+        var accessor: ?*const c.cgltf_accessor = null;
+        for (target.attributes[0..target.attributes_count]) |attr| {
+            if (attr.type == c.cgltf_attribute_type_position) {
+                accessor = attr.data;
+                break;
+            }
+        }
+        const acc = accessor orelse return 0;
+        const count = @min(acc.*.count, out.len);
+        const floats: [*]f32 = @ptrCast(out.ptr);
+        const unpacked = c.cgltf_accessor_unpack_floats(acc, floats, count * 3);
+        if (unpacked != count * 3) return error.MalformedAsset;
+        return count;
+    }
+
     /// The four joint indices skinning each vertex (JOINTS_0). glTF
     /// stores them as bytes or shorts; read as uints and narrow, since a
     /// skeleton never carries more joints than a u16 holds.
@@ -400,27 +427,66 @@ pub const DecodedAnimChannel = struct {
     values: []f32,
 };
 
+/// One sampled pose: the translation, rotation, and scale a node's
+/// animation channels resolve to at a moment. The mixer blends these,
+/// then toMatrix composes the local transform.
+pub const Components = struct {
+    translation: math.Vec3 = .{ 0, 0, 0 },
+    rotation: math.Quat = math.Quat.identity,
+    scale: math.Vec3 = .{ 1, 1, 1 },
+
+    pub fn toMatrix(pose: Components) math.Mat4 {
+        return math.Mat4.mul(math.Mat4.mul(math.Mat4.translation(pose.translation), pose.rotation.toMat4()), math.Mat4.scaling(pose.scale));
+    }
+};
+
+/// Blends sampled poses by weight into one: a weighted average of
+/// translation and scale, a weighted nlerp of rotation with hemisphere
+/// alignment so opposite-sign quaternions add rather than cancel. Weights
+/// are normalized; an empty or all-zero set returns the rest pose.
+pub fn blendComponents(clips: []const Components, weights: []const f32) Components {
+    if (clips.len == 0) return .{};
+    var total: f32 = 0;
+    for (weights[0..clips.len]) |w| total += w;
+    if (total <= 0) return .{};
+    var translation: math.Vec3 = .{ 0, 0, 0 };
+    var scale: math.Vec3 = .{ 0, 0, 0 };
+    var rotation: @Vector(4, f32) = .{ 0, 0, 0, 0 };
+    const reference = clips[0].rotation.v;
+    for (clips, weights[0..clips.len]) |pose, w| {
+        const nw = w / total;
+        translation += @as(math.Vec3, @splat(nw)) * pose.translation;
+        scale += @as(math.Vec3, @splat(nw)) * pose.scale;
+        const aligned = if (@reduce(.Add, reference * pose.rotation.v) < 0) -pose.rotation.v else pose.rotation.v;
+        rotation += @as(@Vector(4, f32), @splat(nw)) * aligned;
+    }
+    return .{ .translation = translation, .rotation = (math.Quat{ .v = rotation }).normalize(), .scale = scale };
+}
+
 pub const DecodedAnimation = struct {
     duration_seconds: f32,
     channels: []DecodedAnimChannel,
 
-    /// The node's local transform at elapsed_seconds, looping every
-    /// duration_seconds - a missing path (no channel drives it) holds
-    /// its identity value, matching how a static glTF node with only a
-    /// rotation channel keeps its authored translation/scale fixed.
-    pub fn sample(anim: *const DecodedAnimation, elapsed_seconds: f32) math.Mat4 {
-        var translation: math.Vec3 = .{ 0, 0, 0 };
-        var rotation = math.Quat.identity;
-        var scale: math.Vec3 = .{ 1, 1, 1 };
+    /// The node's translation, rotation, and scale at elapsed_seconds,
+    /// looping every duration_seconds. A path with no channel holds its
+    /// rest value, so a rotation-only clip keeps the authored translation
+    /// and scale. The mixer blends these before composing.
+    pub fn sampleComponents(anim: *const DecodedAnimation, elapsed_seconds: f32) Components {
+        var out: Components = .{};
         const t_seconds = if (anim.duration_seconds > 0) @mod(elapsed_seconds, anim.duration_seconds) else 0;
         for (anim.channels) |ch| {
             switch (ch.path) {
-                .translation => translation = sampleVec3(ch, t_seconds),
-                .scale => scale = sampleVec3(ch, t_seconds),
-                .rotation => rotation = sampleQuat(ch, t_seconds),
+                .translation => out.translation = sampleVec3(ch, t_seconds),
+                .scale => out.scale = sampleVec3(ch, t_seconds),
+                .rotation => out.rotation = sampleQuat(ch, t_seconds),
             }
         }
-        return math.Mat4.mul(math.Mat4.mul(math.Mat4.translation(translation), rotation.toMat4()), math.Mat4.scaling(scale));
+        return out;
+    }
+
+    /// The node's local transform at elapsed_seconds.
+    pub fn sample(anim: *const DecodedAnimation, elapsed_seconds: f32) math.Mat4 {
+        return anim.sampleComponents(elapsed_seconds).toMatrix();
     }
 };
 
@@ -481,16 +547,25 @@ pub const DecodedModel = struct {
     /// baseColorImageIndex), and deliberately not consumed here yet -
     /// no node type samples one.
     base_color: [4]f32,
-    animation: ?DecodedAnimation,
+    /// Every animation clip that drives this mesh's node, in glTF order,
+    /// keeping only clips that carry at least one channel on the node.
+    /// Empty when the asset has no animation. The mixer blends these by
+    /// weight; with no weights bound the model plays the first clip.
+    animations: []DecodedAnimation,
     /// Present only when the mesh's node carries a glTF skin; a static
     /// model leaves it null and renders on its rigid anchor matrix.
     skin: ?DecodedSkin = null,
+    /// One entry per morph target (blendshape), each a per-vertex POSITION
+    /// delta the same length as `positions`. Empty when the mesh has none.
+    /// A weighted sum of these added to the base positions is the morphed
+    /// mesh; the weights come from the lens.
+    morph_targets: []const []const [3]f32 = &.{},
 };
 
 /// Parses a .glb/.gltf's bytes into a plain-data model: the first
 /// mesh's first primitive's geometry, its material's flat tint, and -
-/// if the first node referencing that mesh has one - the first
-/// animation's channels driving that same node. Suitable for the same
+/// for the first node referencing that mesh - every animation's
+/// channels driving that same node, in glTF order. Suitable for the same
 /// off-thread decode step image.decode already runs for a lens's other
 /// assets (see adapters/asset's generic Loader): no cgltf pointer
 /// outlives this call, everything returned is independently owned.
@@ -526,10 +601,22 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         }
     }
 
-    var decoded_animation: ?DecodedAnimation = null;
-    errdefer if (decoded_animation) |*anim| freeAnimation(gpa, anim);
+    var animations: std.ArrayList(DecodedAnimation) = .empty;
+    errdefer {
+        for (animations.items) |*anim| freeAnimation(gpa, anim);
+        animations.deinit(gpa);
+    }
     if (target_node) |tn| {
-        if (asset.animationCount() > 0) decoded_animation = try decodeAnimation(gpa, asset.animation(0), tn);
+        for (0..asset.animationCount()) |ai| {
+            const clip = try decodeAnimation(gpa, asset.animation(ai), tn);
+            // An animation that never touches this node decodes to no
+            // channels; drop it so the mixer only holds clips that move it.
+            if (clip.channels.len == 0) {
+                freeAnimation(gpa, &clip);
+                continue;
+            }
+            try animations.append(gpa, clip);
+        }
     }
 
     var decoded_skin: ?DecodedSkin = null;
@@ -538,7 +625,19 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         if (tn.raw.skin) |skin_raw| decoded_skin = try decodeSkin(gpa, skin_raw, prim, vertex_count);
     }
 
-    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animation = decoded_animation, .skin = decoded_skin };
+    var morph_targets: std.ArrayList([]const [3]f32) = .empty;
+    errdefer {
+        for (morph_targets.items) |m| gpa.free(m);
+        morph_targets.deinit(gpa);
+    }
+    for (0..prim.morphTargetCount()) |mi| {
+        const deltas = try gpa.alloc([3]f32, vertex_count);
+        errdefer gpa.free(deltas);
+        if (try prim.readMorphTargetPositions(mi, deltas) != vertex_count) return error.MalformedAsset;
+        try morph_targets.append(gpa, deltas);
+    }
+
+    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animations = try animations.toOwnedSlice(gpa), .skin = decoded_skin, .morph_targets = try morph_targets.toOwnedSlice(gpa) };
 }
 
 /// Reads a glTF skin into owned arrays. A vertex joint index past the
@@ -649,11 +748,24 @@ pub fn freeAnimation(gpa: std.mem.Allocator, anim: *const DecodedAnimation) void
     gpa.free(anim.channels);
 }
 
+/// Frees a decoded clip list and every clip it owns.
+pub fn freeAnimations(gpa: std.mem.Allocator, anims: []DecodedAnimation) void {
+    for (anims) |*anim| freeAnimation(gpa, anim);
+    gpa.free(anims);
+}
+
+/// Frees a decoded morph target list and each target's delta array.
+pub fn freeMorphTargets(gpa: std.mem.Allocator, targets: []const []const [3]f32) void {
+    for (targets) |m| gpa.free(m);
+    gpa.free(targets);
+}
+
 pub fn freeDecodedModel(gpa: std.mem.Allocator, model: DecodedModel) void {
     gpa.free(model.positions);
     gpa.free(model.indices);
-    if (model.animation) |*anim| freeAnimation(gpa, anim);
+    freeAnimations(gpa, model.animations);
     if (model.skin) |*sk| freeSkin(gpa, sk);
+    freeMorphTargets(gpa, model.morph_targets);
 }
 
 const t = std.testing;
@@ -924,6 +1036,193 @@ test "no animations is the common, valid case" {
     try t.expectEqual(@as(usize, 0), asset.materialCount());
 }
 
+// Builds a GLB whose one node carries two clips over a shared timeline:
+// clip 0 translates it, clip 1 scales it. Both target node 0, so the
+// mixer holds both.
+fn buildTwoClipGlb(gpa: std.mem.Allocator) ![]u8 {
+    const positions = [3][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 } };
+    const indices = [3]u16{ 0, 1, 2 };
+    const times = [3]f32{ 0.0, 1.0, 2.0 };
+    const translation = [3][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 2, 0 } };
+    const scale = [3][3]f32{ .{ 1, 1, 1 }, .{ 2, 1, 1 }, .{ 3, 1, 1 } };
+
+    var bin: std.ArrayList(u8) = .empty;
+    defer bin.deinit(gpa);
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&positions)); // 0..36
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&indices)); // 36..42
+    while (bin.items.len % 4 != 0) try bin.append(gpa, 0); // pad to 44
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&times)); // 44..56
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&translation)); // 56..92
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&scale)); // 92..128
+    while (bin.items.len % 4 != 0) try bin.append(gpa, 0);
+
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{"asset":{{"version":"2.0"}},
+        \\"buffers":[{{"byteLength":{d}}}],
+        \\"bufferViews":[
+        \\{{"buffer":0,"byteOffset":0,"byteLength":36}},
+        \\{{"buffer":0,"byteOffset":36,"byteLength":6}},
+        \\{{"buffer":0,"byteOffset":44,"byteLength":12}},
+        \\{{"buffer":0,"byteOffset":56,"byteLength":36}},
+        \\{{"buffer":0,"byteOffset":92,"byteLength":36}}],
+        \\"accessors":[
+        \\{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+        \\{{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}},
+        \\{{"bufferView":2,"componentType":5126,"count":3,"type":"SCALAR"}},
+        \\{{"bufferView":3,"componentType":5126,"count":3,"type":"VEC3"}},
+        \\{{"bufferView":4,"componentType":5126,"count":3,"type":"VEC3"}}],
+        \\"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1}}]}}],
+        \\"nodes":[{{"mesh":0,"name":"tri"}}],
+        \\"animations":[
+        \\{{"samplers":[{{"input":2,"output":3,"interpolation":"LINEAR"}}],
+        \\"channels":[{{"sampler":0,"target":{{"node":0,"path":"translation"}}}}]}},
+        \\{{"samplers":[{{"input":2,"output":4,"interpolation":"LINEAR"}}],
+        \\"channels":[{{"sampler":0,"target":{{"node":0,"path":"scale"}}}}]}}],
+        \\"scenes":[{{"nodes":[0]}}],"scene":0}}
+    , .{bin.items.len});
+    defer gpa.free(json);
+
+    var json_padded: std.ArrayList(u8) = .empty;
+    defer json_padded.deinit(gpa);
+    try json_padded.appendSlice(gpa, json);
+    while (json_padded.items.len % 4 != 0) try json_padded.append(gpa, ' ');
+
+    var glb: std.ArrayList(u8) = .empty;
+    errdefer glb.deinit(gpa);
+    const total: u32 = @intCast(12 + 8 + json_padded.items.len + 8 + bin.items.len);
+    var scratch: [4]u8 = undefined;
+    std.mem.writeInt(u32, &scratch, 0x46546C67, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 2, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, total, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, @intCast(json_padded.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x4E4F534A, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, json_padded.items);
+    std.mem.writeInt(u32, &scratch, @intCast(bin.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x004E4942, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, bin.items);
+    return glb.toOwnedSlice(gpa);
+}
+
+test "decodeModel surfaces one clip for a single-animation model" {
+    const glb = try buildAnimatedGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 1), model.animations.len);
+}
+
+test "decodeModel surfaces every clip that drives the node" {
+    const glb = try buildTwoClipGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 2), model.animations.len);
+
+    // Clip 0 translates: at t=1 the node is at x=1, unscaled.
+    const a = model.animations[0].sampleComponents(1.0);
+    try t.expectApproxEqAbs(@as(f32, 1.0), a.translation[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 1.0), a.scale[0], 0.001);
+    // Clip 1 scales: at t=1 the node is at scale.x=2, untranslated.
+    const b = model.animations[1].sampleComponents(1.0);
+    try t.expectApproxEqAbs(@as(f32, 0.0), b.translation[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 2.0), b.scale[0], 0.001);
+}
+
+test "a static mesh with no animation surfaces an empty clip list" {
+    const glb = try buildTriangleGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 0), model.animations.len);
+}
+
+// Builds a GLB whose triangle carries one morph target: per-vertex
+// POSITION deltas that push two of the three vertices out.
+fn buildMorphGlb(gpa: std.mem.Allocator) ![]u8 {
+    const positions = [3][3]f32{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ 0, 1, 0 } };
+    const indices = [3]u16{ 0, 1, 2 };
+    const deltas = [3][3]f32{ .{ 0, 0, 0 }, .{ 0.5, 0, 0 }, .{ 0, 0.5, 0 } };
+
+    var bin: std.ArrayList(u8) = .empty;
+    defer bin.deinit(gpa);
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&positions)); // 0..36
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&indices)); // 36..42
+    while (bin.items.len % 4 != 0) try bin.append(gpa, 0); // pad to 44
+    try bin.appendSlice(gpa, std.mem.sliceAsBytes(&deltas)); // 44..80
+
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{"asset":{{"version":"2.0"}},
+        \\"buffers":[{{"byteLength":{d}}}],
+        \\"bufferViews":[
+        \\{{"buffer":0,"byteOffset":0,"byteLength":36}},
+        \\{{"buffer":0,"byteOffset":36,"byteLength":6}},
+        \\{{"buffer":0,"byteOffset":44,"byteLength":36}}],
+        \\"accessors":[
+        \\{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+        \\{{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}},
+        \\{{"bufferView":2,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[0.5,0.5,0]}}],
+        \\"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"targets":[{{"POSITION":2}}]}}]}}],
+        \\"nodes":[{{"mesh":0,"name":"tri"}}],
+        \\"scenes":[{{"nodes":[0]}}],"scene":0}}
+    , .{bin.items.len});
+    defer gpa.free(json);
+
+    var json_padded: std.ArrayList(u8) = .empty;
+    defer json_padded.deinit(gpa);
+    try json_padded.appendSlice(gpa, json);
+    while (json_padded.items.len % 4 != 0) try json_padded.append(gpa, ' ');
+
+    var glb: std.ArrayList(u8) = .empty;
+    errdefer glb.deinit(gpa);
+    const total: u32 = @intCast(12 + 8 + json_padded.items.len + 8 + bin.items.len);
+    var scratch: [4]u8 = undefined;
+    std.mem.writeInt(u32, &scratch, 0x46546C67, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 2, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, total, .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, @intCast(json_padded.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x4E4F534A, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, json_padded.items);
+    std.mem.writeInt(u32, &scratch, @intCast(bin.items.len), .little);
+    try glb.appendSlice(gpa, &scratch);
+    std.mem.writeInt(u32, &scratch, 0x004E4942, .little);
+    try glb.appendSlice(gpa, &scratch);
+    try glb.appendSlice(gpa, bin.items);
+    return glb.toOwnedSlice(gpa);
+}
+
+test "decodeModel surfaces morph target position deltas" {
+    const glb = try buildMorphGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 1), model.morph_targets.len);
+    try t.expectEqual(@as(usize, 3), model.morph_targets[0].len);
+    // Vertex 0 holds, vertices 1 and 2 push out along x and y.
+    try t.expectEqual([3]f32{ 0, 0, 0 }, model.morph_targets[0][0]);
+    try t.expectApproxEqAbs(@as(f32, 0.5), model.morph_targets[0][1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), model.morph_targets[0][2][1], 0.001);
+}
+
+test "a mesh with no morph targets surfaces an empty list" {
+    const glb = try buildTriangleGlb(t.allocator);
+    defer t.allocator.free(glb);
+    const model = try decodeModel(t.allocator, glb);
+    defer freeDecodedModel(t.allocator, model);
+    try t.expectEqual(@as(usize, 0), model.morph_targets.len);
+}
+
 // Builds a GLB with a two-joint skin over the triangle: JOINTS_0,
 // WEIGHTS_0, inverse-bind matrices, and two named joint nodes. Joint
 // 1's inverse-bind carries a z translation of 5 so the read is provably
@@ -1023,4 +1322,25 @@ test "a static mesh decodes with no skin" {
     const model = try decodeModel(t.allocator, glb);
     defer freeDecodedModel(t.allocator, model);
     try t.expect(model.skin == null);
+}
+
+test "the animation mixer blends poses by weight" {
+    const rest: Components = .{ .translation = .{ 0, 0, 0 }, .rotation = math.Quat.identity, .scale = .{ 1, 1, 1 } };
+    const shifted: Components = .{ .translation = .{ 4, 0, 0 }, .rotation = math.Quat.identity, .scale = .{ 3, 1, 1 } };
+    const blended = blendComponents(&.{ rest, shifted }, &.{ 0.25, 0.75 });
+    try t.expectApproxEqAbs(@as(f32, 3.0), blended.translation[0], 0.001); // 0.25*0 + 0.75*4
+    try t.expectApproxEqAbs(@as(f32, 2.5), blended.scale[0], 0.001); // 0.25*1 + 0.75*3
+    try t.expect(blended.rotation.approxEq(math.Quat.identity, 0.001));
+
+    // Opposite-sign quaternions are the same rotation; hemisphere
+    // alignment must let them add rather than cancel to a bad normalize.
+    const q = math.Quat.fromAxisAngle(.{ 0, 1, 0 }, 1.0);
+    const neg = math.Quat{ .v = -q.v };
+    const mixed = blendComponents(&.{ .{ .rotation = q }, .{ .rotation = neg } }, &.{ 1, 1 });
+    try t.expect(mixed.rotation.approxEq(q, 0.001));
+
+    // An all-zero weight set returns the rest pose.
+    const zeroed = blendComponents(&.{ shifted, shifted }, &.{ 0, 0 });
+    try t.expectEqual(@as(f32, 0), zeroed.translation[0]);
+    try t.expectEqual(@as(f32, 1), zeroed.scale[0]);
 }

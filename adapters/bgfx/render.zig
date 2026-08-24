@@ -103,6 +103,13 @@ pub const Renderer = struct {
     lut_program: c.bgfx_program_handle_t,
     blend_program: c.bgfx_program_handle_t,
     blur_program: c.bgfx_program_handle_t,
+    dof_program: c.bgfx_program_handle_t,
+    fog_program: c.bgfx_program_handle_t,
+    outline_program: c.bgfx_program_handle_t,
+    trail_program: c.bgfx_program_handle_t,
+    ssr_program: c.bgfx_program_handle_t,
+    env_program: c.bgfx_program_handle_t,
+    envmap_program: c.bgfx_program_handle_t,
     grade_program: c.bgfx_program_handle_t,
     bloom_extract_program: c.bgfx_program_handle_t,
     bloom_composite_program: c.bgfx_program_handle_t,
@@ -143,7 +150,18 @@ pub const Renderer = struct {
     tex_lookup_skin: c.bgfx_uniform_handle_t,
     tex_lookup_custom: c.bgfx_uniform_handle_t,
     tex_makeup: c.bgfx_uniform_handle_t,
+    tex_depth: c.bgfx_uniform_handle_t,
     blur_step_uniform: c.bgfx_uniform_handle_t,
+    dof_uniform: c.bgfx_uniform_handle_t,
+    fog_uniform: c.bgfx_uniform_handle_t,
+    outline_uniform: c.bgfx_uniform_handle_t,
+    tex_prev: c.bgfx_uniform_handle_t,
+    trail_uniform: c.bgfx_uniform_handle_t,
+    ssr_uniform: c.bgfx_uniform_handle_t,
+    env_params_uniform: c.bgfx_uniform_handle_t,
+    env_top_uniform: c.bgfx_uniform_handle_t,
+    env_bottom_uniform: c.bgfx_uniform_handle_t,
+    env_rot_uniform: c.bgfx_uniform_handle_t,
     grade_params_uniform: c.bgfx_uniform_handle_t,
     composite_params_uniform: c.bgfx_uniform_handle_t,
     composite_chroma_uniform: c.bgfx_uniform_handle_t,
@@ -290,6 +308,13 @@ pub const Renderer = struct {
         const lut_program = try loadLutProgram();
         const blend_program = try loadBlendProgram();
         const blur_program = try loadBlurProgram();
+        const dof_program = try loadDofProgram();
+        const fog_program = try loadFogProgram();
+        const outline_program = try loadOutlineProgram();
+        const trail_program = try loadTrailProgram();
+        const ssr_program = try loadSsrProgram();
+        const env_program = try loadEnvProgram();
+        const envmap_program = try loadEnvmapProgram();
         const grade_program = try loadGradeProgram();
         const bloom_extract_program = try loadBloomExtractProgram();
         const bloom_composite_program = try loadBloomCompositeProgram();
@@ -359,6 +384,13 @@ pub const Renderer = struct {
             .lut_program = lut_program,
             .blend_program = blend_program,
             .blur_program = blur_program,
+            .dof_program = dof_program,
+            .fog_program = fog_program,
+            .outline_program = outline_program,
+            .trail_program = trail_program,
+            .ssr_program = ssr_program,
+            .env_program = env_program,
+            .envmap_program = envmap_program,
             .grade_program = grade_program,
             .bloom_extract_program = bloom_extract_program,
             .bloom_composite_program = bloom_composite_program,
@@ -389,7 +421,18 @@ pub const Renderer = struct {
             .tex_lookup_skin = c.bgfx_create_uniform("s_texLookupSkin", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_lookup_custom = c.bgfx_create_uniform("s_texLookupCustom", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_makeup = c.bgfx_create_uniform("s_texMakeup", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_depth = c.bgfx_create_uniform("s_texDepth", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .blur_step_uniform = c.bgfx_create_uniform("u_blurStep", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .dof_uniform = c.bgfx_create_uniform("u_dof", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .fog_uniform = c.bgfx_create_uniform("u_fog", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .outline_uniform = c.bgfx_create_uniform("u_outline", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .tex_prev = c.bgfx_create_uniform("s_texPrev", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .trail_uniform = c.bgfx_create_uniform("u_trail", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .ssr_uniform = c.bgfx_create_uniform("u_ssr", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .env_params_uniform = c.bgfx_create_uniform("u_envParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .env_top_uniform = c.bgfx_create_uniform("u_envTop", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .env_bottom_uniform = c.bgfx_create_uniform("u_envBottom", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .env_rot_uniform = c.bgfx_create_uniform("u_envRot", c.BGFX_UNIFORM_TYPE_VEC4, 3),
             .grade_params_uniform = c.bgfx_create_uniform("u_grade", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .composite_params_uniform = c.bgfx_create_uniform("u_composite", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .composite_chroma_uniform = c.bgfx_create_uniform("u_chroma", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -484,6 +527,90 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_blur_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_blur_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_blur_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// dof.pass's own fixed depth-of-field program: the frame on unit 0 and
+    /// the depth texture on unit 1, mixed sharp-to-blurred by depth.
+    pub fn loadDofProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_dof_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_dof_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_dof_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_dof_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// fog.pass's own fixed depth-fog program: the frame on unit 0 and the
+    /// depth on unit 1, faded toward the fog color by depth.
+    pub fn loadFogProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_fog_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_fog_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_fog_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_fog_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// outline.pass's own fixed depth-edge program: the frame on unit 0 and
+    /// the depth on unit 1, outlined where depth jumps between neighbors.
+    pub fn loadOutlineProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_outline_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_outline_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_outline_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_outline_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// trail.pass's own fixed motion-trail program: the current frame on
+    /// unit 0 and the previous frame on unit 1, blended into an echo.
+    pub fn loadTrailProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_trail_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_trail_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_trail_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_trail_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// ssr.pass's own fixed reflection program: the frame on unit 0 and the
+    /// submitted depth on unit 1, mirroring the scene into a reflective floor.
+    pub fn loadSsrProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_ssr_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_ssr_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_ssr_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_ssr_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// env.pass's own fixed sky program: the frame on unit 0 and the mask on
+    /// unit 1, drawing a procedural sky dome behind the segmented foreground.
+    pub fn loadEnvProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_env_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_env_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_env_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_env_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// env.pass's image variant: samples an equirect environment on unit 1 by
+    /// the pose-rotated view ray, compositing it behind the foreground.
+    pub fn loadEnvmapProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_envmap_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_envmap_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_envmap_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_envmap_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -651,7 +778,18 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_lookup_skin);
         c.bgfx_destroy_uniform(r.tex_lookup_custom);
         c.bgfx_destroy_uniform(r.tex_makeup);
+        c.bgfx_destroy_uniform(r.tex_depth);
         c.bgfx_destroy_uniform(r.blur_step_uniform);
+        c.bgfx_destroy_uniform(r.dof_uniform);
+        c.bgfx_destroy_uniform(r.fog_uniform);
+        c.bgfx_destroy_uniform(r.outline_uniform);
+        c.bgfx_destroy_uniform(r.tex_prev);
+        c.bgfx_destroy_uniform(r.trail_uniform);
+        c.bgfx_destroy_uniform(r.ssr_uniform);
+        c.bgfx_destroy_uniform(r.env_params_uniform);
+        c.bgfx_destroy_uniform(r.env_top_uniform);
+        c.bgfx_destroy_uniform(r.env_bottom_uniform);
+        c.bgfx_destroy_uniform(r.env_rot_uniform);
         c.bgfx_destroy_uniform(r.grade_params_uniform);
         c.bgfx_destroy_uniform(r.composite_params_uniform);
         c.bgfx_destroy_uniform(r.composite_chroma_uniform);
@@ -671,6 +809,13 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.lut_program);
         c.bgfx_destroy_program(r.blend_program);
         c.bgfx_destroy_program(r.blur_program);
+        c.bgfx_destroy_program(r.dof_program);
+        c.bgfx_destroy_program(r.fog_program);
+        c.bgfx_destroy_program(r.outline_program);
+        c.bgfx_destroy_program(r.trail_program);
+        c.bgfx_destroy_program(r.ssr_program);
+        c.bgfx_destroy_program(r.env_program);
+        c.bgfx_destroy_program(r.envmap_program);
         c.bgfx_destroy_program(r.grade_program);
         c.bgfx_destroy_program(r.composite_program);
         c.bgfx_destroy_program(r.bloom_extract_program);
@@ -1069,6 +1214,24 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.composite_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Draws a sprite over the frame already in the view's target: narrows
+    /// the view to the sprite's pixel rect and alpha-composites the image
+    /// there at `opacity` through the shared composite program. The caller
+    /// sets the target, so this works for an offscreen target or swap chain.
+    pub fn submitSpriteAtRect(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32) void {
+        c.bgfx_set_view_rect(view_id, @intCast(dx), @intCast(dy), dw, dh);
+        c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, sprite_tex, std.math.maxInt(u32));
+        const params = [4]f32{ opacity, 0, 0, 0 };
+        const chroma = [4]f32{ 0, 0, 0, 0 };
+        c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
+        c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
+        const blend = blendFunc(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA);
+        c.bgfx_set_state(@as(u64, c.BGFX_STATE_WRITE_RGB) | @as(u64, c.BGFX_STATE_WRITE_A) | blend, 0);
+        c.bgfx_submit(view_id, r.composite_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Points `view_id` at a sub-rectangle of `target` with no clear, so the
     /// caller can draw the camera preview into one composite cell via
     /// submitPreview (which fills whatever viewport is set).
@@ -1114,6 +1277,104 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.blur_step_uniform, &step_vec4, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.blur_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws a depth-of-field pass into view_id: the frame on unit 0, the
+    /// depth texture on unit 1, blurred toward the out-of-focus image by the
+    /// depth distance from the focus plane. focus is 0..1 in the depth's
+    /// near..far range, strength scales the falloff.
+    pub fn submitDofPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, depth_texture: c.bgfx_texture_handle_t, focus: f32, strength: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, depth_texture, std.math.maxInt(u32));
+        const params = [4]f32{ focus, strength, 0.004, 0.0 };
+        c.bgfx_set_uniform(r.dof_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.dof_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws a depth fog pass into view_id: the frame on unit 0, the depth on
+    /// unit 1, faded toward `color` by depth scaled by `density`.
+    pub fn submitFogPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, depth_texture: c.bgfx_texture_handle_t, color: [3]f32, density: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, depth_texture, std.math.maxInt(u32));
+        const params = [4]f32{ color[0], color[1], color[2], density };
+        c.bgfx_set_uniform(r.fog_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.fog_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws a depth-edge outline pass into view_id: the frame on unit 0, the
+    /// depth on unit 1, `color` drawn where the depth jump between neighbors
+    /// exceeds `threshold`.
+    pub fn submitOutlinePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, depth_texture: c.bgfx_texture_handle_t, color: [3]f32, threshold: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, depth_texture, std.math.maxInt(u32));
+        const params = [4]f32{ color[0], color[1], color[2], threshold };
+        c.bgfx_set_uniform(r.outline_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.outline_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws a motion-trail pass into view_id: the current frame on unit 0
+    /// and the previous frame on unit 1, blended into an echo by `amount`.
+    pub fn submitTrailPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, prev_texture: c.bgfx_texture_handle_t, amount: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_prev, prev_texture, std.math.maxInt(u32));
+        const params = [4]f32{ amount, 0, 0, 0 };
+        c.bgfx_set_uniform(r.trail_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.trail_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws a screen-space reflection pass into view_id: the frame on unit 0,
+    /// the depth on unit 1, mirroring the scene across the `plane` horizon into
+    /// the floor below it and scaling the reflection by `strength` and depth.
+    pub fn submitSsrPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, depth_texture: c.bgfx_texture_handle_t, strength: f32, plane: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, depth_texture, std.math.maxInt(u32));
+        const params = [4]f32{ strength, plane, 0, 0 };
+        c.bgfx_set_uniform(r.ssr_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.ssr_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws a procedural sky pass into view_id: the frame on unit 0, the
+    /// segmentation mask on unit 1, a top-to-bottom sky gradient behind the
+    /// foreground shifted by the camera `pitch` and `yaw` and scaled by
+    /// `intensity`.
+    pub fn submitEnvPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, top: [3]f32, bottom: [3]f32, intensity: f32, pitch: f32, yaw: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ pitch, yaw, intensity, 0 };
+        const top_v = [4]f32{ top[0], top[1], top[2], 0 };
+        const bottom_v = [4]f32{ bottom[0], bottom[1], bottom[2], 0 };
+        c.bgfx_set_uniform(r.env_params_uniform, &params, 1);
+        c.bgfx_set_uniform(r.env_top_uniform, &top_v, 1);
+        c.bgfx_set_uniform(r.env_bottom_uniform, &bottom_v, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.env_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws env.pass's image variant into view_id: the frame on unit 0, the
+    /// equirect environment on unit 1, the mask on unit 2. `rot` is the
+    /// camera's world rotation as three basis rows; the shader turns each
+    /// pixel's view ray by it, samples the equirect, and keeps the foreground.
+    pub fn submitEnvmapPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, env_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, rot: [3][4]f32, intensity: f32, aspect: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_background, env_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ intensity, aspect, 0, 0 };
+        c.bgfx_set_uniform(r.env_params_uniform, &params, 1);
+        c.bgfx_set_uniform(r.env_rot_uniform, &rot, 3);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.envmap_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one lens grade.pass node as a full-screen pass into view_id:
@@ -1240,8 +1501,14 @@ pub const Renderer = struct {
     /// A model.gltf node's geometry, uploaded once at load time - fixed
     /// topology, unlike the makeup mesh's per-frame-updated positions,
     /// so both buffers are static (not dynamic).
+    /// A model mesh, static by default. A mesh with morph targets is
+    /// built dynamic instead: its positions live in a dynamic buffer the
+    /// morph pass re-uploads each frame, drawn by the same model program.
     pub const ModelMesh = struct {
-        vertex_buffer: c.bgfx_vertex_buffer_handle_t,
+        vertex_buffer: c.bgfx_vertex_buffer_handle_t = .{ .idx = invalid_handle },
+        dynamic_vertex_buffer: c.bgfx_dynamic_vertex_buffer_handle_t = .{ .idx = invalid_handle },
+        dynamic: bool = false,
+        vertex_count: u32 = 0,
         index_buffer: c.bgfx_index_buffer_handle_t,
         index_count: u32,
     };
@@ -1289,12 +1556,46 @@ pub const Renderer = struct {
         }
         const vertex_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))), &r.layout, 0);
         const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
-        return .{ .vertex_buffer = vertex_buffer, .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
+        return .{ .vertex_buffer = vertex_buffer, .vertex_count = @intCast(positions.len), .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
+    }
+
+    /// Like createModelMesh but backs the positions with a dynamic buffer
+    /// the morph pass re-uploads each frame; the initial upload is the
+    /// mesh's rest positions, so it draws unmorphed until a weight moves.
+    pub fn createDynamicModelMesh(r: *Renderer, positions: []const [3]f32, indices: []const u32) !ModelMesh {
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(@intCast(positions.len), &r.layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        const mesh: ModelMesh = .{ .dynamic_vertex_buffer = position_buffer, .dynamic = true, .vertex_count = @intCast(positions.len), .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
+        r.updateModelMesh(mesh, positions);
+        return mesh;
+    }
+
+    /// Re-uploads deformed positions into a dynamic model mesh, padding
+    /// the texcoord to zero to match r.layout. A no-op on a static mesh.
+    pub fn updateModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32) void {
+        if (!mesh.dynamic) return;
+        const count = @min(positions.len, mesh.vertex_count);
+        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
+        defer r.gpa.free(interleaved);
+        for (0..count) |i| {
+            interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
+        }
+        c.bgfx_update_dynamic_vertex_buffer(mesh.dynamic_vertex_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
     }
 
     pub fn destroyModelMesh(mesh: ModelMesh) void {
-        c.bgfx_destroy_vertex_buffer(mesh.vertex_buffer);
+        if (mesh.dynamic) c.bgfx_destroy_dynamic_vertex_buffer(mesh.dynamic_vertex_buffer) else c.bgfx_destroy_vertex_buffer(mesh.vertex_buffer);
         c.bgfx_destroy_index_buffer(mesh.index_buffer);
+    }
+
+    /// Binds a model mesh's positions, dynamic buffer or static, so the
+    /// three model draw paths do not each branch on the buffer kind.
+    fn setModelVertexBuffer(mesh: ModelMesh) void {
+        if (mesh.dynamic) {
+            c.bgfx_set_dynamic_vertex_buffer(0, mesh.dynamic_vertex_buffer, 0, mesh.vertex_count);
+        } else {
+            c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
+        }
     }
 
     /// Builds a skinned mesh: a dynamic position buffer sized to the
@@ -1549,7 +1850,7 @@ pub const Renderer = struct {
         const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
         c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
         _ = c.bgfx_set_transform(&model_matrix.cols, 1);
-        c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
+        setModelVertexBuffer(mesh);
         c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
@@ -1580,7 +1881,7 @@ pub const Renderer = struct {
         const projection_tiled = r.tiledProjection(projection);
         c.bgfx_set_view_transform(mesh_view, &view.cols, &projection_tiled.cols);
         _ = c.bgfx_set_transform(&model_matrix.cols, 1);
-        c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
+        setModelVertexBuffer(mesh);
         c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);

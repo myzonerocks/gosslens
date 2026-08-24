@@ -6,6 +6,7 @@
 //! stopping at the first one, so a lens author sees every problem at once.
 
 const std = @import("std");
+const material = @import("material");
 
 pub const max_manifest_bytes = 256 * 1024;
 pub const max_json_depth = 32;
@@ -152,6 +153,100 @@ pub const BloomField = struct {
     intensity: f32 = 0.6,
 };
 
+pub const DofField = struct {
+    /// A dof.pass node's focus plane (0..1 in the submitted depth's
+    /// near..far range) and blur strength (how sharply the frame softens
+    /// with distance from that plane).
+    focus: f32 = 0.5,
+    strength: f32 = 4.0,
+};
+
+pub const FogField = struct {
+    /// A fog.pass node's fog color (rgb, 0..1) and density (how quickly the
+    /// frame fades toward it with depth). Default a light haze.
+    r: f32 = 0.7,
+    g: f32 = 0.75,
+    b: f32 = 0.8,
+    density: f32 = 1.0,
+};
+
+pub const OutlineField = struct {
+    /// An outline.pass node's line color (rgb, 0..1) and the depth jump
+    /// between neighbors above which an outline draws. Default a black line.
+    r: f32 = 0.0,
+    g: f32 = 0.0,
+    b: f32 = 0.0,
+    threshold: f32 = 0.08,
+};
+
+pub const TrailField = struct {
+    /// A trail.pass node's echo amount (0..1): how much of the previous
+    /// frame blends into this one, so moving content leaves a motion trail.
+    amount: f32 = 0.6,
+};
+
+pub const SsrField = struct {
+    /// An ssr.pass node's reflection strength (0..1) and the screen-space
+    /// horizon (0..1 down the frame) below which the scene mirrors into a
+    /// reflective floor. Default a subtle floor at the lower third.
+    strength: f32 = 0.5,
+    plane: f32 = 0.66,
+};
+
+pub const EnvField = struct {
+    /// An env.pass node's sky gradient (top and bottom rgb, 0..1) and overall
+    /// intensity, drawn behind the segmented foreground. Default a clear day.
+    top_r: f32 = 0.25,
+    top_g: f32 = 0.5,
+    top_b: f32 = 0.9,
+    bottom_r: f32 = 0.85,
+    bottom_g: f32 = 0.9,
+    bottom_b: f32 = 0.98,
+    intensity: f32 = 1.0,
+};
+
+pub const SpriteField = struct {
+    /// A sprite.2d node's screen rect in normalized coordinates (origin
+    /// top-left, 0..1 across the frame) and its draw opacity. The default
+    /// fills the frame at full opacity.
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+    w: f32 = 1.0,
+    h: f32 = 1.0,
+    opacity: f32 = 1.0,
+    /// A parameter name whose live value overrides `opacity` each frame, so
+    /// a param_ramp can fade the sprite or a beat trigger pulse it. Empty
+    /// leaves the static opacity in force.
+    opacity_param: []const u8 = "",
+    /// Frame count for an animated sprite: 1 (default) draws assets/<id>.png
+    /// once; N>1 loads assets/<id>_0.png..assets/<id>_(N-1).png and cycles
+    /// them at `fps` off the lens clock. Capped so a lens cannot ask for an
+    /// unbounded number of textures.
+    frames: u32 = 1,
+    fps: f32 = 12.0,
+};
+
+pub const max_sprite_frames = 64;
+
+pub const TextField = struct {
+    /// A text.2d node's inline string, the screen rect it fills (same
+    /// normalized coordinates as a sprite), its opacity, and the rgb color
+    /// its glyphs draw in. The engine rasterizes the string with its
+    /// built-in font and draws it like a sprite.
+    content: []const u8 = "",
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+    w: f32 = 1.0,
+    h: f32 = 0.2,
+    opacity: f32 = 1.0,
+    r: u8 = 255,
+    g: u8 = 255,
+    b: u8 = 255,
+    /// Like SpriteField.opacity_param: a parameter name whose live value
+    /// overrides the text's opacity each frame. Empty keeps the static one.
+    opacity_param: []const u8 = "",
+};
+
 pub const LayoutField = struct {
     /// A layout.composite node's head arrangement and the camera base's blend.
     /// arrangement 0 custom..5 overlay matches the ABI; key 0 none, 1 matte,
@@ -201,12 +296,42 @@ pub const Node = struct {
     hair: ?HairField = null,
     /// Set when the node is a particle fountain instead of a glb.
     particles: ?ParticleField = null,
+    /// model.gltf only: a parameter name per animation clip, in clip
+    /// order, whose live value is that clip's blend weight. Empty means
+    /// the node plays its first clip at full weight. A clip past this
+    /// list weighs nothing.
+    clip_weights: []const []const u8 = &.{},
+    /// model.gltf only: a parameter name per morph target, in target
+    /// order, whose live value is that target's blend weight. Empty leaves
+    /// the mesh unmorphed. A target past this list contributes nothing.
+    morph_weights: []const []const u8 = &.{},
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
+    /// Set only on a shader.pass node that authors a material node graph
+    /// instead of naming a built-in shader; lowers to a fragment shader.
+    material: ?material.Graph = null,
     /// Set only on a bloom.pass node: its glow threshold and intensity.
     bloom: ?BloomField = null,
+    /// Set only on a dof.pass node: its focus plane and blur strength.
+    dof: ?DofField = null,
+    /// Set only on a fog.pass node: its fog color and density.
+    fog: ?FogField = null,
+    /// Set only on an outline.pass node: its line color and depth threshold.
+    outline: ?OutlineField = null,
+    /// Set only on a trail.pass node: its motion-trail echo amount.
+    trail: ?TrailField = null,
+    /// Set only on an ssr.pass node: its reflection strength and floor plane.
+    ssr: ?SsrField = null,
+    /// Set only on an env.pass node: its sky gradient colors and intensity.
+    env: ?EnvField = null,
     /// Set only on a layout.composite node: the head arrangement it drives.
     layout: ?LayoutField = null,
+    /// Set only on a sprite.2d node: the screen rect and opacity it draws
+    /// its image at.
+    sprite: ?SpriteField = null,
+    /// Set only on a text.2d node: the string, rect, opacity, and color it
+    /// draws.
+    text: ?TextField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -224,7 +349,7 @@ pub const ActionKind = enum {
     play_sound,
 };
 
-pub const Curve = enum { linear, spring };
+pub const Curve = enum { linear, ease_in_quad, ease_out_quad, ease_in_out_quad, ease_in_out_cubic, ease_in_out_sine, spring };
 
 pub const Action = struct {
     kind: ActionKind,
@@ -680,6 +805,32 @@ fn parseBinding(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
     }
 }
 
+/// Parses a model.gltf node's array of parameter names (clip_weights or
+/// morph_weights): one weight-driving parameter name per clip or target.
+/// Rejected on any other node type. Cross-referencing each name against
+/// the declared parameters happens in the validation pass.
+fn parseWeightNames(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, object: std.json.ObjectMap, node_type: []const u8, field: []const u8) error{OutOfMemory}![]const []const u8 {
+    var names: []const []const u8 = &.{};
+    if (getField(object, field)) |value| {
+        const mark = path.push(field);
+        if (!std.mem.eql(u8, node_type, "model.gltf")) {
+            try diags.add(path.slice(), "{s} is a model.gltf field, found it on '{s}'", .{ field, node_type });
+        } else if (try expectArray(diags, path, value)) |array| {
+            var list: std.ArrayList([]const u8) = .empty;
+            for (array.items, 0..) |name_value, i| {
+                const name_mark = path.pushIndex(i);
+                if (try expectString(diags, path, name_value)) |name| {
+                    try list.append(arena, try arena.dupe(u8, name));
+                }
+                path.pop(name_mark);
+            }
+            names = try list.toOwnedSlice(arena);
+        }
+        path.pop(mark);
+    }
+    return names;
+}
+
 fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, array: std.json.Array) error{OutOfMemory}!?[]const Node {
     if (array.items.len > max_nodes) {
         try diags.add(path.slice(), "at most {d} nodes, found {d}", .{ max_nodes, array.items.len });
@@ -864,6 +1015,28 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(gmark);
         }
+        var material_field: ?material.Graph = null;
+        if (getField(object, "material")) |mv| {
+            const mmark = path.push("material");
+            if (!std.mem.eql(u8, node_type, "shader.pass")) {
+                try diags.add(path.slice(), "material is a shader.pass field, found it on '{s}'", .{node_type});
+            } else {
+                const graph: ?material.Graph = material.parse(arena, mv) catch |err| blk: {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
+                    try diags.add(path.slice(), "material graph is malformed ({s})", .{@errorName(err)});
+                    break :blk null;
+                };
+                if (graph) |g| {
+                    const types = try arena.alloc(material.ValueType, g.nodes.len);
+                    material.validate(arena, g, types) catch |err| {
+                        if (err == error.OutOfMemory) return error.OutOfMemory;
+                        try diags.add(path.slice(), "material graph is invalid ({s})", .{@errorName(err)});
+                    };
+                    material_field = g;
+                }
+            }
+            path.pop(mmark);
+        }
         var bloom_field: ?BloomField = null;
         if (getField(object, "bloom")) |bv| {
             const bmark = path.push("bloom");
@@ -878,6 +1051,200 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 bloom_field = field;
             }
             path.pop(bmark);
+        }
+        var dof_field: ?DofField = null;
+        if (getField(object, "dof")) |dv| {
+            const dmark = path.push("dof");
+            if (!std.mem.eql(u8, node_type, "dof.pass")) {
+                try diags.add(path.slice(), "dof is a dof.pass field, found it on '{s}'", .{node_type});
+            } else if (dv != .object) {
+                try diags.add(path.slice(), "dof must be an object", .{});
+            } else {
+                var field: DofField = .{};
+                if (getField(dv.object, "focus")) |v| field.focus = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.focus)), 0.0, 1.0);
+                if (getField(dv.object, "strength")) |v| field.strength = @floatCast(numberOf(v) orelse field.strength);
+                dof_field = field;
+            }
+            path.pop(dmark);
+        } else if (std.mem.eql(u8, node_type, "dof.pass")) {
+            dof_field = .{};
+        }
+        var fog_field: ?FogField = null;
+        if (getField(object, "fog")) |fv| {
+            const fmark = path.push("fog");
+            if (!std.mem.eql(u8, node_type, "fog.pass")) {
+                try diags.add(path.slice(), "fog is a fog.pass field, found it on '{s}'", .{node_type});
+            } else if (fv != .object) {
+                try diags.add(path.slice(), "fog must be an object", .{});
+            } else {
+                var field: FogField = .{};
+                if (getField(fv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "fog color must be three numbers", .{});
+                }
+                if (getField(fv.object, "density")) |v| field.density = @floatCast(numberOf(v) orelse field.density);
+                fog_field = field;
+            }
+            path.pop(fmark);
+        } else if (std.mem.eql(u8, node_type, "fog.pass")) {
+            fog_field = .{};
+        }
+        var outline_field: ?OutlineField = null;
+        if (getField(object, "outline")) |ov| {
+            const omark = path.push("outline");
+            if (!std.mem.eql(u8, node_type, "outline.pass")) {
+                try diags.add(path.slice(), "outline is an outline.pass field, found it on '{s}'", .{node_type});
+            } else if (ov != .object) {
+                try diags.add(path.slice(), "outline must be an object", .{});
+            } else {
+                var field: OutlineField = .{};
+                if (getField(ov.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "outline color must be three numbers", .{});
+                }
+                if (getField(ov.object, "threshold")) |v| field.threshold = @floatCast(numberOf(v) orelse field.threshold);
+                outline_field = field;
+            }
+            path.pop(omark);
+        } else if (std.mem.eql(u8, node_type, "outline.pass")) {
+            outline_field = .{};
+        }
+        var trail_field: ?TrailField = null;
+        if (getField(object, "trail")) |tv| {
+            const tmark = path.push("trail");
+            if (!std.mem.eql(u8, node_type, "trail.pass")) {
+                try diags.add(path.slice(), "trail is a trail.pass field, found it on '{s}'", .{node_type});
+            } else if (tv != .object) {
+                try diags.add(path.slice(), "trail must be an object", .{});
+            } else {
+                var field: TrailField = .{};
+                if (getField(tv.object, "amount")) |v| field.amount = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.amount)), 0.0, 1.0);
+                trail_field = field;
+            }
+            path.pop(tmark);
+        } else if (std.mem.eql(u8, node_type, "trail.pass")) {
+            trail_field = .{};
+        }
+        var ssr_field: ?SsrField = null;
+        if (getField(object, "ssr")) |rv| {
+            const rmark = path.push("ssr");
+            if (!std.mem.eql(u8, node_type, "ssr.pass")) {
+                try diags.add(path.slice(), "ssr is an ssr.pass field, found it on '{s}'", .{node_type});
+            } else if (rv != .object) {
+                try diags.add(path.slice(), "ssr must be an object", .{});
+            } else {
+                var field: SsrField = .{};
+                if (getField(rv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 1.0);
+                if (getField(rv.object, "plane")) |v| field.plane = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.plane)), 0.0, 1.0);
+                ssr_field = field;
+            }
+            path.pop(rmark);
+        } else if (std.mem.eql(u8, node_type, "ssr.pass")) {
+            ssr_field = .{};
+        }
+        var env_field: ?EnvField = null;
+        if (getField(object, "env")) |ev| {
+            const emark = path.push("env");
+            if (!std.mem.eql(u8, node_type, "env.pass")) {
+                try diags.add(path.slice(), "env is an env.pass field, found it on '{s}'", .{node_type});
+            } else if (ev != .object) {
+                try diags.add(path.slice(), "env must be an object", .{});
+            } else {
+                var field: EnvField = .{};
+                if (getField(ev.object, "top")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.top_r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.top_g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.top_b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "env top must be three numbers", .{});
+                }
+                if (getField(ev.object, "bottom")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.bottom_r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.bottom_g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.bottom_b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "env bottom must be three numbers", .{});
+                }
+                if (getField(ev.object, "intensity")) |v| field.intensity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.intensity)), 0.0, 2.0);
+                env_field = field;
+            }
+            path.pop(emark);
+        } else if (std.mem.eql(u8, node_type, "env.pass")) {
+            env_field = .{};
+        }
+        var sprite_field: ?SpriteField = null;
+        if (getField(object, "sprite")) |sv| {
+            const smark = path.push("sprite");
+            if (!std.mem.eql(u8, node_type, "sprite.2d")) {
+                try diags.add(path.slice(), "sprite is a sprite.2d field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "sprite must be an object", .{});
+            } else {
+                var field: SpriteField = .{};
+                if (getField(sv.object, "x")) |v| field.x = @floatCast(numberOf(v) orelse field.x);
+                if (getField(sv.object, "y")) |v| field.y = @floatCast(numberOf(v) orelse field.y);
+                if (getField(sv.object, "w")) |v| field.w = @floatCast(numberOf(v) orelse field.w);
+                if (getField(sv.object, "h")) |v| field.h = @floatCast(numberOf(v) orelse field.h);
+                if (getField(sv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(sv.object, "opacity_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
+                }
+                if (getField(sv.object, "frames")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= max_sprite_frames) {
+                        field.frames = @intCast(v.integer);
+                    } else try diags.add(path.slice(), "sprite frames must be an integer 1..{d}", .{max_sprite_frames});
+                }
+                if (getField(sv.object, "fps")) |v| field.fps = @floatCast(numberOf(v) orelse field.fps);
+                sprite_field = field;
+            }
+            path.pop(smark);
+        } else if (std.mem.eql(u8, node_type, "sprite.2d")) {
+            // A sprite.2d node with no sprite block draws its image full-frame.
+            sprite_field = .{};
+        }
+        var text_field: ?TextField = null;
+        if (getField(object, "text")) |tv| {
+            const tmark = path.push("text");
+            if (!std.mem.eql(u8, node_type, "text.2d")) {
+                try diags.add(path.slice(), "text is a text.2d field, found it on '{s}'", .{node_type});
+            } else if (tv != .object) {
+                try diags.add(path.slice(), "text must be an object", .{});
+            } else {
+                var field: TextField = .{};
+                if (getField(tv.object, "content")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.content = try arena.dupe(u8, s);
+                }
+                if (getField(tv.object, "x")) |v| field.x = @floatCast(numberOf(v) orelse field.x);
+                if (getField(tv.object, "y")) |v| field.y = @floatCast(numberOf(v) orelse field.y);
+                if (getField(tv.object, "w")) |v| field.w = @floatCast(numberOf(v) orelse field.w);
+                if (getField(tv.object, "h")) |v| field.h = @floatCast(numberOf(v) orelse field.h);
+                if (getField(tv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(tv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = @intFromFloat(std.math.clamp(rgb[0], 0.0, 1.0) * 255.0);
+                        field.g = @intFromFloat(std.math.clamp(rgb[1], 0.0, 1.0) * 255.0);
+                        field.b = @intFromFloat(std.math.clamp(rgb[2], 0.0, 1.0) * 255.0);
+                    } else try diags.add(path.slice(), "text color must be three numbers", .{});
+                }
+                if (getField(tv.object, "opacity_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
+                }
+                text_field = field;
+            }
+            path.pop(tmark);
+        } else if (std.mem.eql(u8, node_type, "text.2d")) {
+            try diags.add(path.slice(), "a text.2d node needs a text block", .{});
         }
         var layout_field: ?LayoutField = null;
         if (getField(object, "layout")) |lv| {
@@ -1072,6 +1439,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             path.pop(anchor_mark);
         }
 
+        const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
+        const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
+
         var mask_channel: ?u8 = null;
         if (getField(object, "mask")) |mask_value| {
             const mask_mark = path.push("mask");
@@ -1114,9 +1484,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .cloth = cloth_field,
             .hair = hair_field,
             .particles = particle_field,
+            .clip_weights = clip_weights,
+            .morph_weights = morph_weights,
             .grade = grade_field,
+            .material = material_field,
             .bloom = bloom_field,
+            .dof = dof_field,
+            .fog = fog_field,
+            .outline = outline_field,
+            .trail = trail_field,
+            .ssr = ssr_field,
+            .env = env_field,
             .layout = layout_field,
+            .sprite = sprite_field,
+            .text = text_field,
             .script = script_source,
         });
     }
@@ -1371,6 +1752,34 @@ fn crossReference(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocato
             }
         }
         path.pop(params_mark);
+        const cw_mark = path.push("clip_weights");
+        for (node.clip_weights, 0..) |name, ci| {
+            if (!param_names.contains(name)) {
+                const idx_mark = path.pushIndex(ci);
+                try diags.add(path.slice(), "clip weight binds unknown parameter '{s}'", .{name});
+                path.pop(idx_mark);
+            }
+        }
+        path.pop(cw_mark);
+        const mw_mark = path.push("morph_weights");
+        for (node.morph_weights, 0..) |name, mi| {
+            if (!param_names.contains(name)) {
+                const idx_mark = path.pushIndex(mi);
+                try diags.add(path.slice(), "morph weight binds unknown parameter '{s}'", .{name});
+                path.pop(idx_mark);
+            }
+        }
+        path.pop(mw_mark);
+        if (node.sprite) |sp| {
+            if (sp.opacity_param.len > 0 and !param_names.contains(sp.opacity_param)) {
+                try diags.add(path.slice(), "sprite opacity_param binds unknown parameter '{s}'", .{sp.opacity_param});
+            }
+        }
+        if (node.text) |tf| {
+            if (tf.opacity_param.len > 0 and !param_names.contains(tf.opacity_param)) {
+                try diags.add(path.slice(), "text opacity_param binds unknown parameter '{s}'", .{tf.opacity_param});
+            }
+        }
         path.pop(node_mark);
     }
     path.pop(nodes_mark);
@@ -1471,6 +1880,53 @@ test "a minimal valid manifest parses with every field populated" {
     try t.expect(manifest.engine_compat.contains(0, 5));
     try t.expect(!manifest.engine_compat.contains(1, 0));
     try t.expect(!manifest.engine_compat.contains(0, 4));
+}
+
+test "a material graph parses on a shader.pass node" {
+    const src =
+        \\{
+        \\  "glf": "1.0", "id": "com.example.mat", "version": "1.0.0",
+        \\  "display_name": "Mat", "engine_compat": ">=0.5 <1.0",
+        \\  "capabilities": [], "parameters": [],
+        \\  "nodes": [
+        \\    {"id": "mat", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {},
+        \\     "material": {"output": 3, "nodes": [
+        \\        {"kind": "uv"},
+        \\        {"kind": "texture", "name": "albedo"},
+        \\        {"kind": "sample", "inputs": [1, 0]},
+        \\        {"kind": "output", "inputs": [2]}
+        \\     ]}}
+        \\  ],
+        \\  "triggers": []
+        \\}
+    ;
+    var manifest = try parseOk(src);
+    defer manifest.deinit();
+    const g = manifest.nodes[0].material orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(usize, 4), g.nodes.len);
+    try t.expectEqual(@as(u32, 3), g.root);
+}
+
+test "a material on a non shader.pass node is rejected" {
+    const src =
+        \\{
+        \\  "glf": "1.0", "id": "com.example.mat", "version": "1.0.0",
+        \\  "display_name": "Mat", "engine_compat": ">=0.5 <1.0",
+        \\  "capabilities": [], "parameters": [],
+        \\  "nodes": [
+        \\    {"id": "b", "type": "beauty.reshape", "inputs": {"frame": "camera"}, "params": {},
+        \\     "material": {"output": 0, "nodes": [{"kind": "output", "inputs": [0]}]}}
+        \\  ],
+        \\  "triggers": []
+        \\}
+    ;
+    var failed = try parseFails(src);
+    defer failed.deinit();
+    var found = false;
+    for (failed.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "material is a shader.pass field") != null) found = true;
+    }
+    try t.expect(found);
 }
 
 test "a missing required field reports its exact path" {
@@ -1662,6 +2118,217 @@ test "an unknown anchor name is rejected" {
     var found = false;
     for (result.diags.items) |d| {
         if (std.mem.indexOf(u8, d.message, "unknown anchor") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "clip weights parse on a model node and bind declared parameters" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "walk", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0},
+        \\   {"name": "run", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "clip_weights": ["walk", "run"]}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expectEqual(@as(usize, 2), manifest.nodes[0].clip_weights.len);
+    try t.expectEqualStrings("walk", manifest.nodes[0].clip_weights[0]);
+    try t.expectEqualStrings("run", manifest.nodes[0].clip_weights[1]);
+}
+
+test "a clip weight binding an unknown parameter fails cross reference" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "walk", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "clip_weights": ["walk", "sprint"]}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "clip weight binds unknown parameter 'sprint'") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "clip weights on a non-model node are rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "walk", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "a", "type": "beauty.reshape", "inputs": {"frame": "camera"}, "params": {}, "clip_weights": ["walk"]}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "clip_weights is a model.gltf field") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "morph weights parse on a model node and bind declared parameters" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "smile", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0},
+        \\   {"name": "blink", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "morph_weights": ["smile", "blink"]}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expectEqual(@as(usize, 2), manifest.nodes[0].morph_weights.len);
+    try t.expectEqualStrings("smile", manifest.nodes[0].morph_weights[0]);
+    try t.expectEqualStrings("blink", manifest.nodes[0].morph_weights[1]);
+}
+
+test "a morph weight binding an unknown parameter fails cross reference" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "smile", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "morph_weights": ["smile", "frown"]}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "morph weight binds unknown parameter 'frown'") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a sprite.2d node parses its rect and opacity" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.25, "y": 0.1, "w": 0.5, "h": 0.3, "opacity": 0.8}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
+    try t.expectApproxEqAbs(@as(f32, 0.25), sp.x, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.5), sp.w, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0.8), sp.opacity, 0.001);
+}
+
+test "a sprite.2d node with no sprite block defaults to full frame" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
+    try t.expectApproxEqAbs(@as(f32, 1.0), sp.w, 0.001);
+    try t.expectApproxEqAbs(@as(f32, 1.0), sp.opacity, 0.001);
+}
+
+test "a sprite block on a non-sprite node is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "a", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.1}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "sprite is a sprite.2d field") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a sprite opacity_param binding an unknown parameter fails cross reference" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.3, "opacity_param": "pulse"}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "sprite opacity_param binds unknown parameter 'pulse'") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a sprite opacity_param naming a declared parameter parses" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "pulse", "type": "float", "default": 1.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.3, "opacity_param": "pulse"}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expectEqualStrings("pulse", manifest.nodes[0].sprite.?.opacity_param);
+}
+
+test "a text.2d node parses its content, rect, and color" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "label", "type": "text.2d", "inputs": {"frame": "camera"}, "params": {}, "text": {"content": "HELLO", "x": 0.1, "y": 0.8, "w": 0.8, "h": 0.15, "color": [1.0, 0.0, 0.0]}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const tf = manifest.nodes[0].text orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings("HELLO", tf.content);
+    try t.expectApproxEqAbs(@as(f32, 0.8), tf.w, 0.001);
+    try t.expectEqual(@as(u8, 255), tf.r);
+    try t.expectEqual(@as(u8, 0), tf.g);
+}
+
+test "a text.2d node with no text block is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "label", "type": "text.2d", "inputs": {"frame": "camera"}, "params": {}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "a text.2d node needs a text block") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a text block on a non-text node is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "a", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}, "text": {"content": "HI"}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "text is a text.2d field") != null) found = true;
     }
     try t.expect(found);
 }

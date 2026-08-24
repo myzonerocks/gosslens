@@ -19,7 +19,20 @@ const max_steps_per_advance: u32 = 32;
 const settle_distance: f32 = 1e-4;
 const settle_velocity: f32 = 1e-3;
 
-pub const Curve = enum { linear, spring };
+pub const Curve = enum { linear, ease_in_quad, ease_out_quad, ease_in_out_quad, ease_in_out_cubic, ease_in_out_sine, spring };
+
+/// Maps linear progress (0..1) to an eased progress for the time-based
+/// curves. Spring is physical, not progress-based, so it passes through.
+fn easeProgress(curve: Curve, p: f32) f32 {
+    return switch (curve) {
+        .linear, .spring => p,
+        .ease_in_quad => p * p,
+        .ease_out_quad => p * (2.0 - p),
+        .ease_in_out_quad => if (p < 0.5) 2.0 * p * p else -1.0 + (4.0 - 2.0 * p) * p,
+        .ease_in_out_cubic => if (p < 0.5) 4.0 * p * p * p else 1.0 - std.math.pow(f32, -2.0 * p + 2.0, 3.0) / 2.0,
+        .ease_in_out_sine => -(std.math.cos(std.math.pi * p) - 1.0) / 2.0,
+    };
+}
 
 pub const Ramp = struct {
     start: f32,
@@ -40,6 +53,21 @@ pub const Ramp = struct {
             .value = current,
             .target = target,
             .curve = .linear,
+            .duration_us = duration_ms * 1000,
+        };
+        if (ramp.duration_us == 0) {
+            ramp.value = target;
+            ramp.done = true;
+        }
+        return ramp;
+    }
+
+    pub fn startEased(current: f32, target: f32, duration_ms: u32, curve: Curve) Ramp {
+        var ramp = Ramp{
+            .start = current,
+            .value = current,
+            .target = target,
+            .curve = curve,
             .duration_us = duration_ms * 1000,
         };
         if (ramp.duration_us == 0) {
@@ -78,32 +106,52 @@ pub const Ramp = struct {
     }
 
     fn tick(self: *Ramp) void {
-        switch (self.curve) {
-            .linear => {
-                self.elapsed_us += fixed_step_us;
-                if (self.elapsed_us >= self.duration_us) {
-                    self.value = self.target;
-                    self.done = true;
-                    return;
-                }
-                const progress = @as(f32, @floatFromInt(self.elapsed_us)) / @as(f32, @floatFromInt(self.duration_us));
-                self.value = self.start + (self.target - self.start) * progress;
-            },
-            .spring => {
-                const accel = self.stiffness * (self.target - self.value) - self.damping * self.velocity;
-                self.velocity += accel * fixed_step_seconds;
-                self.value += self.velocity * fixed_step_seconds;
-                if (@abs(self.target - self.value) < settle_distance and @abs(self.velocity) < settle_velocity) {
-                    self.value = self.target;
-                    self.velocity = 0;
-                    self.done = true;
-                }
-            },
+        if (self.curve == .spring) {
+            const accel = self.stiffness * (self.target - self.value) - self.damping * self.velocity;
+            self.velocity += accel * fixed_step_seconds;
+            self.value += self.velocity * fixed_step_seconds;
+            if (@abs(self.target - self.value) < settle_distance and @abs(self.velocity) < settle_velocity) {
+                self.value = self.target;
+                self.velocity = 0;
+                self.done = true;
+            }
+            return;
         }
+        // Every other curve is time-based: advance elapsed, take the linear
+        // progress, and shape it through the curve's easing function.
+        self.elapsed_us += fixed_step_us;
+        if (self.elapsed_us >= self.duration_us) {
+            self.value = self.target;
+            self.done = true;
+            return;
+        }
+        const progress = @as(f32, @floatFromInt(self.elapsed_us)) / @as(f32, @floatFromInt(self.duration_us));
+        self.value = self.start + (self.target - self.start) * easeProgress(self.curve, progress);
     }
 };
 
 const t = std.testing;
+
+test "easing curves shape the same ramp differently and still land on target" {
+    var eio = Ramp.startEased(0, 1, 100, .ease_in_out_quad);
+    var eiq = Ramp.startEased(0, 1, 100, .ease_in_quad);
+    var eoq = Ramp.startEased(0, 1, 100, .ease_out_quad);
+    var i: usize = 0;
+    while (i < 6) : (i += 1) { // ~half of a 100ms ramp at the fixed step
+        _ = eio.advance(fixed_step_us + 1);
+        _ = eiq.advance(fixed_step_us + 1);
+        _ = eoq.advance(fixed_step_us + 1);
+    }
+    try t.expectApproxEqAbs(@as(f32, 0.5), eio.value, 0.05); // symmetric at the midpoint
+    try t.expect(eiq.value < 0.3); // ease-in lags linear at the midpoint
+    try t.expect(eoq.value > 0.7); // ease-out leads it
+
+    var done = Ramp.startEased(0, 1, 100, .ease_in_out_sine);
+    i = 0;
+    while (!done.done and i < 100) : (i += 1) _ = done.advance(fixed_step_us + 1);
+    try t.expectEqual(@as(f32, 1), done.value); // every eased ramp lands exactly on target
+    try t.expect(done.done);
+}
 
 test "a zero-duration linear ramp settles immediately" {
     const ramp = Ramp.startLinear(0, 1, 0);

@@ -55,6 +55,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const material_module = b.createModule(.{
+        .root_source_file = b.path("core/material/graph.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const particles_module = b.createModule(.{
         .root_source_file = b.path("core/particles/particles.zig"),
         .target = target,
@@ -213,6 +219,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("pose", pose_core_module);
     abi_module.addImport("face_geometry", face_geometry_core_module);
     abi_module.addImport("png", pngModule(b, target, optimize));
+    abi_module.addImport("gif", gifModule(b, target, optimize));
     abi_module.addImport("jpeg", jpegModule(b, target, optimize));
     abi_module.addImport("color", colorModule(b, target, optimize));
     abi_module.addImport("media_recording", recordingModule(b, target, optimize));
@@ -221,6 +228,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("audio_mix", audioMixModule(b, target, optimize));
     abi_module.addImport("layout", compositeLayoutModule(b, target, optimize));
     abi_module.addImport("geo", geoModule(b, target, optimize));
+    abi_module.addImport("font", fontModule(b, target, optimize));
     abi_module.addImport("stroke", strokeModule(b, target, optimize));
     abi_module.addImport("world_board", worldBoardModule(b, target, optimize));
     const have_jolt = blk: {
@@ -248,6 +256,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lens_manifest_module.addImport("material", material_module);
     const lens_trigger_module = b.createModule(.{
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = target,
@@ -283,6 +292,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "manifest", .module = lens_manifest_module },
             .{ .name = "trigger", .module = lens_trigger_module },
+            .{ .name = "material", .module = material_module },
         },
     });
     const lens_validator_exe = b.addExecutable(.{
@@ -340,15 +350,18 @@ pub fn build(b: *std.Build) void {
     const segment_tests = b.addTest(.{ .root_module = segment_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
+    const material_tests = b.addTest(.{ .root_module = material_module });
     const fit_module = b.createModule(.{ .root_source_file = b.path("core/math/fit.zig"), .target = target, .optimize = optimize });
     const fit_tests = b.addTest(.{ .root_module = fit_module });
     const png_tests = b.addTest(.{ .root_module = pngModule(b, target, optimize) });
+    const gif_tests = b.addTest(.{ .root_module = gifModule(b, target, optimize) });
     const jpeg_tests = b.addTest(.{ .root_module = jpegModule(b, target, optimize) });
     const color_tests = b.addTest(.{ .root_module = colorModule(b, target, optimize) });
     const audio_analysis_tests = b.addTest(.{ .root_module = audioAnalysisModule(b, target, optimize) });
     const audio_mix_tests = b.addTest(.{ .root_module = audioMixModule(b, target, optimize) });
     const composite_layout_tests = b.addTest(.{ .root_module = compositeLayoutModule(b, target, optimize) });
     const geo_tests = b.addTest(.{ .root_module = geoModule(b, target, optimize) });
+    const font_tests = b.addTest(.{ .root_module = fontModule(b, target, optimize) });
     const stroke_tests = b.addTest(.{ .root_module = strokeModule(b, target, optimize) });
     const world_board_tests = b.addTest(.{ .root_module = worldBoardModule(b, target, optimize) });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
@@ -375,15 +388,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(segment_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
+    test_step.dependOn(&b.addRunArtifact(material_tests).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particles_module })).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
+    test_step.dependOn(&b.addRunArtifact(gif_tests).step);
     test_step.dependOn(&b.addRunArtifact(jpeg_tests).step);
     test_step.dependOn(&b.addRunArtifact(color_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_analysis_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_mix_tests).step);
     test_step.dependOn(&b.addRunArtifact(composite_layout_tests).step);
     test_step.dependOn(&b.addRunArtifact(geo_tests).step);
+    test_step.dependOn(&b.addRunArtifact(font_tests).step);
     test_step.dependOn(&b.addRunArtifact(stroke_tests).step);
     test_step.dependOn(&b.addRunArtifact(world_board_tests).step);
     if (have_jolt) {
@@ -450,6 +466,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(asset_tests).step);
 
         lens_validator_module.addImport("image", am.image);
+        lens_validator_module.addImport("gif", gifModule(b, target, optimize));
         lens_validator_module.link_libc = true;
         abi_module.addImport("image", am.image);
         abi_module.addImport("asset", am.asset);
@@ -521,6 +538,7 @@ pub fn build(b: *std.Build) void {
     lens_validator_test_module.addOptions("build_options", lens_test_options);
     if (host_asset) |am| {
         lens_validator_test_module.addImport("image", am.image);
+        lens_validator_test_module.addImport("gif", gifModule(b, target, optimize));
         lens_validator_test_module.link_libc = true;
         if (gltf_module) |gm| lens_validator_test_module.addImport("gltf", gm);
     }
@@ -685,6 +703,7 @@ pub fn build(b: *std.Build) void {
             },
         });
         abi_tracking_module.addImport("png", pngModule(b, target, optimize));
+        abi_tracking_module.addImport("gif", gifModule(b, target, optimize));
         abi_tracking_module.addImport("jpeg", jpegModule(b, target, optimize));
         abi_tracking_module.addImport("color", colorModule(b, target, optimize));
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize));
@@ -693,6 +712,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("audio_mix", audioMixModule(b, target, optimize));
         abi_tracking_module.addImport("layout", compositeLayoutModule(b, target, optimize));
         abi_tracking_module.addImport("geo", geoModule(b, target, optimize));
+        abi_tracking_module.addImport("font", fontModule(b, target, optimize));
         abi_tracking_module.addImport("stroke", strokeModule(b, target, optimize));
         abi_tracking_module.addImport("world_board", worldBoardModule(b, target, optimize));
         abi_tracking_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
@@ -901,6 +921,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("pose", tracking_cores_wasm.pose);
     abi_wasm.addImport("face_geometry", tracking_cores_wasm.face_geometry);
     abi_wasm.addImport("png", pngModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("gif", gifModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("color", colorModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
@@ -909,6 +930,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("layout", compositeLayoutModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("geo", geoModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("font", fontModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("stroke", strokeModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("world_board", worldBoardModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
@@ -923,6 +945,7 @@ pub fn build(b: *std.Build) void {
             .target = wasm_target,
             .optimize = .ReleaseSmall,
         });
+        lens_manifest_wasm.addImport("material", materialModule(b, wasm_target, .ReleaseSmall));
         const lens_trigger_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/trigger.zig"),
             .target = wasm_target,
@@ -1078,6 +1101,7 @@ pub fn build(b: *std.Build) void {
         const conformance_jpeg_module = jpegModule(b, target, optimize);
         const conformance_color_module = colorModule(b, target, optimize);
         abi_conformance_module.addImport("png", conformance_png_module);
+        abi_conformance_module.addImport("gif", gifModule(b, target, optimize));
         abi_conformance_module.addImport("jpeg", conformance_jpeg_module);
         abi_conformance_module.addImport("color", conformance_color_module);
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize));
@@ -1086,6 +1110,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("audio_mix", audioMixModule(b, target, optimize));
         abi_conformance_module.addImport("layout", compositeLayoutModule(b, target, optimize));
         abi_conformance_module.addImport("geo", geoModule(b, target, optimize));
+        abi_conformance_module.addImport("font", fontModule(b, target, optimize));
         abi_conformance_module.addImport("stroke", strokeModule(b, target, optimize));
         abi_conformance_module.addImport("world_board", worldBoardModule(b, target, optimize));
         abi_conformance_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
@@ -1191,6 +1216,7 @@ pub fn build(b: *std.Build) void {
         });
         if (host_asset) |am| conformance_module.addImport("image", am.image);
         conformance_module.addImport("png", conformance_png_module);
+        conformance_module.addImport("gif", gifModule(b, target, optimize));
         conformance_module.addImport("jpeg", conformance_jpeg_module);
         conformance_module.addImport("color", conformance_color_module);
         const world_replay_module = b.createModule(.{
@@ -1386,6 +1412,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("pose", tracking_cores_android.pose);
     abi_android.addImport("face_geometry", tracking_cores_android.face_geometry);
     abi_android.addImport("png", pngModule(b, android_target, optimize));
+    abi_android.addImport("gif", gifModule(b, android_target, optimize));
     abi_android.addImport("jpeg", jpegModule(b, android_target, optimize));
     abi_android.addImport("color", colorModule(b, android_target, optimize));
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
@@ -1394,6 +1421,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
     abi_android.addImport("layout", compositeLayoutModule(b, android_target, optimize));
     abi_android.addImport("geo", geoModule(b, android_target, optimize));
+    abi_android.addImport("font", fontModule(b, android_target, optimize));
     abi_android.addImport("stroke", strokeModule(b, android_target, optimize));
     abi_android.addImport("world_board", worldBoardModule(b, android_target, optimize));
     abi_android.addImport("physics", physicsModule(b, android_target, optimize, true));
@@ -1405,6 +1433,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         .target = android_target,
         .optimize = optimize,
     });
+    lens_manifest_android.addImport("material", materialModule(b, android_target, optimize));
     const lens_trigger_android = b.createModule(.{
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = android_target,
@@ -1602,6 +1631,14 @@ fn pngModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     return b.createModule(.{ .root_source_file = b.path("core/media/png.zig"), .target = target, .optimize = optimize });
 }
 
+fn gifModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/gif.zig"), .target = target, .optimize = optimize });
+}
+
+fn materialModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/material/graph.zig"), .target = target, .optimize = optimize });
+}
+
 fn jpegModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/media/jpeg.zig"), .target = target, .optimize = optimize });
 }
@@ -1624,6 +1661,10 @@ fn compositeLayoutModule(b: *std.Build, target: std.Build.ResolvedTarget, optimi
 
 fn geoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/geo/geo.zig"), .target = target, .optimize = optimize });
+}
+
+fn fontModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/text/font.zig"), .target = target, .optimize = optimize });
 }
 
 fn strokeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -3350,6 +3391,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("pose", tracking_cores_ios.pose);
     abi_ios.addImport("face_geometry", tracking_cores_ios.face_geometry);
     abi_ios.addImport("png", pngModule(b, ios_target, optimize));
+    abi_ios.addImport("gif", gifModule(b, ios_target, optimize));
     abi_ios.addImport("jpeg", jpegModule(b, ios_target, optimize));
     abi_ios.addImport("color", colorModule(b, ios_target, optimize));
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
@@ -3358,6 +3400,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("audio_mix", audioMixModule(b, ios_target, optimize));
     abi_ios.addImport("layout", compositeLayoutModule(b, ios_target, optimize));
     abi_ios.addImport("geo", geoModule(b, ios_target, optimize));
+    abi_ios.addImport("font", fontModule(b, ios_target, optimize));
     abi_ios.addImport("stroke", strokeModule(b, ios_target, optimize));
     abi_ios.addImport("world_board", worldBoardModule(b, ios_target, optimize));
     // Physics, scripting and audio follow their vendor the same way the host
@@ -3384,6 +3427,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .target = ios_target,
         .optimize = optimize,
     });
+    lens_manifest_ios.addImport("material", materialModule(b, ios_target, optimize));
     const lens_trigger_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = ios_target,
@@ -3919,6 +3963,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("pose", tracking_cores_em.pose);
     abi_em.addImport("face_geometry", tracking_cores_em.face_geometry);
     abi_em.addImport("png", pngModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("gif", gifModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("jpeg", jpegModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("color", colorModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));
@@ -3927,6 +3972,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("audio_mix", audioMixModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("layout", compositeLayoutModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("geo", geoModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("font", fontModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("stroke", strokeModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("world_board", worldBoardModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, true));
@@ -3948,6 +3994,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     });
     abi_em.addImport("face106", face106_em);
     const lens_manifest_em = b.createModule(.{ .root_source_file = b.path("core/lens/manifest.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    lens_manifest_em.addImport("material", materialModule(b, em_target, .ReleaseSmall));
     const lens_trigger_em = b.createModule(.{
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = em_target,
@@ -4215,6 +4262,13 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // different u_blurStep values the caller submits it with, same
         // program both times.
         .{ .name = "fs_blur_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_dof_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_fog_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_outline_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_trail_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_ssr_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_env_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_envmap_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // grade.pass's own fixed fragment shader: a parametric color
         // grade (exposure, contrast, saturation, temperature), same
         // reasoning as fs_lut_pass above.

@@ -207,6 +207,17 @@ pub const Renderer = struct {
         _ = chroma;
     }
 
+    pub fn submitSpriteAtRect(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = sprite_tex;
+        _ = dx;
+        _ = dy;
+        _ = dw;
+        _ = dh;
+        _ = opacity;
+    }
+
     pub fn setLayoutViewport(view_id: u16, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
         _ = view_id;
         _ = target;
@@ -252,6 +263,73 @@ pub const Renderer = struct {
         _ = view_id;
         _ = input_texture;
         _ = step;
+    }
+
+    pub fn submitDofPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, depth_texture: TextureHandle, focus: f32, strength: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = depth_texture;
+        _ = focus;
+        _ = strength;
+    }
+
+    pub fn submitFogPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, depth_texture: TextureHandle, color: [3]f32, density: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = depth_texture;
+        _ = color;
+        _ = density;
+    }
+
+    pub fn submitOutlinePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, depth_texture: TextureHandle, color: [3]f32, threshold: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = depth_texture;
+        _ = color;
+        _ = threshold;
+    }
+
+    pub fn submitTrailPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, prev_texture: TextureHandle, amount: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = prev_texture;
+        _ = amount;
+    }
+
+    pub fn submitSsrPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, depth_texture: TextureHandle, strength: f32, plane: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = depth_texture;
+        _ = strength;
+        _ = plane;
+    }
+
+    pub fn submitEnvPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, top: [3]f32, bottom: [3]f32, intensity: f32, pitch: f32, yaw: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = top;
+        _ = bottom;
+        _ = intensity;
+        _ = pitch;
+        _ = yaw;
+    }
+
+    pub fn submitEnvmapPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, env_texture: TextureHandle, mask_texture: TextureHandle, rot: [3][4]f32, intensity: f32, aspect: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = env_texture;
+        _ = mask_texture;
+        _ = rot;
+        _ = intensity;
+        _ = aspect;
     }
 
     pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
@@ -334,6 +412,19 @@ pub const Renderer = struct {
         _ = positions;
         _ = indices;
         return error.RendererUnavailable;
+    }
+
+    pub fn createDynamicModelMesh(r: *Renderer, positions: []const [3]f32, indices: []const u32) !ModelMesh {
+        _ = r;
+        _ = positions;
+        _ = indices;
+        return error.RendererUnavailable;
+    }
+
+    pub fn updateModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
     }
 
     pub fn destroyModelMesh(mesh: ModelMesh) void {

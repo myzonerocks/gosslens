@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.gif-sprite",
+  "version": "1.0.0",
+  "display_name": "GIF Clip",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "clip", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5, "opacity": 1.0}}
+  ],
+  "triggers": []
+}
