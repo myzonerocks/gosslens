@@ -5031,6 +5031,82 @@ fn proveTrailPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the ssr.pass reflects by the submitted depth. The ssr-floor bundle
+/// mirrors the scene into the floor below the horizon, scaled by how near the
+/// depth reads: a far, dry floor leaves the frame alone, a near one wets it
+/// with a reflection, so the near-depth frame differs from the far one.
+fn proveSsrPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/ssr-floor";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: ssr-floor proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    const dw: u32 = 64;
+    const dh: u32 = 64;
+    const depth = try gpa.alloc(f32, dw * dh);
+    defer gpa.free(depth);
+
+    // A far, dry floor: depth at the far plane reads no reflection.
+    for (depth) |*d| d.* = 5.0;
+    if (abi.goss_session_submit_depth(session, depth.ptr, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-ssr-dry");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // A near floor: the same region now wets with a mirrored reflection.
+    for (depth) |*d| d.* = 0.1;
+    if (abi.goss_session_submit_depth(session, depth.ptr, dw, dh, 0.1, 5.0) != .ok) return error.SubmitFailed;
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-ssr-wet");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const dry_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-ssr-dry.tga", gpa, .limited(8 << 20));
+    defer gpa.free(dry_tga);
+    const wet_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-ssr-wet.tga", gpa, .limited(8 << 20));
+    defer gpa.free(wet_tga);
+
+    if (std.mem.eql(u8, dry_tga, wet_tga)) {
+        std.debug.print("conformance: FAIL ssr-floor: a near depth wet no reflection over the far, dry floor\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF ssr-floor reflects by depth: a near floor wets with a mirrored reflection where a far one stays dry\n", .{});
+    return true;
+}
+
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
@@ -5134,6 +5210,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("outline pass");
     if (!try proveTrailPass(gpa, engine)) return 1;
     watchHold("trail pass");
+    if (!try proveSsrPass(gpa, engine)) return 1;
+    watchHold("ssr pass");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

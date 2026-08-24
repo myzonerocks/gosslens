@@ -33,6 +33,7 @@ CaptureOutput, Events.
 | Post-effect nodes (blur, parametric grade, bloom) | proven in the host harness, each with a reference lens and a conformance proof | built, no hardware yet | built |
 | Depth post-passes (depth-of-field, depth fog, depth-edge outline) | proven in the host harness: a depth gradient blurs off the focus plane and hazes the far side, a depth step draws a toon outline, each with a reference lens and a proof | built, no hardware yet | built |
 | Motion trail (temporal echo of the previous frame) | proven in the host harness: the frame right after a scene cut still carries the previous frame's echo, with a reference lens and a proof | built, no hardware yet | built |
+| Screen-space reflection (depth-gated reflective floor) | proven in the host harness: a near depth wets the floor with a mirrored reflection where a far one stays dry, with a reference lens and a proof | built, no hardware yet | built |
 | Material graph shaders (node-graph fragment shaders lowered to GLSL) | proven in the host harness: authored graphs compile and render, with reference lenses and a conformance proof | built, no hardware yet | built |
 | glTF animation mixer and morph targets (weights bound to parameters) | proven in the host harness: clip and morph weights blend the pose, each with a reference lens and a proof | built, no hardware yet | built |
 | 2D sprite and text nodes (image overlay, built-in-font text) | proven in the host harness, each with a reference lens and a proof | built, no hardware yet | built |

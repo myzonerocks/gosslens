@@ -284,6 +284,14 @@ the one it drew last, seeded from the current frame the first time so the first
 frame shows no echo - so it is always ready. `amount` is optional with an
 engine default, and it ships no asset.
 
+An `"ssr.pass"` node is a screen-space reflection post-effect. It carries an
+`"ssr": {"strength", "plane"}` block: `plane` (0..1 down the frame) is the
+horizon below which the scene mirrors into a reflective floor, and `strength`
+(0..1) how strongly the reflection shows. It reads the host's submitted depth
+to scale the reflection by how near the floor is, so a near floor wets while a
+far one stays dry, holding the frame through when no depth is submitted. Both
+fields are optional with engine defaults, and it ships no asset.
+
 A `"draw.board"` node draws the session's brush board at its own place in the
 chain: the frame passes through, then every committed stroke draws over it, neon
 strokes additively and the rest on alpha. It ships no asset, carries no params,

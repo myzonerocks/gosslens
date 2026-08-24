@@ -609,6 +609,8 @@ pub const Session = struct {
     fog_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     /// outline.pass nodes by graph index: their line color (rgb) and threshold.
     outline_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// ssr.pass nodes by graph index: their reflection strength and floor plane.
+    ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// trail.pass nodes by graph index: their motion-trail echo amount.
     trail_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
     /// The previous composited frame a trail.pass echoes, held across frames
@@ -1403,6 +1405,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // seeds from the current frame on the first pass), so it is ready
             // as soon as its echo amount is resolved - no host input to gate on.
             .trail => s.trail_params.contains(entry.graph_index),
+            // Screen-space reflection reads the submitted depth to know how
+            // reflective the floor is, degrading the same way dof and fog do.
+            .ssr => s.ssr_params.contains(entry.graph_index) and s.depth_texture != null,
             // Only the background image gates readiness - the mask
             // degrades to the renderer's always-foreground default
             // when segmentation is unavailable (SPEC's rule: a node
@@ -1606,6 +1611,22 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitOutlinePass(view_id, input_texture, depth_tex, .{ line[0], line[1], line[2] }, line[3]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .ssr => {
+                const ssr = s.ssr_params.get(entry.graph_index) orelse continue;
+                const depth_tex = s.depth_texture orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitSsrPass(view_id, input_texture, depth_tex, ssr[0], ssr[1]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2313,6 +2334,7 @@ pub fn destroySession(session: *Session) void {
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
+    session.ssr_params.deinit(session.engine.gpa);
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.depth_texture) |tex| {
         if (session.engine.renderer) |*r| r.destroyTexture(tex);
@@ -4955,6 +4977,7 @@ fn destroyBlendState(session: *Session) void {
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
+    session.ssr_params.clearRetainingCapacity();
     // The prev-frame target is reused across lenses, but its echo belongs to
     // the lens that just left: drop it so the next trail reseeds cleanly.
     session.prev_frame_valid = false;
@@ -5320,6 +5343,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createFogParams(s, gpa) catch {};
     createOutlineParams(s, gpa) catch {};
     createTrailParams(s, gpa) catch {};
+    createSsrParams(s, gpa) catch {};
     // A particle fountain also needs no bundle (the CPU sim and its mesh are
     // built from the field alone), so create it here too; the empty bundle
     // path just means a glTF model's own asset never loads, degrading it,
@@ -5413,6 +5437,17 @@ fn createTrailParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(trails);
     for (trails) |tr| {
         session.trail_params.put(gpa, tr.graph_index, tr.amount) catch {};
+    }
+}
+
+/// Resolves every spliced ssr.pass node's reflection strength and floor
+/// plane into session.ssr_params, once at activation.
+fn createSsrParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const ssrs = try lens.ssrPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(ssrs);
+    for (ssrs) |sr| {
+        session.ssr_params.put(gpa, sr.graph_index, .{ sr.strength, sr.plane }) catch {};
     }
 }
 
@@ -6004,6 +6039,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createFogParams(session, gpa);
     try createOutlineParams(session, gpa);
     try createTrailParams(session, gpa);
+    try createSsrParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
 }

@@ -300,6 +300,15 @@ pub const Renderer = struct {
         _ = amount;
     }
 
+    pub fn submitSsrPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, depth_texture: TextureHandle, strength: f32, plane: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = depth_texture;
+        _ = strength;
+        _ = plane;
+    }
+
     pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
         _ = r;
         _ = view_id;
