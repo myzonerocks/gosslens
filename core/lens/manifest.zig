@@ -305,6 +305,13 @@ pub const TextField = struct {
     /// Like SpriteField.opacity_param: a parameter name whose live value
     /// overrides the text's opacity each frame. Empty keeps the static one.
     opacity_param: []const u8 = "",
+    /// The rgb the glyphs fade toward at their base for a vertical gradient
+    /// (top is the main color); null draws a flat fill.
+    gradient: ?[3]u8 = null,
+    /// Drop a soft shadow down-right behind the glyphs.
+    shadow: bool = false,
+    /// An outline the glyphs are stroked with; null is no stroke.
+    stroke: ?[3]u8 = null,
 };
 
 pub const LayoutField = struct {
@@ -1447,6 +1454,29 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(tv.object, "opacity_param")) |v| {
                     if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
+                }
+                if (getField(tv.object, "gradient")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.gradient = .{
+                            @intFromFloat(std.math.clamp(rgb[0], 0.0, 1.0) * 255.0),
+                            @intFromFloat(std.math.clamp(rgb[1], 0.0, 1.0) * 255.0),
+                            @intFromFloat(std.math.clamp(rgb[2], 0.0, 1.0) * 255.0),
+                        };
+                    } else try diags.add(path.slice(), "text gradient must be three numbers", .{});
+                }
+                if (getField(tv.object, "stroke")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.stroke = .{
+                            @intFromFloat(std.math.clamp(rgb[0], 0.0, 1.0) * 255.0),
+                            @intFromFloat(std.math.clamp(rgb[1], 0.0, 1.0) * 255.0),
+                            @intFromFloat(std.math.clamp(rgb[2], 0.0, 1.0) * 255.0),
+                        };
+                    } else try diags.add(path.slice(), "text stroke must be three numbers", .{});
+                }
+                if (getField(tv.object, "shadow")) |v| {
+                    if (v == .bool) field.shadow = v.bool;
                 }
                 text_field = field;
             }

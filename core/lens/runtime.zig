@@ -239,6 +239,11 @@ pub const TextNode = struct {
     /// A parameter name whose live value overrides opacity each frame, or
     /// empty for the static opacity.
     opacity_param: []const u8,
+    /// Rich-text styling: a vertical gradient base color, a drop shadow, and a
+    /// stroke outline (each null/false is off).
+    gradient: ?[3]u8,
+    shadow: bool,
+    stroke: ?[3]u8,
 };
 
 /// One grade.pass node ready for the caller to draw - which graph node
@@ -606,7 +611,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .text_2d) continue;
             const tf = node.text orelse manifest.TextField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke });
         }
         return out.toOwnedSlice(gpa);
     }

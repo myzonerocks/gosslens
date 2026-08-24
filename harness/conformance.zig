@@ -3195,6 +3195,29 @@ fn proveMeshInstancing(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves rich text styling: the same string with a gradient, a drop shadow
+/// and a stroke outline renders a different frame from the plain-fill text, so
+/// the styling draws, and it is bit-stable across runs. The rasterizer's own
+/// coverage is pinned by the font module test.
+fn proveRichText(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const rich0 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-rich", 10)) orelse return false;
+    defer gpa.free(rich0);
+    const rich1 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-rich", 10)) orelse return false;
+    defer gpa.free(rich1);
+    if (!std.mem.eql(u8, rich0, rich1)) {
+        std.debug.print("conformance: FAIL rich text is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const plain = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-plain", 10)) orelse return false;
+    defer gpa.free(plain);
+    if (std.mem.eql(u8, rich0, plain)) {
+        std.debug.print("conformance: FAIL rich text styling did not change the frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF gradient, shadow and stroke restyle a text label away from the plain fill, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -7101,6 +7124,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveLiveCollider(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "mesh-instancing")) {
             if (!try proveMeshInstancing(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "rich-text")) {
+            if (!try proveRichText(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7219,6 +7244,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("live collider");
     if (!try proveMeshInstancing(gpa, engine)) return 1;
     watchHold("mesh instancing");
+    if (!try proveRichText(gpa, engine)) return 1;
+    watchHold("rich text");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

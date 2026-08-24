@@ -6255,7 +6255,11 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
     const texts = try lens.textNodes(gpa, &session.lens_graph);
     defer gpa.free(texts);
     for (texts) |txt| {
-        const raster = font.rasterize(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
+        const rich = txt.gradient != null or txt.shadow or txt.stroke != null;
+        const raster = if (rich)
+            font.rasterizeRich(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }, txt.gradient, txt.shadow, txt.stroke) catch continue
+        else
+            font.rasterize(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
         defer gpa.free(raster.rgba);
         const texture = render.Renderer.createStaticTexture(@intCast(raster.width), @intCast(raster.height), raster.rgba);
         session.sprite_textures.put(gpa, txt.graph_index, texture) catch {
