@@ -131,6 +131,9 @@ pub const ParticleField = struct {
     stretch: f32 = 0,
     /// Frames in a square sprite sheet flip-booked over life; 1 is a still.
     frames: u32 = 1,
+    /// Trail length: recent positions drawn behind each particle as a fading
+    /// ribbon (a comet tail); 0 or 1 is no trail.
+    trail: u32 = 0,
     /// Emit everything once and let it die out, rather than looping.
     oneshot: bool = false,
     /// Sprite size in pixels at death, if the size changes over life.
@@ -987,6 +990,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "frames")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= 64) field.frames = @intCast(v.integer) else try diags.add(path.slice(), "particles frames must be an integer 1..64", .{});
+                }
+                if (getField(pv.object, "trail")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer <= 32) field.trail = @intCast(v.integer) else try diags.add(path.slice(), "particles trail must be an integer 0..32", .{});
                 }
                 if (getField(pv.object, "wind")) |v| {
                     var w: [3]f32 = .{ 0, 0, 0 };

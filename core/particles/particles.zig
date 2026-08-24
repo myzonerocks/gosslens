@@ -59,6 +59,9 @@ pub const Field = struct {
     /// Frames in a square sprite sheet the sprite flip-books through over its
     /// life; 1 (or 0) is a still image.
     frames: u32 = 1,
+    /// Trail length: how many of each particle's recent positions draw behind
+    /// it as a fading ribbon of billboards (a comet tail). 0 or 1 is no trail.
+    trail: u32 = 0,
     /// Blend additively so overlaps brighten (a fire glow).
     glow: bool = false,
     /// Sprite image stem (assets/<stem>.png); null is the soft round default.
@@ -119,16 +122,46 @@ pub const System = struct {
     /// Live spawn points (world space) the host feeds each frame for the face
     /// pattern - tracked landmarks. Empty means no tracked subject.
     emitters: []const [3]f32 = &.{},
+    /// A ring of each particle's recent positions (count * trail * 3 floats),
+    /// only when a trail is on; the newest slot per particle is `head`.
+    history: []f32 = &.{},
+    head: u32 = 0,
+
+    /// Trail slots per particle, at least one, so the trail math never divides
+    /// by zero when a trail is off.
+    fn trailLen(self: *const System) u32 {
+        return @max(self.field.trail, 1);
+    }
 
     pub fn init(gpa: std.mem.Allocator, field: Field) !System {
         const particles = try gpa.alloc(Particle, field.count);
+        errdefer gpa.free(particles);
         var sys = System{ .field = field, .particles = particles, .gpa = gpa };
+        if (field.trail > 1) {
+            sys.history = try gpa.alloc(f32, @as(usize, field.count) * field.trail * 3);
+        }
         sys.emitAll();
         return sys;
     }
 
     pub fn deinit(self: *System) void {
         self.gpa.free(self.particles);
+        if (self.history.len > 0) self.gpa.free(self.history);
+    }
+
+    /// Fills every trail slot of particle i with pos, so a fresh or respawned
+    /// particle's trail starts collapsed at its birthplace rather than
+    /// streaking from wherever it last died.
+    fn seedHistory(self: *System, i: usize, pos: [3]f32) void {
+        if (self.history.len == 0) return;
+        const n = self.trailLen();
+        var s: u32 = 0;
+        while (s < n) : (s += 1) {
+            const b = (i * n + s) * 3;
+            self.history[b + 0] = pos[0];
+            self.history[b + 1] = pos[1];
+            self.history[b + 2] = pos[2];
+        }
     }
 
     /// Points the face pattern spawns from this frame. The slice is borrowed,
@@ -211,7 +244,11 @@ pub const System = struct {
     }
 
     fn emitAll(self: *System) void {
-        for (self.particles, 0..) |*p, i| p.* = emitOne(self.field, self.emitters, i);
+        for (self.particles, 0..) |*p, i| {
+            p.* = emitOne(self.field, self.emitters, i);
+            self.seedHistory(i, p.pos);
+        }
+        self.head = 0;
     }
 
     /// Advances every particle by dt under gravity, drag, wind, turbulence, an
@@ -227,6 +264,7 @@ pub const System = struct {
                     continue;
                 }
                 p.* = emitOne(f, self.emitters, i);
+                self.seedHistory(i, p.pos);
                 continue;
             }
             p.vel[1] -= f.gravity * dt;
@@ -270,6 +308,54 @@ pub const System = struct {
                 if (p.pos[1] < y) {
                     p.pos[1] = y;
                     p.vel[1] = -p.vel[1] * 0.5;
+                }
+            }
+        }
+        // Record this frame's positions into the trail ring, one slot on.
+        if (self.history.len > 0) {
+            const n = self.trailLen();
+            self.head = (self.head + 1) % n;
+            for (self.particles, 0..) |p, i| {
+                const b = (i * n + self.head) * 3;
+                self.history[b + 0] = p.pos[0];
+                self.history[b + 1] = p.pos[1];
+                self.history[b + 2] = p.pos[2];
+            }
+        }
+    }
+
+    /// Billboard vertices a trail draw needs: six per particle per trail slot.
+    pub fn trailVertexCount(self: *const System) usize {
+        return @as(usize, self.field.count) * self.trailLen() * 6;
+    }
+
+    /// Writes the trail as fading billboards (trailVertexCount() * 8 floats):
+    /// each particle's recent positions, oldest faintest, so the ribbon tapers
+    /// off behind it. Same vertex shape as writeBillboards, so the one fading
+    /// billboard program draws it with no new shader.
+    pub fn writeTrailBillboards(self: *const System, out: []f32) void {
+        const corners = [6]f32{ 0, 1, 2, 0, 2, 3 };
+        const n = self.trailLen();
+        for (self.particles, 0..) |p, i| {
+            const life_frac = std.math.clamp(p.life / p.max_life, 0.0, 1.0);
+            var slot: u32 = 0;
+            while (slot < n) : (slot += 1) {
+                // slot 0 is the oldest sample, n-1 the newest; the newest sits
+                // at `head`, so walk forward from just past it.
+                const ring = (self.head + 1 + slot) % n;
+                const hb = (i * n + ring) * 3;
+                const age = @as(f32, @floatFromInt(slot + 1)) / @as(f32, @floatFromInt(n));
+                const frac = life_frac * age;
+                for (corners, 0..) |corner, k| {
+                    const base = ((i * n + slot) * 6 + k) * 8;
+                    out[base + 0] = self.history[hb + 0];
+                    out[base + 1] = self.history[hb + 1];
+                    out[base + 2] = self.history[hb + 2];
+                    out[base + 3] = corner;
+                    out[base + 4] = frac;
+                    out[base + 5] = p.seed;
+                    out[base + 6] = p.vel[0];
+                    out[base + 7] = p.vel[1];
                 }
             }
         }
@@ -370,4 +456,34 @@ test "curl noise is divergence-free and swirls particles off the plain path" {
         if (a.pos[0] != b.pos[0] or a.pos[2] != b.pos[2]) diverged = true;
     }
     try std.testing.expect(diverged);
+}
+
+test "a trail records recent positions and fades from head to tail" {
+    const field = Field{ .count = 32, .speed = 1.0, .lifetime = 5.0, .pattern = .fountain, .trail = 6, .fade = true };
+    var s = try System.init(std.testing.allocator, field);
+    defer s.deinit();
+    // Every trail slot starts collapsed at the birthplace, so no garbage streak.
+    for (0..s.trailVertexCount()) |_| {}
+    try std.testing.expectEqual(@as(usize, 32 * 6 * 6), s.trailVertexCount());
+    for (0..40) |_| s.step(1.0 / 60.0);
+
+    // The ring now holds distinct recent positions for a moving particle.
+    const n = s.trailLen();
+    const p0 = s.particles[0];
+    _ = p0;
+    var distinct = false;
+    const newest = (s.head) % n;
+    const oldest = (s.head + 1) % n;
+    const bn = (0 * n + newest) * 3;
+    const bo = (0 * n + oldest) * 3;
+    if (s.history[bn + 1] != s.history[bo + 1]) distinct = true;
+    try std.testing.expect(distinct);
+
+    // Billboards write, oldest slot fainter than newest for the same particle.
+    const out = try std.testing.allocator.alloc(f32, s.trailVertexCount() * 8);
+    defer std.testing.allocator.free(out);
+    s.writeTrailBillboards(out);
+    const oldest_frac = out[((0 * n + 0) * 6 + 0) * 8 + 4];
+    const newest_frac = out[((0 * n + (n - 1)) * 6 + 0) * 8 + 4];
+    try std.testing.expect(newest_frac > oldest_frac);
 }

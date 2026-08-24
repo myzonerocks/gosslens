@@ -2879,6 +2879,77 @@ fn proveParticlePatterns(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves particle trails: the comet-trail lens draws each particle's recent
+/// positions as a fading tail behind it, so its settled frame differs from the
+/// comet-plain lens - identical particles with the trail off - which draws only
+/// the heads. Both stay bit-stable across runs.
+fn proveParticleTrail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const lenses = [_][]const u8{ ".lens-packages/comet-trail", ".lens-packages/comet-plain" };
+    var settled: [2][]u8 = .{ &.{}, &.{} };
+    defer for (settled) |s| if (s.len > 0) gpa.free(s);
+
+    for (lenses, 0..) |pkg, lens_idx| {
+        var first_hash: [64]u8 = undefined;
+        var runs: u32 = 0;
+        while (runs < 2) : (runs += 1) {
+            const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(engine);
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL comet lens activation\n", .{});
+                return false;
+            }
+            const corpus = try loadCorpusFrame(gpa, corpus_path);
+            defer corpus.deinit();
+            const planes = try rgbaToNv12(gpa, corpus.frame);
+            defer planes.deinit(gpa);
+            const half_w = (planes.width + 1) / 2;
+
+            var this_settled: []u8 = &.{};
+            defer if (this_settled.len > 0) gpa.free(this_settled);
+
+            for (0..90) |i| {
+                const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+                if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(engine, session);
+                c.glfwPollEvents();
+                if (i == 85) {
+                    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                    errdefer gpa.free(shot);
+                    var w: u32 = 0;
+                    var h: u32 = 0;
+                    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                        gpa.free(shot);
+                        return false;
+                    }
+                    this_settled = shot;
+                }
+            }
+            var digest: [32]u8 = undefined;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(this_settled);
+            hasher.final(&digest);
+            const hash = std.fmt.bytesToHex(digest, .lower);
+            if (runs == 0) {
+                first_hash = hash;
+            } else {
+                if (!std.mem.eql(u8, &first_hash, &hash)) {
+                    std.debug.print("conformance: FAIL a comet lens is not bit-stable across runs\n", .{});
+                    return false;
+                }
+                settled[lens_idx] = this_settled;
+                this_settled = &.{};
+            }
+        }
+    }
+    if (std.mem.eql(u8, settled[0], settled[1])) {
+        std.debug.print("conformance: FAIL the trail drew nothing the plain comet did not\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF particle trails draw a fading tail: the trailed comet differs from the same comet with no trail, each bit-stable\n", .{});
+    return true;
+}
+
 /// Proves the AR spawn off tracked landmarks: the face-sparkle lens uses the face
 /// emission pattern, so particles spawn from the tracked face landmarks. With
 /// face tracking on the portrait corpus it develops (settled differs from
@@ -5558,6 +5629,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("star sprite");
     if (!try proveParticlePatterns(gpa, engine)) return 1;
     watchHold("particle patterns");
+    if (!try proveParticleTrail(gpa, engine)) return 1;
+    watchHold("particle trail");
     if (!try proveFaceSparkle(gpa, engine)) return 1;
     watchHold("face sparkle");
     if (!try proveJsonPostEffect(gpa, engine)) return 1;

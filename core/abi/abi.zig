@@ -1893,7 +1893,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
                         if (sys.field.pattern == .face) feedFaceEmitters(s, sys, width, height);
                         if (!s.capture_requested) sys.step(1.0 / 60.0);
-                        fade = sys.field.fade;
+                        // A trail draws through the fading billboard program
+                        // too, so it counts as a faded draw here.
+                        const has_trail = sys.field.trail > 1;
+                        fade = sys.field.fade or has_trail;
                         glow = sys.field.glow;
                         if (sys.field.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
                         cool_color = base_color;
@@ -1910,7 +1913,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             const frames: f32 = @floatFromInt(@max(sys.field.frames, 1));
                             const sheet_dim: f32 = @ceil(@sqrt(frames));
                             particle_fx = .{ frames, sheet_dim, sys.field.stretch, 0 };
-                            if (s.engine.gpa.alloc(f32, count * 6 * 8)) |verts| {
+                            if (has_trail) {
+                                if (s.engine.gpa.alloc(f32, sys.trailVertexCount() * 8)) |verts| {
+                                    defer s.engine.gpa.free(verts);
+                                    sys.writeTrailBillboards(verts);
+                                    render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
+                                } else |_| {}
+                            } else if (s.engine.gpa.alloc(f32, count * 6 * 8)) |verts| {
                                 defer s.engine.gpa.free(verts);
                                 sys.writeBillboards(verts);
                                 render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
@@ -5979,11 +5988,14 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
                 const pattern = particlePattern(pf.pattern);
-                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .curl = pf.curl, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .pattern = pattern })) |sys| {
-                    // A fading fountain draws six-vertex sprite quads; a plain
-                    // one draws one point per particle.
-                    const vertex_count = if (pf.fade) pf.count * 6 else pf.count;
-                    if (r.createParticleMesh(vertex_count, pf.fade)) |mesh| {
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .curl = pf.curl, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .trail = pf.trail, .pattern = pattern })) |sys| {
+                    // A trail draws a fading billboard per particle per trail
+                    // slot; a fading fountain one quad per particle; a plain one
+                    // a single point each. Trails and fades share the billboard
+                    // program, so both take the faded mesh path.
+                    const faded = pf.fade or pf.trail > 1;
+                    const vertex_count: u32 = if (pf.trail > 1) @intCast(sys.trailVertexCount()) else if (pf.fade) pf.count * 6 else pf.count;
+                    if (r.createParticleMesh(vertex_count, faded)) |mesh| {
                         session.particle_systems.put(gpa, model.graph_index, sys) catch {
                             var s2 = sys;
                             s2.deinit();
