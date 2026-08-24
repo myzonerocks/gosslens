@@ -8,6 +8,7 @@ pub const supported = false;
 pub const Shape = enum(u32) {
     box = 0,
     sphere = 1,
+    cylinder = 2,
 };
 
 pub const Motion = enum(u32) {

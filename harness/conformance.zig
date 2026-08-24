@@ -2723,6 +2723,43 @@ fn provePhysicsSpring(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the cylinder collider shape: the same marker dropped as a cylinder
+/// lands flat on its base and rests a half height up, where the sphere marker
+/// of the identical drop lens settles far lower - so the shape, not the model,
+/// drives the contact - each bit-stable across runs.
+fn provePhysicsShapeCylinder(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var cyl_settled: []u8 = &.{};
+    defer if (cyl_settled.len > 0) gpa.free(cyl_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/shape-cylinder");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            cyl_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL cylinder shape is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const sphere_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-drop");
+    defer gpa.free(sphere_settled);
+    if (std.mem.eql(u8, cyl_settled, sphere_settled)) {
+        std.debug.print("conformance: FAIL the cylinder marker settled the same as the sphere marker\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a cylinder marker rests a half height up where the identical sphere-marker drop settles lower, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -6037,6 +6074,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics hinge");
     if (!try provePhysicsSpring(gpa, engine)) return 1;
     watchHold("physics spring");
+    if (!try provePhysicsShapeCylinder(gpa, engine)) return 1;
+    watchHold("physics shape cylinder");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

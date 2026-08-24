@@ -11,6 +11,7 @@
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
@@ -114,8 +115,9 @@ extern "C" void goss_physics_world_destroy(void* handle) {
   }
 }
 
-// shape: 0 = box (params x/y/z half extents), 1 = sphere (params x =
-// radius). motion: 0 static, 1 dynamic, 2 kinematic (the engine drives
+// shape: 0 = box (params x/y/z half extents), 1 = sphere (param x =
+// radius), 2 = cylinder (axis vertical, param x = radius, y = half
+// height). motion: 0 static, 1 dynamic, 2 kinematic (the engine drives
 // it; chained bodies follow). Returns the body id, or UINT32_MAX.
 extern "C" uint32_t goss_physics_body_add(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, uint32_t motion) {
   auto* world = static_cast<World*>(handle);
@@ -125,6 +127,8 @@ extern "C" uint32_t goss_physics_body_add(void* handle, uint32_t shape, float px
     body_shape = new JPH::BoxShape(JPH::Vec3(sx, sy, sz));
   } else if (shape == 1) {
     body_shape = new JPH::SphereShape(sx);
+  } else if (shape == 2) {
+    body_shape = new JPH::CylinderShape(sy, sx);
   } else {
     return UINT32_MAX;
   }

@@ -10,6 +10,8 @@ pub const supported = true;
 pub const Shape = enum(u32) {
     box = 0,
     sphere = 1,
+    /// Axis vertical; size is radius, half-height.
+    cylinder = 2,
 };
 
 pub const Motion = enum(u32) {
@@ -237,6 +239,23 @@ test "a spring joint stretches under gravity and settles below its rest length" 
     try t.expect(p[13] > 1.30);
     try t.expect(@abs(p[12]) < 0.05);
     try t.expect(@abs(p[14]) < 0.05);
+}
+
+test "a cylinder rests upright at its half height, above where a sphere sits" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    _ = try world.addBody(.box, .{ 0, -0.1, 0 }, .{ 4, 0.1, 4 }, .static); // floor top at y = 0
+    // A cylinder dropped straight down with no spin lands flat on its base and
+    // rests with its centre a half height (0.3) above the floor.
+    const cyl = try world.addBody(.cylinder, .{ 0, 1.0, 0 }, .{ 0.1, 0.3, 0.1 }, .dynamic);
+    // A sphere of the same radius rests far lower, its centre one radius up.
+    const ball = try world.addBody(.sphere, .{ 1.0, 1.0, 0 }, .{ 0.1, 0, 0 }, .dynamic);
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const cyl_pose = try world.bodyPose(cyl);
+    const ball_pose = try world.bodyPose(ball);
+    try t.expectApproxEqAbs(@as(f32, 0.3), cyl_pose[13], 0.03);
+    try t.expectApproxEqAbs(@as(f32, 0.1), ball_pose[13], 0.03);
+    try t.expect(cyl_pose[13] > ball_pose[13] + 0.15);
 }
 
 test "two identical worlds land bit-identical poses" {

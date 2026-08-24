@@ -283,8 +283,9 @@ pub const LayoutField = struct {
 };
 
 pub const PhysicsBody = struct {
-    shape: enum { box, sphere },
-    /// Box half extents; a sphere reads its radius from [0].
+    shape: enum { box, sphere, cylinder },
+    /// Box half extents; a sphere reads its radius from [0]; a cylinder
+    /// (axis vertical) reads radius from [0] and half height from [1].
     size: [3]f32,
     position: [3]f32,
     dynamic: bool,
@@ -1474,6 +1475,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                             shape_ok = true;
                         } else if (std.mem.eql(u8, body_name, "sphere")) {
                             body.shape = .sphere;
+                            shape_ok = true;
+                        } else if (std.mem.eql(u8, body_name, "cylinder")) {
+                            body.shape = .cylinder;
                             shape_ok = true;
                         } else {
                             try diags.add(path.slice(), "unknown physics body '{s}'", .{body_name});

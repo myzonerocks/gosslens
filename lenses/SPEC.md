@@ -175,9 +175,11 @@ a declared parameter, a target past the list contributes nothing, and with
 no `morph_weights` the mesh draws unmorphed.
 
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
-pose drives the model matrix once simulation starts. `body` is `box`
-or `sphere`, `size` is box half extents (a sphere reads its radius
-from the first element), `position` places the body at activation, and
+pose drives the model matrix once simulation starts. `body` is `box`,
+`sphere`, or `cylinder` (axis vertical), `size` is box half extents (a
+sphere reads its radius from the first element; a cylinder reads radius
+from the first and half height from the second), `position` places the
+body at activation, and
 `motion` is `dynamic`, `static`, or `kinematic` (the engine holds the
 body, so chained content can hang off it). A body may add
 `"chain": {"to": "<node id>", "length": <meters>}`, a distance

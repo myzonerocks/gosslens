@@ -6214,8 +6214,13 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 }
                 if (session.physics_world) |world| {
                     const motion: physics.Motion = if (body.kinematic) .kinematic else if (body.dynamic) .dynamic else .static;
+                    const shape: physics.Shape = switch (body.shape) {
+                        .box => .box,
+                        .sphere => .sphere,
+                        .cylinder => .cylinder,
+                    };
                     const id = world.addBody(
-                        if (body.shape == .box) .box else .sphere,
+                        shape,
                         body.position,
                         body.size,
                         motion,
