@@ -490,6 +490,9 @@ pub const Session = struct {
     grabbable_bodies: std.ArrayListUnmanaged(u32) = .empty,
     grab_body: ?u32 = null,
     grab_target: [3]f32 = .{ 0, 0, 0 },
+    /// A kinematic collider the engine drives to the tracked head each physics
+    /// tick, so lens content collides with the head.
+    head_collider_body: ?u32 = null,
     /// Cloth nodes: the solver body and the dynamic render mesh, by
     /// graph index. Cloth replaces the glb mesh with a simulated grid.
     cloth_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
@@ -1375,6 +1378,22 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
 fn tiledAspect(s: *Session, rect_w: u16, rect_h: u16) f32 {
     if (s.capture_tile != null and s.capture_aspect > 0) return s.capture_aspect;
     return @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
+}
+
+/// The tracked head's world position for the head collider: the head pose's
+/// origin in landmark pixels, mapped into world space the same way the
+/// face-anchored draw path maps content (the pixel_to_world transform). Null
+/// when no head is tracked.
+fn headWorldPosition(s: *Session, current: anytype) ?[3]f32 {
+    const worker = s.face_tracking orelse return null;
+    var tracked: face.Result = undefined;
+    if (!(tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5)) return null;
+    const h = face_geometry.estimateHeadPose(&tracked.landmarks) orelse return null;
+    const fw: f32 = @floatFromInt(current.desc.width);
+    const fh: f32 = @floatFromInt(current.desc.height);
+    const world_height: f32 = 1.6568542;
+    const scale = world_height / fh;
+    return .{ scale * (h.cols[3][0] - 0.5 * fw), scale * (0.5 * fh - h.cols[3][1]), -scale * h.cols[3][2] };
 }
 
 /// True when the active lens carries a draw.board node, which draws the board
@@ -2975,6 +2994,12 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
                     // A grabbed body is dragged toward the pointer each tick; the
                     // kinematic move imparts the velocity it throws with on release.
                     if (s.grab_body) |gid| world.moveBody(gid, s.grab_target, @min(dt, 0.25));
+                    // A head collider is driven to the tracked head, its landmark
+                    // pose mapped into world space the same way face-anchored
+                    // content is, so lens content collides with the head.
+                    if (s.head_collider_body) |hid| {
+                        if (headWorldPosition(s, current)) |wp| world.moveBody(hid, wp, @min(dt, 0.25));
+                    }
                     world.step(@min(dt, 0.25));
                 }
                 s.physics_last_us = now_us;
@@ -5443,6 +5468,7 @@ fn destroyMeshFaceState(session: *Session) void {
     session.pending_glb_colliders.clearRetainingCapacity();
     session.grabbable_bodies.clearRetainingCapacity();
     session.grab_body = null;
+    session.head_collider_body = null;
     var loader_it = session.mesh_face_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
     session.mesh_face_loaders.clearRetainingCapacity();
@@ -6497,6 +6523,8 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                         session.physics_bodies.put(gpa, model.graph_index, id) catch {};
                         // A dynamic body can be grabbed and thrown by a pointer.
                         if (body.dynamic and !body.kinematic) session.grabbable_bodies.append(gpa, id) catch {};
+                        // A head-following collider is driven to the tracked head.
+                        if (body.follow == .head) session.head_collider_body = id;
                     }
                 }
             }

@@ -341,6 +341,9 @@ pub const PhysicsBody = struct {
     /// Confine the body to the z = 0 plane (x/y motion and z spin only) for a
     /// 2D world laid into the 3D scene.
     planar: bool = false,
+    /// The engine drives this (kinematic) body to a tracked target each frame:
+    /// `head` follows the tracked head pose, so content collides with the head.
+    follow: enum { none, head } = .none,
     dynamic: bool,
     /// The engine drives this body's pose from its anchor each frame;
     /// chained bodies hang off it.
@@ -1711,6 +1714,16 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(physics_value.object, "planar")) |planar_value| {
                     if (planar_value == .bool) body.planar = planar_value.bool else {
                         try diags.add(path.slice(), "physics planar must be a boolean", .{});
+                    }
+                }
+                if (getField(physics_value.object, "follow")) |follow_value| {
+                    if (try expectString(diags, path, follow_value)) |follow_name| {
+                        if (std.mem.eql(u8, follow_name, "head")) {
+                            body.follow = .head;
+                            body.kinematic = true;
+                        } else if (!std.mem.eql(u8, follow_name, "none")) {
+                            try diags.add(path.slice(), "unknown physics follow '{s}'", .{follow_name});
+                        }
                     }
                 }
                 if (getField(physics_value.object, "motion")) |motion_value| {

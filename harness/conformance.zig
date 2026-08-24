@@ -3019,6 +3019,85 @@ fn proveSphFluid(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Settles a physics scene with face tracking on, so a head-following collider
+/// has a head to track. It first warms the tracker with frozen physics (a fixed
+/// timestamp advances no step) until a face result lands, so the head is being
+/// tracked before the ball falls; then it settles and captures at frame 85.
+fn settledHeadPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8) !?[]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const face_bytes = std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20)) catch return null;
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return null;
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    var warm: u32 = 0;
+    while (warm < 180) : (warm += 1) {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        var fr: abi.FaceResult = undefined;
+        if (abi.goss_session_face_result(session, &fr) == .ok) break;
+    }
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves a head collider driven off the tracked head pose: a ball dropped onto
+/// the tracked head comes to rest on the head-following collider where the same
+/// ball with no collider falls straight past. Bit-stable across runs.
+fn proveHeadCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var caught: []u8 = &.{};
+    defer if (caught.len > 0) gpa.free(caught);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = (try settledHeadPhysicsCapture(gpa, engine, ".lens-packages/head-collider")) orelse return true;
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            caught = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the head collider scene is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const nocollider = (try settledHeadPhysicsCapture(gpa, engine, ".lens-packages/head-nocollider")) orelse return true;
+    defer gpa.free(nocollider);
+    if (std.mem.eql(u8, caught, nocollider)) {
+        std.debug.print("conformance: FAIL the head collider did not stop the ball\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rests on a collider driven to the tracked head where the same ball with no collider falls past, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -6919,6 +6998,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveSphFluid(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "dof")) {
             if (!try proveDofPass(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "head-collider")) {
+            if (!try proveHeadCollider(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7031,6 +7112,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("grab throw");
     if (!try proveSphFluid(gpa, engine)) return 1;
     watchHold("sph fluid");
+    if (!try proveHeadCollider(gpa, engine)) return 1;
+    watchHold("head collider");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
