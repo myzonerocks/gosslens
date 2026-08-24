@@ -73,6 +73,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const sph_module = b.createModule(.{
+        .root_source_file = b.path("core/particles/sph.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // The host export layer carries the render stub: unit tests cannot
     // exercise Metal, and the harness plus device demos are the executable
     // truth for the real backend. Platform libraries built by the ios step
@@ -253,6 +259,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
     abi_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
     abi_module.addImport("particles", particlesModule(b, target, optimize));
+    abi_module.addImport("sph", sphModule(b, target, optimize));
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
@@ -397,6 +404,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(material_tests).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particles_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = navmesh_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sph_module })).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
     test_step.dependOn(&b.addRunArtifact(gif_tests).step);
@@ -726,6 +734,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         abi_tracking_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_tracking_module.addImport("particles", particlesModule(b, target, optimize));
+        abi_tracking_module.addImport("sph", sphModule(b, target, optimize));
         if (target.result.os.tag == .macos) {
             abi_tracking_module.addImport("beauty", beauty_real_module);
         } else {
@@ -944,6 +953,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("particles", particlesModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("sph", sphModule(b, wasm_target, .ReleaseSmall));
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
@@ -1124,6 +1134,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         abi_conformance_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_conformance_module.addImport("particles", particlesModule(b, target, optimize));
+        abi_conformance_module.addImport("sph", sphModule(b, target, optimize));
         if (host_asset) |am| {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
@@ -1435,6 +1446,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("script", scriptModule(b, android_target, optimize, true));
     abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, true));
     abi_android.addImport("particles", particlesModule(b, android_target, optimize));
+    abi_android.addImport("sph", sphModule(b, android_target, optimize));
     const lens_manifest_android = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = android_target,
@@ -1769,6 +1781,14 @@ fn audioPlaybackModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
 fn particlesModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("core/particles/particles.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn sphModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("core/particles/sph.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -3429,6 +3449,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("script", scriptModule(b, ios_target, optimize, have_quickjs_ios));
     abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, have_miniaudio_ios));
     abi_ios.addImport("particles", particlesModule(b, ios_target, optimize));
+    abi_ios.addImport("sph", sphModule(b, ios_target, optimize));
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = ios_target,
@@ -3986,6 +4007,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("particles", particlesModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("sph", sphModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));

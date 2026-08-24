@@ -2982,6 +2982,43 @@ fn proveGrabThrow(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the 2D SPH fluid renders and flows: the block of fluid particles it
+/// starts as pools into a different shape by the settle frame, so the sim is
+/// on screen and running, and the settled frame is bit-stable across runs. The
+/// pooling itself is pinned by the sph module test.
+fn proveSphFluid(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var settled: []u8 = &.{};
+    defer if (settled.len > 0) gpa.free(settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = (try captureFountainAtFrame(gpa, engine, ".lens-packages/sph-pool", 85)) orelse return false;
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the sph fluid is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const early = (try captureFountainAtFrame(gpa, engine, ".lens-packages/sph-pool", 2)) orelse return false;
+    defer gpa.free(early);
+    if (std.mem.eql(u8, settled, early)) {
+        std.debug.print("conformance: FAIL the sph fluid did not flow\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a 2D SPH fluid renders and flows from its start block into a pool, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -6878,6 +6915,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try provePhysicsGlbCollider(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "grab-throw")) {
             if (!try proveGrabThrow(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "sph-fluid")) {
+            if (!try proveSphFluid(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -6988,6 +7027,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics glb collider");
     if (!try proveGrabThrow(gpa, engine)) return 1;
     watchHold("grab throw");
+    if (!try proveSphFluid(gpa, engine)) return 1;
+    watchHold("sph fluid");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
