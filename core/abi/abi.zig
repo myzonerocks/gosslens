@@ -6253,6 +6253,27 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             for (models) |anchor_model| {
                 if (!std.mem.eql(u8, anchor_model.node_id, chain_to)) continue;
                 const anchor = session.physics_bodies.get(anchor_model.graph_index) orelse break;
+                if (body.jiggle_segments > 1) {
+                    // Build a spring chain of hidden proxy bodies between the
+                    // anchor and this node, so the node lags and sways after the
+                    // anchor moves - jiggle for hair, jewelry, and tails. The
+                    // node's own body is the tip; the proxies hang between.
+                    const segments = body.jiggle_segments;
+                    const seg_len = body.chain_length / @as(f32, @floatFromInt(segments));
+                    const anchor_pos = if (anchor_model.physics) |ap| ap.position else .{ 0, 0, 0 };
+                    var prev = anchor;
+                    var prev_pos = anchor_pos;
+                    var link: u32 = 1;
+                    while (link < segments) : (link += 1) {
+                        const pos: [3]f32 = .{ prev_pos[0], prev_pos[1] - seg_len, prev_pos[2] };
+                        const proxy = world.addBody(.sphere, pos, .{ 0.02, 0, 0 }, .dynamic) catch break;
+                        world.constrainSpring(prev, proxy, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg_len, body.jiggle_stiffness, body.jiggle_damping) catch {};
+                        prev = proxy;
+                        prev_pos = pos;
+                    }
+                    world.constrainSpring(prev, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg_len, body.jiggle_stiffness, body.jiggle_damping) catch {};
+                    break;
+                }
                 switch (body.joint) {
                     .distance => world.constrainDistance(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, body.chain_length) catch {},
                     .point => world.constrainPoint(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }) catch {},

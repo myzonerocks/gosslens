@@ -192,7 +192,11 @@ joint) instead, `"joint": "fixed"` welds them rigidly so the body rides
 the anchor, `"joint": "hinge"` lets it swing about a single axis like a
 door or a pendulum, `"joint": "spring"` tethers them softly at `length`
 so the body stretches and bobs, and `"joint": "distance"` (the default)
-bounds their separation up to `length`. Simulation steps at a fixed
+bounds their separation up to `length`. Adding
+`"jiggle": {"segments": <n>, "stiffness": <hz>, "damping": <0..1>}` to
+the chain instead builds the link from `n` soft springs through hidden
+proxy bodies, so the content lags and sways after the anchor moves -
+secondary motion for hair, jewelry, and tails. Simulation steps at a fixed
 rate from frame timestamps, so the same frames replay the same motion;
 on a session without physics support the node holds its initial pose.
 

@@ -2797,6 +2797,43 @@ fn provePhysicsShapeCapsule(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves declarative jiggle: a jiggle chain builds hidden spring-linked proxy
+/// bodies that hang its ornament well below the anchor, where the same ornament
+/// rigidly welded rides at it - so the multi-link chain assembled and simulates,
+/// bit-stable. The secondary-motion lag itself is covered by the physics unit test.
+fn provePhysicsJiggle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var jiggle_settled: []u8 = &.{};
+    defer if (jiggle_settled.len > 0) gpa.free(jiggle_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/jiggle-ornament");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            jiggle_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the jiggle chain is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const rigid_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/rigid-ornament");
+    defer gpa.free(rigid_settled);
+    if (std.mem.eql(u8, jiggle_settled, rigid_settled)) {
+        std.debug.print("conformance: FAIL the jiggle ornament settled the same as the rigidly welded one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a jiggle chain hangs its ornament below the anchor where a rigid weld rides at it, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -6115,6 +6152,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics shape cylinder");
     if (!try provePhysicsShapeCapsule(gpa, engine)) return 1;
     watchHold("physics shape capsule");
+    if (!try provePhysicsJiggle(gpa, engine)) return 1;
+    watchHold("physics jiggle");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

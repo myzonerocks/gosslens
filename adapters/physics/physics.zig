@@ -289,6 +289,38 @@ test "a horizontal capsule bridges a gap a sphere falls through" {
     try t.expect(cap_pose[13] > ball_pose[13] + 0.3);
 }
 
+test "a jiggle chain trails a swept anchor with secondary motion" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.sphere, .{ 0, 1.0, 0 }, .{ 0.02, 0, 0 }, .kinematic);
+    // Four soft spring links hanging below the anchor; the last body is the tip.
+    const seg: f32 = 0.125;
+    var prev = anchor;
+    var prev_y: f32 = 1.0;
+    var tip = anchor;
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        const y = prev_y - seg;
+        const b = try world.addBody(.sphere, .{ 0, y, 0 }, .{ 0.02, 0, 0 }, .dynamic);
+        try world.constrainSpring(prev, b, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg, 2.0, 0.3);
+        prev = b;
+        prev_y = y;
+        tip = b;
+    }
+    // Sweep the anchor to +x; the soft chain cannot keep up, so the tip trails
+    // behind the anchor's x - the secondary motion a rigid attach never shows.
+    var step: usize = 0;
+    while (step < 48) : (step += 1) {
+        const x = 0.8 * @as(f32, @floatFromInt(step + 1)) / 48.0;
+        world.moveBody(anchor, .{ x, 1.0, 0 }, 1.0 / 60.0);
+        world.step(1.0 / 60.0);
+    }
+    const anchor_pose = try world.bodyPose(anchor);
+    const tip_pose = try world.bodyPose(tip);
+    try t.expect(tip_pose[12] < anchor_pose[12] - 0.05); // lags well behind in x
+    try t.expect(tip_pose[13] < anchor_pose[13] - 0.2); // still hanging below
+}
+
 test "two identical worlds land bit-identical poses" {
     var poses: [2][16]f32 = undefined;
     for (0..2) |run| {

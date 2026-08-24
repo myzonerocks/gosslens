@@ -306,6 +306,14 @@ pub const PhysicsBody = struct {
     /// swings the body in one plane about a z axis at the anchor, or a spring
     /// that tethers them softly at `chain_length`, stretching and bobbing.
     joint: enum { distance, point, fixed, hinge, spring } = .distance,
+    /// Secondary motion: when > 1, the chain is built from this many spring
+    /// links through hidden proxy bodies between the anchor and this node, so
+    /// the node lags and sways after the anchor moves - jiggle for hair,
+    /// jewelry, and tails. 0 or 1 leaves the plain single-link chain.
+    jiggle_segments: u32 = 0,
+    /// Spring frequency in Hz and damping 0..1 for each jiggle link.
+    jiggle_stiffness: f32 = 3.0,
+    jiggle_damping: f32 = 0.3,
 };
 
 pub const Node = struct {
@@ -1556,6 +1564,32 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                                     body.joint = .spring;
                                 } else {
                                     try diags.add(path.slice(), "physics chain joint must be distance, point, fixed, hinge, or spring", .{});
+                                }
+                            }
+                        }
+                        if (getField(chain_value.object, "jiggle")) |jiggle_value| {
+                            if (jiggle_value != .object) {
+                                try diags.add(path.slice(), "physics chain jiggle must be an object", .{});
+                            } else {
+                                if (getField(jiggle_value.object, "segments")) |seg_value| {
+                                    switch (seg_value) {
+                                        .integer => |n| body.jiggle_segments = if (n > 0) @intCast(n) else 0,
+                                        else => try diags.add(path.slice(), "physics chain jiggle segments must be a whole number", .{}),
+                                    }
+                                }
+                                if (getField(jiggle_value.object, "stiffness")) |stiff_value| {
+                                    switch (stiff_value) {
+                                        .float => |f| body.jiggle_stiffness = @floatCast(f),
+                                        .integer => |n| body.jiggle_stiffness = @floatFromInt(n),
+                                        else => try diags.add(path.slice(), "physics chain jiggle stiffness must be a number", .{}),
+                                    }
+                                }
+                                if (getField(jiggle_value.object, "damping")) |damp_value| {
+                                    switch (damp_value) {
+                                        .float => |f| body.jiggle_damping = @floatCast(f),
+                                        .integer => |n| body.jiggle_damping = @floatFromInt(n),
+                                        else => try diags.add(path.slice(), "physics chain jiggle damping must be a number", .{}),
+                                    }
                                 }
                             }
                         }
