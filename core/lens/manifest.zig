@@ -180,6 +180,9 @@ pub const ParticleField = struct {
     /// Run a 2D smoothed-particle-hydrodynamics fluid instead of the fountain:
     /// the particles carry density and pressure and pool under gravity.
     sph: bool = false,
+    /// Draw a 3D-mesh particle cloud with one instanced call instead of one
+    /// draw per particle - the same pixels, at crowd scale.
+    instanced: bool = false,
 };
 
 /// The prebuilt VFX asset library: a named preset expands to a tuned particle
@@ -1195,6 +1198,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "sph")) |v| {
                     if (v == .bool) field.sph = v.bool;
+                }
+                if (getField(pv.object, "instanced")) |v| {
+                    if (v == .bool) field.instanced = v.bool;
                 }
                 particle_field = field;
             }

@@ -3166,6 +3166,35 @@ fn proveLiveCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves GPU mesh instancing: a 3D-mesh particle cloud drawn in one instanced
+/// call renders the same image as the same cloud drawn one mesh per particle,
+/// so the instanced path is correct. It is stable and on screen (an early frame
+/// differs from a later one), and matches the per-draw cloud.
+fn proveMeshInstancing(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const inst0 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/mesh-instanced", 40)) orelse return false;
+    defer gpa.free(inst0);
+    const inst1 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/mesh-instanced", 40)) orelse return false;
+    defer gpa.free(inst1);
+    if (!std.mem.eql(u8, inst0, inst1)) {
+        std.debug.print("conformance: FAIL the instanced mesh cloud is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const early = (try captureFountainAtFrame(gpa, engine, ".lens-packages/mesh-instanced", 4)) orelse return false;
+    defer gpa.free(early);
+    if (std.mem.eql(u8, inst0, early)) {
+        std.debug.print("conformance: FAIL the instanced mesh cloud drew nothing dynamic\n", .{});
+        return false;
+    }
+    const plain = (try captureFountainAtFrame(gpa, engine, ".lens-packages/mesh-plain", 40)) orelse return false;
+    defer gpa.free(plain);
+    if (frameDiffFraction(inst0, plain, 16) > 0.005) {
+        std.debug.print("conformance: FAIL the instanced mesh cloud does not match the per-draw cloud\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a mesh particle cloud drawn in one instanced call matches the per-draw cloud, stable and on screen\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -7070,6 +7099,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveHeadCollider(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "live-collider")) {
             if (!try proveLiveCollider(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "mesh-instancing")) {
+            if (!try proveMeshInstancing(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7186,6 +7217,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("head collider");
     if (!try proveLiveCollider(gpa, engine)) return 1;
     watchHold("live collider");
+    if (!try proveMeshInstancing(gpa, engine)) return 1;
+    watchHold("mesh instancing");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

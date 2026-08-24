@@ -4279,6 +4279,7 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // lenses/shaders/, not the engine's own preview shader
         // directory, since that's the contract lens authors read.
         .{ .name = "vs_lens_pass", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "vs_lens_pass_instanced", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_instanced.def.sc" },
         // lut.pass's own fixed fragment shader - kit-authored like the
         // vertex contract above, not per-lens, so it compiles here once
         // rather than through the validator's per-lens shader stage.

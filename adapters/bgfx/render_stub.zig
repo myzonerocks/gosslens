@@ -463,6 +463,18 @@ pub const Renderer = struct {
         _ = aspect_ratio;
     }
 
+    pub fn submitParticleMeshesInstanced(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, positions: []const f32, scale: f32, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = positions;
+        _ = scale;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
     pub const SkinnedMesh = struct {
         position_buffer: TextureHandle = .{},
         index_buffer: IndexBufferHandle = .{},

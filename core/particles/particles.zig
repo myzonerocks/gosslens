@@ -59,6 +59,9 @@ pub const Field = struct {
     /// Emit everything once and let it die, rather than respawning forever.
     oneshot: bool = false,
     // Rendering hints the sim itself ignores, carried for the host.
+    /// Draw a 3D-mesh particle cloud with one instanced call instead of one
+    /// draw per particle.
+    instanced: bool = false,
     /// The rgb a particle draws at; null uses the engine's warm default.
     color: ?[3]f32 = null,
     /// The rgb a particle cools toward as it dies; null holds the draw colour.

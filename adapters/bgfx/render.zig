@@ -118,6 +118,7 @@ pub const Renderer = struct {
     beauty_reshape_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
+    model_instanced_program: c.bgfx_program_handle_t,
     billboard_program: c.bgfx_program_handle_t,
     /// The particle-sim compute program, null on backends it is not built for
     /// (then the CPU sim runs). Its two params uniforms feed each dispatch.
@@ -341,6 +342,7 @@ pub const Renderer = struct {
         const beauty_reshape_program = try loadBeautyReshapeProgram();
         const makeup_program = try loadMakeupProgram();
         const model_program = try loadModelProgram();
+        const model_instanced_program = try loadModelInstancedProgram();
         const billboard_program = try loadBillboardProgram();
         const particle_compute_program = loadParticleComputeProgram() catch null;
         const brush_program = try loadBrushProgram();
@@ -418,6 +420,7 @@ pub const Renderer = struct {
             .beauty_reshape_program = beauty_reshape_program,
             .makeup_program = makeup_program,
             .model_program = model_program,
+            .model_instanced_program = model_instanced_program,
             .billboard_program = billboard_program,
             .particle_compute_program = particle_compute_program,
             .sim_params_uniform = c.bgfx_create_uniform("u_simParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -742,6 +745,18 @@ pub const Renderer = struct {
         };
     }
 
+    /// The model program's instanced twin: the same fragment stage over the
+    /// instanced vertex stage, so a cloud of the same mesh draws in one call.
+    pub fn loadModelInstancedProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_instanced_metal, blobs.fs_model_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_instanced_spirv, blobs.fs_model_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_instanced_essl, blobs.fs_model_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_instanced_wgsl, blobs.fs_model_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// The fading-sprite program every lens shares - its own vertex stage
     /// expands each particle centre into a camera-facing quad, kit-authored.
     pub fn loadBillboardProgram() !c.bgfx_program_handle_t {
@@ -867,6 +882,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.beauty_reshape_program);
         c.bgfx_destroy_program(r.makeup_program);
         c.bgfx_destroy_program(r.model_program);
+        c.bgfx_destroy_program(r.model_instanced_program);
         c.bgfx_destroy_program(r.billboard_program);
         c.bgfx_destroy_index_buffer(r.makeup_index_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.makeup_position_buffer);
@@ -1997,6 +2013,40 @@ pub const Renderer = struct {
             const tm = math.Mat4.translation(.{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2] });
             r.drawModelMesh(mesh_view, mesh, tm.mul(sm), base_color, aspect_ratio);
         }
+    }
+
+    /// Draws the same cloud of base meshes as submitParticleMeshes but in one
+    /// instanced call: each particle's model matrix rides an instance buffer,
+    /// so the whole cloud costs one draw instead of one per particle.
+    pub fn submitParticleMeshesInstanced(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, positions: []const f32, scale: f32, base_color: [4]f32, aspect_ratio: f32) void {
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+        const n: u32 = @intCast(positions.len / 3);
+        if (n == 0) return;
+        const stride: u16 = 64;
+        const avail = c.bgfx_get_avail_instance_data_buffer(n, stride);
+        if (avail == 0) return;
+        var idb: c.bgfx_instance_data_buffer_t = undefined;
+        c.bgfx_alloc_instance_data_buffer(&idb, avail, stride);
+        const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
+        const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
+        const data: [*]f32 = @ptrCast(@alignCast(idb.data));
+        const sm = math.Mat4.scaling(.{ scale, scale, scale });
+        var i: u32 = 0;
+        while (i < avail) : (i += 1) {
+            const tm = math.Mat4.translation(.{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2] });
+            const model = tm.mul(sm);
+            const src: [*]const f32 = @ptrCast(&model.cols);
+            var k: usize = 0;
+            while (k < 16) : (k += 1) data[i * 16 + k] = src[k];
+        }
+        setModelVertexBuffer(mesh);
+        c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
+        c.bgfx_set_instance_data_buffer(&idb, 0, avail);
+        c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(mesh_view, r.model_instanced_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws a skinned mesh from its dynamic position buffer under the

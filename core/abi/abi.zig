@@ -2059,7 +2059,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         if (s.engine.gpa.alloc(f32, count * 3)) |verts| {
                             defer s.engine.gpa.free(verts);
                             sys.writePositions(verts);
-                            r.submitParticleMeshes(blit_view, mesh_view, input_texture, base_mesh, verts, scale, base_color, aspect_ratio);
+                            if (sys.field.instanced) {
+                                r.submitParticleMeshesInstanced(blit_view, mesh_view, input_texture, base_mesh, verts, scale, base_color, aspect_ratio);
+                            } else {
+                                r.submitParticleMeshes(blit_view, mesh_view, input_texture, base_mesh, verts, scale, base_color, aspect_ratio);
+                            }
                         } else |_| {}
                     }
                     if (output) |target| {
@@ -6421,7 +6425,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     // Compute is unavailable on this backend; fall through to the CPU sim.
                 }
                 const pattern = particlePattern(pf.pattern);
-                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .curl = pf.curl, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .bounce = pf.bounce, .colliders = pf.colliders, .box_colliders = pf.box_colliders, .plane_colliders = pf.plane_colliders, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .trail = pf.trail, .sub_count = pf.sub_count, .sub_speed = pf.sub_speed, .sub_lifetime = pf.sub_lifetime, .pattern = pattern })) |sys| {
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .curl = pf.curl, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .bounce = pf.bounce, .colliders = pf.colliders, .box_colliders = pf.box_colliders, .plane_colliders = pf.plane_colliders, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .trail = pf.trail, .sub_count = pf.sub_count, .sub_speed = pf.sub_speed, .sub_lifetime = pf.sub_lifetime, .instanced = pf.instanced, .pattern = pattern })) |sys| {
                     // A trail draws a fading billboard per particle per trail
                     // slot; a fading fountain one quad per particle; a plain one
                     // a single point each. Trails and fades share the billboard
