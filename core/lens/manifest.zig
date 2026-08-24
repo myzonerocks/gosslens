@@ -298,9 +298,10 @@ pub const PhysicsBody = struct {
     /// How the body links to its `chain_to` anchor: a distance constraint that
     /// bounds separation up to `chain_length` (default), a point (ball) joint
     /// that pins them at a pivot the body swings freely about, a fixed joint
-    /// that welds them rigidly so the body rides the anchor, or a hinge that
-    /// swings the body in one plane about a z axis at the anchor.
-    joint: enum { distance, point, fixed, hinge } = .distance,
+    /// that welds them rigidly so the body rides the anchor, a hinge that
+    /// swings the body in one plane about a z axis at the anchor, or a spring
+    /// that tethers them softly at `chain_length`, stretching and bobbing.
+    joint: enum { distance, point, fixed, hinge, spring } = .distance,
 };
 
 pub const Node = struct {
@@ -1535,8 +1536,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                                     body.joint = .fixed;
                                 } else if (std.mem.eql(u8, joint_name, "hinge")) {
                                     body.joint = .hinge;
+                                } else if (std.mem.eql(u8, joint_name, "spring")) {
+                                    body.joint = .spring;
                                 } else {
-                                    try diags.add(path.slice(), "physics chain joint must be distance, point, fixed, or hinge", .{});
+                                    try diags.add(path.slice(), "physics chain joint must be distance, point, fixed, hinge, or spring", .{});
                                 }
                             }
                         }

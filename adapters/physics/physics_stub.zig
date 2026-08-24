@@ -81,6 +81,18 @@ pub const World = struct {
         return error.WorldCreateFailed;
     }
 
+    pub fn constrainSpring(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32, rest_length: f32, frequency: f32, damping: f32) !void {
+        _ = world;
+        _ = a;
+        _ = b;
+        _ = point_a;
+        _ = point_b;
+        _ = rest_length;
+        _ = frequency;
+        _ = damping;
+        return error.WorldCreateFailed;
+    }
+
     pub fn moveBody(world: World, body: u32, position: [3]f32, dt_seconds: f32) void {
         _ = world;
         _ = body;

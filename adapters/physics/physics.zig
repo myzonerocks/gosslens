@@ -30,6 +30,7 @@ extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax
 extern fn goss_physics_constrain_point(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) i32;
 extern fn goss_physics_constrain_fixed(handle: *anyopaque, a: u32, b: u32) i32;
 extern fn goss_physics_constrain_hinge(handle: *anyopaque, a: u32, b: u32, px: f32, py: f32, pz: f32, hx: f32, hy: f32, hz: f32) i32;
+extern fn goss_physics_constrain_spring(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, rest_length: f32, frequency: f32, damping: f32) i32;
 extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
 extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, px: f32, py: f32, pz: f32) u32;
 extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
@@ -86,6 +87,13 @@ pub const World = struct {
     /// unlike a point joint that swings every way.
     pub fn constrainHinge(world: World, a: u32, b: u32, pivot: [3]f32, axis: [3]f32) !void {
         if (goss_physics_constrain_hinge(world.handle, a, b, pivot[0], pivot[1], pivot[2], axis[0], axis[1], axis[2]) != 0) return error.ConstraintFailed;
+    }
+
+    /// Tethers two bodies with a spring held at rest_length (frequency in
+    /// Hz, damping 0..1): it stretches under load and bobs back, unlike the
+    /// rigid distance chain.
+    pub fn constrainSpring(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32, rest_length: f32, frequency: f32, damping: f32) !void {
+        if (goss_physics_constrain_spring(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], rest_length, frequency, damping) != 0) return error.ConstraintFailed;
     }
 
     /// Drives a kinematic body toward a pose over dt; chained bodies
@@ -209,6 +217,26 @@ test "a fixed joint welds a body rigidly to its anchor" {
     const pose = try world.bodyPose(welded);
     try t.expectApproxEqAbs(@as(f32, 0.5), pose[12], 0.05); // keeps its x offset
     try t.expectApproxEqAbs(@as(f32, 2.0), pose[13], 0.05); // does not fall
+}
+
+test "a spring joint stretches under gravity and settles below its rest length" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.box, .{ 0, 2.0, 0 }, .{ 0.05, 0.05, 0.05 }, .kinematic);
+    // The pendant starts exactly a rest length (0.5) below the anchor. A rigid
+    // rope would hold it there; the spring is soft, so gravity stretches it and
+    // it settles below that rest position, hanging straight down.
+    const pend = try world.addBody(.sphere, .{ 0, 1.5, 0 }, .{ 0.08, 0, 0 }, .dynamic);
+    try world.constrainSpring(anchor, pend, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.5, 2.0, 0.5);
+
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const p = try world.bodyPose(pend);
+    // Stretched below the 1.5 rest position, but bounded by the spring (not a
+    // free fall), and hanging straight under the anchor.
+    try t.expect(p[13] < 1.48);
+    try t.expect(p[13] > 1.30);
+    try t.expect(@abs(p[12]) < 0.05);
+    try t.expect(@abs(p[14]) < 0.05);
 }
 
 test "two identical worlds land bit-identical poses" {

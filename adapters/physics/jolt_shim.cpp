@@ -15,6 +15,7 @@
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/SpringSettings.h>
 #include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
 #include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
@@ -240,6 +241,35 @@ extern "C" int32_t goss_physics_constrain_hinge(void* handle, uint32_t body_a, u
   settings.mPoint1 = settings.mPoint2 = JPH::RVec3(px, py, pz);
   settings.mHingeAxis1 = settings.mHingeAxis2 = axis;
   settings.mNormalAxis1 = settings.mNormalAxis2 = normal;
+  world->system.AddConstraint(settings.Create(*a, *b));
+  return 0;
+}
+
+// Links two bodies with a soft distance constraint held at rest_length by a
+// spring (frequency in Hz, damping 0..1) - a springy tether that stretches
+// under load and bobs back, unlike the rigid distance chain.
+extern "C" int32_t goss_physics_constrain_spring(void* handle, uint32_t body_a, uint32_t body_b, float ax, float ay, float az, float bx, float by, float bz, float rest_length, float frequency, float damping) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr) return -1;
+  JPH::Body* a = nullptr;
+  JPH::Body* b = nullptr;
+  {
+    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
+    if (!lock_a.Succeeded()) return -1;
+    a = &lock_a.GetBody();
+  }
+  {
+    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
+    if (!lock_b.Succeeded()) return -1;
+    b = &lock_b.GetBody();
+  }
+  JPH::DistanceConstraintSettings settings;
+  settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+  settings.mPoint1 = JPH::RVec3(ax, ay, az);
+  settings.mPoint2 = JPH::RVec3(bx, by, bz);
+  settings.mMinDistance = rest_length;
+  settings.mMaxDistance = rest_length;
+  settings.mLimitsSpringSettings = JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, frequency, damping);
   world->system.AddConstraint(settings.Create(*a, *b));
   return 0;
 }

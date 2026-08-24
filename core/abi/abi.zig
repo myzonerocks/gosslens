@@ -6255,6 +6255,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                         const pivot = if (anchor_model.physics) |ap| ap.position else .{ 0, 0, 0 };
                         world.constrainHinge(anchor, child, pivot, .{ 0, 0, 1 }) catch {};
                     },
+                    .spring => world.constrainSpring(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, body.chain_length, 1.2, 0.6) catch {},
                 }
                 break;
             }

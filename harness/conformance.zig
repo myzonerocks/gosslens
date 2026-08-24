@@ -2680,6 +2680,49 @@ fn provePhysicsHinge(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the spring joint: a pendant tethered by a soft spring stretches
+/// under gravity and settles lower than the same pendant on a rigid distance
+/// chain or hinge, and nowhere near the point or fixed joints, each
+/// bit-stable across runs.
+fn provePhysicsSpring(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var spring_settled: []u8 = &.{};
+    defer if (spring_settled.len > 0) gpa.free(spring_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-spring");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            spring_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL physics spring is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const chain_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-chain");
+    defer gpa.free(chain_settled);
+    const hinge_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-hinge");
+    defer gpa.free(hinge_settled);
+    if (std.mem.eql(u8, spring_settled, chain_settled)) {
+        std.debug.print("conformance: FAIL the spring joint settled the same as the rigid distance chain\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, spring_settled, hinge_settled)) {
+        std.debug.print("conformance: FAIL the spring joint settled the same as the hinge joint\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a spring joint stretches a pendant below where the rigid distance chain and hinge settle it, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -5992,6 +6035,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics fixed");
     if (!try provePhysicsHinge(gpa, engine)) return 1;
     watchHold("physics hinge");
+    if (!try provePhysicsSpring(gpa, engine)) return 1;
+    watchHold("physics spring");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
