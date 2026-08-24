@@ -75,6 +75,17 @@ pub const World = struct {
         return error.BodyAddFailed;
     }
 
+    pub fn addBodyMesh(world: World, points: []const [3]f32, indices: []const u32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32) !u32 {
+        _ = world;
+        _ = points;
+        _ = indices;
+        _ = position;
+        _ = rotation;
+        _ = friction;
+        _ = restitution;
+        return error.BodyAddFailed;
+    }
+
     pub fn step(world: World, dt_seconds: f32) void {
         _ = world;
         _ = dt_seconds;

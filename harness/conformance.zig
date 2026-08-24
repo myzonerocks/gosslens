@@ -2943,6 +2943,43 @@ fn provePhysicsRestitution(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the concave mesh collider: a ball settles at the bottom of a V-groove
+/// triangle mesh where on the convex hull of the very same points it rests up on
+/// the filled-in top, so the mesh keeps a concavity a hull cannot, each
+/// bit-stable across runs.
+fn provePhysicsMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var mesh_settled: []u8 = &.{};
+    defer if (mesh_settled.len > 0) gpa.free(mesh_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/mesh-valley");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            mesh_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the mesh valley is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const hull_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/hull-valley");
+    defer gpa.free(hull_settled);
+    if (std.mem.eql(u8, mesh_settled, hull_settled)) {
+        std.debug.print("conformance: FAIL the ball in the mesh valley settled the same as on the hull of the same points\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball settles in a concave mesh valley where the convex hull of the same points holds it up on top, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -6269,6 +6306,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics hull");
     if (!try provePhysicsRestitution(gpa, engine)) return 1;
     watchHold("physics restitution");
+    if (!try provePhysicsMesh(gpa, engine)) return 1;
+    watchHold("physics mesh");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

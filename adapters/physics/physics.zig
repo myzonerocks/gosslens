@@ -31,6 +31,7 @@ extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32
 extern fn goss_physics_body_add_oriented(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, motion: u32) u32;
 extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32) u32;
 extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32) u32;
+extern fn goss_physics_body_add_mesh(handle: *anyopaque, points: [*]const f32, point_count: u32, indices: [*]const u32, index_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
@@ -84,6 +85,15 @@ pub const World = struct {
     pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion) !u32 {
         const flat: [*]const f32 = @ptrCast(points.ptr);
         const id = goss_physics_body_add_hull(world.handle, flat, @intCast(points.len), position[0], position[1], position[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution, @intFromEnum(motion));
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Adds a static body whose collider is the concave triangle mesh of
+    /// `points` and `indices` (three per triangle). Concave meshes are static.
+    pub fn addBodyMesh(world: World, points: []const [3]f32, indices: []const u32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32) !u32 {
+        const flat: [*]const f32 = @ptrCast(points.ptr);
+        const id = goss_physics_body_add_mesh(world.handle, flat, @intCast(points.len), indices.ptr, @intCast(indices.len), position[0], position[1], position[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution);
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -399,6 +409,26 @@ test "restitution decides whether a ball bounces back or lands dead" {
     }
     try t.expect(bouncy_peak > 0.3); // clearly rebounds
     try t.expect(dead_peak < 0.2); // stays down near rest
+}
+
+test "a concave mesh collider holds a ball in a valley a hull would fill" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    // A V-groove: two slanted strips meeting at the bottom, so its concavity
+    // survives where a convex hull of the same points would fill it flat.
+    const points = [_][3]f32{
+        .{ -0.5, 0.4, -0.5 }, .{ 0.0, 0.0, -0.5 }, .{ 0.5, 0.4, -0.5 },
+        .{ -0.5, 0.4, 0.5 },  .{ 0.0, 0.0, 0.5 },  .{ 0.5, 0.4, 0.5 },
+    };
+    const indices = [_]u32{ 0, 4, 1, 0, 3, 4, 1, 5, 2, 1, 4, 5 };
+    _ = try world.addBodyMesh(&points, &indices, .{ 0, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0);
+    const ball = try world.addBody(.sphere, .{ 0.2, 1.0, 0 }, .{ 0.12, 0, 0 }, .dynamic);
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const ball_pose = try world.bodyPose(ball);
+    // The ball rolls to the bottom of the groove: low and near centre, well
+    // below the y=0.4 lip where a filled hull would hold it.
+    try t.expect(ball_pose[13] < 0.25);
+    try t.expect(@abs(ball_pose[12]) < 0.2);
 }
 
 test "two identical worlds land bit-identical poses" {

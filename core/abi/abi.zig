@@ -6215,17 +6215,19 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 if (session.physics_world) |world| {
                     const motion: physics.Motion = if (body.kinematic) .kinematic else if (body.dynamic) .dynamic else .static;
                     const rotation = eulerDegreesToQuat(body.rotation);
-                    const id = if (body.shape == .hull)
-                        world.addBodyHull(body.hull_points, body.position, rotation, body.friction, body.restitution, motion) catch physics.invalid_body
-                    else id: {
-                        const shape: physics.Shape = switch (body.shape) {
-                            .box => .box,
-                            .sphere => .sphere,
-                            .cylinder => .cylinder,
-                            .capsule => .capsule,
-                            .hull => unreachable,
-                        };
-                        break :id world.addBodyMaterial(shape, body.position, body.size, rotation, body.friction, body.restitution, motion) catch physics.invalid_body;
+                    const id = switch (body.shape) {
+                        .hull => world.addBodyHull(body.hull_points, body.position, rotation, body.friction, body.restitution, motion) catch physics.invalid_body,
+                        .mesh => world.addBodyMesh(body.hull_points, body.mesh_indices, body.position, rotation, body.friction, body.restitution) catch physics.invalid_body,
+                        else => id: {
+                            const shape: physics.Shape = switch (body.shape) {
+                                .box => .box,
+                                .sphere => .sphere,
+                                .cylinder => .cylinder,
+                                .capsule => .capsule,
+                                .hull, .mesh => unreachable,
+                            };
+                            break :id world.addBodyMaterial(shape, body.position, body.size, rotation, body.friction, body.restitution, motion) catch physics.invalid_body;
+                        },
                     };
                     if (id != physics.invalid_body) {
                         session.physics_bodies.put(gpa, model.graph_index, id) catch {};

@@ -283,14 +283,17 @@ pub const LayoutField = struct {
 };
 
 pub const PhysicsBody = struct {
-    shape: enum { box, sphere, cylinder, capsule, hull },
+    shape: enum { box, sphere, cylinder, capsule, hull, mesh },
     /// Box half extents; a sphere reads its radius from [0]; a cylinder or
     /// capsule (axis vertical) reads radius from [0] and half height from [1].
-    /// A hull ignores this and reads its geometry from `hull_points`.
+    /// A hull or mesh ignores this and reads its geometry from `hull_points`.
     size: [3]f32,
-    /// Local-space points a `hull` body takes the convex hull of; empty for
-    /// the analytic shapes.
+    /// Local-space points a `hull` body takes the convex hull of, or a `mesh`
+    /// body triangulates; empty for the analytic shapes.
     hull_points: []const [3]f32 = &.{},
+    /// Triangle indices (three per face) for a concave `mesh` collider; empty
+    /// otherwise.
+    mesh_indices: []const u32 = &.{},
     position: [3]f32,
     /// Orientation in euler degrees (x, y, z), so an elongated shape can lie
     /// on its side or a static collider can tilt. Zero is upright.
@@ -1504,6 +1507,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         } else if (std.mem.eql(u8, body_name, "hull")) {
                             body.shape = .hull;
                             shape_ok = true;
+                        } else if (std.mem.eql(u8, body_name, "mesh")) {
+                            body.shape = .mesh;
+                            shape_ok = true;
                         } else {
                             try diags.add(path.slice(), "unknown physics body '{s}'", .{body_name});
                         }
@@ -1534,6 +1540,34 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                             pi += 1;
                         }
                         if (pts_ok) body.hull_points = pts else shape_ok = false;
+                    }
+                }
+                if (getField(physics_value.object, "indices")) |indices_value| {
+                    if (indices_value != .array or indices_value.array.items.len < 3 or indices_value.array.items.len % 3 != 0) {
+                        try diags.add(path.slice(), "physics mesh indices must be a whole number of triangles (three per face)", .{});
+                        shape_ok = false;
+                    } else {
+                        const idx = try arena.alloc(u32, indices_value.array.items.len);
+                        var ii: usize = 0;
+                        var idx_ok = true;
+                        for (indices_value.array.items) |index_value| {
+                            switch (index_value) {
+                                .integer => |n| {
+                                    if (n < 0) {
+                                        idx_ok = false;
+                                    } else {
+                                        idx[ii] = @intCast(n);
+                                    }
+                                },
+                                else => idx_ok = false,
+                            }
+                            if (!idx_ok) break;
+                            ii += 1;
+                        }
+                        if (idx_ok) body.mesh_indices = idx else {
+                            try diags.add(path.slice(), "physics mesh index must be a non-negative whole number", .{});
+                            shape_ok = false;
+                        }
                     }
                 }
                 if (getField(physics_value.object, "position")) |position_value| {

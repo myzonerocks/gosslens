@@ -14,6 +14,7 @@
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
@@ -194,6 +195,29 @@ extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points
   JPH::ShapeSettings::ShapeResult result = settings.Create();
   if (result.HasError()) return UINT32_MAX;
   return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, motion);
+}
+
+// Adds a static body whose collider is a concave triangle mesh: `points`
+// (three floats each) and `indices` (three per triangle). Concave meshes are
+// static in Jolt. Returns the body id, or UINT32_MAX on a bad mesh.
+extern "C" uint32_t goss_physics_body_add_mesh(void* handle, const float* points, uint32_t point_count, const uint32_t* indices, uint32_t index_count, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr || points == nullptr || indices == nullptr || point_count < 3 || index_count < 3 || index_count % 3 != 0) return UINT32_MAX;
+  JPH::VertexList vertices;
+  vertices.reserve(point_count);
+  for (uint32_t i = 0; i < point_count; ++i) {
+    vertices.push_back(JPH::Float3(points[i * 3], points[i * 3 + 1], points[i * 3 + 2]));
+  }
+  JPH::IndexedTriangleList triangles;
+  triangles.reserve(index_count / 3);
+  for (uint32_t i = 0; i < index_count; i += 3) {
+    if (indices[i] >= point_count || indices[i + 1] >= point_count || indices[i + 2] >= point_count) return UINT32_MAX;
+    triangles.push_back(JPH::IndexedTriangle(indices[i], indices[i + 1], indices[i + 2], 0));
+  }
+  JPH::MeshShapeSettings settings(vertices, triangles);
+  JPH::ShapeSettings::ShapeResult result = settings.Create();
+  if (result.HasError()) return UINT32_MAX;
+  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, 0);
 }
 
 // Links two bodies with a distance constraint between local attach

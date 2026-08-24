@@ -1,0 +1,16 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.mesh-valley",
+  "version": "1.0.0",
+  "display_name": "Mesh Valley",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "collider", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "physics": {"body": "mesh", "points": [[-0.5,0.4,-0.5],[0,0,-0.5],[0.5,0.4,-0.5],[-0.5,0.4,0.5],[0,0,0.5],[0.5,0.4,0.5]], "indices": [0,4,1,0,3,4,1,5,2,1,4,5], "position": [0, -0.3, 0], "motion": "static"}},
+    {"id": "ball", "type": "model.gltf", "inputs": {"frame": "collider"}, "params": {},
+     "physics": {"body": "sphere", "size": [0.12, 0, 0], "position": [0.2, 0.8, 0], "motion": "dynamic"}}
+  ],
+  "triggers": []
+}

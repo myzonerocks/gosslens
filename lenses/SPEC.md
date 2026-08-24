@@ -176,12 +176,13 @@ no `morph_weights` the mesh draws unmorphed.
 
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
 pose drives the model matrix once simulation starts. `body` is `box`,
-`sphere`, `cylinder`, `capsule` (the last two axis vertical), or `hull`,
-`size` is box half extents (a sphere reads its radius from the first
-element; a cylinder or capsule reads radius from the first and half
+`sphere`, `cylinder`, `capsule` (the last two axis vertical), `hull`, or
+`mesh`, `size` is box half extents (a sphere reads its radius from the
+first element; a cylinder or capsule reads radius from the first and half
 height from the second), a `hull` instead lists `points` as at least
-four `[x, y, z]` and its collider is their convex hull, `position` places
-the body at activation, an optional
+four `[x, y, z]` and its collider is their convex hull, a `mesh` lists
+`points` and `indices` (three per triangle) for a concave collider and is
+always static, `position` places the body at activation, an optional
 `rotation` in euler degrees lays an elongated body on its side or tilts a
 collider, optional `friction` (0 slippery, ~1 grippy) and `restitution`
 (0 dead, 1 bouncy) set its surface material, and
