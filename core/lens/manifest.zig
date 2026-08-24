@@ -161,6 +161,15 @@ pub const DofField = struct {
     strength: f32 = 4.0,
 };
 
+pub const FogField = struct {
+    /// A fog.pass node's fog color (rgb, 0..1) and density (how quickly the
+    /// frame fades toward it with depth). Default a light haze.
+    r: f32 = 0.7,
+    g: f32 = 0.75,
+    b: f32 = 0.8,
+    density: f32 = 1.0,
+};
+
 pub const SpriteField = struct {
     /// A sprite.2d node's screen rect in normalized coordinates (origin
     /// top-left, 0..1 across the frame) and its draw opacity. The default
@@ -270,6 +279,8 @@ pub const Node = struct {
     bloom: ?BloomField = null,
     /// Set only on a dof.pass node: its focus plane and blur strength.
     dof: ?DofField = null,
+    /// Set only on a fog.pass node: its fog color and density.
+    fog: ?FogField = null,
     /// Set only on a layout.composite node: the head arrangement it drives.
     layout: ?LayoutField = null,
     /// Set only on a sprite.2d node: the screen rect and opacity it draws
@@ -1015,6 +1026,30 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "dof.pass")) {
             dof_field = .{};
         }
+        var fog_field: ?FogField = null;
+        if (getField(object, "fog")) |fv| {
+            const fmark = path.push("fog");
+            if (!std.mem.eql(u8, node_type, "fog.pass")) {
+                try diags.add(path.slice(), "fog is a fog.pass field, found it on '{s}'", .{node_type});
+            } else if (fv != .object) {
+                try diags.add(path.slice(), "fog must be an object", .{});
+            } else {
+                var field: FogField = .{};
+                if (getField(fv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "fog color must be three numbers", .{});
+                }
+                if (getField(fv.object, "density")) |v| field.density = @floatCast(numberOf(v) orelse field.density);
+                fog_field = field;
+            }
+            path.pop(fmark);
+        } else if (std.mem.eql(u8, node_type, "fog.pass")) {
+            fog_field = .{};
+        }
         var sprite_field: ?SpriteField = null;
         if (getField(object, "sprite")) |sv| {
             const smark = path.push("sprite");
@@ -1323,6 +1358,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,
+            .fog = fog_field,
             .layout = layout_field,
             .sprite = sprite_field,
             .text = text_field,

@@ -605,6 +605,8 @@ pub const Session = struct {
     depth_texture: ?render.TextureHandle = null,
     /// dof.pass nodes by graph index: their focus plane and blur strength.
     dof_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// fog.pass nodes by graph index: their fog color (rgb) and density.
+    fog_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -1369,6 +1371,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Depth of field needs the host's depth: with none submitted the
             // node holds the frame through, the standard capability degradation.
             .dof => s.dof_params.contains(entry.graph_index) and s.depth_texture != null,
+            // Depth fog degrades the same way: it needs the submitted depth.
+            .fog => s.fog_params.contains(entry.graph_index) and s.depth_texture != null,
             // Only the background image gates readiness - the mask
             // degrades to the renderer's always-foreground default
             // when segmentation is unavailable (SPEC's rule: a node
@@ -1540,6 +1544,22 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitDofPass(view_id, input_texture, depth_tex, params[0], params[1]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .fog => {
+                const fog = s.fog_params.get(entry.graph_index) orelse continue;
+                const depth_tex = s.depth_texture orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitFogPass(view_id, input_texture, depth_tex, .{ fog[0], fog[1], fog[2] }, fog[3]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2207,6 +2227,7 @@ pub fn destroySession(session: *Session) void {
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
     session.dof_params.deinit(session.engine.gpa);
+    session.fog_params.deinit(session.engine.gpa);
     if (session.depth_texture) |tex| {
         if (session.engine.renderer) |*r| r.destroyTexture(tex);
     }
@@ -4845,6 +4866,7 @@ fn destroyBlendState(session: *Session) void {
     // grade.pass and bloom.pass hold only plain params, nothing to free.
     session.grade_params.clearRetainingCapacity();
     session.dof_params.clearRetainingCapacity();
+    session.fog_params.clearRetainingCapacity();
     session.bloom_params.clearRetainingCapacity();
 }
 
@@ -5204,6 +5226,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createGradeParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
+    createFogParams(s, gpa) catch {};
     // A particle fountain also needs no bundle (the CPU sim and its mesh are
     // built from the field alone), so create it here too; the empty bundle
     // path just means a glTF model's own asset never loads, degrading it,
@@ -5264,6 +5287,17 @@ fn createDofParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(dofs);
     for (dofs) |d| {
         session.dof_params.put(gpa, d.graph_index, .{ d.focus, d.strength }) catch {};
+    }
+}
+
+/// Resolves every spliced fog.pass node's color and density into
+/// session.fog_params, once at activation - mirrors createDofParams.
+fn createFogParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const fogs = try lens.fogPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(fogs);
+    for (fogs) |f| {
+        session.fog_params.put(gpa, f.graph_index, .{ f.color[0], f.color[1], f.color[2], f.density }) catch {};
     }
 }
 
@@ -5852,6 +5886,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createGradeParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);
+    try createFogParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
 }

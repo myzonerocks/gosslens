@@ -261,6 +261,13 @@ submits; with no depth it holds the frame through, the standard capability
 degradation. Both fields are optional with engine defaults, and it ships no
 asset.
 
+A `"fog.pass"` node is a depth fog post-effect. It carries a `"fog":
+{"color", "density"}` block: the frame fades toward `color` (three 0..1
+numbers) by how far its submitted depth is, `density` scaling the falloff,
+so distant geometry sinks into haze while near content stays clear. Like
+`dof.pass` it reads the host's depth and holds the frame through when none
+is submitted, ships no asset, and defaults its fields.
+
 A `"draw.board"` node draws the session's brush board at its own place in the
 chain: the frame passes through, then every committed stroke draws over it, neon
 strokes additively and the rest on alpha. It ships no asset, carries no params,
