@@ -219,6 +219,7 @@ motion, and appearance:
   (a divergence-free curl-noise swirl, the organic churn of smoke and fire),
   `"attract": [x, y, z]` with `"attract_strength"` (a gravity well),
   `"vortex"` (orbital swirl), `"floor"` (a height particles bounce off),
+  `"bounce"` (0..1, how much speed a floor or collider bounce keeps),
   `"colliders": [[x, y, z, radius], ...]` (up to sixteen spheres particles
   bounce off, kept outside each), `"box_colliders": [[x, y, z, hx, hy, hz],
   ...]` (up to sixteen axis-aligned boxes they bounce off), and `"oneshot"`

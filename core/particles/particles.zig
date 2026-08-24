@@ -36,9 +36,11 @@ pub const Field = struct {
     attract_strength: f32 = 0,
     /// Swirl strength around the vertical axis - an orbital vortex.
     vortex: f32 = 0,
-    /// A floor height particles bounce off (losing half their speed). Null
-    /// lets them fall through.
+    /// A floor height particles bounce off. Null lets them fall through.
     floor: ?f32 = null,
+    /// How much speed a particle keeps when it bounces off the floor or a
+    /// collider (0 stops dead, 1 a perfect bounce). Default keeps half.
+    bounce: f32 = 0.5,
     /// Sphere colliders particles bounce off, each center xyz plus radius. A
     /// particle driven inside one is pushed back to its surface and its
     /// velocity reflected (half speed kept), so particles skate over invisible
@@ -317,7 +319,7 @@ pub const System = struct {
             if (f.floor) |y| {
                 if (p.pos[1] < y) {
                     p.pos[1] = y;
-                    p.vel[1] = -p.vel[1] * 0.5;
+                    p.vel[1] = -p.vel[1] * f.bounce;
                 }
             }
             for (f.colliders) |sphere| {
@@ -338,9 +340,9 @@ pub const System = struct {
                     // Reflect the inward velocity, keeping half its speed.
                     const vn = p.vel[0] * nx + p.vel[1] * ny + p.vel[2] * nz;
                     if (vn < 0) {
-                        p.vel[0] = (p.vel[0] - 2.0 * vn * nx) * 0.5;
-                        p.vel[1] = (p.vel[1] - 2.0 * vn * ny) * 0.5;
-                        p.vel[2] = (p.vel[2] - 2.0 * vn * nz) * 0.5;
+                        p.vel[0] = (p.vel[0] - 2.0 * vn * nx) * f.bounce;
+                        p.vel[1] = (p.vel[1] - 2.0 * vn * ny) * f.bounce;
+                        p.vel[2] = (p.vel[2] - 2.0 * vn * nz) * f.bounce;
                     }
                 }
             }
@@ -354,15 +356,15 @@ pub const System = struct {
                     if (lx <= ly and lx <= lz) {
                         const s: f32 = if (p.pos[0] < box[0]) -1.0 else 1.0;
                         p.pos[0] = box[0] + s * box[3];
-                        if (p.vel[0] * s < 0) p.vel[0] = -p.vel[0] * 0.5;
+                        if (p.vel[0] * s < 0) p.vel[0] = -p.vel[0] * f.bounce;
                     } else if (ly <= lz) {
                         const s: f32 = if (p.pos[1] < box[1]) -1.0 else 1.0;
                         p.pos[1] = box[1] + s * box[4];
-                        if (p.vel[1] * s < 0) p.vel[1] = -p.vel[1] * 0.5;
+                        if (p.vel[1] * s < 0) p.vel[1] = -p.vel[1] * f.bounce;
                     } else {
                         const s: f32 = if (p.pos[2] < box[2]) -1.0 else 1.0;
                         p.pos[2] = box[2] + s * box[5];
-                        if (p.vel[2] * s < 0) p.vel[2] = -p.vel[2] * 0.5;
+                        if (p.vel[2] * s < 0) p.vel[2] = -p.vel[2] * f.bounce;
                     }
                 }
             }
@@ -532,6 +534,28 @@ test "particles bounce off a sphere collider and never enter it" {
         try std.testing.expect(d2 >= 0.5 * 0.5 - 1e-4); // outside the sphere
         try std.testing.expectEqual(pa.pos[1], pb.pos[1]); // deterministic
     }
+}
+
+test "bounce controls how much speed a floor bounce keeps" {
+    // Two particles dropped onto a floor: a perfect bounce keeps more upward
+    // speed after impact than a dead-stop one, deterministically.
+    const drop = Field{ .count = 4, .pattern = .rain, .speed = 0.0, .lifetime = 6.0, .gravity = 9.8, .floor = -0.5 };
+    var bouncy = try System.init(std.testing.allocator, .{ .count = 4, .pattern = .rain, .speed = 0.0, .lifetime = 6.0, .gravity = 9.8, .floor = -0.5, .bounce = 1.0 });
+    defer bouncy.deinit();
+    var dead = try System.init(std.testing.allocator, .{ .count = 4, .pattern = .rain, .speed = 0.0, .lifetime = 6.0, .gravity = 9.8, .floor = -0.5, .bounce = 0.0 });
+    defer dead.deinit();
+    _ = drop;
+    for (0..80) |_| {
+        bouncy.step(1.0 / 60.0);
+        dead.step(1.0 / 60.0);
+    }
+    // The perfect bounce keeps the particle livelier (higher) than the dead one.
+    try std.testing.expect(bouncy.particles[0].pos[1] > dead.particles[0].pos[1]);
+    // A dead bounce keeps no upward speed the frame it lands.
+    var sticky = try System.init(std.testing.allocator, .{ .count = 1, .pattern = .rain, .speed = 0.0, .lifetime = 6.0, .gravity = 9.8, .floor = -0.5, .bounce = 0.0 });
+    defer sticky.deinit();
+    for (0..80) |_| sticky.step(1.0 / 60.0);
+    try std.testing.expect(sticky.particles[0].vel[1] <= 0.001);
 }
 
 test "particles bounce off a box collider and never enter it" {

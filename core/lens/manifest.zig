@@ -120,6 +120,9 @@ pub const ParticleField = struct {
     /// Curl-noise amplitude: a divergence-free swirl for organic smoke and
     /// fire churn.
     curl: f32 = 0,
+    /// How much speed a particle keeps when it bounces off the floor or a
+    /// collider (0 stops dead, 1 a perfect bounce).
+    bounce: f32 = 0.5,
     /// A point particles are pulled toward and how strongly (a gravity well).
     attract: ?[3]f32 = null,
     attract_strength: f32 = 0,
@@ -1013,6 +1016,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(pv.object, "drag")) |v| field.drag = @floatCast(numberOf(v) orelse field.drag);
                 if (getField(pv.object, "turbulence")) |v| field.turbulence = @floatCast(numberOf(v) orelse field.turbulence);
                 if (getField(pv.object, "curl")) |v| field.curl = @floatCast(numberOf(v) orelse field.curl);
+                if (getField(pv.object, "bounce")) |v| field.bounce = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.bounce)), 0.0, 1.0);
                 if (getField(pv.object, "spin")) |v| field.spin = @floatCast(numberOf(v) orelse field.spin);
                 if (getField(pv.object, "vortex")) |v| field.vortex = @floatCast(numberOf(v) orelse field.vortex);
                 if (getField(pv.object, "attract_strength")) |v| field.attract_strength = @floatCast(numberOf(v) orelse field.attract_strength);
