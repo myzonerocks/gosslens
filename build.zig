@@ -945,6 +945,7 @@ pub fn build(b: *std.Build) void {
             .target = wasm_target,
             .optimize = .ReleaseSmall,
         });
+        lens_manifest_wasm.addImport("material", materialModule(b, wasm_target, .ReleaseSmall));
         const lens_trigger_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/trigger.zig"),
             .target = wasm_target,
@@ -1432,6 +1433,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         .target = android_target,
         .optimize = optimize,
     });
+    lens_manifest_android.addImport("material", materialModule(b, android_target, optimize));
     const lens_trigger_android = b.createModule(.{
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = android_target,
@@ -1631,6 +1633,10 @@ fn pngModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
 fn gifModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/media/gif.zig"), .target = target, .optimize = optimize });
+}
+
+fn materialModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/material/graph.zig"), .target = target, .optimize = optimize });
 }
 
 fn jpegModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -3421,6 +3427,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .target = ios_target,
         .optimize = optimize,
     });
+    lens_manifest_ios.addImport("material", materialModule(b, ios_target, optimize));
     const lens_trigger_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = ios_target,
@@ -3987,6 +3994,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     });
     abi_em.addImport("face106", face106_em);
     const lens_manifest_em = b.createModule(.{ .root_source_file = b.path("core/lens/manifest.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    lens_manifest_em.addImport("material", materialModule(b, em_target, .ReleaseSmall));
     const lens_trigger_em = b.createModule(.{
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = em_target,
