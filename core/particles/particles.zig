@@ -51,6 +51,11 @@ pub const Field = struct {
     /// least-penetrated face and that velocity component reflected (half speed
     /// kept). Borrowed for the system's lifetime; empty is no box colliders.
     box_colliders: []const [6]f32 = &.{},
+    /// Infinite plane colliders particles bounce off, each a unit normal xyz
+    /// plus offset d (the plane is normal·p = d); a particle on the negative
+    /// side is pushed onto the plane and its inward velocity reflected. Walls,
+    /// ramps and slides. Borrowed for the system's lifetime; empty is none.
+    plane_colliders: []const [4]f32 = &.{},
     /// Emit everything once and let it die, rather than respawning forever.
     oneshot: bool = false,
     // Rendering hints the sim itself ignores, carried for the host.
@@ -368,6 +373,24 @@ pub const System = struct {
                     }
                 }
             }
+            for (f.plane_colliders) |plane| {
+                const nx = plane[0];
+                const ny = plane[1];
+                const nz = plane[2];
+                const sd = p.pos[0] * nx + p.pos[1] * ny + p.pos[2] * nz - plane[3];
+                if (sd < 0) {
+                    // Push onto the plane along the normal.
+                    p.pos[0] -= nx * sd;
+                    p.pos[1] -= ny * sd;
+                    p.pos[2] -= nz * sd;
+                    const vn = p.vel[0] * nx + p.vel[1] * ny + p.vel[2] * nz;
+                    if (vn < 0) {
+                        p.vel[0] = (p.vel[0] - 2.0 * vn * nx) * f.bounce;
+                        p.vel[1] = (p.vel[1] - 2.0 * vn * ny) * f.bounce;
+                        p.vel[2] = (p.vel[2] - 2.0 * vn * nz) * f.bounce;
+                    }
+                }
+            }
         }
         // Record this frame's positions into the trail ring, one slot on.
         if (self.history.len > 0) {
@@ -632,6 +655,27 @@ test "particles bounce off a box collider and never enter it" {
         const inside = @abs(pa.pos[0]) < 0.4 - 1e-3 and @abs(pa.pos[1]) < 0.4 - 1e-3 and @abs(pa.pos[2]) < 0.4 - 1e-3;
         try std.testing.expect(!inside);
         try std.testing.expectEqual(pa.pos[1], pb.pos[1]); // deterministic
+    }
+}
+
+test "particles bounce off a tilted plane collider and never cross it" {
+    // A plane tilted 45 degrees (normal pointing up and to +x): particles must
+    // stay on its positive side, deterministically.
+    const inv = 1.0 / @sqrt(2.0);
+    const plane = [_][4]f32{.{ inv, inv, 0.0, -0.3 }};
+    const field = Field{ .count = 64, .pattern = .rain, .speed = 2.0, .lifetime = 6.0, .gravity = 5.0, .plane_colliders = &plane };
+    var a = try System.init(std.testing.allocator, field);
+    defer a.deinit();
+    var b = try System.init(std.testing.allocator, field);
+    defer b.deinit();
+    for (0..180) |_| {
+        a.step(1.0 / 60.0);
+        b.step(1.0 / 60.0);
+    }
+    for (a.particles, b.particles) |pa, pb| {
+        const sd = pa.pos[0] * inv + pa.pos[1] * inv - (-0.3);
+        try std.testing.expect(sd >= -1e-3); // on the positive side of the plane
+        try std.testing.expectEqual(pa.pos[0], pb.pos[0]); // deterministic
     }
 }
 

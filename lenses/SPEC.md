@@ -222,8 +222,10 @@ motion, and appearance:
   `"bounce"` (0..1, how much speed a floor or collider bounce keeps),
   `"colliders": [[x, y, z, radius], ...]` (up to sixteen spheres particles
   bounce off, kept outside each), `"box_colliders": [[x, y, z, hx, hy, hz],
-  ...]` (up to sixteen axis-aligned boxes they bounce off), and `"oneshot"`
-  (emit once and die out rather than looping).
+  ...]` (up to sixteen axis-aligned boxes they bounce off), `"plane_colliders":
+  [[nx, ny, nz, d], ...]` (up to sixteen infinite planes - walls, ramps, slides
+  - they bounce off), and `"oneshot"` (emit once and die out rather than
+  looping).
 - Appearance (with `"fade": true` each particle is a camera-facing sprite,
   otherwise a one-pixel point): `"size"` px at birth with an optional
   `"size_end"`, `"color": [r, g, b]` crossing to a `"cool"` colour over life,
