@@ -582,6 +582,33 @@ pub const Renderer = struct {
         vertex_count: u32 = 0,
     };
 
+    pub const GpuParticleSim = struct {
+        state_buffer: TextureHandle = .{},
+        billboard: ParticleMesh = .{},
+        count: u32 = 0,
+        seeded: bool = false,
+    };
+
+    pub fn createGpuParticleSim(r: *Renderer, count: u32) ?GpuParticleSim {
+        _ = r;
+        _ = count;
+        return null;
+    }
+
+    pub fn dispatchGpuParticles(r: *Renderer, view: u16, sim: *GpuParticleSim, dt: f32, gravity: f32, speed: f32, lifetime: f32) void {
+        _ = r;
+        _ = view;
+        _ = sim;
+        _ = dt;
+        _ = gravity;
+        _ = speed;
+        _ = lifetime;
+    }
+
+    pub fn destroyGpuParticleSim(sim: GpuParticleSim) void {
+        _ = sim;
+    }
+
     pub fn createParticleMesh(r: *Renderer, count: u32, fade: bool) !ParticleMesh {
         _ = r;
         _ = count;

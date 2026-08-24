@@ -174,6 +174,9 @@ pub const ParticleField = struct {
     sub_count: u32 = 0,
     sub_speed: f32 = 3.0,
     sub_lifetime: f32 = 0.8,
+    /// Run the sim on the GPU compute path at crowd scale where the backend
+    /// supports it; otherwise the identical CPU sim runs. A gravity fountain.
+    gpu: bool = false,
 };
 
 /// The prebuilt VFX asset library: a named preset expands to a tuned particle
@@ -1178,6 +1181,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "sub_speed")) |v| field.sub_speed = @floatCast(numberOf(v) orelse field.sub_speed);
                 if (getField(pv.object, "sub_lifetime")) |v| field.sub_lifetime = @floatCast(numberOf(v) orelse field.sub_lifetime);
+                if (getField(pv.object, "gpu")) |v| {
+                    if (v == .bool) field.gpu = v.bool;
+                }
                 particle_field = field;
             }
             path.pop(pmark);

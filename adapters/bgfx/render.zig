@@ -119,6 +119,14 @@ pub const Renderer = struct {
     makeup_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
     billboard_program: c.bgfx_program_handle_t,
+    /// The particle-sim compute program, null on backends it is not built for
+    /// (then the CPU sim runs). Its two params uniforms feed each dispatch.
+    particle_compute_program: ?c.bgfx_program_handle_t,
+    sim_params_uniform: c.bgfx_uniform_handle_t,
+    sim_params2_uniform: c.bgfx_uniform_handle_t,
+    /// A single-vec4 vertex layout, the stride the particle state buffer binds
+    /// to the compute shader as.
+    vec4_layout: c.bgfx_vertex_layout_t,
     brush_program: c.bgfx_program_handle_t,
     /// The 176-triangle face-makeup mesh's fixed index buffer -
     /// makeup_mesh.triangle_indices, uploaded once, never changes.
@@ -285,6 +293,13 @@ pub const Renderer = struct {
         _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_TEXCOORD1, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         c.bgfx_vertex_layout_end(&billboard_layout);
 
+        // A bare vec4 - the particle state buffer's element the compute shader
+        // reads and writes.
+        var vec4_layout: c.bgfx_vertex_layout_t = undefined;
+        _ = c.bgfx_vertex_layout_begin(&vec4_layout, c.BGFX_RENDERER_TYPE_NOOP);
+        _ = c.bgfx_vertex_layout_add(&vec4_layout, c.BGFX_ATTRIB_TEXCOORD0, 4, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        c.bgfx_vertex_layout_end(&vec4_layout);
+
         const backend = c.bgfx_get_renderer_type();
         const rgba_program, const nv12_program = switch (backend) {
             c.BGFX_RENDERER_TYPE_METAL => .{
@@ -324,6 +339,7 @@ pub const Renderer = struct {
         const makeup_program = try loadMakeupProgram();
         const model_program = try loadModelProgram();
         const billboard_program = try loadBillboardProgram();
+        const particle_compute_program = loadParticleComputeProgram() catch null;
         const brush_program = try loadBrushProgram();
 
         // The brush ribbon vertex: a screen-space point and its stroke color.
@@ -400,6 +416,10 @@ pub const Renderer = struct {
             .makeup_program = makeup_program,
             .model_program = model_program,
             .billboard_program = billboard_program,
+            .particle_compute_program = particle_compute_program,
+            .sim_params_uniform = c.bgfx_create_uniform("u_simParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .sim_params2_uniform = c.bgfx_create_uniform("u_simParams2", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .vec4_layout = vec4_layout,
             .brush_program = brush_program,
             .makeup_index_buffer = makeup_index_buffer,
             .face_mesh_index_buffer = face_mesh_index_buffer,
@@ -724,6 +744,23 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_billboard_spirv, blobs.fs_billboard_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_billboard_essl, blobs.fs_billboard_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_billboard_wgsl, blobs.fs_billboard_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    fn loadCompute(cs_blob: []const u8) !c.bgfx_program_handle_t {
+        const csh = c.bgfx_create_shader(c.bgfx_copy(cs_blob.ptr, @intCast(cs_blob.len)));
+        const program = c.bgfx_create_compute_program(csh, true);
+        if (program.idx == invalid_handle) return error.ProgramCreate;
+        return program;
+    }
+
+    /// The particle-sim compute program, built only for Metal and Vulkan; the
+    /// caller falls back to the CPU sim on the other backends.
+    pub fn loadParticleComputeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadCompute(blobs.cs_particle_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadCompute(blobs.cs_particle_spirv),
             else => error.RendererUnsupported,
         };
     }
@@ -1777,6 +1814,47 @@ pub const Renderer = struct {
 
     pub fn destroyParticleMesh(mesh: ParticleMesh) void {
         c.bgfx_destroy_dynamic_vertex_buffer(mesh.position_buffer);
+    }
+
+    /// The GPU particle sim's buffers: state (compute read/write, three vec4 per
+    /// particle) and the billboards it writes (compute-write, drawn like any
+    /// billboard mesh).
+    pub const GpuParticleSim = struct {
+        state_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
+        billboard: ParticleMesh,
+        count: u32,
+        seeded: bool = false,
+    };
+
+    /// Creates the GPU sim's buffers for `count` particles, or null when the
+    /// compute program is not built for this backend (the CPU sim runs instead).
+    pub fn createGpuParticleSim(r: *Renderer, count: u32) ?GpuParticleSim {
+        if (r.particle_compute_program == null) return null;
+        const billboard = c.bgfx_create_dynamic_vertex_buffer(count * 6, &r.billboard_layout, c.BGFX_BUFFER_COMPUTE_WRITE);
+        const state = c.bgfx_create_dynamic_vertex_buffer(count * 3, &r.vec4_layout, c.BGFX_BUFFER_COMPUTE_READ_WRITE);
+        return .{ .state_buffer = state, .billboard = .{ .position_buffer = billboard, .vertex_count = count * 6 }, .count = count };
+    }
+
+    /// Runs one sim step on the GPU: binds the state and billboard buffers, sets
+    /// the params, and dispatches a thread group per 64 particles. The first
+    /// call seeds the state (emit); later calls integrate.
+    pub fn dispatchGpuParticles(r: *Renderer, view: c.bgfx_view_id_t, sim: *GpuParticleSim, dt: f32, gravity: f32, speed: f32, lifetime: f32) void {
+        const program = r.particle_compute_program orelse return;
+        const seed_flag: f32 = if (sim.seeded) 0.0 else 1.0;
+        sim.seeded = true;
+        const p1 = [4]f32{ dt, gravity, @floatFromInt(sim.count), seed_flag };
+        const p2 = [4]f32{ speed, lifetime, 0, 0 };
+        c.bgfx_set_uniform(r.sim_params_uniform, &p1, 1);
+        c.bgfx_set_uniform(r.sim_params2_uniform, &p2, 1);
+        c.bgfx_set_compute_dynamic_vertex_buffer(0, sim.state_buffer, c.BGFX_ACCESS_READWRITE);
+        c.bgfx_set_compute_dynamic_vertex_buffer(1, sim.billboard.position_buffer, c.BGFX_ACCESS_WRITE);
+        const groups = (sim.count + 63) / 64;
+        c.bgfx_dispatch(view, program, groups, 1, 1, 0);
+    }
+
+    pub fn destroyGpuParticleSim(sim: GpuParticleSim) void {
+        c.bgfx_destroy_dynamic_vertex_buffer(sim.state_buffer);
+        c.bgfx_destroy_dynamic_vertex_buffer(sim.billboard.position_buffer);
     }
 
     /// Draws particles over the frame. Opaque one-pixel points through the

@@ -449,6 +449,13 @@ pub const GeoRegion = union(enum) {
     }
 };
 
+/// A particle node whose sim runs on the GPU: the compute buffers plus the
+/// field the draw reads its colour and size from.
+const GpuParticleNode = struct {
+    sim: render.Renderer.GpuParticleSim,
+    field: manifest.ParticleField,
+};
+
 pub const Session = struct {
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
     /// once fed, its level and beat outrank the host's tick value.
@@ -480,6 +487,8 @@ pub const Session = struct {
     /// A ribbon-mode particle node's dynamic strip buffer, rebaked each frame
     /// from the trail history and drawn as one connected ribbon per particle.
     particle_ribbon_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ParticleMesh) = .empty,
+    /// Particle nodes whose sim runs on the GPU compute path.
+    gpu_particle_sims: std.AutoHashMapUnmanaged(graph.NodeIndex, GpuParticleNode) = .empty,
     /// A fading fountain's own sprite texture, loaded once at activation from
     /// assets/<stem>.png when the particles field names one.
     particle_sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
@@ -1465,7 +1474,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Like blend's mask: the face is a capability input whose
             // absence degrades (no draw), never blocks the chain.
             .mesh => s.mesh_face_textures.contains(entry.graph_index),
-            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index) or s.particle_base_meshes.contains(entry.graph_index) or s.particle_ribbon_meshes.contains(entry.graph_index),
+            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index) or s.particle_base_meshes.contains(entry.graph_index) or s.particle_ribbon_meshes.contains(entry.graph_index) or s.gpu_particle_sims.contains(entry.graph_index),
             // The draw board carries no loaded asset: it passes the frame
             // through and draws the session's brush strokes over it, so it is
             // always ready.
@@ -2056,6 +2065,50 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     }
                     continue;
                 }
+                if (s.gpu_particle_sims.getPtr(entry.graph_index)) |node| {
+                    drawn += 1;
+                    // The compute runs on its own view, ordered before the draw
+                    // views so bgfx barriers its written billboards into the draw.
+                    const compute_view = next_view_id;
+                    next_view_id += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const rect_w = if (output != null and !is_final) width else output_width;
+                    const rect_h = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                        render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    const pf = node.field;
+                    // A capture is a snapshot; only a live frame advances the sim.
+                    if (!s.capture_requested) {
+                        r.dispatchGpuParticles(compute_view, &node.sim, 1.0 / 60.0, pf.gravity, pf.speed, pf.lifetime);
+                    }
+                    var base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
+                    if (pf.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
+                    var cool_color = base_color;
+                    if (pf.cool) |c_| cool_color = .{ c_[0], c_[1], c_[2], 1.0 };
+                    const sprite_px: f32 = if (pf.size > 0) @floatFromInt(pf.size) else 8.0;
+                    const end_ratio: f32 = if (pf.size_end) |end_px| @as(f32, @floatFromInt(end_px)) / @max(sprite_px, 1.0) else 1.0;
+                    const particle_params: [4]f32 = .{ sprite_px / @as(f32, @floatFromInt(rect_w)), sprite_px / @as(f32, @floatFromInt(rect_h)), end_ratio, pf.spin };
+                    const frames: f32 = @floatFromInt(@max(pf.frames, 1));
+                    const particle_fx: [4]f32 = .{ frames, @ceil(@sqrt(frames)), pf.stretch, 0 };
+                    const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                    r.tile = if (is_final) s.capture_tile else null;
+                    r.submitParticles(blit_view, mesh_view, input_texture, node.sim.billboard, base_color, cool_color, aspect_ratio, true, particle_params, particle_fx, pf.glow, r.defaultSpriteTexture());
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 if (s.hair_meshes.get(entry.graph_index)) |hair_mesh| {
                     drawn += 1;
                     const blit_view = next_view_id;
@@ -2531,6 +2584,7 @@ pub fn destroySession(session: *Session) void {
     session.particle_meshes.deinit(session.engine.gpa);
     session.particle_base_meshes.deinit(session.engine.gpa);
     session.particle_ribbon_meshes.deinit(session.engine.gpa);
+    session.gpu_particle_sims.deinit(session.engine.gpa);
     session.particle_systems.deinit(session.engine.gpa);
     session.particle_sprite_textures.deinit(session.engine.gpa);
     destroyModelState(session);
@@ -4589,6 +4643,13 @@ pub fn loadsPending(session: ?*Session) u32 {
     return @intCast(n);
 }
 
+/// How many of the active lens's particle nodes run on the GPU compute path,
+/// so the harness can prove the GPU sim was taken rather than the CPU fallback.
+pub fn activeGpuParticleSims(session: ?*Session) u32 {
+    const s = session orelse return 0;
+    return @intCast(s.gpu_particle_sims.count());
+}
+
 /// Reads the index-th submitted face. invalid_argument once index reaches
 /// face_count, so a caller loops zero to face_count to visit every face.
 pub export fn goss_session_face_result_at(session: ?*Session, index: u32, out_result: ?*face.Result) Status {
@@ -5235,9 +5296,12 @@ fn destroyMeshFaceState(session: *Session) void {
         while (prm_it.next()) |mesh| render.Renderer.destroyParticleMesh(mesh.*);
         var sprite_it = session.particle_sprite_textures.valueIterator();
         while (sprite_it.next()) |tex| r.destroyTexture(tex.*);
+        var gps_it = session.gpu_particle_sims.valueIterator();
+        while (gps_it.next()) |node| render.Renderer.destroyGpuParticleSim(node.sim);
     }
     var ps_it = session.particle_systems.valueIterator();
     while (ps_it.next()) |sys| sys.deinit();
+    session.gpu_particle_sims.clearRetainingCapacity();
     session.particle_meshes.clearRetainingCapacity();
     session.particle_base_meshes.clearRetainingCapacity();
     session.particle_ribbon_meshes.clearRetainingCapacity();
@@ -6122,6 +6186,16 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
+                if (pf.gpu) {
+                    if (r.createGpuParticleSim(pf.count)) |sim| {
+                        session.gpu_particle_sims.put(gpa, model.graph_index, .{ .sim = sim, .field = pf }) catch {
+                            render.Renderer.destroyGpuParticleSim(sim);
+                        };
+                        // The GPU node generates its own billboards; no glb, no CPU sim.
+                        continue;
+                    }
+                    // Compute is unavailable on this backend; fall through to the CPU sim.
+                }
                 const pattern = particlePattern(pf.pattern);
                 if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .curl = pf.curl, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .bounce = pf.bounce, .colliders = pf.colliders, .box_colliders = pf.box_colliders, .plane_colliders = pf.plane_colliders, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .trail = pf.trail, .sub_count = pf.sub_count, .sub_speed = pf.sub_speed, .sub_lifetime = pf.sub_lifetime, .pattern = pattern })) |sys| {
                     // A trail draws a fading billboard per particle per trail

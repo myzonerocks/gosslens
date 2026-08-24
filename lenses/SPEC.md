@@ -277,6 +277,9 @@ other fields then override, so `{"preset": "fire"}` is a finished flame and
   `"sub_lifetime"` for their launch and life - a firework shell opening into
   sparks. The children fade and fall on their own; pair with `"fade"` so
   spent sparks vanish.
+- `"gpu": true` runs the fountain sim on the GPU compute path at crowd scale
+  where the backend supports compute; elsewhere the identical CPU sim runs, so
+  the same field draws the same picture either way.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the

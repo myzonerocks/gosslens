@@ -4331,19 +4331,35 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // back end.
         .{ .profile = "wgsl", .platform = "asm.js", .tag = "wgsl" },
     };
-    const computes = [_][]const u8{"cs_nv12_to_rgba"};
-    for (computes) |compute_name| {
-        const run = b.addRunArtifact(shaderc_exe);
-        run.addArg("-f");
-        run.addFileArg(b.path(b.fmt("adapters/bgfx/shaders/{s}.sc", .{compute_name})));
-        run.addArg("-o");
-        const out_name = b.fmt("{s}.spirv.bin", .{compute_name});
-        const out = run.addOutputFileArg(out_name);
-        run.addArgs(&.{ "--type", "compute", "--platform", "android", "-p", "spirv" });
-        run.addArg("-i");
-        run.addDirectoryArg(b.path(".vendor/bgfx/src"));
-        _ = wf.addCopyFile(out, out_name);
-        source.appendSlice(b.allocator, b.fmt("pub const {s}_spirv = @embedFile(\"{s}\");\n", .{ compute_name, out_name })) catch @panic("oom");
+    const compute_backends = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
+        .{ .profile = "spirv", .platform = "android", .tag = "spirv" },
+        .{ .profile = "metal", .platform = "ios", .tag = "metal" },
+    };
+    // cs_nv12_to_rgba drives the native Vulkan path (spirv only); cs_particle
+    // runs the particle sim on the GPU on both backends.
+    const computes = [_]struct { name: []const u8, backends: []const []const u8 }{
+        .{ .name = "cs_nv12_to_rgba", .backends = &.{"spirv"} },
+        .{ .name = "cs_particle", .backends = &.{ "spirv", "metal" } },
+    };
+    for (computes) |compute| {
+        for (compute_backends) |be| {
+            var wanted = false;
+            for (compute.backends) |w| {
+                if (std.mem.eql(u8, w, be.tag)) wanted = true;
+            }
+            if (!wanted) continue;
+            const run = b.addRunArtifact(shaderc_exe);
+            run.addArg("-f");
+            run.addFileArg(b.path(b.fmt("adapters/bgfx/shaders/{s}.sc", .{compute.name})));
+            run.addArg("-o");
+            const out_name = b.fmt("{s}.{s}.bin", .{ compute.name, be.tag });
+            const out = run.addOutputFileArg(out_name);
+            run.addArgs(&.{ "--type", "compute", "--platform", be.platform, "-p", be.profile });
+            run.addArg("-i");
+            run.addDirectoryArg(b.path(".vendor/bgfx/src"));
+            _ = wf.addCopyFile(out, out_name);
+            source.appendSlice(b.allocator, b.fmt("pub const {s}_{s} = @embedFile(\"{s}\");\n", .{ compute.name, be.tag, out_name })) catch @panic("oom");
+        }
     }
     for (shaders) |shader| {
         for (profiles) |profile| {

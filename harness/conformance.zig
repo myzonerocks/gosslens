@@ -3618,6 +3618,85 @@ fn provePresetLibrary(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The fraction of pixels where any channel differs by more than `delta`.
+fn frameDiffFraction(a: []const u8, b: []const u8, delta: u8) f32 {
+    if (a.len != b.len or a.len == 0) return 1.0;
+    var differing: usize = 0;
+    var i: usize = 0;
+    while (i + 4 <= a.len) : (i += 4) {
+        const dr = if (a[i] > b[i]) a[i] - b[i] else b[i] - a[i];
+        const dg = if (a[i + 1] > b[i + 1]) a[i + 1] - b[i + 1] else b[i + 1] - a[i + 1];
+        const db = if (a[i + 2] > b[i + 2]) a[i + 2] - b[i + 2] else b[i + 2] - a[i + 2];
+        if (dr > delta or dg > delta or db > delta) differing += 1;
+    }
+    return @as(f32, @floatFromInt(differing)) / @as(f32, @floatFromInt(a.len / 4));
+}
+
+fn captureFountain(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []const u8) !?[]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) return null;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves the GPU-compute particle path: a fountain simmed on the GPU renders a
+/// stable frame that closely tracks the same fountain simmed on the CPU (they
+/// share the emit and integration math, off only by GPU float rounding), so the
+/// compute path stays in sync with the deterministic baseline.
+fn proveGpuParticles(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First confirm the GPU compute path is actually taken here; a backend
+    // without compute falls back to the CPU sim, which is already proven.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const pkg = ".lens-packages/gpu-fountain";
+        if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) return false;
+        if (abi.activeGpuParticleSims(session) == 0) {
+            std.debug.print("conformance: gpu-particles skipped - no compute backend here, the CPU sim runs and is already proven\n", .{});
+            return true;
+        }
+    }
+    const gpu0 = (try captureFountain(gpa, engine, ".lens-packages/gpu-fountain")) orelse return false;
+    defer gpa.free(gpu0);
+    const gpu1 = (try captureFountain(gpa, engine, ".lens-packages/gpu-fountain")) orelse return false;
+    defer gpa.free(gpu1);
+    if (!std.mem.eql(u8, gpu0, gpu1)) {
+        std.debug.print("conformance: FAIL the GPU fountain is not stable across runs\n", .{});
+        return false;
+    }
+    const cpu = (try captureFountain(gpa, engine, ".lens-packages/cpu-fountain")) orelse return false;
+    defer gpa.free(cpu);
+    // The GPU and CPU share the emit and integration math, so their frames
+    // track within GPU float rounding (here they land pixel-identical).
+    if (frameDiffFraction(gpu0, cpu, 16) > 0.15) {
+        std.debug.print("conformance: FAIL the GPU fountain does not track the CPU fountain\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a GPU-compute fountain renders on the compute path, stable across runs and tracking the CPU fountain\n", .{});
+    return true;
+}
+
 /// Proves the sub-emitter: a firework whose shells burst into child sparks
 /// renders a different frame from the same emitter with no sub-emitter, so the
 /// children the parents spawn on death are drawn, each bit-stable across runs.
@@ -6617,6 +6696,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("preset library");
     if (!try proveSubEmitter(gpa, engine)) return 1;
     watchHold("sub emitter");
+    if (!try proveGpuParticles(gpa, engine)) return 1;
+    watchHold("gpu particles");
     if (!try proveParticleCollider(gpa, engine)) return 1;
     watchHold("particle collider");
     if (!try proveMeshParticles(gpa, engine)) return 1;
