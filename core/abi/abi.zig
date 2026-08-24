@@ -6218,11 +6218,14 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                         .box => .box,
                         .sphere => .sphere,
                         .cylinder => .cylinder,
+                        .capsule => .capsule,
                     };
-                    const id = world.addBody(
+                    const rotation = eulerDegreesToQuat(body.rotation);
+                    const id = world.addBodyOriented(
                         shape,
                         body.position,
                         body.size,
+                        rotation,
                         motion,
                     ) catch physics.invalid_body;
                     if (id != physics.invalid_body) {
@@ -7011,6 +7014,27 @@ fn volumeContains(vol: manifest.Volume, p: [3]f32) bool {
     const dz = p[2] - vol.center[2];
     if (vol.radius > 0) return dx * dx + dy * dy + dz * dz <= vol.radius * vol.radius;
     return @abs(dx) <= vol.half[0] and @abs(dy) <= vol.half[1] and @abs(dz) <= vol.half[2];
+}
+
+/// Turns an euler orientation in degrees (x, y, z) into a quaternion
+/// (x, y, z, w) for a physics body, applied in x-then-y-then-z order.
+fn eulerDegreesToQuat(euler: [3]f32) [4]f32 {
+    const deg2rad = std.math.pi / 180.0;
+    const hx = euler[0] * deg2rad * 0.5;
+    const hy = euler[1] * deg2rad * 0.5;
+    const hz = euler[2] * deg2rad * 0.5;
+    const cx = @cos(hx);
+    const sx = @sin(hx);
+    const cy = @cos(hy);
+    const sy = @sin(hy);
+    const cz = @cos(hz);
+    const sz = @sin(hz);
+    return .{
+        sx * cy * cz - cx * sy * sz,
+        cx * sy * cz + sx * cy * sz,
+        cx * cy * sz - sx * sy * cz,
+        cx * cy * cz + sx * sy * sz,
+    };
 }
 
 pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {

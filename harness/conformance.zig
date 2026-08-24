@@ -2760,6 +2760,43 @@ fn provePhysicsShapeCylinder(gpa: std.mem.Allocator, engine: *abi.Engine) !bool 
     return true;
 }
 
+/// Proves the capsule collider and oriented bodies: a capsule laid on its side
+/// bridges a gap between two pillars, resting high, where a sphere of its
+/// radius drops straight through the same gap to the floor - so both the
+/// elongated shape and the body rotation take effect - each bit-stable.
+fn provePhysicsShapeCapsule(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var cap_settled: []u8 = &.{};
+    defer if (cap_settled.len > 0) gpa.free(cap_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/shape-capsule");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            cap_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL capsule shape is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const sphere_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/gap-sphere");
+    defer gpa.free(sphere_settled);
+    if (std.mem.eql(u8, cap_settled, sphere_settled)) {
+        std.debug.print("conformance: FAIL the bridging capsule settled the same as the sphere falling through the gap\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a side-laid capsule bridges a gap a sphere of its radius falls straight through, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -6076,6 +6113,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics spring");
     if (!try provePhysicsShapeCylinder(gpa, engine)) return 1;
     watchHold("physics shape cylinder");
+    if (!try provePhysicsShapeCapsule(gpa, engine)) return 1;
+    watchHold("physics shape capsule");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

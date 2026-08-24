@@ -176,10 +176,12 @@ no `morph_weights` the mesh draws unmorphed.
 
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
 pose drives the model matrix once simulation starts. `body` is `box`,
-`sphere`, or `cylinder` (axis vertical), `size` is box half extents (a
-sphere reads its radius from the first element; a cylinder reads radius
-from the first and half height from the second), `position` places the
-body at activation, and
+`sphere`, `cylinder`, or `capsule` (the last two axis vertical), `size`
+is box half extents (a sphere reads its radius from the first element; a
+cylinder or capsule reads radius from the first and half height from the
+second), `position` places the body at activation, an optional
+`rotation` in euler degrees lays an elongated body on its side or tilts a
+collider, and
 `motion` is `dynamic`, `static`, or `kinematic` (the engine holds the
 body, so chained content can hang off it). A body may add
 `"chain": {"to": "<node id>", "length": <meters>}`, a distance

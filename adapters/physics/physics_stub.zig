@@ -9,6 +9,7 @@ pub const Shape = enum(u32) {
     box = 0,
     sphere = 1,
     cylinder = 2,
+    capsule = 3,
 };
 
 pub const Motion = enum(u32) {
@@ -37,6 +38,16 @@ pub const World = struct {
         _ = shape;
         _ = position;
         _ = size;
+        _ = motion;
+        return error.BodyAddFailed;
+    }
+
+    pub fn addBodyOriented(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, motion: Motion) !u32 {
+        _ = world;
+        _ = shape;
+        _ = position;
+        _ = size;
+        _ = rotation;
         _ = motion;
         return error.BodyAddFailed;
     }

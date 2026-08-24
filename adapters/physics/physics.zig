@@ -12,6 +12,8 @@ pub const Shape = enum(u32) {
     sphere = 1,
     /// Axis vertical; size is radius, half-height.
     cylinder = 2,
+    /// Axis vertical; size is radius, half-height of the cylinder part.
+    capsule = 3,
 };
 
 pub const Motion = enum(u32) {
@@ -26,6 +28,7 @@ pub const invalid_body: u32 = std.math.maxInt(u32);
 extern fn goss_physics_world_create(gravity_y: f32) ?*anyopaque;
 extern fn goss_physics_world_destroy(handle: *anyopaque) void;
 extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, motion: u32) u32;
+extern fn goss_physics_body_add_oriented(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, motion: u32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
@@ -54,6 +57,14 @@ pub const World = struct {
     /// Half extents size a box; a sphere reads its radius from size[0].
     pub fn addBody(world: World, shape: Shape, position: [3]f32, size: [3]f32, motion: Motion) !u32 {
         const id = goss_physics_body_add(world.handle, @intFromEnum(shape), position[0], position[1], position[2], size[0], size[1], size[2], @intFromEnum(motion));
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Adds a body rotated by a quaternion (x, y, z, w), so an elongated
+    /// shape can lie on its side or a static collider can tilt.
+    pub fn addBodyOriented(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, motion: Motion) !u32 {
+        const id = goss_physics_body_add_oriented(world.handle, @intFromEnum(shape), position[0], position[1], position[2], size[0], size[1], size[2], rotation[0], rotation[1], rotation[2], rotation[3], @intFromEnum(motion));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -256,6 +267,26 @@ test "a cylinder rests upright at its half height, above where a sphere sits" {
     try t.expectApproxEqAbs(@as(f32, 0.3), cyl_pose[13], 0.03);
     try t.expectApproxEqAbs(@as(f32, 0.1), ball_pose[13], 0.03);
     try t.expect(cyl_pose[13] > ball_pose[13] + 0.15);
+}
+
+test "a horizontal capsule bridges a gap a sphere falls through" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    _ = try world.addBody(.box, .{ 0, -0.1, 0 }, .{ 4, 0.1, 4 }, .static); // floor top at y = 0
+    _ = try world.addBody(.box, .{ -0.5, 0.25, 0 }, .{ 0.1, 0.25, 0.4 }, .static); // pillar tops at y = 0.5,
+    _ = try world.addBody(.box, .{ 0.5, 0.25, 0 }, .{ 0.1, 0.25, 0.4 }, .static); // inner faces at x = +-0.4
+    // A capsule laid on its side (a quarter turn about z) spans wider than the
+    // 0.8 gap, so it rests bridging the pillar tops well above the floor.
+    const quarter_turn_z = [4]f32{ 0, 0, 0.70710678, 0.70710678 };
+    const cap = try world.addBodyOriented(.capsule, .{ 0, 1.0, 0 }, .{ 0.12, 0.35, 0 }, quarter_turn_z, .dynamic);
+    // A sphere of the capsule's radius drops straight through the gap to the floor.
+    const ball = try world.addBody(.sphere, .{ 0, 1.0, 0 }, .{ 0.12, 0, 0 }, .dynamic);
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const cap_pose = try world.bodyPose(cap);
+    const ball_pose = try world.bodyPose(ball);
+    try t.expect(cap_pose[13] > 0.5); // bridging, up on the pillars
+    try t.expect(ball_pose[13] < 0.2); // fallen through, resting on the floor
+    try t.expect(cap_pose[13] > ball_pose[13] + 0.3);
 }
 
 test "two identical worlds land bit-identical poses" {

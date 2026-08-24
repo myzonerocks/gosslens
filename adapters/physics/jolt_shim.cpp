@@ -12,6 +12,7 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
@@ -117,10 +118,11 @@ extern "C" void goss_physics_world_destroy(void* handle) {
 
 // shape: 0 = box (params x/y/z half extents), 1 = sphere (param x =
 // radius), 2 = cylinder (axis vertical, param x = radius, y = half
-// height). motion: 0 static, 1 dynamic, 2 kinematic (the engine drives
-// it; chained bodies follow). Returns the body id, or UINT32_MAX.
-extern "C" uint32_t goss_physics_body_add(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, uint32_t motion) {
-  auto* world = static_cast<World*>(handle);
+// height), 3 = capsule (axis vertical, param x = radius, y = half height
+// of the cylinder part). A rotation orients the body so a capsule or
+// cylinder can lie on its side. motion: 0 static, 1 dynamic, 2 kinematic
+// (the engine drives it; chained bodies follow).
+static uint32_t create_body(World* world, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, uint32_t motion) {
   if (world == nullptr) return UINT32_MAX;
   JPH::Ref<JPH::Shape> body_shape;
   if (shape == 0) {
@@ -129,6 +131,8 @@ extern "C" uint32_t goss_physics_body_add(void* handle, uint32_t shape, float px
     body_shape = new JPH::SphereShape(sx);
   } else if (shape == 2) {
     body_shape = new JPH::CylinderShape(sy, sx);
+  } else if (shape == 3) {
+    body_shape = new JPH::CapsuleShape(sy, sx);
   } else {
     return UINT32_MAX;
   }
@@ -136,11 +140,25 @@ extern "C" uint32_t goss_physics_body_add(void* handle, uint32_t shape, float px
                                        : motion == 2 ? JPH::EMotionType::Kinematic
                                                      : JPH::EMotionType::Static;
   const bool moving = motion != 0;
-  JPH::BodyCreationSettings settings(body_shape, JPH::RVec3(px, py, pz), JPH::Quat::sIdentity(),
+  JPH::Quat rotation = JPH::Quat(qx, qy, qz, qw);
+  if (rotation.LengthSq() < 1.0e-6f) rotation = JPH::Quat::sIdentity();
+  rotation = rotation.Normalized();
+  JPH::BodyCreationSettings settings(body_shape, JPH::RVec3(px, py, pz), rotation,
                                      motion_type, moving ? layer_moving : layer_static);
   const JPH::BodyID id = world->system.GetBodyInterface().CreateAndAddBody(
       settings, moving ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
   return id.IsInvalid() ? UINT32_MAX : id.GetIndexAndSequenceNumber();
+}
+
+// Adds a body at an identity orientation. Returns the body id, or UINT32_MAX.
+extern "C" uint32_t goss_physics_body_add(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, uint32_t motion) {
+  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, 0, 0, 0, 1, motion);
+}
+
+// Adds a body rotated by a quaternion, so an elongated shape can lie on its
+// side or a static collider can tilt. Returns the body id, or UINT32_MAX.
+extern "C" uint32_t goss_physics_body_add_oriented(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, uint32_t motion) {
+  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, motion);
 }
 
 // Links two bodies with a distance constraint between local attach
