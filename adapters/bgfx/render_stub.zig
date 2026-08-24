@@ -321,6 +321,17 @@ pub const Renderer = struct {
         _ = yaw;
     }
 
+    pub fn submitEnvmapPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, env_texture: TextureHandle, mask_texture: TextureHandle, rot: [3][4]f32, intensity: f32, aspect: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = env_texture;
+        _ = mask_texture;
+        _ = rot;
+        _ = intensity;
+        _ = aspect;
+    }
+
     pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
         _ = r;
         _ = view_id;

@@ -5199,6 +5199,95 @@ fn proveEnvPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves env.pass's image variant samples an equirect by the pose. The
+/// env-map bundle ships a sky.png with a sun at one longitude; yawing the
+/// camera pans it, so the yawed frame differs from the level one while the
+/// segmented foreground stays put.
+fn proveEnvmapPass(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/env-map";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: env-map proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // Render until both the segmentation mask and the equirect image have
+    // landed, so the pass takes its image path over a real background.
+    var polls: usize = 0;
+    while (session.segmentation_texture == null or session.env_textures.count() == 0) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000) return error.EnvMapTimedOut;
+    }
+
+    var level: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = identity_pose, .projection = identity_pose, .timestamp_us = 1000 };
+    if (abi.goss_session_submit_world(session, &level, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-envmap-level");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // Yaw 1.0 rad about y: the camera turns, panning the equirect sideways.
+    const b: f32 = 1.0;
+    const cb = std.math.cos(b);
+    const sb = std.math.sin(b);
+    const yawed_pose = [16]f32{ cb, 0, -sb, 0, 0, 1, 0, 0, sb, 0, cb, 0, 0, 0, 0, 1 };
+    var yawed: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = yawed_pose, .projection = identity_pose, .timestamp_us = 2000 };
+    if (abi.goss_session_submit_world(session, &yawed, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+    for (0..6) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-envmap-yawed");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const level_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-envmap-level.tga", gpa, .limited(8 << 20));
+    defer gpa.free(level_tga);
+    const yawed_tga = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-envmap-yawed.tga", gpa, .limited(8 << 20));
+    defer gpa.free(yawed_tga);
+
+    if (std.mem.eql(u8, level_tga, yawed_tga)) {
+        std.debug.print("conformance: FAIL env-map: yawing the camera did not pan the equirect\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF env-map samples the equirect by pose: yawing the camera pans the environment behind the foreground\n", .{});
+    return true;
+}
+
 const identity_pose = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
 var g_watch_window: ?*c.GLFWwindow = null;
@@ -5308,6 +5397,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ssr pass");
     if (!try proveEnvPass(gpa, engine)) return 1;
     watchHold("env pass");
+    if (!try proveEnvmapPass(gpa, engine)) return 1;
+    watchHold("env map");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

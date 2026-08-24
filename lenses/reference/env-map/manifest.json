@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.env-map",
+  "version": "1.0.0",
+  "display_name": "Environment Map",
+  "engine_compat": ">=0.5",
+  "capabilities": ["segmentation"],
+  "parameters": [],
+  "nodes": [
+    {"id": "sky", "type": "env.pass", "inputs": {"frame": "camera"}, "params": {}, "env": {"intensity": 1.0}}
+  ],
+  "triggers": []
+}

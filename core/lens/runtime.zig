@@ -288,6 +288,9 @@ pub const EnvPassNode = struct {
     top: [3]f32,
     bottom: [3]f32,
     intensity: f32,
+    /// The equirect environment image's stem (assets/<stem>.png) when the
+    /// node ships one, null for a plain gradient sky.
+    image_stem: ?[]const u8,
 };
 
 pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, trail, ssr, env, model, mesh, draw_board, sprite };
@@ -539,6 +542,7 @@ pub const Lens = struct {
                 .top = .{ ev.top_r, ev.top_g, ev.top_b },
                 .bottom = .{ ev.bottom_r, ev.bottom_g, ev.bottom_b },
                 .intensity = ev.intensity,
+                .image_stem = node.asset_stem,
             });
         }
         return out.toOwnedSlice(gpa);
@@ -833,7 +837,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .graph_index = graph_index,
             .node_type = node_type,
             .asset_stem = switch (node_type) {
-                .shader_pass, .lut_pass, .blend_pass, .model_gltf, .mesh_face, .sprite_2d => node.id,
+                .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .sprite_2d => node.id,
                 else => null,
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,

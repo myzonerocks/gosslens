@@ -759,6 +759,13 @@ pub const Session = struct {
     /// One bgfx texture per blend.pass node whose background finished
     /// loading.
     blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// One equirect loader per env.pass node that ships an environment image,
+    /// still in flight - mirrors blend_loaders. A node with no image (or a
+    /// load that fails) simply falls back to the gradient sky.
+    env_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
+    /// One bgfx texture per env.pass node whose equirect image finished
+    /// loading, sampled by the camera pose instead of the gradient.
+    env_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// The parametric color grade of each spliced grade.pass node, packed
     /// as (exposure, contrast, saturation, temperature) - resolved once at
     /// activation since grade.pass ships no asset and needs no loader.
@@ -1642,12 +1649,6 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .env => {
                 const env = s.env_params.get(entry.graph_index) orelse continue;
                 const mask_texture = s.segmentation_texture orelse r.default_mask_texture;
-                // The submitted camera pose drives the sky: its forward
-                // elevation shifts the gradient and its heading slides the sun,
-                // scaled into screen fractions, so the sky pans as the phone
-                // turns. With no pose the identity leaves the sky centered.
-                const cam_pose: math.Mat4 = .{ .cols = @bitCast(s.world.state.world_from_camera) };
-                const euler = headEuler(cam_pose);
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -1655,7 +1656,26 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitEnvPass(view_id, input_texture, mask_texture, .{ env[0], env[1], env[2] }, .{ env[3], env[4], env[5] }, env[6], euler.pitch * 0.2, euler.yaw * 0.15915494);
+                if (s.env_textures.get(entry.graph_index)) |env_tex| {
+                    // With an equirect image loaded, sample it by the pose. Its
+                    // basis rows turn each pixel's view ray into world space, so
+                    // the environment pans with the device; the upper 3x3 of the
+                    // column-major pose reads out as rows here.
+                    const wfc = s.world.state.world_from_camera;
+                    const rot = [3][4]f32{
+                        .{ wfc[0], wfc[4], wfc[8], 0 },
+                        .{ wfc[1], wfc[5], wfc[9], 0 },
+                        .{ wfc[2], wfc[6], wfc[10], 0 },
+                    };
+                    const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                    r.submitEnvmapPass(view_id, input_texture, env_tex, mask_texture, rot, env[6], aspect);
+                } else {
+                    // No image: the procedural sky, its gradient shifted by the
+                    // pose pitch and sun slid by the yaw into screen fractions.
+                    const cam_pose: math.Mat4 = .{ .cols = @bitCast(s.world.state.world_from_camera) };
+                    const euler = headEuler(cam_pose);
+                    r.submitEnvPass(view_id, input_texture, mask_texture, .{ env[0], env[1], env[2] }, .{ env[3], env[4], env[5] }, env[6], euler.pitch * 0.2, euler.yaw * 0.15915494);
+                }
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2353,6 +2373,8 @@ pub fn destroySession(session: *Session) void {
     destroyMeshFaceState(session);
     session.blend_loaders.deinit(session.engine.gpa);
     session.blend_textures.deinit(session.engine.gpa);
+    session.env_loaders.deinit(session.engine.gpa);
+    session.env_textures.deinit(session.engine.gpa);
     session.sprite_loaders.deinit(session.engine.gpa);
     session.sprite_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
@@ -2684,6 +2706,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
     if (session) |s| {
         pollLutLoaders(s, r, s.engine.gpa);
         pollBlendLoaders(s, r, s.engine.gpa);
+        pollEnvLoaders(s, r, s.engine.gpa);
         pollMeshFaceLoaders(s, r, s.engine.gpa);
         pollSpriteLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
@@ -2771,6 +2794,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
 
     pollLutLoaders(s, r, s.engine.gpa);
     pollBlendLoaders(s, r, s.engine.gpa);
+    pollEnvLoaders(s, r, s.engine.gpa);
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
@@ -2884,6 +2908,7 @@ test "swapRedBlue turns rgba into bgra" {
 fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollLutLoaders(s, r, s.engine.gpa);
     pollBlendLoaders(s, r, s.engine.gpa);
+    pollEnvLoaders(s, r, s.engine.gpa);
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
@@ -5001,6 +5026,15 @@ fn destroyBlendState(session: *Session) void {
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
     }
     session.blend_textures.clearRetainingCapacity();
+
+    var env_loader_it = session.env_loaders.valueIterator();
+    while (env_loader_it.next()) |loader| loader.*.deinit();
+    session.env_loaders.clearRetainingCapacity();
+    if (session.engine.renderer) |*r| {
+        var env_texture_it = session.env_textures.valueIterator();
+        while (env_texture_it.next()) |handle| r.destroyTexture(handle.*);
+    }
+    session.env_textures.clearRetainingCapacity();
     // grade.pass and bloom.pass hold only plain params, nothing to free.
     session.grade_params.clearRetainingCapacity();
     session.dof_params.clearRetainingCapacity();
@@ -5603,6 +5637,49 @@ fn pollBlendLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     }
 }
 
+/// Starts an equirect load for every env.pass node that ships an environment
+/// image (assets/<stem>.png) - mirrors createBlendLoaders. A node with no
+/// image, or one whose file is absent, keeps its gradient sky.
+fn createEnvLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const envs = try lens.envPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(envs);
+    for (envs) |ev| {
+        const stem = ev.image_stem orelse continue;
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        session.env_loaders.put(gpa, ev.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Turns every finished (or failed) env-image load into a texture (or drops
+/// it) - mirrors pollBlendLoaders.
+fn pollEnvLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.env_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+            gpa.free(decoded.rgba);
+            session.env_textures.put(gpa, entry.key_ptr.*, texture) catch {
+                r.destroyTexture(texture);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.env_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
 /// An animated sprite's frame state: the per-frame loads in flight, the
 /// textures they resolve into (in frame order), and the count landed so
 /// far, plus the rate the draw cycles them at.
@@ -6072,6 +6149,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
     try createBlendLoaders(session, gpa, bundle_path);
+    try createEnvLoaders(session, gpa, bundle_path);
     try createMeshFaceLoaders(session, gpa, bundle_path);
     try createSpriteLoaders(session, gpa, bundle_path);
     try createTextTextures(session, gpa);
