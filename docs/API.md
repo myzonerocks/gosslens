@@ -304,6 +304,7 @@ ribbon for the renderer to draw.
 | `goss_session_ar_brush_begin` / `_point` / `_end` | `arBrushBegin()` / `arBrushPoint(x, y, z)` / `arBrushEnd()`, a stroke in the world frame the platform reports poses in; nothing draws without live world tracking | world-tracking SDKs |
 | `goss_session_ar_brush_undo` / `_clear` | `arBrushUndo()` / `arBrushClear()`, the world-brush stacks | world-tracking SDKs |
 | `goss_session_grab` / `_release` | `grab(x, y, z)` grabs the nearest dynamic physics body to a world point and drags it there, driving it kinematically so it gathers throw velocity; `release()` lets it fly off dynamic again | all SDKs |
+| `goss_session_add_collider` / `_erase_collider` | `addCollider(x, y, z)` drops a static sphere collider at a world point that content lands on live; `eraseCollider(x, y, z, radius)` removes every live collider within radius - drawing and erasing a 2D collider world | all SDKs |
 
 ## Web tracking module
 

@@ -810,6 +810,18 @@ export fn Java_com_gosslens_Gosslens_nativeRelease(env: *JniEnv, cls: jobject, s
     return @intFromEnum(abi.goss_session_release(sessionFromHandle(session)));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeAddCollider(env: *JniEnv, cls: jobject, session: i64, x: f32, y: f32, z: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_add_collider(sessionFromHandle(session), x, y, z));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeEraseCollider(env: *JniEnv, cls: jobject, session: i64, x: f32, y: f32, z: f32, radius: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_erase_collider(sessionFromHandle(session), x, y, z, radius));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;

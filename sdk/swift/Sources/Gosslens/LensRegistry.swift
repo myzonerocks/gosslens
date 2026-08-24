@@ -320,4 +320,6 @@ extension GossSession {
     public func clearARStrokes() throws { try checked(goss_session_ar_brush_clear(handle)) }
     public func grab(x: Float, y: Float, z: Float) throws { try checked(goss_session_grab(handle, x, y, z)) }
     public func release() throws { try checked(goss_session_release(handle)) }
+    public func addCollider(x: Float, y: Float, z: Float) throws { try checked(goss_session_add_collider(handle, x, y, z)) }
+    public func eraseCollider(x: Float, y: Float, z: Float, radius: Float) throws { try checked(goss_session_erase_collider(handle, x, y, z, radius)) }
 }

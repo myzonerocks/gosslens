@@ -34,6 +34,8 @@ extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, p
 extern fn goss_physics_body_add_mesh(handle: *anyopaque, points: [*]const f32, point_count: u32, indices: [*]const u32, index_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_set_motion(handle: *anyopaque, body: u32, motion: u32) void;
+extern fn goss_physics_body_remove(handle: *anyopaque, body: u32) void;
+extern fn goss_physics_body_wake(handle: *anyopaque, body: u32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
 extern fn goss_physics_constrain_point(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) i32;
@@ -152,6 +154,17 @@ pub const World = struct {
     /// the velocity the drag imparted.
     pub fn setBodyMotion(world: World, body: u32, motion: Motion) void {
         goss_physics_body_set_motion(world.handle, body, @intFromEnum(motion));
+    }
+
+    /// Removes a body from the world and destroys it - an erased live collider.
+    pub fn removeBody(world: World, body: u32) void {
+        goss_physics_body_remove(world.handle, body);
+    }
+
+    /// Wakes a body so it re-evaluates its support after a collider it rested
+    /// on was erased.
+    pub fn wakeBody(world: World, body: u32) void {
+        goss_physics_body_wake(world.handle, body);
     }
 
     /// Adds a pinned-top cloth grid; its deformed vertices drive a mesh.

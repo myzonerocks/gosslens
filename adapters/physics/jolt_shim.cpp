@@ -379,6 +379,24 @@ extern "C" void goss_physics_body_set_motion(void* handle, uint32_t body, uint32
   world->system.GetBodyInterface().SetMotionType(JPH::BodyID(body), motion_type, JPH::EActivation::Activate);
 }
 
+// Removes a body from the world and destroys it - an erased live collider.
+extern "C" void goss_physics_body_remove(void* handle, uint32_t body) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr) return;
+  auto& bi = world->system.GetBodyInterface();
+  const JPH::BodyID id(body);
+  bi.RemoveBody(id);
+  bi.DestroyBody(id);
+}
+
+// Wakes a body so it re-evaluates its support - a body resting on a collider
+// that was just erased must fall, not stay asleep in place.
+extern "C" void goss_physics_body_wake(void* handle, uint32_t body) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr) return;
+  world->system.GetBodyInterface().ActivateBody(JPH::BodyID(body));
+}
+
 // Fixed 60 Hz substeps accumulated from dt, the determinism contract.
 extern "C" void goss_physics_step(void* handle, float dt_seconds) {
   auto* world = static_cast<World*>(handle);

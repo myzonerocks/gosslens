@@ -1151,6 +1151,14 @@ export class GossSession {
     this.mod.ccall("goss_session_release", "number", ["number"], [this.handle]);
   }
 
+  addCollider(x: number, y: number, z: number): void {
+    this.mod.ccall("goss_session_add_collider", "number", ["number", "number", "number", "number"], [this.handle, x, y, z]);
+  }
+
+  eraseCollider(x: number, y: number, z: number, radius: number): void {
+    this.mod.ccall("goss_session_erase_collider", "number", ["number", "number", "number", "number", "number"], [this.handle, x, y, z, radius]);
+  }
+
   /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the
   /// renderer. Queries the float count, then reads it out of a scratch buffer.
   brushVertices(): Float32Array {

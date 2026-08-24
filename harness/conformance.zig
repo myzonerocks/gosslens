@@ -3098,6 +3098,74 @@ fn proveHeadCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Settles a scene over a live collider added at runtime under the ball; when
+/// `erase` is set the collider is erased partway, so the resting ball falls.
+/// Captures at frame 85.
+fn settledLiveColliderCapture(gpa: std.mem.Allocator, engine: *abi.Engine, erase: bool) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/live-collider", ".lens-packages/live-collider".len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    _ = abi.goss_session_add_collider(session, 0.0, -0.15, 0.0);
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        if (erase and i == 45) _ = abi.goss_session_erase_collider(session, 0.0, -0.15, 0.0, 0.3);
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves erasable live colliders: a ball rests on a collider added under it at
+/// runtime, and when that collider is erased partway the ball drops - the same
+/// scene lands the ball in two different places. Bit-stable across runs.
+fn proveLiveCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var resting: []u8 = &.{};
+    defer if (resting.len > 0) gpa.free(resting);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledLiveColliderCapture(gpa, engine, false);
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            resting = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the live collider scene is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const erased = try settledLiveColliderCapture(gpa, engine, true);
+    defer gpa.free(erased);
+    if (std.mem.eql(u8, resting, erased)) {
+        std.debug.print("conformance: FAIL erasing the live collider did not drop the ball\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rests on a live collider added under it and drops when that collider is erased, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -7000,6 +7068,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveDofPass(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "head-collider")) {
             if (!try proveHeadCollider(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "live-collider")) {
+            if (!try proveLiveCollider(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7114,6 +7184,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("sph fluid");
     if (!try proveHeadCollider(gpa, engine)) return 1;
     watchHold("head collider");
+    if (!try proveLiveCollider(gpa, engine)) return 1;
+    watchHold("live collider");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

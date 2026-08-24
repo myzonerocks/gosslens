@@ -154,6 +154,16 @@ pub const World = struct {
         _ = motion;
     }
 
+    pub fn removeBody(world: World, body: u32) void {
+        _ = world;
+        _ = body;
+    }
+
+    pub fn wakeBody(world: World, body: u32) void {
+        _ = world;
+        _ = body;
+    }
+
     pub fn addCloth(world: World, cols: u32, rows: u32, width: f32, height: f32, position: [3]f32) !u32 {
         _ = world;
         _ = cols;

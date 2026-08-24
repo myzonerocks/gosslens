@@ -779,6 +779,13 @@ goss_status goss_session_ar_brush_clear(goss_session *session);
 goss_status goss_session_grab(goss_session *session, float x, float y, float z);
 goss_status goss_session_release(goss_session *session);
 
+/* Live 2D colliders. goss_session_add_collider drops a static sphere collider
+ * at a world point that dynamic content lands on at once; drawing them in as a
+ * pointer moves builds a live 2D world. goss_session_erase_collider removes
+ * every collider within radius of a point - the eraser. */
+goss_status goss_session_add_collider(goss_session *session, float x, float y, float z);
+goss_status goss_session_erase_collider(goss_session *session, float x, float y, float z, float radius);
+
 /* Graph thread. Runs the beauty chain over one RGBA frame on the calling
  * thread, reading the newest tracking result for the landmark driven
  * effects when face tracking is enabled. The stated CPU path; live

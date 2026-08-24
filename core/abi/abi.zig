@@ -147,6 +147,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_ar_brush_clear(goss_session *session)",
     "goss_status goss_session_grab(goss_session *session, float x, float y, float z)",
     "goss_status goss_session_release(goss_session *session)",
+    "goss_status goss_session_add_collider(goss_session *session, float x, float y, float z)",
+    "goss_status goss_session_erase_collider(goss_session *session, float x, float y, float z, float radius)",
     "goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)",
     "goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)",
     "goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
@@ -493,6 +495,9 @@ pub const Session = struct {
     /// A kinematic collider the engine drives to the tracked head each physics
     /// tick, so lens content collides with the head.
     head_collider_body: ?u32 = null,
+    /// Static colliders added live by a pointer, each its body id and where it
+    /// sits, so an erase pass can remove the ones near a point.
+    live_colliders: std.ArrayListUnmanaged(struct { id: u32, pos: [3]f32 }) = .empty,
     /// Cloth nodes: the solver body and the dynamic render mesh, by
     /// graph index. Cloth replaces the glb mesh with a simulated grid.
     cloth_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
@@ -2663,6 +2668,7 @@ pub fn destroySession(session: *Session) void {
     session.physics_bodies.deinit(session.engine.gpa);
     session.pending_glb_colliders.deinit(session.engine.gpa);
     session.grabbable_bodies.deinit(session.engine.gpa);
+    session.live_colliders.deinit(session.engine.gpa);
     session.cloth_bodies.deinit(session.engine.gpa);
     session.cloth_meshes.deinit(session.engine.gpa);
     session.cloth_cols.deinit(session.engine.gpa);
@@ -4361,6 +4367,53 @@ pub export fn goss_session_release(session: ?*Session) Status {
     return .ok;
 }
 
+/// Adds a static sphere collider at a world point, live: dynamic content lands
+/// on it at once. Drawing colliders in as the pointer moves builds a live 2D
+/// world; goss_session_erase_collider takes them back out.
+pub export fn goss_session_add_collider(session: ?*Session, x: f32, y: f32, z: f32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!physics.supported) return .ok;
+    if (s.physics_world == null) {
+        s.physics_world = physics.World.create(-9.81) catch return .ok;
+        s.physics_last_us = 0;
+    }
+    if (s.physics_world) |world| {
+        const id = world.addBody(.sphere, .{ x, y, z }, .{ 0.12, 0, 0 }, .static) catch return .ok;
+        s.live_colliders.append(s.engine.gpa, .{ .id = id, .pos = .{ x, y, z } }) catch {};
+    }
+    return .ok;
+}
+
+/// Erases every live collider within `radius` of a world point - the eraser
+/// stroke over drawn colliders.
+pub export fn goss_session_erase_collider(session: ?*Session, x: f32, y: f32, z: f32, radius: f32) Status {
+    const s = session orelse return .invalid_argument;
+    if (s.physics_world) |world| {
+        const r2 = radius * radius;
+        var i: usize = 0;
+        var erased_any = false;
+        while (i < s.live_colliders.items.len) {
+            const lc = s.live_colliders.items[i];
+            const dx = lc.pos[0] - x;
+            const dy = lc.pos[1] - y;
+            const dz = lc.pos[2] - z;
+            if (dx * dx + dy * dy + dz * dz <= r2) {
+                world.removeBody(lc.id);
+                _ = s.live_colliders.swapRemove(i);
+                erased_any = true;
+            } else {
+                i += 1;
+            }
+        }
+        // A body asleep on an erased collider must wake so it falls.
+        if (erased_any) {
+            var it = s.physics_bodies.valueIterator();
+            while (it.next()) |bid| world.wakeBody(bid.*);
+        }
+    }
+    return .ok;
+}
+
 pub export fn goss_session_ar_brush_clear(session: ?*Session) Status {
     const s = session orelse return .invalid_argument;
     s.ar_board.clear();
@@ -5469,6 +5522,7 @@ fn destroyMeshFaceState(session: *Session) void {
     session.grabbable_bodies.clearRetainingCapacity();
     session.grab_body = null;
     session.head_collider_body = null;
+    session.live_colliders.clearRetainingCapacity();
     var loader_it = session.mesh_face_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
     session.mesh_face_loaders.clearRetainingCapacity();

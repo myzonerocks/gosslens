@@ -125,6 +125,8 @@ object Gosslens {
     internal external fun nativeArBrushClear(session: Long): Int
     internal external fun nativeGrab(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeRelease(session: Long): Int
+    internal external fun nativeAddCollider(session: Long, x: Float, y: Float, z: Float): Int
+    internal external fun nativeEraseCollider(session: Long, x: Float, y: Float, z: Float, radius: Float): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -991,6 +993,8 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     fun clearARStrokes(): Boolean = Gosslens.nativeArBrushClear(handle) == 0
     fun grab(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeGrab(handle, x, y, z) == 0
     fun release(): Boolean = Gosslens.nativeRelease(handle) == 0
+    fun addCollider(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeAddCollider(handle, x, y, z) == 0
+    fun eraseCollider(x: Float, y: Float, z: Float, radius: Float): Boolean = Gosslens.nativeEraseCollider(handle, x, y, z, radius) == 0
 
     /** Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the renderer. */
     fun brushVertices(): FloatArray {
