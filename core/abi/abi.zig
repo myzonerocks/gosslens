@@ -855,6 +855,9 @@ pub const Session = struct {
     sprite_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     sprite_rects: std.AutoHashMapUnmanaged(graph.NodeIndex, [5]f32) = .empty,
+    /// Extruded 3D text nodes: the glyph block mesh and its color, drawn via
+    /// the model path, by graph index.
+    text3d_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { mesh: render.Renderer.ModelMesh, color: [4]f32 }) = .empty,
     /// A sprite/text node's opacity parameter name (a slice into the lens
     /// manifest arena), when it binds one, so the draw reads a live opacity.
     sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
@@ -1530,7 +1533,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // A sprite draws once its image has decoded (an animated sprite
             // once all its frames have); until then it holds the frame
             // through, never blocking the chain.
-            .sprite => s.sprite_textures.contains(entry.graph_index) or
+            .sprite => s.sprite_textures.contains(entry.graph_index) or s.text3d_meshes.contains(entry.graph_index) or
                 (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
         };
         if (ready) ready_count += 1;
@@ -1907,6 +1910,40 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .sprite => {
+                if (s.text3d_meshes.get(entry.graph_index)) |text3d| {
+                    drawn += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const out_w: u16 = if (output != null and !is_final) width else output_width;
+                    const out_h: u16 = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, out_w, out_h);
+                        render.Renderer.setViewTarget(mesh_view, target, out_w, out_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    const aspect: f32 = tiledAspect(s, out_w, out_h);
+                    r.tile = if (is_final) s.capture_tile else null;
+                    const rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
+                    const cx = (rect[0] + rect[2] * 0.5) * 2.0 - 1.0;
+                    const cy = 1.0 - (rect[1] + rect[3] * 0.5) * 2.0;
+                    const sc = @max(rect[2], 0.1) * 0.7;
+                    // Place the text at its rect centre and rotate it so the
+                    // extruded sides show rather than reading as a flat label.
+                    const model = math.Mat4.translation(.{ cx * 0.7, cy * 0.7, 0 }).mul(math.Mat4.rotationY(0.6)).mul(math.Mat4.rotationX(0.25)).mul(math.Mat4.scaling(.{ sc, sc, sc }));
+                    r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                    r.drawModelMesh(mesh_view, text3d.mesh, model, text3d.color, aspect);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 var sprite_texture: render.TextureHandle = undefined;
                 if (s.sprite_anims.get(entry.graph_index)) |anim| {
                     // An animated sprite cycles its frames off the lens clock;
@@ -2647,6 +2684,7 @@ pub fn destroySession(session: *Session) void {
     session.env_textures.deinit(session.engine.gpa);
     session.sprite_loaders.deinit(session.engine.gpa);
     session.sprite_textures.deinit(session.engine.gpa);
+    session.text3d_meshes.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
@@ -5456,7 +5494,10 @@ fn destroySpriteState(session: *Session) void {
     if (session.engine.renderer) |*r| {
         var texture_it = session.sprite_textures.valueIterator();
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
+        var mesh_it = session.text3d_meshes.valueIterator();
+        while (mesh_it.next()) |t3d| render.Renderer.destroyModelMesh(t3d.mesh);
     }
+    session.text3d_meshes.clearRetainingCapacity();
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
     session.sprite_opacity_params.clearRetainingCapacity();
@@ -6255,6 +6296,19 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
     const texts = try lens.textNodes(gpa, &session.lens_graph);
     defer gpa.free(texts);
     for (texts) |txt| {
+        // Extruded text builds a 3D block mesh drawn through the model path,
+        // instead of a flat sprite texture.
+        if (txt.depth > 0) {
+            const mesh_geo = font.extrudeMesh(gpa, txt.content, txt.depth) catch continue;
+            defer gpa.free(mesh_geo.positions);
+            defer gpa.free(mesh_geo.indices);
+            if (r.createModelMesh(mesh_geo.positions, mesh_geo.indices)) |mesh| {
+                const col: [4]f32 = .{ @as(f32, @floatFromInt(txt.color[0])) / 255.0, @as(f32, @floatFromInt(txt.color[1])) / 255.0, @as(f32, @floatFromInt(txt.color[2])) / 255.0, 1.0 };
+                session.text3d_meshes.put(gpa, txt.graph_index, .{ .mesh = mesh, .color = col }) catch {};
+                session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
+            } else |_| {}
+            continue;
+        }
         const rich = txt.gradient != null or txt.shadow or txt.stroke != null;
         const raster = if (rich)
             font.rasterizeRich(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }, txt.gradient, txt.shadow, txt.stroke) catch continue

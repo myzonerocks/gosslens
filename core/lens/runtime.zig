@@ -244,6 +244,9 @@ pub const TextNode = struct {
     gradient: ?[3]u8,
     shadow: bool,
     stroke: ?[3]u8,
+    /// Extrude the glyphs into a rotated 3D block mesh of this depth; 0 keeps
+    /// the flat sprite text.
+    depth: f32,
 };
 
 /// One grade.pass node ready for the caller to draw - which graph node
@@ -611,7 +614,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .text_2d) continue;
             const tf = node.text orelse manifest.TextField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth });
         }
         return out.toOwnedSlice(gpa);
     }

@@ -312,6 +312,9 @@ pub const TextField = struct {
     shadow: bool = false,
     /// An outline the glyphs are stroked with; null is no stroke.
     stroke: ?[3]u8 = null,
+    /// Extrude the glyphs into a rotated 3D block mesh of this depth (in the
+    /// normalized text space); 0 keeps the flat 2D sprite text.
+    depth: f32 = 0,
 };
 
 pub const LayoutField = struct {
@@ -1478,6 +1481,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(tv.object, "shadow")) |v| {
                     if (v == .bool) field.shadow = v.bool;
                 }
+                if (getField(tv.object, "depth")) |v| field.depth = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.depth)));
                 text_field = field;
             }
             path.pop(tmark);

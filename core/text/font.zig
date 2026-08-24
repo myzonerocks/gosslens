@@ -243,6 +243,75 @@ pub fn rasterizeRich(gpa: std.mem.Allocator, text: []const u8, scale: u32, color
     return .{ .rgba = rgba, .width = width, .height = height };
 }
 
+pub const Mesh = struct { positions: [][3]f32, indices: []u32 };
+
+fn emitBox(gpa: std.mem.Allocator, pos: *std.ArrayList([3]f32), idx: *std.ArrayList(u32), cx: f32, cy: f32, hw: f32, hh: f32, hd: f32) !void {
+    const base: u32 = @intCast(pos.items.len);
+    const verts = [8][3]f32{
+        .{ cx - hw, cy - hh, -hd }, .{ cx + hw, cy - hh, -hd }, .{ cx + hw, cy + hh, -hd }, .{ cx - hw, cy + hh, -hd },
+        .{ cx - hw, cy - hh, hd },  .{ cx + hw, cy - hh, hd },  .{ cx + hw, cy + hh, hd },  .{ cx - hw, cy + hh, hd },
+    };
+    for (verts) |v| try pos.append(gpa, v);
+    const faces = [12][3]u32{
+        .{ 4, 5, 6 }, .{ 4, 6, 7 }, .{ 0, 2, 1 }, .{ 0, 3, 2 }, .{ 0, 4, 7 }, .{ 0, 7, 3 },
+        .{ 1, 2, 6 }, .{ 1, 6, 5 }, .{ 3, 7, 6 }, .{ 3, 6, 2 }, .{ 0, 1, 5 }, .{ 0, 5, 4 },
+    };
+    for (faces) |f| {
+        try idx.append(gpa, base + f[0]);
+        try idx.append(gpa, base + f[1]);
+        try idx.append(gpa, base + f[2]);
+    }
+}
+
+/// Extrudes `text` into a 3D block mesh: one box per set glyph bit, laid out in
+/// a normalized [-1, 1] square (the caller's model matrix places and rotates
+/// it) and given `depth` in z, so the letters read as solid extruded type.
+pub fn extrudeMesh(gpa: std.mem.Allocator, text: []const u8, depth: f32) !Mesh {
+    var lines: u32 = 1;
+    var max_len: u32 = 0;
+    var cur: u32 = 0;
+    for (text) |ch| {
+        if (ch == '\n') {
+            lines += 1;
+            if (cur > max_len) max_len = cur;
+            cur = 0;
+        } else cur += 1;
+    }
+    if (cur > max_len) max_len = cur;
+    if (max_len == 0) max_len = 1;
+    const grid_w: f32 = @floatFromInt(max_len * glyph_px);
+    const grid_h: f32 = @floatFromInt(lines * glyph_px);
+    var pos: std.ArrayList([3]f32) = .empty;
+    errdefer pos.deinit(gpa);
+    var idx: std.ArrayList(u32) = .empty;
+    errdefer idx.deinit(gpa);
+    const hw = 1.0 / grid_w;
+    const hh = 1.0 / grid_h;
+    var col: u32 = 0;
+    var line: u32 = 0;
+    for (text) |ch| {
+        if (ch == '\n') {
+            line += 1;
+            col = 0;
+            continue;
+        }
+        const rows = glyph(ch);
+        for (rows, 0..) |row, ry| {
+            var bit: u3 = 0;
+            while (true) : (bit += 1) {
+                if ((row & (@as(u8, 0x80) >> bit)) != 0) {
+                    const bx: f32 = @floatFromInt(col * glyph_px + bit);
+                    const by: f32 = @floatFromInt(line * glyph_px + @as(u32, @intCast(ry)));
+                    try emitBox(gpa, &pos, &idx, (bx + 0.5) / grid_w * 2.0 - 1.0, 1.0 - (by + 0.5) / grid_h * 2.0, hw, hh, depth);
+                }
+                if (bit == 7) break;
+            }
+        }
+        col += 1;
+    }
+    return .{ .positions = try pos.toOwnedSlice(gpa), .indices = try idx.toOwnedSlice(gpa) };
+}
+
 const t = std.testing;
 
 test "measure sizes a monospace line" {
@@ -296,6 +365,22 @@ test "lowercase draws its own glyph, distinct from uppercase" {
     var any: u8 = 0;
     for (lower.rgba) |b| any |= b;
     try t.expect(any != 0);
+}
+
+test "extruded text builds a non-empty two-sided box mesh" {
+    const mesh = try extrudeMesh(t.allocator, "GO", 0.06);
+    defer t.allocator.free(mesh.positions);
+    defer t.allocator.free(mesh.indices);
+    try t.expect(mesh.positions.len > 0);
+    try t.expect(mesh.indices.len % 3 == 0);
+    var has_front = false;
+    var has_back = false;
+    for (mesh.positions) |v| {
+        if (v[2] > 0.0) has_front = true;
+        if (v[2] < 0.0) has_back = true;
+    }
+    // Genuinely extruded: vertices sit on both the front and back faces.
+    try t.expect(has_front and has_back);
 }
 
 test "rich text adds stroke and shadow coverage beyond the plain glyphs" {

@@ -3218,6 +3218,29 @@ fn proveRichText(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves extruded 3D text: the same string with a depth draws as a rotated 3D
+/// block mesh through the model path, a different frame from the flat sprite
+/// text, and bit-stable across runs. The block mesh itself is pinned by the
+/// font module test.
+fn proveExtrudedText(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const solid0 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-3d", 10)) orelse return false;
+    defer gpa.free(solid0);
+    const solid1 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-3d", 10)) orelse return false;
+    defer gpa.free(solid1);
+    if (!std.mem.eql(u8, solid0, solid1)) {
+        std.debug.print("conformance: FAIL extruded 3D text is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const flat = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-flat", 10)) orelse return false;
+    defer gpa.free(flat);
+    if (std.mem.eql(u8, solid0, flat)) {
+        std.debug.print("conformance: FAIL extruded text drew the same as the flat text\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a text label extrudes into a rotated 3D block mesh, a different frame from the flat sprite text, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the cylinder collider shape: the same marker dropped as a cylinder
 /// lands flat on its base and rests a half height up, where the sphere marker
 /// of the identical drop lens settles far lower - so the shape, not the model,
@@ -7126,6 +7149,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveMeshInstancing(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "rich-text")) {
             if (!try proveRichText(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "extruded-text")) {
+            if (!try proveExtrudedText(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7246,6 +7271,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("mesh instancing");
     if (!try proveRichText(gpa, engine)) return 1;
     watchHold("rich text");
+    if (!try proveExtrudedText(gpa, engine)) return 1;
+    watchHold("extruded text");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
