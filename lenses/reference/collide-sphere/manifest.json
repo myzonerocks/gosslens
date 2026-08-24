@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.collide-sphere",
+  "version": "1.0.0",
+  "display_name": "Collide Sphere",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "rain", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 160, "pattern": "rain", "gravity": 5.0, "speed": 1.5, "lifetime": 3.0, "colliders": [[0.0, -0.1, 0.0, 0.55]], "fade": true, "size": 7, "color": [0.6, 0.85, 1.0], "cool": [0.3, 0.5, 0.9]}}
+  ],
+  "triggers": []
+}

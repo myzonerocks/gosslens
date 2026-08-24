@@ -140,6 +140,8 @@ pub const ParticleField = struct {
     size_end: ?u32 = null,
     /// Turns a textured sprite spins over its life.
     spin: f32 = 0,
+    /// Sphere colliders particles bounce off, each [x, y, z, radius].
+    colliders: []const [4]f32 = &.{},
 };
 
 pub const GradeField = struct {
@@ -485,6 +487,18 @@ fn jsonDepth(value: std.json.Value) usize {
 
 fn readVec3(value: std.json.Value, out: *[3]f32) bool {
     if (value != .array or value.array.items.len != 3) return false;
+    for (value.array.items, 0..) |item, i| {
+        out[i] = switch (item) {
+            .float => |f| @floatCast(f),
+            .integer => |n| @floatFromInt(n),
+            else => return false,
+        };
+    }
+    return true;
+}
+
+fn readVec4(value: std.json.Value, out: *[4]f32) bool {
+    if (value != .array or value.array.items.len != 4) return false;
     for (value.array.items, 0..) |item, i| {
         out[i] = switch (item) {
             .float => |f| @floatCast(f),
@@ -1003,6 +1017,16 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "size_end")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= 64) field.size_end = @intCast(v.integer) else try diags.add(path.slice(), "particles size_end must be an integer 1..64", .{});
+                }
+                if (getField(pv.object, "colliders")) |v| {
+                    if (v == .array and v.array.items.len <= 16) {
+                        const cols = try arena.alloc([4]f32, v.array.items.len);
+                        var ok = true;
+                        for (v.array.items, 0..) |cv, ci| {
+                            if (!readVec4(cv, &cols[ci])) ok = false;
+                        }
+                        if (ok) field.colliders = cols else try diags.add(path.slice(), "particles colliders must be arrays of [x, y, z, radius]", .{});
+                    } else try diags.add(path.slice(), "particles colliders must be an array of up to 16 spheres", .{});
                 }
                 particle_field = field;
             }

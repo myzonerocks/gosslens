@@ -39,6 +39,11 @@ pub const Field = struct {
     /// A floor height particles bounce off (losing half their speed). Null
     /// lets them fall through.
     floor: ?f32 = null,
+    /// Sphere colliders particles bounce off, each center xyz plus radius. A
+    /// particle driven inside one is pushed back to its surface and its
+    /// velocity reflected (half speed kept), so particles skate over invisible
+    /// obstacles. Borrowed for the system's lifetime; empty is no colliders.
+    colliders: []const [4]f32 = &.{},
     /// Emit everything once and let it die, rather than respawning forever.
     oneshot: bool = false,
     // Rendering hints the sim itself ignores, carried for the host.
@@ -310,6 +315,30 @@ pub const System = struct {
                     p.vel[1] = -p.vel[1] * 0.5;
                 }
             }
+            for (f.colliders) |sphere| {
+                const dx = p.pos[0] - sphere[0];
+                const dy = p.pos[1] - sphere[1];
+                const dz = p.pos[2] - sphere[2];
+                const d2 = dx * dx + dy * dy + dz * dz;
+                const rr = sphere[3];
+                if (d2 < rr * rr and d2 > 1e-12) {
+                    const d = @sqrt(d2);
+                    const nx = dx / d;
+                    const ny = dy / d;
+                    const nz = dz / d;
+                    // Push out to the surface along the normal.
+                    p.pos[0] = sphere[0] + nx * rr;
+                    p.pos[1] = sphere[1] + ny * rr;
+                    p.pos[2] = sphere[2] + nz * rr;
+                    // Reflect the inward velocity, keeping half its speed.
+                    const vn = p.vel[0] * nx + p.vel[1] * ny + p.vel[2] * nz;
+                    if (vn < 0) {
+                        p.vel[0] = (p.vel[0] - 2.0 * vn * nx) * 0.5;
+                        p.vel[1] = (p.vel[1] - 2.0 * vn * ny) * 0.5;
+                        p.vel[2] = (p.vel[2] - 2.0 * vn * nz) * 0.5;
+                    }
+                }
+            }
         }
         // Record this frame's positions into the trail ring, one slot on.
         if (self.history.len > 0) {
@@ -456,6 +485,26 @@ test "curl noise is divergence-free and swirls particles off the plain path" {
         if (a.pos[0] != b.pos[0] or a.pos[2] != b.pos[2]) diverged = true;
     }
     try std.testing.expect(diverged);
+}
+
+test "particles bounce off a sphere collider and never enter it" {
+    // A rain of particles falls straight onto a sphere sitting below them; none
+    // may end up inside it, and the collision must be deterministic.
+    const sphere = [_][4]f32{.{ 0.0, 0.0, 0.0, 0.5 }};
+    const field = Field{ .count = 64, .pattern = .rain, .speed = 3.0, .lifetime = 6.0, .gravity = 4.0, .colliders = &sphere };
+    var a = try System.init(std.testing.allocator, field);
+    defer a.deinit();
+    var b = try System.init(std.testing.allocator, field);
+    defer b.deinit();
+    for (0..180) |_| {
+        a.step(1.0 / 60.0);
+        b.step(1.0 / 60.0);
+    }
+    for (a.particles, b.particles) |pa, pb| {
+        const d2 = pa.pos[0] * pa.pos[0] + pa.pos[1] * pa.pos[1] + pa.pos[2] * pa.pos[2];
+        try std.testing.expect(d2 >= 0.5 * 0.5 - 1e-4); // outside the sphere
+        try std.testing.expectEqual(pa.pos[1], pb.pos[1]); // deterministic
+    }
 }
 
 test "a trail records recent positions and fades from head to tail" {
