@@ -2558,6 +2558,46 @@ fn settledPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []
     return settled;
 }
 
+/// Settles a physics scene whose bodies are anchored to the tracked world:
+/// each frame submits a world state (a moving camera pose and one anchor) then
+/// the corpus frame, so the sim runs in world space and draws through the
+/// platform camera. Captures at frame 85.
+fn settledWorldPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const anchor = abi.WorldAnchor{ .id = 7, .pose = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } };
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        const replay = world_replay.stateAt(@intCast(i), 33_333, 4.0 / 3.0);
+        const state = abi.WorldState{
+            .tracking_state = replay.tracking_state,
+            .world_from_camera = @bitCast(replay.world_from_camera.cols),
+            .projection = @bitCast(replay.projection.cols),
+            .timestamp_us = replay.timestamp_us,
+        };
+        if (abi.goss_session_submit_world(session, &state, null, 0, @ptrCast(&anchor), 1, null) != .ok) return error.SubmitFailed;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = replay.timestamp_us };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
 /// Proves the point (ball) joint: a pendant pinned to its anchor by a point
 /// joint settles to its pivot, deterministically, at a place the same pendant
 /// hung on a distance chain does not - so the joint type genuinely changes the
@@ -2757,6 +2797,43 @@ fn provePhysics2dWorld(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a 2D world of a circle collider and a polygon collider holds its plane on a tilted incline where the free 3D scene slides off it, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves physics against a world-anchored mesh: a concave mesh and a ball,
+/// both anchored to the tracked world, settle in world space and draw through
+/// the platform camera - the ball comes to rest in the mesh valley where the
+/// same ball with no mesh keeps falling, bit-stable across runs.
+fn provePhysicsWorldMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var caught: []u8 = &.{};
+    defer if (caught.len > 0) gpa.free(caught);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledWorldPhysicsCapture(gpa, engine, ".lens-packages/world-mesh-collider");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            caught = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the world-anchored mesh scene is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const empty = try settledWorldPhysicsCapture(gpa, engine, ".lens-packages/world-mesh-empty");
+    defer gpa.free(empty);
+    if (std.mem.eql(u8, caught, empty)) {
+        std.debug.print("conformance: FAIL the world-anchored mesh did not change where the ball settles\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rests on a world-anchored mesh where the same ball with no mesh keeps falling, bit-stable across runs\n", .{});
     return true;
 }
 
@@ -6650,6 +6727,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveGpuForces(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "2d-world")) {
             if (!try provePhysics2dWorld(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "world-mesh")) {
+            if (!try provePhysicsWorldMesh(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -6754,6 +6833,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics planar");
     if (!try provePhysics2dWorld(gpa, engine)) return 1;
     watchHold("physics 2d world");
+    if (!try provePhysicsWorldMesh(gpa, engine)) return 1;
+    watchHold("physics world mesh");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
