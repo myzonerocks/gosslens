@@ -378,6 +378,29 @@ test "a convex hull collider gives a ball a slope to roll down" {
     try t.expect(ball_pose[12] < -0.1); // rolled downhill from x = 0.4
 }
 
+test "restitution decides whether a ball bounces back or lands dead" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    _ = try world.addBody(.box, .{ 0, -0.1, 0 }, .{ 4, 0.1, 4 }, .static); // floor top at y = 0
+    const bouncy = try world.addBodyMaterial(.sphere, .{ -0.5, 1.0, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.9, .dynamic);
+    const dead = try world.addBodyMaterial(.sphere, .{ 0.5, 1.0, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.0, .dynamic);
+    // After the first impact the bouncy ball rebounds high while the dead one
+    // just settles, so their peak heights over the rebound window diverge.
+    var bouncy_peak: f32 = 0;
+    var dead_peak: f32 = 0;
+    for (0..200) |i| {
+        world.step(1.0 / 60.0);
+        if (i >= 40) {
+            const bp = try world.bodyPose(bouncy);
+            const dp = try world.bodyPose(dead);
+            bouncy_peak = @max(bouncy_peak, bp[13]);
+            dead_peak = @max(dead_peak, dp[13]);
+        }
+    }
+    try t.expect(bouncy_peak > 0.3); // clearly rebounds
+    try t.expect(dead_peak < 0.2); // stays down near rest
+}
+
 test "two identical worlds land bit-identical poses" {
     var poses: [2][16]f32 = undefined;
     for (0..2) |run| {

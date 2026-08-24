@@ -2907,6 +2907,42 @@ fn provePhysicsHull(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves restitution: a bouncy ball is still rebounding above the floor at the
+/// settle frame where a dead ball of the same drop has come to rest, so the
+/// material's restitution changes the motion, each bit-stable across runs.
+fn provePhysicsRestitution(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var bouncy_settled: []u8 = &.{};
+    defer if (bouncy_settled.len > 0) gpa.free(bouncy_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/bounce-high");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            bouncy_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the bouncy ball is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const dead_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/bounce-dead");
+    defer gpa.free(dead_settled);
+    if (std.mem.eql(u8, bouncy_settled, dead_settled)) {
+        std.debug.print("conformance: FAIL the bouncy ball settled the same as the dead one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a bouncy ball still rides above the floor where a dead ball of the same drop has come to rest, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -6231,6 +6267,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics friction");
     if (!try provePhysicsHull(gpa, engine)) return 1;
     watchHold("physics hull");
+    if (!try provePhysicsRestitution(gpa, engine)) return 1;
+    watchHold("physics restitution");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
