@@ -40,6 +40,7 @@ CaptureOutput, Events.
 | glTF animation mixer and morph targets (weights bound to parameters) | proven in the host harness: clip and morph weights blend the pose, each with a reference lens and a proof | built, no hardware yet | built |
 | 2D sprite and text nodes (image overlay, built-in-font text) | proven in the host harness, each with a reference lens and a proof | built, no hardware yet | built |
 | Animated GIF video textures (sprite plays a decoded clip) | proven in the host harness: a sprite decodes a shipped GIF and advancing the lens clock draws a different frame, with a reference lens and a proof | built, no hardware yet | built |
+| MP4 video textures (video.texture node streams a clip off the hardware decoder) | proven in the host harness: a recorded clip decodes back onto a sprite through AVAssetReader and advances off the frame clock, bit-stable, with a reference lens and a proof | deterministic stub; AMediaCodec decode queued | deterministic stub; browser decode queued |
 | Lens particles (deterministic CPU fountain, GPU points) | proven in the host harness: the fountain falls, settled differs from initial, bit-stable across runs | pure-Zig sim, runs on device | pure-Zig sim, runs in browser |
 
 "Demonstrated" means executed on the real target through the public
