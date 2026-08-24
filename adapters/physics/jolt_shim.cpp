@@ -13,6 +13,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/FixedConstraint.h>
@@ -122,20 +123,8 @@ extern "C" void goss_physics_world_destroy(void* handle) {
 // of the cylinder part). A rotation orients the body so a capsule or
 // cylinder can lie on its side. motion: 0 static, 1 dynamic, 2 kinematic
 // (the engine drives it; chained bodies follow).
-static uint32_t create_body(World* world, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
-  if (world == nullptr) return UINT32_MAX;
-  JPH::Ref<JPH::Shape> body_shape;
-  if (shape == 0) {
-    body_shape = new JPH::BoxShape(JPH::Vec3(sx, sy, sz));
-  } else if (shape == 1) {
-    body_shape = new JPH::SphereShape(sx);
-  } else if (shape == 2) {
-    body_shape = new JPH::CylinderShape(sy, sx);
-  } else if (shape == 3) {
-    body_shape = new JPH::CapsuleShape(sy, sx);
-  } else {
-    return UINT32_MAX;
-  }
+// Places a finished shape as a body at a pose with a surface material.
+static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
   const JPH::EMotionType motion_type = motion == 1   ? JPH::EMotionType::Dynamic
                                        : motion == 2 ? JPH::EMotionType::Kinematic
                                                      : JPH::EMotionType::Static;
@@ -150,6 +139,23 @@ static uint32_t create_body(World* world, uint32_t shape, float px, float py, fl
   const JPH::BodyID id = world->system.GetBodyInterface().CreateAndAddBody(
       settings, moving ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
   return id.IsInvalid() ? UINT32_MAX : id.GetIndexAndSequenceNumber();
+}
+
+static uint32_t create_body(World* world, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
+  if (world == nullptr) return UINT32_MAX;
+  JPH::Ref<JPH::Shape> body_shape;
+  if (shape == 0) {
+    body_shape = new JPH::BoxShape(JPH::Vec3(sx, sy, sz));
+  } else if (shape == 1) {
+    body_shape = new JPH::SphereShape(sx);
+  } else if (shape == 2) {
+    body_shape = new JPH::CylinderShape(sy, sx);
+  } else if (shape == 3) {
+    body_shape = new JPH::CapsuleShape(sy, sx);
+  } else {
+    return UINT32_MAX;
+  }
+  return finalize_body(world, body_shape, px, py, pz, qx, qy, qz, qw, friction, restitution, motion);
 }
 
 // Jolt's own defaults for a body that does not name a material.
@@ -171,6 +177,23 @@ extern "C" uint32_t goss_physics_body_add_oriented(void* handle, uint32_t shape,
 // ~1 grippy) and restitution (0 dead, 1 bouncy). Returns the body id.
 extern "C" uint32_t goss_physics_body_add_material(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
   return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, friction, restitution, motion);
+}
+
+// Adds a body whose collision shape is the convex hull of a set of local-space
+// points (three floats each) - an arbitrary faceted collider. Returns the body
+// id, or UINT32_MAX if the hull could not be built.
+extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points, uint32_t point_count, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr || points == nullptr || point_count < 4) return UINT32_MAX;
+  JPH::Array<JPH::Vec3> hull_points;
+  hull_points.reserve(point_count);
+  for (uint32_t i = 0; i < point_count; ++i) {
+    hull_points.push_back(JPH::Vec3(points[i * 3], points[i * 3 + 1], points[i * 3 + 2]));
+  }
+  JPH::ConvexHullShapeSettings settings(hull_points);
+  JPH::ShapeSettings::ShapeResult result = settings.Create();
+  if (result.HasError()) return UINT32_MAX;
+  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, motion);
 }
 
 // Links two bodies with a distance constraint between local attach

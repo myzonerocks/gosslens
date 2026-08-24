@@ -283,10 +283,14 @@ pub const LayoutField = struct {
 };
 
 pub const PhysicsBody = struct {
-    shape: enum { box, sphere, cylinder, capsule },
+    shape: enum { box, sphere, cylinder, capsule, hull },
     /// Box half extents; a sphere reads its radius from [0]; a cylinder or
     /// capsule (axis vertical) reads radius from [0] and half height from [1].
+    /// A hull ignores this and reads its geometry from `hull_points`.
     size: [3]f32,
+    /// Local-space points a `hull` body takes the convex hull of; empty for
+    /// the analytic shapes.
+    hull_points: []const [3]f32 = &.{},
     position: [3]f32,
     /// Orientation in euler degrees (x, y, z), so an elongated shape can lie
     /// on its side or a static collider can tilt. Zero is upright.
@@ -1497,6 +1501,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         } else if (std.mem.eql(u8, body_name, "capsule")) {
                             body.shape = .capsule;
                             shape_ok = true;
+                        } else if (std.mem.eql(u8, body_name, "hull")) {
+                            body.shape = .hull;
+                            shape_ok = true;
                         } else {
                             try diags.add(path.slice(), "unknown physics body '{s}'", .{body_name});
                         }
@@ -1508,6 +1515,25 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     if (!readVec3(size_value, &body.size)) {
                         try diags.add(path.slice(), "physics size must be three numbers", .{});
                         shape_ok = false;
+                    }
+                }
+                if (getField(physics_value.object, "points")) |points_value| {
+                    if (points_value != .array or points_value.array.items.len < 4) {
+                        try diags.add(path.slice(), "physics hull points must be an array of at least four [x, y, z]", .{});
+                        shape_ok = false;
+                    } else {
+                        const pts = try arena.alloc([3]f32, points_value.array.items.len);
+                        var pi: usize = 0;
+                        var pts_ok = true;
+                        for (points_value.array.items) |point_value| {
+                            if (!readVec3(point_value, &pts[pi])) {
+                                try diags.add(path.slice(), "physics hull point must be three numbers", .{});
+                                pts_ok = false;
+                                break;
+                            }
+                            pi += 1;
+                        }
+                        if (pts_ok) body.hull_points = pts else shape_ok = false;
                     }
                 }
                 if (getField(physics_value.object, "position")) |position_value| {

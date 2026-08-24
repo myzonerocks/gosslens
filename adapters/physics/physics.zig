@@ -30,6 +30,7 @@ extern fn goss_physics_world_destroy(handle: *anyopaque) void;
 extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, motion: u32) u32;
 extern fn goss_physics_body_add_oriented(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, motion: u32) u32;
 extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32) u32;
+extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
@@ -74,6 +75,15 @@ pub const World = struct {
     /// ~1 grippy) and restitution (0 dead, 1 bouncy).
     pub fn addBodyMaterial(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion) !u32 {
         const id = goss_physics_body_add_material(world.handle, @intFromEnum(shape), position[0], position[1], position[2], size[0], size[1], size[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution, @intFromEnum(motion));
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Adds a body whose shape is the convex hull of `points` (local space),
+    /// an arbitrary faceted collider. Needs at least four points.
+    pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion) !u32 {
+        const flat: [*]const f32 = @ptrCast(points.ptr);
+        const id = goss_physics_body_add_hull(world.handle, flat, @intCast(points.len), position[0], position[1], position[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution, @intFromEnum(motion));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -348,6 +358,24 @@ test "friction decides whether a body grips a slope or slides down it" {
     // sits; the slippery one runs down the slope a long way.
     try t.expect(@abs(gripper_pose[12]) < 0.25);
     try t.expect(@abs(slider_pose[12]) > 0.5);
+}
+
+test "a convex hull collider gives a ball a slope to roll down" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    // A static wedge: a right-triangle prism whose long face rises to +x, so its
+    // hull is a genuine ramp, not a box or sphere.
+    const wedge = [_][3]f32{
+        .{ -0.6, 0.0, -0.4 }, .{ 0.6, 0.0, -0.4 }, .{ 0.6, 0.6, -0.4 },
+        .{ -0.6, 0.0, 0.4 },  .{ 0.6, 0.0, 0.4 },  .{ 0.6, 0.6, 0.4 },
+    };
+    _ = try world.addBodyHull(&wedge, .{ 0, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0, .static);
+    // A ball set on the high side of the ramp rolls down to -x and off the low
+    // edge; on a flat floor it would have stayed put.
+    const ball = try world.addBody(.sphere, .{ 0.4, 1.0, 0 }, .{ 0.12, 0, 0 }, .dynamic);
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const ball_pose = try world.bodyPose(ball);
+    try t.expect(ball_pose[12] < -0.1); // rolled downhill from x = 0.4
 }
 
 test "two identical worlds land bit-identical poses" {

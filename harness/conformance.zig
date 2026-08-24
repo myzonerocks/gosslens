@@ -2870,6 +2870,43 @@ fn provePhysicsFriction(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the convex-hull collider: the same ball dropped on a wedge-shaped
+/// hull rolls down its sloped face and off the low edge, where on a flat-topped
+/// box it stays where it lands, so the hull points shape the contact, each
+/// bit-stable across runs.
+fn provePhysicsHull(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var wedge_settled: []u8 = &.{};
+    defer if (wedge_settled.len > 0) gpa.free(wedge_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/hull-wedge");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            wedge_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the hull wedge is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const box_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/box-block");
+    defer gpa.free(box_settled);
+    if (std.mem.eql(u8, wedge_settled, box_settled)) {
+        std.debug.print("conformance: FAIL the ball on the hull wedge settled the same as on the flat box\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rolls down a wedge-shaped convex hull where on a flat box it stays put, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -6192,6 +6229,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics jiggle");
     if (!try provePhysicsFriction(gpa, engine)) return 1;
     watchHold("physics friction");
+    if (!try provePhysicsHull(gpa, engine)) return 1;
+    watchHold("physics hull");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
