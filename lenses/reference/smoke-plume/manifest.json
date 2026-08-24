@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.smoke-plume",
+  "version": "1.0.0",
+  "display_name": "Smoke Plume",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "smoke", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 180, "pattern": "cone", "gravity": -0.7, "speed": 0.5, "speed_spread": 0.5, "lifetime": 2.6, "lifetime_spread": 0.4, "curl": 2.0, "drag": 1.1, "fade": true, "size": 8, "size_end": 34, "color": [0.55, 0.55, 0.58], "cool": [0.2, 0.2, 0.22]}}
+  ],
+  "triggers": []
+}
