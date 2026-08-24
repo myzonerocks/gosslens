@@ -18,6 +18,7 @@ const segmentation = @import("segmentation");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
 const png = @import("png");
+const gif = @import("gif");
 const jpeg = @import("jpeg");
 const color = @import("color");
 const media_recording = @import("media_recording");
@@ -5691,6 +5692,45 @@ const SpriteAnim = struct {
     loaded: u32 = 0,
 };
 
+/// Loads a sprite.2d node's animated GIF (assets/<stem>.gif) as a video
+/// texture: every frame decodes to a texture up front and a fully-loaded
+/// SpriteAnim the render loop cycles at the clip's own rate. Returns false
+/// when the node ships no GIF, so the caller falls back to a PNG.
+fn tryStartGifSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, sprite: runtime.SpriteNode) bool {
+    if (session.engine.renderer == null) return false;
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.gif", .{ bundle_path, sprite.image_stem }) catch return false;
+    defer gpa.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(32 << 20)) catch return false;
+    defer gpa.free(bytes);
+    const decoded = gif.decode(gpa, bytes) catch return false;
+    defer decoded.deinit(gpa);
+    const n: u32 = @intCast(decoded.frames.len);
+    if (n == 0) return false;
+
+    const loaders = gpa.alloc(?*asset.ImageLoader, 0) catch return false;
+    const textures = gpa.alloc(render.TextureHandle, n) catch {
+        gpa.free(loaders);
+        return false;
+    };
+    for (decoded.frames, 0..) |frame, i| {
+        textures[i] = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), frame);
+    }
+    // Cycle at the clip's own rate: the mean frame delay in centiseconds,
+    // defaulting to a lively rate when the file leaves it unset.
+    var total_cs: u32 = 0;
+    for (decoded.delays_cs) |d| total_cs += d;
+    const avg_cs: f32 = @as(f32, @floatFromInt(total_cs)) / @as(f32, @floatFromInt(n));
+    const fps: f32 = if (avg_cs > 0) 100.0 / avg_cs else 12.0;
+
+    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = fps, .loaders = loaders, .textures = textures, .loaded = n }) catch {
+        if (session.engine.renderer) |*r| for (textures) |tex| r.destroyTexture(tex);
+        gpa.free(loaders);
+        gpa.free(textures);
+        return false;
+    };
+    return true;
+}
+
 /// Starts a background load for every spliced sprite.2d node's image
 /// (assets/<stem>.png, or assets/<stem>_<i>.png for an animated sprite)
 /// and records the rect it draws at - mirrors createBlendLoaders, plus the
@@ -5702,6 +5742,9 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
     for (sprites) |sprite| {
         session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
         if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
+        // An animated GIF upgrades the node to a video texture; a node with no
+        // GIF falls through to the still or image-sequence PNG path.
+        if (tryStartGifSprite(session, gpa, bundle_path, sprite)) continue;
         if (sprite.frames > 1) {
             startSpriteAnim(session, gpa, bundle_path, sprite);
             continue;

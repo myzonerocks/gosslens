@@ -4707,6 +4707,81 @@ fn proveSpriteAnim(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a sprite.2d node plays an animated GIF as a video texture. The
+/// gif-sprite bundle ships clip.gif, a bar sweeping across six frames; the
+/// hand-written decoder turns it into textures the sprite cycles off the lens
+/// clock, so advancing the clock draws a different frame.
+fn proveGifSprite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/gif-sprite";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: gif-sprite proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+
+    // The GIF decodes to textures at activation, so frame 0 is ready at once.
+    for (0..8) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-gif-frame0");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // The clip runs at 12.5 fps (80ms a frame); 120ms lands on frame 1, its
+    // bar swept to a new column, not a wrap back to frame 0.
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 120_000) : (elapsed_us += dt_us) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) return error.TickRefused;
+    }
+
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-gif-frame1");
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const frame0 = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-gif-frame0.tga", gpa, .limited(8 << 20));
+    defer gpa.free(frame0);
+    const frame1 = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-gif-frame1.tga", gpa, .limited(8 << 20));
+    defer gpa.free(frame1);
+
+    if (std.mem.eql(u8, frame0, frame1)) {
+        std.debug.print("conformance: FAIL gif-sprite: advancing the clock did not change the GIF frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF gif-sprite plays its clip off the lens clock: advancing the clock draws a different decoded GIF frame\n", .{});
+    return true;
+}
+
 /// Proves the dof.pass blurs by the submitted depth. The dof-blur bundle
 /// holds the frame through until depth arrives (its capability is absent),
 /// then, given a near-to-far depth gradient, softens everything off the
@@ -5399,6 +5474,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("env pass");
     if (!try proveEnvmapPass(gpa, engine)) return 1;
     watchHold("env map");
+    if (!try proveGifSprite(gpa, engine)) return 1;
+    watchHold("gif sprite");
     if (!try provePhotoCapture(gpa, engine)) return 1;
     watchHold("photo capture");
     if (!try proveMaskDegradation(gpa, engine)) return 1;

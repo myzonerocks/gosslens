@@ -18,6 +18,7 @@ const manifest = @import("manifest");
 const trigger = @import("trigger");
 const material = @import("material");
 const image = @import("image");
+const gif = @import("gif");
 const gltf = @import("gltf");
 const build_options = @import("build_options");
 
@@ -29,7 +30,7 @@ const max_manifest_bytes: u64 = manifest.max_manifest_bytes;
 
 const permitted_top_level = [_][]const u8{ "shaders", "assets", "sounds" };
 const shader_extensions = [_][]const u8{".glsl"};
-const asset_extensions = [_][]const u8{ ".gltf", ".glb", ".png" };
+const asset_extensions = [_][]const u8{ ".gltf", ".glb", ".png", ".gif" };
 const sound_extensions = [_][]const u8{ ".wav", ".mp3", ".flac", ".ogg" };
 
 fn hasAnyExtension(name: []const u8, extensions: []const []const u8) bool {
@@ -262,10 +263,10 @@ fn packageMaterialShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.D
     return ok;
 }
 
-/// Every PNG under assets/ (textures and LUTs, section 7) must decode
-/// cleanly through the same decoder the runtime itself loads one with -
-/// a bundle that passes this stage is guaranteed to never hand a broken
-/// image to whatever node type ends up sampling it.
+/// Every image under assets/ (textures and LUTs as PNG, animated clips as
+/// GIF, section 7) must decode cleanly through the same decoder the runtime
+/// itself loads one with - a bundle that passes this stage is guaranteed to
+/// never hand a broken image to whatever node type ends up sampling it.
 fn validateAssets(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, bundle_path: []const u8) !bool {
     var bundle_dir = std.Io.Dir.cwd().openDir(io, bundle_path, .{ .iterate = true }) catch return true;
     defer bundle_dir.close(io);
@@ -277,7 +278,9 @@ fn validateAssets(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnosti
     var ok = true;
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.basename, ".png")) continue;
+        const is_png = std.mem.endsWith(u8, entry.basename, ".png");
+        const is_gif = std.mem.endsWith(u8, entry.basename, ".gif");
+        if (!is_png and !is_gif) continue;
         const diag_path = try std.fmt.allocPrint(diags.arena, "/assets/{s}", .{entry.path});
 
         const disk_path = try std.fs.path.join(diags.arena, &.{ bundle_path, "assets", entry.path });
@@ -287,6 +290,15 @@ fn validateAssets(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnosti
             continue;
         };
         defer gpa.free(bytes);
+        if (is_gif) {
+            const clip = gif.decode(gpa, bytes) catch {
+                try diags.add(diag_path, "does not decode as a valid GIF", .{});
+                ok = false;
+                continue;
+            };
+            clip.deinit(gpa);
+            continue;
+        }
         const decoded = image.decode(gpa, bytes) catch {
             try diags.add(diag_path, "does not decode as a valid PNG", .{});
             ok = false;

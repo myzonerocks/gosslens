@@ -219,6 +219,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("pose", pose_core_module);
     abi_module.addImport("face_geometry", face_geometry_core_module);
     abi_module.addImport("png", pngModule(b, target, optimize));
+    abi_module.addImport("gif", gifModule(b, target, optimize));
     abi_module.addImport("jpeg", jpegModule(b, target, optimize));
     abi_module.addImport("color", colorModule(b, target, optimize));
     abi_module.addImport("media_recording", recordingModule(b, target, optimize));
@@ -353,6 +354,7 @@ pub fn build(b: *std.Build) void {
     const fit_module = b.createModule(.{ .root_source_file = b.path("core/math/fit.zig"), .target = target, .optimize = optimize });
     const fit_tests = b.addTest(.{ .root_module = fit_module });
     const png_tests = b.addTest(.{ .root_module = pngModule(b, target, optimize) });
+    const gif_tests = b.addTest(.{ .root_module = gifModule(b, target, optimize) });
     const jpeg_tests = b.addTest(.{ .root_module = jpegModule(b, target, optimize) });
     const color_tests = b.addTest(.{ .root_module = colorModule(b, target, optimize) });
     const audio_analysis_tests = b.addTest(.{ .root_module = audioAnalysisModule(b, target, optimize) });
@@ -390,6 +392,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particles_module })).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
+    test_step.dependOn(&b.addRunArtifact(gif_tests).step);
     test_step.dependOn(&b.addRunArtifact(jpeg_tests).step);
     test_step.dependOn(&b.addRunArtifact(color_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_analysis_tests).step);
@@ -463,6 +466,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(asset_tests).step);
 
         lens_validator_module.addImport("image", am.image);
+        lens_validator_module.addImport("gif", gifModule(b, target, optimize));
         lens_validator_module.link_libc = true;
         abi_module.addImport("image", am.image);
         abi_module.addImport("asset", am.asset);
@@ -534,6 +538,7 @@ pub fn build(b: *std.Build) void {
     lens_validator_test_module.addOptions("build_options", lens_test_options);
     if (host_asset) |am| {
         lens_validator_test_module.addImport("image", am.image);
+        lens_validator_test_module.addImport("gif", gifModule(b, target, optimize));
         lens_validator_test_module.link_libc = true;
         if (gltf_module) |gm| lens_validator_test_module.addImport("gltf", gm);
     }
@@ -698,6 +703,7 @@ pub fn build(b: *std.Build) void {
             },
         });
         abi_tracking_module.addImport("png", pngModule(b, target, optimize));
+        abi_tracking_module.addImport("gif", gifModule(b, target, optimize));
         abi_tracking_module.addImport("jpeg", jpegModule(b, target, optimize));
         abi_tracking_module.addImport("color", colorModule(b, target, optimize));
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize));
@@ -915,6 +921,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("pose", tracking_cores_wasm.pose);
     abi_wasm.addImport("face_geometry", tracking_cores_wasm.face_geometry);
     abi_wasm.addImport("png", pngModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("gif", gifModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("color", colorModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
@@ -1093,6 +1100,7 @@ pub fn build(b: *std.Build) void {
         const conformance_jpeg_module = jpegModule(b, target, optimize);
         const conformance_color_module = colorModule(b, target, optimize);
         abi_conformance_module.addImport("png", conformance_png_module);
+        abi_conformance_module.addImport("gif", gifModule(b, target, optimize));
         abi_conformance_module.addImport("jpeg", conformance_jpeg_module);
         abi_conformance_module.addImport("color", conformance_color_module);
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize));
@@ -1207,6 +1215,7 @@ pub fn build(b: *std.Build) void {
         });
         if (host_asset) |am| conformance_module.addImport("image", am.image);
         conformance_module.addImport("png", conformance_png_module);
+        conformance_module.addImport("gif", gifModule(b, target, optimize));
         conformance_module.addImport("jpeg", conformance_jpeg_module);
         conformance_module.addImport("color", conformance_color_module);
         const world_replay_module = b.createModule(.{
@@ -1402,6 +1411,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("pose", tracking_cores_android.pose);
     abi_android.addImport("face_geometry", tracking_cores_android.face_geometry);
     abi_android.addImport("png", pngModule(b, android_target, optimize));
+    abi_android.addImport("gif", gifModule(b, android_target, optimize));
     abi_android.addImport("jpeg", jpegModule(b, android_target, optimize));
     abi_android.addImport("color", colorModule(b, android_target, optimize));
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
@@ -1617,6 +1627,10 @@ const TrackingCoreModules = struct {
 // shared by the worker, the harness, and the export layer.
 fn pngModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/media/png.zig"), .target = target, .optimize = optimize });
+}
+
+fn gifModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/gif.zig"), .target = target, .optimize = optimize });
 }
 
 fn jpegModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -3371,6 +3385,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("pose", tracking_cores_ios.pose);
     abi_ios.addImport("face_geometry", tracking_cores_ios.face_geometry);
     abi_ios.addImport("png", pngModule(b, ios_target, optimize));
+    abi_ios.addImport("gif", gifModule(b, ios_target, optimize));
     abi_ios.addImport("jpeg", jpegModule(b, ios_target, optimize));
     abi_ios.addImport("color", colorModule(b, ios_target, optimize));
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
@@ -3941,6 +3956,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("pose", tracking_cores_em.pose);
     abi_em.addImport("face_geometry", tracking_cores_em.face_geometry);
     abi_em.addImport("png", pngModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("gif", gifModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("jpeg", jpegModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("color", colorModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));

@@ -28,7 +28,7 @@ mylens.glens/
   manifest.json          required, described below
   shaders/                *.glsl source, plus *.<profile>.bin next to each
                           one once packaged (section 7) - metal/spirv/essl
-  assets/                 *.gltf, *.glb, *.png, LUTs, referenced by relative path
+  assets/                 *.gltf, *.glb, *.png, *.gif clips, LUTs, by relative path
   sounds/                 *.wav, *.mp3, *.flac, *.ogg, played by a play_sound trigger
 ```
 
@@ -323,8 +323,12 @@ so a sprite reads as a sticker or badge pinned to the frame. An
 each frame, so a param_ramp fades the sprite or a beat trigger pulses it. A
 `"frames"` count above one makes the sprite animated: it loads
 `assets/<id>_0.png` through `assets/<id>_(frames-1).png` and cycles them at
-`"fps"` off the lens clock. Until its image decodes (all frames, for an
-animated sprite) the node holds the frame through, never blocking the chain.
+`"fps"` off the lens clock. Shipping the image as an animated GIF at
+`assets/<id>.gif` instead plays the clip as a video texture: the engine
+decodes its frames and cycles them at the clip's own frame timing, so a
+sticker animates without a param or a frame count. Until its image decodes
+(all frames, for an animated sprite) the node holds the frame through, never
+blocking the chain.
 
 A `"text.2d"` node draws a line of text over the frame. It carries a `"text":
 {"content", "x", "y", "w", "h", "opacity", "color"}` block: the string to
