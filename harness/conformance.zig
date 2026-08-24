@@ -6917,6 +6917,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveGrabThrow(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "sph-fluid")) {
             if (!try proveSphFluid(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "dof")) {
+            if (!try proveDofPass(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;

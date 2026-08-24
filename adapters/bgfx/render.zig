@@ -1330,7 +1330,7 @@ pub const Renderer = struct {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(1, r.tex_depth, depth_texture, std.math.maxInt(u32));
-        const params = [4]f32{ focus, strength, 0.004, 0.0 };
+        const params = [4]f32{ focus, strength, 0.006, 0.0 };
         c.bgfx_set_uniform(r.dof_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.dof_program, 0, c.BGFX_DISCARD_ALL);
