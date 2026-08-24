@@ -383,12 +383,10 @@ pub const PhysicsBody = struct {
     /// length, for content hanging off an anchor.
     chain_to: ?[]const u8 = null,
     chain_length: f32 = 0,
-    /// How the body links to its `chain_to` anchor: a distance constraint that
-    /// bounds separation up to `chain_length` (default), a point (ball) joint
-    /// that pins them at a pivot the body swings freely about, a fixed joint
-    /// that welds them rigidly so the body rides the anchor, a hinge that
-    /// swings the body in one plane about a z axis at the anchor, or a spring
-    /// that tethers them softly at `chain_length`, stretching and bobbing.
+    /// How the body links to its `chain_to` anchor: a distance constraint
+    /// bounded by `chain_length`, a point (ball) joint it swings about, a
+    /// fixed weld that rides the anchor, a hinge that swings in one plane
+    /// about z, or a spring that tethers softly and bobs at `chain_length`.
     joint: enum { distance, point, fixed, hinge, spring } = .distance,
     /// Secondary motion: when > 1, the chain is built from this many spring
     /// links through hidden proxy bodies between the anchor and this node, so

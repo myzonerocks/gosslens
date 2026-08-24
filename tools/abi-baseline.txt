@@ -1,4 +1,4 @@
-abi 0.45
+abi 0.49
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -153,6 +153,10 @@ fn goss_status goss_session_ar_brush_point(goss_session *session, float x, float
 fn goss_status goss_session_ar_brush_end(goss_session *session)
 fn goss_status goss_session_ar_brush_undo(goss_session *session)
 fn goss_status goss_session_ar_brush_clear(goss_session *session)
+fn goss_status goss_session_grab(goss_session *session, float x, float y, float z)
+fn goss_status goss_session_release(goss_session *session)
+fn goss_status goss_session_add_collider(goss_session *session, float x, float y, float z)
+fn goss_status goss_session_erase_collider(goss_session *session, float x, float y, float z, float radius)
 fn goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)
 fn goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)
 fn goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)

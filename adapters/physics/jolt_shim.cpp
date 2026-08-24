@@ -118,15 +118,10 @@ extern "C" void goss_physics_world_destroy(void* handle) {
   }
 }
 
-// shape: 0 = box (params x/y/z half extents), 1 = sphere (param x =
-// radius), 2 = cylinder (axis vertical, param x = radius, y = half
-// height), 3 = capsule (axis vertical, param x = radius, y = half height
-// of the cylinder part). A rotation orients the body so a capsule or
-// cylinder can lie on its side. motion: 0 static, 1 dynamic, 2 kinematic
-// (the engine drives it; chained bodies follow).
-// Places a finished shape as a body at a pose with a surface material. When
-// planar is set the body's motion is confined to the z = 0 plane (it may
-// translate in x/y and spin about z only) - a 2D world inside the 3D engine.
+// Places a finished shape as a body at a pose with a surface material.
+// motion: 0 static, 1 dynamic, 2 kinematic (the engine drives it). When
+// planar is set the body is confined to the z = 0 plane - x/y translation
+// and z spin only, a 2D world inside the 3D engine.
 static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
   const JPH::EMotionType motion_type = motion == 1   ? JPH::EMotionType::Dynamic
                                        : motion == 2 ? JPH::EMotionType::Kinematic
@@ -145,6 +140,9 @@ static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, flo
   return id.IsInvalid() ? UINT32_MAX : id.GetIndexAndSequenceNumber();
 }
 
+// shape: 0 box (x/y/z half extents), 1 sphere (x radius), 2 cylinder
+// (x radius, y half height), 3 capsule (x radius, y half height); a
+// rotation can lay a capsule or cylinder on its side.
 static uint32_t create_body(World* world, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
   if (world == nullptr) return UINT32_MAX;
   JPH::Ref<JPH::Shape> body_shape;
