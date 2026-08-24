@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.preset-fire",
+  "version": "1.0.0",
+  "display_name": "Preset Fire",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "flame", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"preset": "fire"}}
+  ],
+  "triggers": []
+}

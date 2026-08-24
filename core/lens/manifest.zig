@@ -171,6 +171,17 @@ pub const ParticleField = struct {
     mesh_shape: []const u8 = "octahedron",
 };
 
+/// The prebuilt VFX asset library: a named preset expands to a tuned particle
+/// config an author can then override field by field. Returns null for an
+/// unknown name.
+pub fn particlePreset(name: []const u8) ?ParticleField {
+    if (std.mem.eql(u8, name, "fire")) return .{ .count = 220, .pattern = "cone", .gravity = -1.4, .speed = 0.7, .speed_spread = 0.4, .lifetime = 1.3, .lifetime_spread = 0.4, .curl = 3.5, .drag = 0.6, .fade = true, .glow = true, .size = 16, .size_end = 2, .color = .{ 1.0, 0.6, 0.2 }, .cool = .{ 0.5, 0.05, 0.02 } };
+    if (std.mem.eql(u8, name, "smoke")) return .{ .count = 180, .pattern = "cone", .gravity = -0.7, .speed = 0.5, .speed_spread = 0.5, .lifetime = 2.6, .lifetime_spread = 0.4, .curl = 2.0, .drag = 1.1, .fade = true, .size = 8, .size_end = 34, .color = .{ 0.55, 0.55, 0.58 }, .cool = .{ 0.2, 0.2, 0.22 } };
+    if (std.mem.eql(u8, name, "magic")) return .{ .count = 240, .pattern = "sphere", .gravity = 0.0, .speed = 0.3, .lifetime = 2.2, .lifetime_spread = 0.5, .curl = 2.5, .vortex = 2.4, .attract = .{ 0.0, 0.2, 0.0 }, .attract_strength = 1.3, .fade = true, .glow = true, .spin = 3.0, .size = 10, .size_end = 3, .color = .{ 0.6, 0.3, 1.0 }, .cool = .{ 0.2, 0.8, 1.0 } };
+    if (std.mem.eql(u8, name, "sparks")) return .{ .count = 200, .pattern = "burst", .gravity = 6.0, .speed = 3.0, .speed_spread = 0.6, .lifetime = 0.9, .lifetime_spread = 0.5, .drag = 0.8, .fade = true, .glow = true, .stretch = 2.5, .size = 6, .size_end = 1, .color = .{ 1.0, 0.85, 0.35 }, .cool = .{ 0.9, 0.2, 0.05 } };
+    return null;
+}
+
 pub const GradeField = struct {
     /// A grade.pass node's parametric color grade. Defaults are the
     /// identity (nothing changes): exposure in stops, contrast and
@@ -1033,6 +1044,15 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 try diags.add(path.slice(), "particles must be an object", .{});
             } else {
                 var field: ParticleField = .{ .count = 128, .gravity = 9.8, .speed = 2.0, .lifetime = 2.0 };
+                if (getField(pv.object, "preset")) |v| {
+                    if (try expectString(diags, path, v)) |preset_name| {
+                        if (particlePreset(preset_name)) |preset| {
+                            field = preset;
+                        } else {
+                            try diags.add(path.slice(), "unknown particle preset '{s}'", .{preset_name});
+                        }
+                    }
+                }
                 if (getField(pv.object, "count")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= 4096) field.count = @intCast(v.integer);
                 }

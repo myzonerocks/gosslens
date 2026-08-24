@@ -234,8 +234,11 @@ a particle system instead of a glb mesh, drawn over the frame. The sim is a
 deterministic CPU integration - no clock, no randomness, every particle a
 pure function of its index and elapsed steps - so the same field and frame
 count produce the same picture, conformance bit-stable; it needs no glb
-asset. `count` is how many (1 to 4096); the rest of the field tunes emission,
-motion, and appearance:
+asset. A `"preset"` names a prebuilt effect from the VFX asset library -
+`fire`, `smoke`, `magic`, or `sparks` - that fills in a curated config the
+other fields then override, so `{"preset": "fire"}` is a finished flame and
+`{"preset": "fire", "count": 400}` is a bigger one. `count` is how many
+(1 to 4096); the rest of the field tunes emission, motion, and appearance:
 
 - Emission `"pattern"`: `fountain` (default), `rain`, `burst`, `ring`,
   `cone`, `sphere`, `box`, `disc`, `hemisphere`, or `face` - the last spawns
