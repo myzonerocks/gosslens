@@ -473,6 +473,25 @@ fn maxRadius(buf: []const f32, center: [3]f32) f32 {
     return m;
 }
 
+test "an unpinned soft body rests on a rigid floor" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    _ = try world.addBody(.box, .{ 0, -0.1, 0 }, .{ 4, 0.1, 4 }, .static); // floor top at y = 0
+    const r: f32 = 0.3;
+    const verts = [_][3]f32{ .{ r, 0, 0 }, .{ -r, 0, 0 }, .{ 0, r, 0 }, .{ 0, -r, 0 }, .{ 0, 0, r }, .{ 0, 0, -r } };
+    const faces = [_]u32{ 2, 4, 0, 2, 1, 4, 2, 5, 1, 2, 0, 5, 3, 0, 4, 3, 4, 1, 3, 1, 5, 3, 5, 0 };
+    const ball = try world.addSoftBody(&verts, &faces, 200.0, false, .{ 0, 0.8, 0 });
+    for (0..240) |_| world.step(1.0 / 60.0);
+    var buf: [6 * 3]f32 = undefined;
+    _ = world.clothRead(ball, &buf);
+    // Lowest vertex should rest at or just above the floor, not tunnel below it.
+    var min_y: f32 = buf[1];
+    var i: usize = 0;
+    while (i + 3 <= buf.len) : (i += 3) min_y = @min(min_y, buf[i + 1]);
+    try t.expect(min_y > -0.15); // did not fall through
+    try t.expect(min_y < 0.3); // actually came down and rests near the floor
+}
+
 test "two identical worlds land bit-identical poses" {
     var poses: [2][16]f32 = undefined;
     for (0..2) |run| {

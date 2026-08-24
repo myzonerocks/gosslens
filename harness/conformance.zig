@@ -3016,6 +3016,43 @@ fn provePhysicsBalloon(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a free soft body colliding with rigid geometry: an unpinned shell
+/// dropped on a floor holds a full shape when firm but collapses flat when
+/// limp, so pressure resists the deformation the impact and gravity apply,
+/// each bit-stable across runs.
+fn provePhysicsSoftBody(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var firm_settled: []u8 = &.{};
+    defer if (firm_settled.len > 0) gpa.free(firm_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/soft-firm");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            firm_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the firm soft body is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const squish_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/soft-squish");
+    defer gpa.free(squish_settled);
+    if (std.mem.eql(u8, firm_settled, squish_settled)) {
+        std.debug.print("conformance: FAIL the firm soft body settled the same as the limp one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a firm soft body holds its shape on a floor where a limp one collapses flat, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -6346,6 +6383,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics mesh");
     if (!try provePhysicsBalloon(gpa, engine)) return 1;
     watchHold("physics balloon");
+    if (!try provePhysicsSoftBody(gpa, engine)) return 1;
+    watchHold("physics soft body");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;

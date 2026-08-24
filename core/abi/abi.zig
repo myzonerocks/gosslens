@@ -6215,7 +6215,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 if (session.physics_world) |world| {
                     if (buildUnitSphere(gpa, balloon.subdivisions, balloon.radius)) |sphere| {
                         defer sphere.deinit(gpa);
-                        const body = world.addSoftBody(sphere.verts, sphere.indices, balloon.pressure, true, .{ 0, 0.4, 0 }) catch physics.invalid_body;
+                        const body = world.addSoftBody(sphere.verts, sphere.indices, balloon.pressure, balloon.pinned, .{ 0, 0.4, 0 }) catch physics.invalid_body;
                         if (body != physics.invalid_body) {
                             if (session.engine.renderer) |*r| {
                                 if (r.createSoftMesh(@intCast(sphere.verts.len), sphere.indices)) |mesh| {

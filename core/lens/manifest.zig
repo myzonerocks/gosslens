@@ -88,6 +88,9 @@ pub const BalloonField = struct {
     radius: f32,
     subdivisions: u32,
     pressure: f32,
+    /// Pin the top cap so it hangs in place (a balloon); false drops it as a
+    /// free soft body that collides with rigid bodies and squishes on impact.
+    pinned: bool = true,
 };
 
 pub const ParticleField = struct {
@@ -1501,6 +1504,12 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             } else {
                 var field: BalloonField = .{ .radius = 0.3, .subdivisions = 2, .pressure = 20.0 };
                 var ok = true;
+                if (getField(balloon_value.object, "pinned")) |v| {
+                    if (v == .bool) field.pinned = v.bool else {
+                        try diags.add(path.slice(), "balloon pinned must be a boolean", .{});
+                        ok = false;
+                    }
+                }
                 if (getField(balloon_value.object, "radius")) |v| {
                     switch (v) {
                         .float => |f| field.radius = @floatCast(f),

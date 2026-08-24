@@ -212,11 +212,13 @@ needs no glb asset.
 
 A model.gltf node may instead carry a `"balloon": {"radius",
 "subdivisions", "pressure"}` field: the node becomes a closed soft-body
-shell (a sphere subdivided from an octahedron, top cap pinned so it
-hangs) that its internal `pressure` inflates - a positive pressure
-puffs it out, zero leaves it limp. `radius` is the rest size in metres,
-`subdivisions` (0 to 3) sets the shell resolution; all are optional with
-engine defaults. Like cloth it needs no glb asset.
+shell (a sphere subdivided from an octahedron) that its internal
+`pressure` inflates - a positive pressure puffs it out, zero leaves it
+limp. `radius` is the rest size in metres, `subdivisions` (0 to 3) sets
+the shell resolution, and `pinned` (default true) holds the top cap so it
+hangs; set it false to drop the shell as a free soft body that collides
+with rigid bodies and squishes on impact. All are optional with engine
+defaults. Like cloth it needs no glb asset.
 
 A model.gltf node may instead carry a `"hair": {"strands", "verts",
 "length"}` field: the node becomes a set of simulated hair strands
