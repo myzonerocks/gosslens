@@ -419,6 +419,64 @@ pub const System = struct {
         }
     }
 
+    /// Triangle vertices a ribbon draw needs: six per particle per trail
+    /// segment (one connecting quad between consecutive history points).
+    pub fn ribbonVertexCount(self: *const System) usize {
+        const n = self.trailLen();
+        const segs = if (n > 1) n - 1 else 0;
+        return @as(usize, self.field.count) * segs * 6;
+    }
+
+    /// Writes the trail history as a solid connected ribbon (ribbonVertexCount()
+    /// * 3 floats): each pair of consecutive positions becomes a camera-facing
+    /// quad `width` wide, tapering toward the tail, so a particle draws one
+    /// continuous strip instead of a row of separate billboards.
+    pub fn writeRibbons(self: *const System, out: []f32, width: f32) void {
+        const n = self.trailLen();
+        if (n < 2) return;
+        const denom: f32 = @floatFromInt(n - 1);
+        for (self.particles, 0..) |_, i| {
+            var seg: u32 = 0;
+            while (seg < n - 1) : (seg += 1) {
+                const r0 = (self.head + 1 + seg) % n;
+                const r1 = (self.head + 1 + seg + 1) % n;
+                const b0 = (i * n + r0) * 3;
+                const b1 = (i * n + r1) * 3;
+                const p0 = [3]f32{ self.history[b0], self.history[b0 + 1], self.history[b0 + 2] };
+                const p1 = [3]f32{ self.history[b1], self.history[b1 + 1], self.history[b1 + 2] };
+                // Offset perpendicular to the segment and to the view (+z), so
+                // the ribbon faces the fixed content camera; a still segment
+                // falls back to a horizontal offset rather than collapsing.
+                var sx = p1[1] - p0[1];
+                var sy = -(p1[0] - p0[0]);
+                var sl = @sqrt(sx * sx + sy * sy);
+                if (sl < 1e-5) {
+                    sx = 1;
+                    sy = 0;
+                    sl = 1;
+                }
+                sx /= sl;
+                sy /= sl;
+                const w0 = width * (@as(f32, @floatFromInt(seg)) / denom);
+                const w1 = width * (@as(f32, @floatFromInt(seg + 1)) / denom);
+                const verts = [6][3]f32{
+                    .{ p0[0] - sx * w0, p0[1] - sy * w0, p0[2] },
+                    .{ p0[0] + sx * w0, p0[1] + sy * w0, p0[2] },
+                    .{ p1[0] + sx * w1, p1[1] + sy * w1, p1[2] },
+                    .{ p0[0] - sx * w0, p0[1] - sy * w0, p0[2] },
+                    .{ p1[0] + sx * w1, p1[1] + sy * w1, p1[2] },
+                    .{ p1[0] - sx * w1, p1[1] - sy * w1, p1[2] },
+                };
+                for (verts, 0..) |v, k| {
+                    const base = ((i * (n - 1) + seg) * 6 + k) * 3;
+                    out[base + 0] = v[0];
+                    out[base + 1] = v[1];
+                    out[base + 2] = v[2];
+                }
+            }
+        }
+    }
+
     /// Writes xyz of every particle into out (count * 3 floats) for the plain
     /// non-fading point mesh.
     pub fn writePositions(self: *const System, out: []f32) void {
@@ -575,6 +633,26 @@ test "particles bounce off a box collider and never enter it" {
         try std.testing.expect(!inside);
         try std.testing.expectEqual(pa.pos[1], pb.pos[1]); // deterministic
     }
+}
+
+test "a ribbon bakes a connecting quad per trail segment" {
+    const field = Field{ .count = 16, .speed = 1.0, .lifetime = 5.0, .pattern = .fountain, .trail = 8 };
+    var s = try System.init(std.testing.allocator, field);
+    defer s.deinit();
+    for (0..40) |_| s.step(1.0 / 60.0);
+    // One quad (six verts) per particle per segment (trail - 1 segments).
+    try std.testing.expectEqual(@as(usize, 16 * 7 * 6), s.ribbonVertexCount());
+    const out = try std.testing.allocator.alloc(f32, s.ribbonVertexCount() * 3);
+    defer std.testing.allocator.free(out);
+    s.writeRibbons(out, 0.05);
+    // The strip has real width: some vertices are offset off the centre line.
+    var spread = false;
+    for (out) |v| {
+        if (v != 0 and @abs(v) > 1e-4) spread = true;
+    }
+    try std.testing.expect(spread);
+    // No NaNs from a degenerate (still) segment.
+    for (out) |v| try std.testing.expect(v == v);
 }
 
 test "a trail records recent positions and fades from head to tail" {

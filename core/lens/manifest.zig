@@ -137,6 +137,9 @@ pub const ParticleField = struct {
     /// Trail length: recent positions drawn behind each particle as a fading
     /// ribbon (a comet tail); 0 or 1 is no trail.
     trail: u32 = 0,
+    /// Draw the trail history as one solid connected ribbon strip per particle
+    /// instead of separate billboards. Needs `trail` set for the history.
+    ribbon: bool = false,
     /// Emit everything once and let it die out, rather than looping.
     oneshot: bool = false,
     /// Sprite size in pixels at death, if the size changes over life.
@@ -1031,6 +1034,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "trail")) |v| {
                     if (v == .integer and v.integer >= 0 and v.integer <= 32) field.trail = @intCast(v.integer) else try diags.add(path.slice(), "particles trail must be an integer 0..32", .{});
+                }
+                if (getField(pv.object, "ribbon")) |v| {
+                    if (v == .bool) field.ribbon = v.bool;
                 }
                 if (getField(pv.object, "wind")) |v| {
                     var w: [3]f32 = .{ 0, 0, 0 };

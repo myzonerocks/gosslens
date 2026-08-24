@@ -618,6 +618,16 @@ pub const Renderer = struct {
         _ = sprite_texture;
     }
 
+    pub fn submitRibbons(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
     pub const HairMesh = struct {
         position_buffer: TextureHandle = .{},
         index_buffer: TextureHandle = .{},

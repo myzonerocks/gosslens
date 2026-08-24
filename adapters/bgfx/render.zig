@@ -1822,6 +1822,23 @@ pub const Renderer = struct {
         }
     }
 
+    /// Draws particle ribbons: blits the frame once, then draws the baked
+    /// ribbon strips (a position-only triangle soup already in `mesh`) as flat
+    /// colored triangles in the same content view the billboards use.
+    pub fn submitRibbons(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32) void {
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+        const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
+        const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
+        const model = math.Mat4.identity;
+        _ = c.bgfx_set_transform(&model.cols, 1);
+        c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
+        c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Draws one model.gltf node: blit_view first blits the current
     /// frame into the shared target so the mesh's own triangles are
     /// the only pixels this draw changes (same reasoning submitMakeup's
