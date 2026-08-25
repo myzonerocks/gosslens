@@ -60,9 +60,14 @@ const world = new GossWebXRWorldSource(session);
 world.onFrame(xrFrame, referenceSpace, timestampUs);
 ```
 
-Video recording and platform photo formats are not wired on web yet; see
-[docs/PARITY.md](../../docs/PARITY.md). The full cross-platform capability
-tour is in the [root README](../../README.md#using-gosslens).
+On web, recording and photo capture run through the browser, used by both
+this SDK and the demo: `captureFrame()` exports a PNG off the composited
+canvas, and `captureStream()` drives a `MediaRecorder` with the
+engine-normalized recording policy. The engine's own hardware encoder and
+the platform-native HEIC format stay native-only, since the browser owns
+encoding on web; see [docs/PARITY.md](../../docs/PARITY.md). The full
+cross-platform capability tour is in the
+[root README](../../README.md#using-gosslens).
 
 ## Demo app
 

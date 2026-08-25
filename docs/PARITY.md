@@ -15,8 +15,8 @@ CaptureOutput, Events.
 | Hand tracking (landmarks, handedness, gestures) | proven in the host harness | built, no hardware yet | demonstrated in browser, the hand pipeline on the wasm tracking module, read through a GossHandTracker |
 | Beauty (six effects) | demonstrated on device | built, no hardware yet | demonstrated in browser |
 | Lens runtime | demonstrated on device | built, no hardware yet | demonstrated in browser, beauty-baseline only |
-| Photo capture (deterministic PNG) | proven in the host harness | built, no hardware yet | not wired |
-| Video recording | proven in the host harness on the Apple encoder | built on MediaCodec, no hardware yet | backend not landed, reports unsupported |
+| Photo capture (deterministic PNG) | proven in the host harness | built, no hardware yet | engine path not wired; the web SDK exports a PNG off the composited canvas (captureFrame) |
+| Video recording | proven in the host harness on the Apple encoder | built on MediaCodec, no hardware yet | engine encoder native-only; the web SDK records through the browser MediaRecorder (captureStream + engine-normalized policy) |
 | Photo formats (JPEG built-in, HEIC platform) | JPEG and HEIC proven in the host harness | JPEG from the engine's own encoder, built; HEIC backend not landed | JPEG from the engine's own encoder, built; HEIC backend not landed |
 | Color-managed stills (Display-P3/Rec2020 tags, 16-bit PNG) | proven in the host harness: wide-gamut PNG carries cHRM/gAMA and JPEG an ICC, sRGB carries neither, 16-bit PNG reports bit depth 16 | core encoder, every target | core encoder, every target |
 | High-resolution still capture (decoupled from preview, supersampled) | proven in the host harness: full-sensor size, anti-aliased supersampling, deterministic | Kotlin wrapper landed, no hardware yet | web wrapper landed over the wasm core |
