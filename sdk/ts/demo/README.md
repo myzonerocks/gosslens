@@ -22,11 +22,11 @@ wasm-emscripten and wasm-emscripten-webgpu each copy their own
 gosslens_web.js/.wasm output straight into sdk/ts/demo/ (WebGL2)
 and sdk/ts/demo/webgpu/ (WebGPU) as part of the build itself, so
 there's no separate cp step for those two and no way to silently keep
-testing a stale binary after a source change - main.ts picks between
+testing a stale binary after a source change. main.ts picks between
 the two directories at load time based on whether the browser has a
 working WebGPU adapter. Everything else this copies in is still a
-gitignored fetch/build output with no auto-copy of its own yet -
-re-run its own step whenever the tracking module or the pinned models
+gitignored fetch/build output with no auto-copy of its own yet.
+Re-run its own step whenever the tracking module or the pinned models
 change.
 
 ## Run it
@@ -47,9 +47,12 @@ upside down" in the controls bar; it's remembered across reloads.
     bun run prove.ts
 
 Drives the real page in headless Chrome (fake capture device) and
-asserts real deltas for whiten/smooth/reshape/makeup plus live face
-tracking - the same technique the demo's own browser testing uses
-throughout this repo.
+checks real frame deltas for whiten/smooth/reshape/makeup. It then
+activates the beauty-baseline reference lens and checks its render is
+non-empty and byte-identical across two frames, and confirms live face
+tracking against a corpus portrait. The run only passes if every one of
+these passes. Same headless-Chrome technique the demo's browser testing
+uses throughout this repo.
 
 ## Proving the tracking modules
 
@@ -70,5 +73,7 @@ Then build the worker and page and run the proof:
 It stands each pipeline up in turn, runs inference over its still, and
 prints a PASS line with the landmark counts, the detected hand and
 gesture, and the segmentation class count and mask coverage. track-prove
-materializes the corpus and bundles itself, so a fresh checkout proves
-once the models are fetched.
+only materializes assets: it copies the tracking wasm from the build output
+plus the model bundles and corpus stills from `.models`, then serves the
+page. Build the page and worker bundles first with the two `bun build`
+commands above and the wasm with `zig build tracking-wasm`.

@@ -1,16 +1,15 @@
 # Roadmap
 
-Gosslens is a full camera and AR engine: every camera-manipulation
-capability and every AR capability, measured against the strongest
-proprietary stacks and aiming past them. New capabilities ride the rails
-that already exist (the tracking module's model path, the lens format's
-node and trigger system, the bgfx graph) rather than arriving as
-parallel machinery.
+Gosslens is a camera and AR engine. New capabilities are built on the
+pieces that already exist: the tracking module's model path, the lens
+format's node and trigger system, and the bgfx render graph, rather than
+as separate machinery.
 
-Work lands in dependency order. Each stage is built to production
-completeness and merges as a single squash PR. Each section below groups a
-capability area's shipped work with what is still ahead in it, so a reader
-finds everything about one area in one place.
+Work is ordered by dependency, so a stage builds on a tracker, material
+system, or runtime an earlier stage added. Each stage merges as one squash
+PR with a conformance proof for what it adds. The sections below group each
+area's built work with what is still planned, so everything about one area
+is in one place.
 
 ## Foundations
 
@@ -33,12 +32,12 @@ finds everything about one area in one place.
 ## Tracking and scene understanding
 
 - [x] Tracking: MediaPipe-class face pipeline behind a C shim, model fetching against a tracked lock
-- [x] Hands: palm detection and hand landmarks on the existing tracking rail, up to two hands with handedness and canned gestures, goss_hand_* mirroring the face surface, Swift/Kotlin wrappers and demo overlays, proven on the pinned corpus through the public surface; the hands-present signal feeds lens triggers, per-gesture trigger signals and the web tracking module still open
-- [x] Segmentation: the multiclass model on the segmentation worker with per-class masks, named mask channels for shader passes, and the hair-recolor reference lens, proven on the corpus and bit-stable in conformance; on-device visual passes still owner-gated
+- [x] Hands: palm detection and hand landmarks on the existing tracking rail, up to two hands with handedness and canned gestures, goss_hand_* mirroring the face surface, Swift/Kotlin wrappers and demo overlays, proven on the pinned corpus through the public surface; the hands-present signal feeds lens triggers; the web hand pipeline is built (GossHandTracker over the wasm tracking module), with per-gesture trigger signals still open
+- [x] Segmentation: the multiclass model on the segmentation worker with per-class masks, named mask channels for shader passes, and the hair-recolor reference lens, proven on the corpus and bit-stable in conformance; on-device visual passes not yet run on hardware
 - [x] Pose: the 33-point body landmark pipeline on the tracking rail with per-point visibility and presence, goss_pose_* mirroring the face surface, Swift/Kotlin wrappers and demo overlays, proven on a pinned standing-figure corpus frame through the public surface; skeleton attachment points land with the anchor-node family alongside head pose
 - [x] Head pose: weighted similarity fit of the canonical face's metric geometry to the live landmarks (deterministic, allocation-free), goss_session_face_pose with Swift/Kotlin wrappers, the model.gltf face-anchor node posing glTF content in canonical centimeter space, and the face-mask reference lens proven bit-stable on the pinned portrait corpus; skeleton anchors ride the same anchor field later
 - [x] Face-mesh effects: the canonical 468-point topology over the tracked landmarks as the mesh.face lens node, with the face-paint reference lens proven bit-stable in conformance with real tracking; makeup and mask variants ride the same node with their own textures
-- [x] World tracking: goss_session_submit_world (pose, projection, planes, anchors, light) driving the world.tracking_state trigger and world-anchored glTF content drawn from the platform camera, proven bit-stable on a deterministic replay orbit with the world-anchor reference lens; all three backends written - ARKit WorldSource (compile-proven, device run pending hardware), the ARCore demo feeder, and the WebXR source with typed submitWorld on the web SDK (device and browser runs pending per the completion bar); depth/occlusion into the mask rail is the named follow-up
+- [x] World tracking: goss_session_submit_world (pose, projection, planes, anchors, light) driving the world.tracking_state trigger and world-anchored glTF content drawn from the platform camera, proven bit-stable on a deterministic replay orbit with the world-anchor reference lens; all three backends written - ARKit WorldSource (compile-proven, device run pending hardware), the ARCore demo feeder, and the WebXR source with typed submitWorld on the web SDK (device and browser runs pending hardware); depth/occlusion into the mask rail is the named follow-up
 - [ ] Tracking depth: multi-face results, eye and gaze tracking with iris landmarks, a hand-gesture grammar as trigger signals, a humanoid body rig with named joints and attach points, and new trackers for pet faces and feet
 - [ ] Scene depth: a depth texture and monocular depth estimation feeding occlusion, a reconstructed world mesh, and sky, ground, building and per-region segmentation with a refined portrait matte
 

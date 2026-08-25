@@ -14,8 +14,8 @@ one canonical parameter shape before wrappers are implemented independently.
 Swift, Kotlin, and TypeScript use that operation identity rather than inventing
 platform-specific names for the same engine action.
 
-A new ABI function and its public API contract land together. A wrapper must
-not ship first and be reconciled later.
+A new ABI function and its public API contract are added together. A wrapper
+is not released first and reconciled later.
 
 ## Public types
 
@@ -308,12 +308,14 @@ ribbon for the renderer to draw.
 
 ## Web tracking module
 
-The web SDK's face tracking runs in a separate wasm module
-(`gosslens_tracking.wasm`, built by `zig build tracking-wasm`), not through
-the frozen C ABI - wasm has no threads here, so the main engine module
-can't host the tracking worker the native targets run in-process. Its
-exports are their own small contract, wrapped only by the web SDK's
-`FaceTracker`:
+The web SDK's face, hand, pose, and segmentation tracking run in a separate
+wasm module (`gosslens_tracking.wasm`, built by `zig build tracking-wasm`),
+not through the frozen C ABI - wasm has no threads here, so the main engine
+module can't host the tracking worker the native targets run in-process. The
+face exports below are their own small contract, wrapped by the web SDK's
+`GossFaceTracker`; the same module adds `goss_pose_*`, `goss_hand_*`, and
+`goss_segmentation_*` exports wrapped by `GossPoseTracker`, `GossHandTracker`,
+and `GossSegmenter`:
 
 | Export | Contract |
 |---|---|
@@ -334,7 +336,7 @@ GossMedia follows the same rule. A new encoder, decoder, muxer, demuxer,
 recording, import, metadata, audio, or capture-output ABI function is not
 special because it is new infrastructure.
 
-Before an SDK wrapper lands:
+Before an SDK wrapper is written:
 
 1. the `goss_*` ABI operation exists in `include/gosslens.h`;
 2. its owning public type is settled;
