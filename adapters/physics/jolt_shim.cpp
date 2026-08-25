@@ -75,6 +75,15 @@ struct HairInstance {
   JPH::Hair* hair = nullptr;
 };
 
+// A body confined to a plane: its z coordinate and out-of-plane motion are
+// reset after every substep. This keeps a 2D world stable where Jolt's
+// Plane2D allowed-DOFs mode divides by a zeroed inverse mass on a contact
+// along the locked axis and blows up to a NaN on some float paths.
+struct PlanarBody {
+  JPH::BodyID id;
+  float plane_z;
+};
+
 struct World {
   JPH::TempAllocatorImpl temp{4 * 1024 * 1024};
   JPH::JobSystemSingleThreaded jobs{JPH::cMaxPhysicsJobs};
@@ -89,6 +98,7 @@ struct World {
   JPH::HairShaders hair_shaders;
   bool hair_ready = false;
   std::vector<HairInstance> hairs;
+  std::vector<PlanarBody> planar_bodies;
 };
 
 int world_count = 0;
@@ -157,10 +167,11 @@ static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, flo
                                      motion_type, moving ? layer_moving : layer_static);
   settings.mFriction = friction;
   settings.mRestitution = restitution;
-  if (planar != 0) settings.mAllowedDOFs = JPH::EAllowedDOFs::Plane2D;
   const JPH::BodyID id = world->system.GetBodyInterface().CreateAndAddBody(
       settings, moving ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
-  return id.IsInvalid() ? UINT32_MAX : id.GetIndexAndSequenceNumber();
+  if (id.IsInvalid()) return UINT32_MAX;
+  if (planar != 0) world->planar_bodies.push_back({id, pz});
+  return id.GetIndexAndSequenceNumber();
 }
 
 // shape: 0 box (x/y/z half extents), 1 sphere (x radius), 2 cylinder
@@ -406,6 +417,12 @@ extern "C" void goss_physics_body_remove(void* handle, uint32_t body) {
   if (world == nullptr) return;
   auto& bi = world->system.GetBodyInterface();
   const JPH::BodyID id(body);
+  for (size_t i = 0; i < world->planar_bodies.size(); ++i) {
+    if (world->planar_bodies[i].id == id) {
+      world->planar_bodies.erase(world->planar_bodies.begin() + i);
+      break;
+    }
+  }
   bi.RemoveBody(id);
   bi.DestroyBody(id);
 }
@@ -427,6 +444,20 @@ extern "C" void goss_physics_step(void* handle, float dt_seconds) {
   while (world->accumulator >= step) {
     world->system.Update((float)step, 1, &world->temp, &world->jobs);
     world->accumulator -= step;
+    // Hold each planar body in its plane: reset the z coordinate and drop the
+    // out-of-plane translation and tumble the step may have added, leaving x/y
+    // motion and z spin - a stable 2D world with no zeroed inverse mass.
+    if (!world->planar_bodies.empty()) {
+      JPH::BodyInterface& bi = world->system.GetBodyInterface();
+      for (const PlanarBody& pb : world->planar_bodies) {
+        const JPH::RVec3 pos = bi.GetPosition(pb.id);
+        const JPH::Vec3 lv = bi.GetLinearVelocity(pb.id);
+        const JPH::Vec3 av = bi.GetAngularVelocity(pb.id);
+        bi.SetPosition(pb.id, JPH::RVec3(pos.GetX(), pos.GetY(), pb.plane_z), JPH::EActivation::DontActivate);
+        bi.SetLinearVelocity(pb.id, JPH::Vec3(lv.GetX(), lv.GetY(), 0.0f));
+        bi.SetAngularVelocity(pb.id, JPH::Vec3(0.0f, 0.0f, av.GetZ()));
+      }
+    }
   }
 }
 

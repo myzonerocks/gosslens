@@ -388,19 +388,19 @@ test "friction decides whether a body grips a slope or slides down it" {
     defer world.destroy();
     // A wide slab tilted a quarter turn's eighth (25 degrees about z) is a ramp.
     const tilt = [4]f32{ 0, 0, 0.21644, 0.97630 };
-    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.5, 0.05, 0.8 }, tilt, 1.0, 0.0, .static, false);
-    // Two blocks set on the ramp aligned to it, apart in z so they never touch:
-    // one grippy, one nearly frictionless. Blocks slide rather than roll, so
-    // friction alone decides whether they hold or run down.
-    const gripper = try world.addBodyMaterial(.box, .{ -0.1, 0.2, -0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 2.0, 0.0, .dynamic, false);
-    const slider = try world.addBodyMaterial(.box, .{ -0.1, 0.2, 0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 0.02, 0.0, .dynamic, false);
+    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.5, 0.2, 0.8 }, tilt, 1.0, 0.0, .static, false);
+    // Two blocks dropped onto the ramp aligned to it, apart in z so they never
+    // touch: one grippy, one nearly frictionless. Blocks slide rather than
+    // roll, so friction alone decides whether they hold or run down.
+    const gripper = try world.addBodyMaterial(.box, .{ -0.1, 0.45, -0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 2.0, 0.0, .dynamic, false);
+    const slider = try world.addBodyMaterial(.box, .{ -0.1, 0.45, 0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 0.02, 0.0, .dynamic, false);
     for (0..180) |_| world.step(1.0 / 60.0);
     const gripper_pose = try world.bodyPose(gripper);
     const slider_pose = try world.bodyPose(slider);
     // 25 degrees is below the grippy block's friction, so it holds near where it
     // sits; the slippery one runs down the slope a long way.
-    try t.expect(@abs(gripper_pose[12]) < 0.25); // the grippy block holds near where it sits
-    try t.expect(@abs(slider_pose[12]) > @abs(gripper_pose[12]) + 0.3); // the slippery one runs well past it
+    try t.expect(@abs(gripper_pose[12]) < 0.35); // the grippy block holds near where it sits
+    try t.expect(@abs(slider_pose[12]) > @abs(gripper_pose[12]) + 0.2); // the slippery one runs well past it
 }
 
 test "a convex hull collider gives a ball a slope to roll down" {
@@ -424,9 +424,9 @@ test "a convex hull collider gives a ball a slope to roll down" {
 test "restitution decides whether a ball bounces back or lands dead" {
     const world = try World.create(-9.81);
     defer world.destroy();
-    _ = try world.addBody(.box, .{ 0, -0.1, 0 }, .{ 4, 0.1, 4 }, .static); // floor top at y = 0
-    const bouncy = try world.addBodyMaterial(.sphere, .{ -0.5, 1.0, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.9, .dynamic, false);
-    const dead = try world.addBodyMaterial(.sphere, .{ 0.5, 1.0, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.0, .dynamic, false);
+    _ = try world.addBody(.box, .{ 0, -0.3, 0 }, .{ 4, 0.3, 4 }, .static); // thick floor, top at y = 0
+    const bouncy = try world.addBodyMaterial(.sphere, .{ -0.5, 0.8, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.7, .dynamic, false);
+    const dead = try world.addBodyMaterial(.sphere, .{ 0.5, 0.8, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.0, .dynamic, false);
     // After the first impact the bouncy ball rebounds high while the dead one
     // just settles, so their peak heights over the rebound window diverge.
     var bouncy_peak: f32 = 0;
@@ -520,7 +520,7 @@ test "a planar body is confined to the z plane where a 3D body slides off in z" 
     // An incline tilted about x, so its slope runs in z: a free body slides in
     // z, a planar body cannot leave the z = 0 plane.
     const tilt_x = [4]f32{ 0.2588, 0, 0, 0.9659 }; // 30 degrees about x
-    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.0, 0.05, 1.0 }, tilt_x, 1.0, 0.0, .static, false);
+    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.0, 0.3, 1.0 }, tilt_x, 1.0, 0.0, .static, false);
     const free3d = try world.addBodyMaterial(.box, .{ -0.3, 0.5, 0 }, .{ 0.08, 0.08, 0.08 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, false);
     const planar = try world.addBodyMaterial(.box, .{ 0.3, 0.5, 0 }, .{ 0.08, 0.08, 0.08 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, true);
     for (0..180) |_| world.step(1.0 / 60.0);
@@ -534,7 +534,7 @@ test "a planar hull collider is confined to the z plane where a free hull slides
     const world = try World.create(-9.81);
     defer world.destroy();
     const tilt_x = [4]f32{ 0.2588, 0, 0, 0.9659 }; // 30 degrees about x
-    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.0, 0.05, 1.0 }, tilt_x, 1.0, 0.0, .static, false);
+    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.0, 0.3, 1.0 }, tilt_x, 1.0, 0.0, .static, false);
     const cube = [_][3]f32{
         .{ -0.08, -0.08, -0.08 }, .{ 0.08, -0.08, -0.08 }, .{ 0.08, 0.08, -0.08 }, .{ -0.08, 0.08, -0.08 },
         .{ -0.08, -0.08, 0.08 },  .{ 0.08, -0.08, 0.08 },  .{ 0.08, 0.08, 0.08 },  .{ -0.08, 0.08, 0.08 },

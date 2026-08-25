@@ -2556,10 +2556,7 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // single-thread std threading stubs ahead of its headers.
 fn joltFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const u8 {
     var flags: std.ArrayList([]const u8) = .empty;
-    // Cross-platform determinism (fixed float order, no FMA contraction) so a
-    // marginal contact settles to the same bits on every runner rather than
-    // diverging to a NaN on one platform and not another.
-    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE", "-DJPH_CROSS_PLATFORM_DETERMINISTIC", "-ffp-contract=off" }) catch @panic("OOM");
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE" }) catch @panic("OOM");
     if (target.result.os.tag == .emscripten) {
         flags.append(b.allocator, "-include") catch @panic("OOM");
         flags.append(b.allocator, b.pathFromRoot("adapters/physics/em_thread_stub.h")) catch @panic("OOM");
