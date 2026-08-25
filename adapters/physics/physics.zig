@@ -29,9 +29,9 @@ extern fn goss_physics_world_create(gravity_y: f32) ?*anyopaque;
 extern fn goss_physics_world_destroy(handle: *anyopaque) void;
 extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, motion: u32) u32;
 extern fn goss_physics_body_add_oriented(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, motion: u32) u32;
-extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
-extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
-extern fn goss_physics_body_add_mesh(handle: *anyopaque, points: [*]const f32, point_count: u32, indices: [*]const u32, index_count: u32, px: f32, py: f32, pz: f32, qx: f32, qy: f32, qz: f32, qw: f32, friction: f32, restitution: f32) u32;
+extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, pos: *const [3]f32, size: *const [3]f32, quat: *const [4]f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
+extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, pos: *const [3]f32, quat: *const [4]f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
+extern fn goss_physics_body_add_mesh(handle: *anyopaque, points: [*]const f32, point_count: u32, indices: [*]const u32, index_count: u32, pos: *const [3]f32, quat: *const [4]f32, friction: f32, restitution: f32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_set_motion(handle: *anyopaque, body: u32, motion: u32) void;
 extern fn goss_physics_body_remove(handle: *anyopaque, body: u32) void;
@@ -80,7 +80,7 @@ pub const World = struct {
     /// ~1 grippy) and restitution (0 dead, 1 bouncy). `planar` confines it to
     /// the z = 0 plane (x/y translation and z spin only) for a 2D world.
     pub fn addBodyMaterial(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
-        const id = goss_physics_body_add_material(world.handle, @intFromEnum(shape), position[0], position[1], position[2], size[0], size[1], size[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution, @intFromEnum(motion), @intFromBool(planar));
+        const id = goss_physics_body_add_material(world.handle, @intFromEnum(shape), &position, &size, &rotation, friction, restitution, @intFromEnum(motion), @intFromBool(planar));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -89,7 +89,7 @@ pub const World = struct {
     /// an arbitrary faceted collider. Needs at least four points.
     pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
         const flat: [*]const f32 = @ptrCast(points.ptr);
-        const id = goss_physics_body_add_hull(world.handle, flat, @intCast(points.len), position[0], position[1], position[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution, @intFromEnum(motion), @intFromBool(planar));
+        const id = goss_physics_body_add_hull(world.handle, flat, @intCast(points.len), &position, &rotation, friction, restitution, @intFromEnum(motion), @intFromBool(planar));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -98,7 +98,7 @@ pub const World = struct {
     /// `points` and `indices` (three per triangle). Concave meshes are static.
     pub fn addBodyMesh(world: World, points: []const [3]f32, indices: []const u32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32) !u32 {
         const flat: [*]const f32 = @ptrCast(points.ptr);
-        const id = goss_physics_body_add_mesh(world.handle, flat, @intCast(points.len), indices.ptr, @intCast(indices.len), position[0], position[1], position[2], rotation[0], rotation[1], rotation[2], rotation[3], friction, restitution);
+        const id = goss_physics_body_add_mesh(world.handle, flat, @intCast(points.len), indices.ptr, @intCast(indices.len), &position, &rotation, friction, restitution);
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }

@@ -225,16 +225,17 @@ extern "C" uint32_t goss_physics_body_add_oriented(void* handle, uint32_t shape,
 // Adds a body with a rotation, a surface material (friction 0 slippery ~1
 // grippy, restitution 0 dead 1 bouncy), and an optional planar constraint that
 // confines it to the z = 0 plane for a 2D world. Returns the body id.
-extern "C" uint32_t goss_physics_body_add_material(void* handle, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
-  return create_body(static_cast<World*>(handle), shape, px, py, pz, sx, sy, sz, qx, qy, qz, qw, friction, restitution, motion, planar);
+extern "C" uint32_t goss_physics_body_add_material(void* handle, uint32_t shape, const float* pos, const float* size, const float* quat, float friction, float restitution, uint32_t motion, uint32_t planar) {
+  if (pos == nullptr || size == nullptr || quat == nullptr) return UINT32_MAX;
+  return create_body(static_cast<World*>(handle), shape, pos[0], pos[1], pos[2], size[0], size[1], size[2], quat[0], quat[1], quat[2], quat[3], friction, restitution, motion, planar);
 }
 
 // Adds a body whose collision shape is the convex hull of a set of local-space
 // points (three floats each) - an arbitrary faceted collider. Returns the body
 // id, or UINT32_MAX if the hull could not be built.
-extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points, uint32_t point_count, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
+extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points, uint32_t point_count, const float* pos, const float* quat, float friction, float restitution, uint32_t motion, uint32_t planar) {
   auto* world = static_cast<World*>(handle);
-  if (world == nullptr || points == nullptr || point_count < 4) return UINT32_MAX;
+  if (world == nullptr || points == nullptr || pos == nullptr || quat == nullptr || point_count < 4) return UINT32_MAX;
   JPH::Array<JPH::Vec3> hull_points;
   hull_points.reserve(point_count);
   for (uint32_t i = 0; i < point_count; ++i) {
@@ -243,15 +244,15 @@ extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points
   JPH::ConvexHullShapeSettings settings(hull_points);
   JPH::ShapeSettings::ShapeResult result = settings.Create();
   if (result.HasError()) return UINT32_MAX;
-  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, motion, planar);
+  return finalize_body(world, result.Get(), pos[0], pos[1], pos[2], quat[0], quat[1], quat[2], quat[3], friction, restitution, motion, planar);
 }
 
 // Adds a static body whose collider is a concave triangle mesh: `points`
 // (three floats each) and `indices` (three per triangle). Concave meshes are
 // static in Jolt. Returns the body id, or UINT32_MAX on a bad mesh.
-extern "C" uint32_t goss_physics_body_add_mesh(void* handle, const float* points, uint32_t point_count, const uint32_t* indices, uint32_t index_count, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution) {
+extern "C" uint32_t goss_physics_body_add_mesh(void* handle, const float* points, uint32_t point_count, const uint32_t* indices, uint32_t index_count, const float* pos, const float* quat, float friction, float restitution) {
   auto* world = static_cast<World*>(handle);
-  if (world == nullptr || points == nullptr || indices == nullptr || point_count < 3 || index_count < 3 || index_count % 3 != 0) return UINT32_MAX;
+  if (world == nullptr || points == nullptr || indices == nullptr || pos == nullptr || quat == nullptr || point_count < 3 || index_count < 3 || index_count % 3 != 0) return UINT32_MAX;
   JPH::VertexList vertices;
   vertices.reserve(point_count);
   for (uint32_t i = 0; i < point_count; ++i) {
@@ -266,7 +267,7 @@ extern "C" uint32_t goss_physics_body_add_mesh(void* handle, const float* points
   JPH::MeshShapeSettings settings(vertices, triangles);
   JPH::ShapeSettings::ShapeResult result = settings.Create();
   if (result.HasError()) return UINT32_MAX;
-  return finalize_body(world, result.Get(), px, py, pz, qx, qy, qz, qw, friction, restitution, 0, 0);
+  return finalize_body(world, result.Get(), pos[0], pos[1], pos[2], quat[0], quat[1], quat[2], quat[3], friction, restitution, 0, 0);
 }
 
 // Links two bodies with a distance constraint between local attach
