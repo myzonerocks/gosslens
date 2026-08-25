@@ -19,10 +19,11 @@ tracking worker.
 { "dependencies": { "@gosslens/core": "workspace:*" } }
 ```
 
-This package is the JS wrapper only. `zig build wasm-emscripten`
-produces the `gosslens_web.js`/`.wasm` pair `wasmJsUrl` below needs to
-point at - not bundled, since WebGPU and WebGL2 are separate artifacts
-(see below).
+This package is the JS wrapper only. `zig build wasm-emscripten` builds
+the WebGL2 `gosslens_web.js`/`.wasm` pair; `zig build
+wasm-emscripten-webgpu` builds the WebGPU pair. `pickEngineUrl` picks
+between them at load, so `wasmJsUrl` points at whichever one it selects.
+They are separate artifacts, not bundled.
 
 ## Use
 
@@ -60,9 +61,13 @@ const world = new GossWebXRWorldSource(session);
 world.onFrame(xrFrame, referenceSpace, timestampUs);
 ```
 
-Video recording and platform photo formats are not wired on web yet; see
-[docs/PARITY.md](../../docs/PARITY.md). The full cross-platform capability
-tour is in the [root README](../../README.md#using-gosslens).
+On web, recording and photo capture run through the browser, used by both
+this SDK and the demo: `captureFrame()` exports a PNG off the composited
+canvas, and `captureStream()` drives a `MediaRecorder` with the
+engine-normalized recording policy. The engine's own hardware encoder and
+the platform-native HEIC format stay native-only, since the browser owns
+encoding on web; see [docs/PARITY.md](../../docs/PARITY.md). The
+cross-platform SDK overview is in the [root README](../../README.md).
 
 ## Demo app
 

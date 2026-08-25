@@ -93,7 +93,7 @@ failure: the lens still splices, its triggers gated on that capability
 simply never fire, and any node consuming that capability's data holds its
 last-known or default state. A named mask channel without live data
 (the capability absent, the running model lacking that class, or the
-first result not yet landed) samples the zero mask - the masked effect
+first result not yet produced) samples the zero mask - the masked effect
 draws nothing, never everywhere. A lens whose *every* node depends on an
 unavailable capability degrades to not rendering, which the host app is
 told about (so it can hide the lens from its picker) rather than the
@@ -436,8 +436,10 @@ which is what lets a scripted lens be conformance bit-stable.
 The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
-passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing,
-the draw board, the layout composite, the 2D sprite, the 2D text, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
+passes reading `shaders/*.glsl`, the post-effect passes blur/grade/bloom/
+dof/fog/outline/trail/ssr/env, glTF model draws, LUT passes, compositing,
+the draw board, the layout composite, the 2D sprite, the 2D text, the
+`video.texture` node, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
 the bottom; without a tracked face the node draws nothing, the standard
 capability degradation).
@@ -647,22 +649,26 @@ never through code.**
 
 ## 9. Conformance
 
-A lens exercises exactly one distinct capability class per the reference
-set (`lenses/reference/`). Shipped today: shader-tint (no capabilities; a
-plain shader pass), hair-recolor (capabilities: segmentation; a shader
-pass reading the hair mask channel), face-paint (capabilities: face; a
-mesh.face node warping a texture over the tracked face), beauty-baseline (capabilities: face; the beauty node
-type), background-swap (capabilities: segmentation), trigger-anim
-(capabilities: none required; a timer-driven trigger playing a glTF
-animation clip, proving 6.2/6.3 without needing a live face), face-mask
-(capabilities: face; a glTF model pinned to the head through
-`"anchor": "face"`), and world-anchor (capabilities: world; a glTF
-model pinned to the tracked world, proven on the deterministic replay
-camera track). The reference set is complete. Each reference lens runs through the conformance
-harness on all three platforms and is asserted bit-stable per platform
-(pixel output) and value-stable across platforms for anything
-resolution-independent (trigger fire timing, parameter curve values at
-fixed timestamps). The validator CLI (`lenses/validator`) is run against
+The reference set (`lenses/reference/`) has 115 lens bundles, at least one
+per node type and capability class the format defines: shader passes, the
+beauty nodes, `mesh.face`, glTF models and the face, body, skeleton, and
+world anchors, physics bodies with joints and jiggle, cloth, strand hair,
+CPU and GPU particles, material graphs, the post-effect passes, and the
+sprite, text, video, script, and audio-playback paths. The validator runs
+against every one in CI (`lens-validate-reference`). A core subset also
+runs end to end through the production ABI in the pixel-hash conformance
+harness: shader-tint (no capabilities), beauty-baseline (face),
+background-swap (segmentation), trigger-anim (none; a timer-driven glTF
+animation), hair-recolor (segmentation; the hair mask channel), face-paint
+(face; a `mesh.face` texture warp), and face-mask (face; a glTF model on
+`"anchor": "face"`). world-anchor (world) is proven separately on the
+deterministic replay camera track. The conformance harness runs today on the host (macOS): it renders each
+covered lens through the production ABI and checks the output
+byte-identical across two runs and against a tracked baseline
+(`lenses/conformance-baseline.txt`), so a change that shifts a lens's
+pixels shows up as a reviewed diff. Cross-platform value-stability for
+anything resolution-independent (trigger fire timing, parameter curve
+values at fixed timestamps) is the remaining work. The validator CLI (`lenses/validator`) is run against
 every reference lens, and against a fuzz corpus of malformed manifests and
 malformed shader inputs, in CI. A fuzz-found crash or leak is a spec
 violation of section 8, filed and fixed before the next lens ships, not

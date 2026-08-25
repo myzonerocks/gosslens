@@ -44,7 +44,7 @@ engine.initRenderer(surface, width, height)
 val session = GossSession.create(engine)
 session.enableBeauty(resourceDir)
 
-session.submitFrameCopy(yBuffer, yStride, uvBuffer, uvStride, width, height, rotationDegrees = 90, mirrored = false, timestampUs)
+session.submitFrameCopy(yBuffer, yStride, uvBuffer, uvStride, width, height, rotationDegrees = 90, mirrored = false, timestampUs = timestampUs)
 engine.renderFrame(session)
 
 session.setWhiten(0.6f)
@@ -81,7 +81,7 @@ capability tour is in the [root README](../../README.md#using-gosslens).
   JitPack artifact would carry no native `.so` and crash on
   `System.loadLibrary`. Needs a real CI step that cross-compiles the
   native library (NDK-dependent, not something JitPack's own
-  environment can do) before publishing - the included-build path
+  environment can do) before publishing. The included-build path
   above is the only one that works right now.
 - Add a `src/test/` suite. Conformance runs through the demo app's
   `ConformanceRunner` and [`harness/`](../../harness/) for now.
