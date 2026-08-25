@@ -86,6 +86,7 @@ struct TrackedBody {
   JPH::Quat last_rot;
   bool planar;
   float plane_z;
+  int reports = 0;
 };
 
 bool poseIsFinite(JPH::RVec3Arg p, JPH::QuatArg q, JPH::Vec3Arg lv, JPH::Vec3Arg av) {
@@ -110,6 +111,7 @@ struct World {
   bool hair_ready = false;
   std::vector<HairInstance> hairs;
   std::vector<TrackedBody> tracked_bodies;
+  int total_substeps = 0;
 };
 
 int world_count = 0;
@@ -379,18 +381,6 @@ extern "C" int32_t goss_physics_constrain_hinge(void* handle, uint32_t body_a, u
 extern "C" int32_t goss_physics_constrain_spring(void* handle, uint32_t body_a, uint32_t body_b, float ax, float ay, float az, float bx, float by, float bz, float rest_length, float frequency, float damping) {
   auto* world = static_cast<World*>(handle);
   if (world == nullptr) return -1;
-  JPH::Body* a = nullptr;
-  JPH::Body* b = nullptr;
-  {
-    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
-    if (!lock_a.Succeeded()) return -1;
-    a = &lock_a.GetBody();
-  }
-  {
-    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
-    if (!lock_b.Succeeded()) return -1;
-    b = &lock_b.GetBody();
-  }
   JPH::DistanceConstraintSettings settings;
   settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
   settings.mPoint1 = JPH::RVec3(ax, ay, az);
@@ -398,7 +388,12 @@ extern "C" int32_t goss_physics_constrain_spring(void* handle, uint32_t body_a, 
   settings.mMinDistance = rest_length;
   settings.mMaxDistance = rest_length;
   settings.mLimitsSpringSettings = JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, frequency, damping);
-  world->system.AddConstraint(settings.Create(*a, *b));
+  // Both locks stay held through Create so the bodies are never read after
+  // their write lock is released.
+  JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
+  JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
+  if (!lock_a.Succeeded() || !lock_b.Succeeded()) return -1;
+  world->system.AddConstraint(settings.Create(lock_a.GetBody(), lock_b.GetBody()));
   return 0;
 }
 
@@ -456,6 +451,7 @@ extern "C" void goss_physics_step(void* handle, float dt_seconds) {
   while (world->accumulator >= step) {
     world->system.Update((float)step, 1, &world->temp, &world->jobs);
     world->accumulator -= step;
+    world->total_substeps += 1;
     for (TrackedBody& tb : world->tracked_bodies) {
       JPH::RVec3 pos = bi.GetPosition(tb.id);
       JPH::Quat rot = bi.GetRotation(tb.id);
@@ -464,7 +460,11 @@ extern "C" void goss_physics_step(void* handle, float dt_seconds) {
       // Roll a body that blew up back to its last finite pose rather than let
       // the NaN spread; the world stays stable where one float path diverges.
       if (!poseIsFinite(pos, rot, lv, av)) {
-        fprintf(stderr, "jolt guard: body %u non-finite, restoring last pose\n", tb.id.GetIndexAndSequenceNumber());
+        if (tb.reports++ < 3) {
+          fprintf(stderr, "jolt guard: body %u non-finite at substep %d, last good pos (%.3f %.3f %.3f) planar=%d\n",
+                  tb.id.GetIndexAndSequenceNumber(), world->total_substeps,
+                  (double)tb.last_pos.GetX(), (double)tb.last_pos.GetY(), (double)tb.last_pos.GetZ(), tb.planar ? 1 : 0);
+        }
         bi.SetPositionAndRotation(tb.id, tb.last_pos, tb.last_rot, JPH::EActivation::DontActivate);
         bi.SetLinearVelocity(tb.id, JPH::Vec3::sZero());
         bi.SetAngularVelocity(tb.id, JPH::Vec3::sZero());
