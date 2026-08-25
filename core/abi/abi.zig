@@ -5411,6 +5411,15 @@ fn maskToTexture(mask: *const [segmentation.mask_len]f32) ?render.TextureHandle 
     return render.Renderer.createMaskTexture(segmentation.mask_side, segmentation.mask_side, &bytes);
 }
 
+/// Which model output class feeds a named mask channel, for the active
+/// segmenter's class count. selfie_multiclass lays its six labels out in the
+/// mask_channels[1..] order, so channel c reads class c-1. Any other model's
+/// order is unknown, so the channel gets no source and serves the zero mask.
+fn classChannelSource(class_count: u32, channel: usize) ?u32 {
+    if (class_count == manifest.mask_channels.len - 1) return @intCast(channel - 1);
+    return null;
+}
+
 fn pollSegmentationMask(session: *Session) void {
     const worker = session.segmentation_worker orelse return;
     var mask: [segmentation.mask_len]f32 = undefined;
@@ -5419,14 +5428,17 @@ fn pollSegmentationMask(session: *Session) void {
     destroySegmentationTexture(session);
     session.segmentation_texture = maskToTexture(&mask);
 
-    // Class channels upload only when the active lens names them; the
-    // person channel (index zero) rides the subject texture above.
+    // Class channels upload only when the active lens names them and the
+    // active model's label order maps to them; the person channel (index
+    // zero) rides the subject texture above.
+    const class_count = segmentation.classCount(worker);
     var it = session.shader_masks.valueIterator();
     var needed: [manifest.mask_channels.len]bool = @splat(false);
     while (it.next()) |channel| needed[channel.*] = true;
     for (needed[1..], 1..) |need, channel| {
         if (!need) continue;
-        if (!segmentation.readClassMask(worker, @intCast(channel - 1), &mask)) continue;
+        const source = classChannelSource(class_count, channel) orelse continue;
+        if (!segmentation.readClassMask(worker, source, &mask)) continue;
         session.segmentation_class_textures[channel] = maskToTexture(&mask);
     }
 }
