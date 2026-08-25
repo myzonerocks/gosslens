@@ -113,12 +113,18 @@ fn rgbaToNv12(gpa: std.mem.Allocator, frame: sampler.Frame) !Nv12Copy {
 /// RendererDesc has no callback field to carry one through the frozen
 /// ABI) writes it as out_path ++ ".tga".
 fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const u8, out_path: [:0]const u8, segmentation_model: ?[]const u8) !void {
+    return renderOnceOpts(gpa, engine, bundle_path, out_path, segmentation_model, true);
+}
+
+/// enable_face off renders the same corpus with no face tracked, the control
+/// for landmark-derived effects: their mask channels stay on the zero mask.
+fn renderOnceOpts(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const u8, out_path: [:0]const u8, segmentation_model: ?[]const u8, enable_face: bool) !void {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
 
     const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
     defer gpa.free(face_bytes);
-    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+    if (enable_face and abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
         return error.EnableFaceTrackingFailed;
     }
     if (segmentation_model) |model_path| {
@@ -161,21 +167,27 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
         .timestamp_us = 1000,
     };
     const half_w = (planes.width + 1) / 2;
-    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
-        return error.TrackFrameFailed;
+    // Nothing to track when the control render enables no tracker; the frame
+    // still submits below so the pass composites over a real image.
+    if (enable_face or segmentation_model != null) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.TrackFrameFailed;
+        }
     }
 
     // Face tracking runs off-thread; wait for a real result before
     // proceeding so the render below reflects real landmarks, not
     // whatever the worker's first frame or two happens to still be
     // computing.
-    var result: abi.FaceResult = undefined;
-    var polls: usize = 0;
-    while (abi.goss_session_face_result(session, &result) == .again) {
-        std.Thread.yield() catch {};
-        if (g_watch) c.glfwPollEvents();
-        polls += 1;
-        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    if (enable_face) {
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
     }
 
     if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
@@ -5756,6 +5768,35 @@ fn proveClassOutline(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveHeadMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // An outline.pass masked to "head" rims the face region off the face
+    // landmark hull with no segmentation model; with no face tracked the
+    // channel is the zero mask, so the rim degrades to nothing.
+    try renderOnceOpts(gpa, engine, ".lens-packages/outline-head", "zig-out/conformance-head-a", null, true);
+    settle(engine);
+    try renderOnceOpts(gpa, engine, ".lens-packages/outline-head", "zig-out/conformance-head-b", null, true);
+    settle(engine);
+    try renderOnceOpts(gpa, engine, ".lens-packages/outline-head", "zig-out/conformance-head-noface", null, false);
+    settle(engine);
+
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-head-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-head-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the head matte outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-head-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the head matte drew nothing - the landmark hull never rasterized\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an outline.pass rims the face-landmark head matte, gone with no face, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7290,6 +7331,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveVideoTexture(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "class-outline")) {
             if (!try proveClassOutline(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "head-matte")) {
+            if (!try proveHeadMatte(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7340,6 +7383,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("scene segmentation");
     if (!try proveClassOutline(gpa, engine)) return 1;
     watchHold("class outline");
+    if (!try proveHeadMatte(gpa, engine)) return 1;
+    watchHold("head matte");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;

@@ -3050,6 +3050,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
         pollDepthOcclusion(s);
+        pollLandmarkMattes(s);
         if (e.recording != null and e.recording_session == s and !s.capture_requested) {
             if (s.current) |current| {
                 recording_frame = prepareRecordingFrame(e, r);
@@ -3146,6 +3147,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollDepthOcclusion(s);
+    pollLandmarkMattes(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
         const mirror = resolveMirror(s, current.desc.flags);
@@ -3260,6 +3262,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollDepthOcclusion(s);
+    pollLandmarkMattes(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
         const mirror = resolveMirror(s, current.desc.flags);
@@ -5423,10 +5426,12 @@ fn maskToTexture(mask: *const [segmentation.mask_len]f32) ?render.TextureHandle 
 
 /// Which model output class feeds a named mask channel, for the active
 /// segmenter's class count. selfie_multiclass lays its six labels out in the
-/// mask_channels[1..] order, so channel c reads class c-1. Any other model's
-/// order is unknown, so the channel gets no source and serves the zero mask.
+/// mask_channels[1..model_class_end] order, so channel c reads class c-1.
+/// Channels past the model range derive another way, and any other model's
+/// order is unknown, so both get no source and serve the zero mask.
 fn classChannelSource(class_count: u32, channel: usize) ?u32 {
-    if (class_count == manifest.mask_channels.len - 1) return @intCast(channel - 1);
+    if (channel >= manifest.model_class_end) return null;
+    if (class_count == manifest.model_class_end - 1) return @intCast(channel - 1);
     return null;
 }
 
@@ -5451,6 +5456,125 @@ fn pollSegmentationMask(session: *Session) void {
         if (!segmentation.readClassMask(worker, source, &mask)) continue;
         session.segmentation_class_textures[channel] = maskToTexture(&mask);
     }
+}
+
+/// True when any active mask consumer, shader or outline, names this channel,
+/// so a class the running lens never reads is never built.
+fn maskChannelNeeded(session: *Session, channel: u8) bool {
+    var shader_it = session.shader_masks.valueIterator();
+    while (shader_it.next()) |c| if (c.* == channel) return true;
+    var outline_it = session.outline_masks.valueIterator();
+    while (outline_it.next()) |c| if (c.* == channel) return true;
+    return false;
+}
+
+fn clearClassTexture(session: *Session, channel: u8) void {
+    if (session.engine.renderer) |*r| {
+        if (session.segmentation_class_textures[channel]) |texture| r.destroyTexture(texture);
+    }
+    session.segmentation_class_textures[channel] = null;
+}
+
+/// The current face landmarks projected into the [0,1] mask grid: the
+/// internal tracking worker where it runs, else the host-fed web set. Fills
+/// out with one (u, v) per landmark and returns true when a face is present.
+fn faceMattePoints(session: *Session, out: *[face.landmark_count][2]f32) bool {
+    const desc = (session.current orelse return false).desc;
+    const w: f32 = @floatFromInt(desc.width);
+    const h: f32 = @floatFromInt(desc.height);
+    if (w <= 0 or h <= 0) return false;
+    if (session.face_tracking) |worker| {
+        var result: face.Result = undefined;
+        if (tracking.readResult(worker, &result) and result.landmark_count_out > 0 and result.presence >= 0.5) {
+            for (0..face.landmark_count) |i| {
+                out[i] = .{ result.landmarks[i * 3] / w, result.landmarks[i * 3 + 1] / h };
+            }
+            return true;
+        }
+    }
+    if (session.web_face_landmarks) |landmarks| {
+        for (0..face.landmark_count) |i| out[i] = .{ landmarks[i].x / w, landmarks[i].y / h };
+        return true;
+    }
+    return false;
+}
+
+fn hullCross(o: [2]f32, a: [2]f32, b: [2]f32) f32 {
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+}
+
+/// Rasterizes the convex hull of the face landmarks into the subject mask
+/// grid. The outermost landmarks trace the face oval, so the filled hull is
+/// a head matte from tracking alone. Monotone chain over points sorted by x
+/// then y, then a per-row span fill; a convex row enters and exits once.
+fn landmarkHullMask(points: *const [face.landmark_count][2]f32, mask: *[segmentation.mask_len]f32) void {
+    var pts = points.*;
+    std.sort.pdq([2]f32, &pts, {}, struct {
+        fn lt(_: void, a: [2]f32, b: [2]f32) bool {
+            return if (a[0] == b[0]) a[1] < b[1] else a[0] < b[0];
+        }
+    }.lt);
+    var hull: [face.landmark_count * 2][2]f32 = undefined;
+    var k: usize = 0;
+    for (pts) |pt| {
+        while (k >= 2 and hullCross(hull[k - 2], hull[k - 1], pt) <= 0) k -= 1;
+        hull[k] = pt;
+        k += 1;
+    }
+    const upper_floor = k + 1;
+    var j: usize = pts.len - 1;
+    while (j > 0) : (j -= 1) {
+        const pt = pts[j - 1];
+        while (k >= upper_floor and hullCross(hull[k - 2], hull[k - 1], pt) <= 0) k -= 1;
+        hull[k] = pt;
+        k += 1;
+    }
+    const hull_len = k - 1;
+
+    @memset(mask, 0);
+    const side = segmentation.mask_side;
+    const side_f: f32 = @floatFromInt(side);
+    for (0..side) |y| {
+        const v = (@as(f32, @floatFromInt(y)) + 0.5) / side_f;
+        var lo: f32 = 0;
+        var hi: f32 = 0;
+        var hit = false;
+        var e: usize = 0;
+        while (e < hull_len) : (e += 1) {
+            const a = hull[e];
+            const b = hull[(e + 1) % hull_len];
+            if ((a[1] <= v) == (b[1] <= v)) continue;
+            const ix = a[0] + (v - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+            if (!hit or ix < lo) lo = ix;
+            if (!hit or ix > hi) hi = ix;
+            hit = true;
+        }
+        if (!hit) continue;
+        var x0: i64 = @intFromFloat(@floor(lo * side_f));
+        var x1: i64 = @intFromFloat(@ceil(hi * side_f));
+        if (x0 < 0) x0 = 0;
+        if (x1 > @as(i64, @intCast(side))) x1 = @intCast(side);
+        var x: i64 = x0;
+        while (x < x1) : (x += 1) mask[y * side + @as(usize, @intCast(x))] = 1;
+    }
+}
+
+/// Builds the head matte from the tracked face's landmark hull when a lens
+/// names the head channel, so any mask consumer can rim or key the face
+/// region with no segmentation model. No face this frame leaves the channel
+/// on the zero mask.
+fn pollLandmarkMattes(session: *Session) void {
+    const head: u8 = manifest.head_channel;
+    if (!maskChannelNeeded(session, head)) return;
+    var points: [face.landmark_count][2]f32 = undefined;
+    if (!faceMattePoints(session, &points)) {
+        clearClassTexture(session, head);
+        return;
+    }
+    var mask: [segmentation.mask_len]f32 = undefined;
+    landmarkHullMask(&points, &mask);
+    clearClassTexture(session, head);
+    session.segmentation_class_textures[head] = maskToTexture(&mask);
 }
 
 /// When the host submits depth and no in-engine segmenter runs, the depth
