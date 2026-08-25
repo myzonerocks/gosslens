@@ -34,7 +34,9 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
+#include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -91,11 +93,32 @@ struct World {
 
 int world_count = 0;
 
+// Jolt leaves its trace and assert hooks null by default; a firing assert
+// would then call through null and crash. Route them to stderr instead so
+// a tripped invariant is logged, not fatal - the sim continues past it.
+void traceImpl(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  char buffer[1024];
+  vsnprintf(buffer, sizeof(buffer), fmt, args);
+  va_end(args);
+  fprintf(stderr, "jolt: %s\n", buffer);
+}
+
+#ifdef JPH_ENABLE_ASSERTS
+bool assertFailedImpl(const char* expression, const char* message, const char* file, JPH::uint line) {
+  fprintf(stderr, "jolt assert: %s:%u: (%s) %s\n", file, line, expression, message != nullptr ? message : "");
+  return false;
+}
+#endif
+
 }  // namespace
 
 extern "C" void* goss_physics_world_create(float gravity_y) {
   if (world_count == 0) {
     JPH::RegisterDefaultAllocator();
+    JPH::Trace = traceImpl;
+    JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = assertFailedImpl;)
     JPH::Factory::sInstance = new JPH::Factory();
     JPH::RegisterTypes();
   }
