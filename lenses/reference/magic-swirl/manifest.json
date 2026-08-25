@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.magic-swirl",
+  "version": "1.0.0",
+  "display_name": "Magic Swirl",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "magic", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 240, "pattern": "sphere", "gravity": 0.0, "speed": 0.3, "lifetime": 2.2, "lifetime_spread": 0.5, "curl": 2.5, "vortex": 2.4, "attract": [0.0, 0.2, 0.0], "attract_strength": 1.3, "fade": true, "glow": true, "spin": 3.0, "size": 10, "size_end": 3, "color": [0.6, 0.3, 1.0], "cool": [0.2, 0.8, 1.0]}}
+  ],
+  "triggers": []
+}

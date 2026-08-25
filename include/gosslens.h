@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 45u
+#define GOSS_ABI_MINOR 49u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -771,6 +771,20 @@ goss_status goss_session_ar_brush_point(goss_session *session, float x, float y,
 goss_status goss_session_ar_brush_end(goss_session *session);
 goss_status goss_session_ar_brush_undo(goss_session *session);
 goss_status goss_session_ar_brush_clear(goss_session *session);
+
+/* Grab and throw. goss_session_grab moves the nearest dynamic physics body to a
+ * world point and, while it holds one, drags it there; the body is driven
+ * kinematically each tick so it follows the pointer and gathers the velocity it
+ * throws with. goss_session_release lets it go back to dynamic, flinging it. */
+goss_status goss_session_grab(goss_session *session, float x, float y, float z);
+goss_status goss_session_release(goss_session *session);
+
+/* Live 2D colliders. goss_session_add_collider drops a static sphere collider
+ * at a world point that dynamic content lands on at once; drawing them in as a
+ * pointer moves builds a live 2D world. goss_session_erase_collider removes
+ * every collider within radius of a point - the eraser. */
+goss_status goss_session_add_collider(goss_session *session, float x, float y, float z);
+goss_status goss_session_erase_collider(goss_session *session, float x, float y, float z, float radius);
 
 /* Graph thread. Runs the beauty chain over one RGBA frame on the calling
  * thread, reading the newest tracking result for the landmark driven

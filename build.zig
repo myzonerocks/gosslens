@@ -67,6 +67,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const navmesh_module = b.createModule(.{
+        .root_source_file = b.path("core/nav/navmesh.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const sph_module = b.createModule(.{
+        .root_source_file = b.path("core/particles/sph.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // The host export layer carries the render stub: unit tests cannot
     // exercise Metal, and the harness plus device demos are the executable
     // truth for the real backend. Platform libraries built by the ios step
@@ -223,6 +235,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("jpeg", jpegModule(b, target, optimize));
     abi_module.addImport("color", colorModule(b, target, optimize));
     abi_module.addImport("media_recording", recordingModule(b, target, optimize));
+    abi_module.addImport("media_video", mediaVideoModule(b, target, optimize));
     abi_module.addImport("photo", photoModule(b, target, optimize));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
     abi_module.addImport("audio_mix", audioMixModule(b, target, optimize));
@@ -247,6 +260,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
     abi_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
     abi_module.addImport("particles", particlesModule(b, target, optimize));
+    abi_module.addImport("sph", sphModule(b, target, optimize));
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
@@ -390,6 +404,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(material_tests).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particles_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = navmesh_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sph_module })).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
     test_step.dependOn(&b.addRunArtifact(gif_tests).step);
@@ -707,6 +723,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("jpeg", jpegModule(b, target, optimize));
         abi_tracking_module.addImport("color", colorModule(b, target, optimize));
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize));
+        abi_tracking_module.addImport("media_video", mediaVideoModule(b, target, optimize));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_tracking_module.addImport("audio_mix", audioMixModule(b, target, optimize));
@@ -719,6 +736,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         abi_tracking_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_tracking_module.addImport("particles", particlesModule(b, target, optimize));
+        abi_tracking_module.addImport("sph", sphModule(b, target, optimize));
         if (target.result.os.tag == .macos) {
             abi_tracking_module.addImport("beauty", beauty_real_module);
         } else {
@@ -925,6 +943,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("color", colorModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
@@ -937,6 +956,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("particles", particlesModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("sph", sphModule(b, wasm_target, .ReleaseSmall));
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
@@ -1105,6 +1125,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("jpeg", conformance_jpeg_module);
         abi_conformance_module.addImport("color", conformance_color_module);
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize));
+        abi_conformance_module.addImport("media_video", mediaVideoModule(b, target, optimize));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_conformance_module.addImport("audio_mix", audioMixModule(b, target, optimize));
@@ -1117,6 +1138,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         abi_conformance_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_conformance_module.addImport("particles", particlesModule(b, target, optimize));
+        abi_conformance_module.addImport("sph", sphModule(b, target, optimize));
         if (host_asset) |am| {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
@@ -1416,6 +1438,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("jpeg", jpegModule(b, android_target, optimize));
     abi_android.addImport("color", colorModule(b, android_target, optimize));
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
+    abi_android.addImport("media_video", mediaVideoModule(b, android_target, optimize));
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
@@ -1428,6 +1451,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("script", scriptModule(b, android_target, optimize, true));
     abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, true));
     abi_android.addImport("particles", particlesModule(b, android_target, optimize));
+    abi_android.addImport("sph", sphModule(b, android_target, optimize));
     const lens_manifest_android = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = android_target,
@@ -1767,6 +1791,14 @@ fn particlesModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     });
 }
 
+fn sphModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("core/particles/sph.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
 // Platform photo encoding: the formats phones actually save, produced
 // by the platform's own encoders; targets without a landed backend get
 // the stub, which reports the capability honestly absent.
@@ -1785,6 +1817,36 @@ fn photoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         module.link_libcpp = true;
         module.linkFramework("CoreGraphics", .{});
         module.linkFramework("ImageIO", .{});
+        module.linkFramework("Foundation", .{});
+        if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    }
+    return module;
+}
+
+// Video decode rides the platform's own hardware decoder, streaming a
+// file's frames one at a time so a live texture pulls the next in O(1).
+// Targets without a landed backend get the deterministic synthetic
+// clip, so the playback path still runs and tests.
+fn mediaVideoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const apple = target.result.os.tag == .macos or target.result.os.tag == .ios;
+    const root = if (apple)
+        "adapters/media/video.zig"
+    else
+        "adapters/media/video_stub.zig";
+    const module = b.createModule(.{
+        .root_source_file = b.path(root),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (apple) {
+        module.addCSourceFile(.{
+            .file = b.path("adapters/media/video_apple.mm"),
+            .flags = &.{ "-std=c++17", "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        module.link_libcpp = true;
+        module.linkFramework("AVFoundation", .{});
+        module.linkFramework("CoreMedia", .{});
+        module.linkFramework("CoreVideo", .{});
         module.linkFramework("Foundation", .{});
         if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     }
@@ -3395,6 +3457,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("jpeg", jpegModule(b, ios_target, optimize));
     abi_ios.addImport("color", colorModule(b, ios_target, optimize));
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
+    abi_ios.addImport("media_video", mediaVideoModule(b, ios_target, optimize));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     abi_ios.addImport("audio_mix", audioMixModule(b, ios_target, optimize));
@@ -3422,6 +3485,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("script", scriptModule(b, ios_target, optimize, have_quickjs_ios));
     abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, have_miniaudio_ios));
     abi_ios.addImport("particles", particlesModule(b, ios_target, optimize));
+    abi_ios.addImport("sph", sphModule(b, ios_target, optimize));
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = ios_target,
@@ -3967,6 +4031,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("jpeg", jpegModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("color", colorModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("media_video", mediaVideoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_mix", audioMixModule(b, em_target, .ReleaseSmall));
@@ -3979,6 +4044,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("particles", particlesModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("sph", sphModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
@@ -4250,6 +4316,7 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // lenses/shaders/, not the engine's own preview shader
         // directory, since that's the contract lens authors read.
         .{ .name = "vs_lens_pass", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "vs_lens_pass_instanced", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_instanced.def.sc" },
         // lut.pass's own fixed fragment shader - kit-authored like the
         // vertex contract above, not per-lens, so it compiles here once
         // rather than through the validator's per-lens shader stage.
@@ -4324,19 +4391,35 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // back end.
         .{ .profile = "wgsl", .platform = "asm.js", .tag = "wgsl" },
     };
-    const computes = [_][]const u8{"cs_nv12_to_rgba"};
-    for (computes) |compute_name| {
-        const run = b.addRunArtifact(shaderc_exe);
-        run.addArg("-f");
-        run.addFileArg(b.path(b.fmt("adapters/bgfx/shaders/{s}.sc", .{compute_name})));
-        run.addArg("-o");
-        const out_name = b.fmt("{s}.spirv.bin", .{compute_name});
-        const out = run.addOutputFileArg(out_name);
-        run.addArgs(&.{ "--type", "compute", "--platform", "android", "-p", "spirv" });
-        run.addArg("-i");
-        run.addDirectoryArg(b.path(".vendor/bgfx/src"));
-        _ = wf.addCopyFile(out, out_name);
-        source.appendSlice(b.allocator, b.fmt("pub const {s}_spirv = @embedFile(\"{s}\");\n", .{ compute_name, out_name })) catch @panic("oom");
+    const compute_backends = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
+        .{ .profile = "spirv", .platform = "android", .tag = "spirv" },
+        .{ .profile = "metal", .platform = "ios", .tag = "metal" },
+    };
+    // cs_nv12_to_rgba drives the native Vulkan path (spirv only); cs_particle
+    // runs the particle sim on the GPU on both backends.
+    const computes = [_]struct { name: []const u8, backends: []const []const u8 }{
+        .{ .name = "cs_nv12_to_rgba", .backends = &.{"spirv"} },
+        .{ .name = "cs_particle", .backends = &.{ "spirv", "metal" } },
+    };
+    for (computes) |compute| {
+        for (compute_backends) |be| {
+            var wanted = false;
+            for (compute.backends) |w| {
+                if (std.mem.eql(u8, w, be.tag)) wanted = true;
+            }
+            if (!wanted) continue;
+            const run = b.addRunArtifact(shaderc_exe);
+            run.addArg("-f");
+            run.addFileArg(b.path(b.fmt("adapters/bgfx/shaders/{s}.sc", .{compute.name})));
+            run.addArg("-o");
+            const out_name = b.fmt("{s}.{s}.bin", .{ compute.name, be.tag });
+            const out = run.addOutputFileArg(out_name);
+            run.addArgs(&.{ "--type", "compute", "--platform", be.platform, "-p", be.profile });
+            run.addArg("-i");
+            run.addDirectoryArg(b.path(".vendor/bgfx/src"));
+            _ = wf.addCopyFile(out, out_name);
+            source.appendSlice(b.allocator, b.fmt("pub const {s}_{s} = @embedFile(\"{s}\");\n", .{ compute.name, be.tag, out_name })) catch @panic("oom");
+        }
     }
     for (shaders) |shader| {
         for (profiles) |profile| {

@@ -1,0 +1,17 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.gpu-churn",
+  "version": "1.0.0",
+  "display_name": "GPU Churn",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "fx", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 300, "pattern": "fountain", "gravity": 9.8, "speed": 2.0, "lifetime": 2.5,
+                   "drag": 0.4, "wind": [4.0, 1.5, 0.0], "attract": [0.4, 0.6, 0.0], "attract_strength": 3.0, "vortex": 3.0,
+                   "turbulence": 2.0, "curl": 3.0,
+                   "fade": true, "glow": true, "size": 44, "color": [0.9, 0.8, 0.3], "gpu": true}}
+  ],
+  "triggers": []
+}

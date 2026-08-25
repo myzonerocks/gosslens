@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.spark-burst",
+  "version": "1.0.0",
+  "display_name": "Spark Burst",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "spark", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 200, "pattern": "burst", "gravity": 6.0, "speed": 3.0, "speed_spread": 0.6, "lifetime": 0.9, "lifetime_spread": 0.5, "drag": 0.8, "fade": true, "glow": true, "stretch": 2.5, "size": 6, "size_end": 1, "color": [1.0, 0.85, 0.35], "cool": [0.9, 0.2, 0.05]}}
+  ],
+  "triggers": []
+}

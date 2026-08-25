@@ -1970,6 +1970,47 @@ fn proveEventTrigger(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a trigger volume through the public ABI: a lens with a device.in_volume
+/// trigger and a manifest volume leaves its parameter at default while the
+/// submitted world pose sits outside the region and fires the action once the
+/// device is inside it - the pose never crosses the ABI, only the membership.
+fn proveVolumeTrigger(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const manifest =
+        \\{"glf":"1.0","id":"goss.reference.volume-trigger","version":"1.0.0","display_name":"Volume Trigger","engine_compat":">=0.5","capabilities":[],"parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],"nodes":[{"id":"grade","type":"grade.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[{"when":"device.in_volume","action":{"kind":"param_set","target":"intensity","to":1.0}}],"volume":{"center":[0.0,0.0,0.0],"radius":0.6}}
+    ;
+    const pname = "intensity";
+
+    // A world pose whose translation is well outside the radius-0.6 sphere.
+    var outside_pose = identity_pose;
+    outside_pose[12] = 2.0;
+
+    const cases = [_]struct { pose: [16]f32, want: f32 }{
+        .{ .pose = outside_pose, .want = 0.0 },
+        .{ .pose = identity_pose, .want = 1.0 }, // translation at the origin, inside
+    };
+    for (cases) |case| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        if (abi.goss_session_activate_lens(session, manifest.ptr, manifest.len) != .ok) {
+            std.debug.print("conformance: FAIL volume-trigger lens activation\n", .{});
+            return false;
+        }
+        var state: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = case.pose, .projection = identity_pose, .timestamp_us = 1000 };
+        if (abi.goss_session_submit_world(session, &state, null, 0, null, 0, null) != .ok) return error.SubmitFailed;
+        var sig = std.mem.zeroes(abi.LensSignals);
+        _ = abi.goss_session_tick_lens(session, 16000, &sig);
+        var value: f32 = -1;
+        _ = abi.goss_session_parameter_value(session, pname, pname.len, &value);
+        if (value != case.want) {
+            std.debug.print("conformance: FAIL volume trigger: wanted {d}, got {d}\n", .{ case.want, value });
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF a trigger volume fires device.in_volume only while the world pose is inside the region\n", .{});
+    return true;
+}
+
 /// Proves multi-source composition through the public ABI: a side-by-side
 /// layout puts the camera (a red frame) in the left half and a named source (a
 /// green frame) in the right half of the captured output, deterministically.
@@ -2488,6 +2529,1190 @@ fn provePhysicsChain(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Renders a physics reference lens for 86 frames and returns its settled
+/// 400x300 capture, so two joint types can be compared pixel for pixel.
+fn settledPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Settles a physics scene whose bodies are anchored to the tracked world:
+/// each frame submits a world state (a moving camera pose and one anchor) then
+/// the corpus frame, so the sim runs in world space and draws through the
+/// platform camera. Captures at frame 85.
+fn settledWorldPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const anchor = abi.WorldAnchor{ .id = 7, .pose = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } };
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        const replay = world_replay.stateAt(@intCast(i), 33_333, 4.0 / 3.0);
+        const state = abi.WorldState{
+            .tracking_state = replay.tracking_state,
+            .world_from_camera = @bitCast(replay.world_from_camera.cols),
+            .projection = @bitCast(replay.projection.cols),
+            .timestamp_us = replay.timestamp_us,
+        };
+        if (abi.goss_session_submit_world(session, &state, null, 0, @ptrCast(&anchor), 1, null) != .ok) return error.SubmitFailed;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = replay.timestamp_us };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves the point (ball) joint: a pendant pinned to its anchor by a point
+/// joint settles to its pivot, deterministically, at a place the same pendant
+/// hung on a distance chain does not - so the joint type genuinely changes the
+/// physics, each bit-stable across runs.
+fn provePhysicsPivot(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var pivot_settled: []u8 = &.{};
+    defer if (pivot_settled.len > 0) gpa.free(pivot_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-pivot");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            pivot_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL physics pivot is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const chain_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-chain");
+    defer gpa.free(chain_settled);
+    if (std.mem.eql(u8, pivot_settled, chain_settled)) {
+        std.debug.print("conformance: FAIL the point joint settled the same as the distance chain\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a point joint pins a pendant to its pivot, settling where a distance chain does not, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the fixed joint: a pendant welded to its anchor rides it rigidly,
+/// settling at a place neither the distance chain nor the freely-swinging point
+/// joint reaches, deterministically and bit-stable across runs.
+fn provePhysicsFixed(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var fixed_settled: []u8 = &.{};
+    defer if (fixed_settled.len > 0) gpa.free(fixed_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-fixed");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            fixed_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL physics fixed is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const chain_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-chain");
+    defer gpa.free(chain_settled);
+    const pivot_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-pivot");
+    defer gpa.free(pivot_settled);
+    if (std.mem.eql(u8, fixed_settled, chain_settled)) {
+        std.debug.print("conformance: FAIL the fixed joint settled the same as the distance chain\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, fixed_settled, pivot_settled)) {
+        std.debug.print("conformance: FAIL the fixed joint settled the same as the point joint\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a fixed joint welds a pendant to its anchor, settling where neither the distance chain nor the point joint does, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the hinge joint: a pendant hinged about a z axis at its anchor swings
+/// in one plane and settles where the point and fixed joints do not, its rigid
+/// single-axis arm reaching a different frame than any of the others, each
+/// bit-stable across runs.
+fn provePhysicsHinge(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var hinge_settled: []u8 = &.{};
+    defer if (hinge_settled.len > 0) gpa.free(hinge_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-hinge");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            hinge_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL physics hinge is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const point_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-pivot");
+    defer gpa.free(point_settled);
+    const fixed_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-fixed");
+    defer gpa.free(fixed_settled);
+    if (std.mem.eql(u8, hinge_settled, point_settled)) {
+        std.debug.print("conformance: FAIL the hinge joint settled the same as the point joint\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, hinge_settled, fixed_settled)) {
+        std.debug.print("conformance: FAIL the hinge joint settled the same as the fixed joint\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a hinge joint swings a pendant in one plane, settling where the point and fixed joints do not, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the spring joint: a pendant tethered by a soft spring stretches
+/// under gravity and settles lower than the same pendant on a rigid distance
+/// chain or hinge, and nowhere near the point or fixed joints, each
+/// bit-stable across runs.
+fn provePhysicsSpring(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var spring_settled: []u8 = &.{};
+    defer if (spring_settled.len > 0) gpa.free(spring_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-spring");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            spring_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL physics spring is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const chain_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-chain");
+    defer gpa.free(chain_settled);
+    const hinge_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-hinge");
+    defer gpa.free(hinge_settled);
+    if (std.mem.eql(u8, spring_settled, chain_settled)) {
+        std.debug.print("conformance: FAIL the spring joint settled the same as the rigid distance chain\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, spring_settled, hinge_settled)) {
+        std.debug.print("conformance: FAIL the spring joint settled the same as the hinge joint\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a spring joint stretches a pendant below where the rigid distance chain and hinge settle it, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves a 2D world of planar colliders: a planar sphere (circle) and a planar
+/// hull (polygon) drop onto a tilted incline. Confined to the plane they hold
+/// their ground where the free version of the same scene slides off in the
+/// third axis (the 2D spring and confinement are pinned by the module tests).
+fn provePhysics2dWorld(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var planar_settled: []u8 = &.{};
+    defer if (planar_settled.len > 0) gpa.free(planar_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/two-d-world");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            planar_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the 2D world is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const free_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/two-d-world-free");
+    defer gpa.free(free_settled);
+    if (std.mem.eql(u8, planar_settled, free_settled)) {
+        std.debug.print("conformance: FAIL the 2D world settled the same as the unconstrained 3D version\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a 2D world of a circle collider and a polygon collider holds its plane on a tilted incline where the free 3D scene slides off it, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves physics against a world-anchored mesh: a concave mesh and a ball,
+/// both anchored to the tracked world, settle in world space and draw through
+/// the platform camera - the ball comes to rest in the mesh valley where the
+/// same ball with no mesh keeps falling, bit-stable across runs.
+fn provePhysicsWorldMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var caught: []u8 = &.{};
+    defer if (caught.len > 0) gpa.free(caught);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledWorldPhysicsCapture(gpa, engine, ".lens-packages/world-mesh-collider");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            caught = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the world-anchored mesh scene is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const empty = try settledWorldPhysicsCapture(gpa, engine, ".lens-packages/world-mesh-empty");
+    defer gpa.free(empty);
+    if (std.mem.eql(u8, caught, empty)) {
+        std.debug.print("conformance: FAIL the world-anchored mesh did not change where the ball settles\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rests on a world-anchored mesh where the same ball with no mesh keeps falling, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Settles a physics scene after its glb geometry has decoded: a first frame
+/// plus pumpUntilLoaded builds any glb-derived collider before the sim runs (no
+/// frame advances it during the wait), so the fall is deterministic whatever
+/// the decode timing. Captures at frame 85.
+fn settledGlbPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const warm: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
+    if (abi.goss_session_submit_frame_copy(session, &warm, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    pumpUntilLoaded(engine, session);
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves a mesh collider auto-built from a node's own glb: a ball dropped onto
+/// a slab whose collider is the slab glb's own decoded geometry comes to rest on
+/// it, where the same slab with no physics lets the ball fall straight past.
+/// Bit-stable across runs.
+fn provePhysicsGlbCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var caught: []u8 = &.{};
+    defer if (caught.len > 0) gpa.free(caught);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledGlbPhysicsCapture(gpa, engine, ".lens-packages/glb-collider");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            caught = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the glb-collider scene is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const loose = try settledGlbPhysicsCapture(gpa, engine, ".lens-packages/glb-collider-loose");
+    defer gpa.free(loose);
+    if (std.mem.eql(u8, caught, loose)) {
+        std.debug.print("conformance: FAIL the glb-derived collider did not catch the ball\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rests on a collider built from a slab's own glb geometry where the same slab with no physics lets it fall past, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Settles a physics scene, optionally driving a grab: once the ball has come
+/// to rest, grab it, drag it up and to the side over several frames, and let
+/// go, so it is flung. Captures at frame 85.
+fn settledGrabCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8, do_grab: bool) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        if (do_grab) {
+            if (i == 12) _ = abi.goss_session_grab(session, 0.0, -0.13, 0.0);
+            if (i > 12 and i < 36) {
+                const t = @as(f32, @floatFromInt(i - 12)) / 24.0;
+                _ = abi.goss_session_grab(session, 0.35 * t, -0.13 + 0.72 * t, 0.0);
+            }
+            if (i == 36) _ = abi.goss_session_release(session);
+        }
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves grab and throw: a pointer grabs the resting ball, drags it up and
+/// aside, and releases it so it flies off - the settled frame lands far from
+/// the same scene left untouched, where the ball just rests. Bit-stable.
+fn proveGrabThrow(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var thrown: []u8 = &.{};
+    defer if (thrown.len > 0) gpa.free(thrown);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledGrabCapture(gpa, engine, ".lens-packages/grab-scene", true);
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            thrown = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the grab-throw is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const rested = try settledGrabCapture(gpa, engine, ".lens-packages/grab-scene", false);
+    defer gpa.free(rested);
+    if (std.mem.eql(u8, thrown, rested)) {
+        std.debug.print("conformance: FAIL the grab did not move the ball\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a pointer grabs the resting ball, drags it and throws it clear of where it rests untouched, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the 2D SPH fluid renders and flows: the block of fluid particles it
+/// starts as pools into a different shape by the settle frame, so the sim is
+/// on screen and running, and the settled frame is bit-stable across runs. The
+/// pooling itself is pinned by the sph module test.
+fn proveSphFluid(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var settled: []u8 = &.{};
+    defer if (settled.len > 0) gpa.free(settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = (try captureFountainAtFrame(gpa, engine, ".lens-packages/sph-pool", 85)) orelse return false;
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the sph fluid is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const early = (try captureFountainAtFrame(gpa, engine, ".lens-packages/sph-pool", 2)) orelse return false;
+    defer gpa.free(early);
+    if (std.mem.eql(u8, settled, early)) {
+        std.debug.print("conformance: FAIL the sph fluid did not flow\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a 2D SPH fluid renders and flows from its start block into a pool, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Settles a physics scene with face tracking on, so a head-following collider
+/// has a head to track. It first warms the tracker with frozen physics (a fixed
+/// timestamp advances no step) until a face result lands, so the head is being
+/// tracked before the ball falls; then it settles and captures at frame 85.
+fn settledHeadPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8) !?[]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const face_bytes = std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20)) catch return null;
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return null;
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    var warm: u32 = 0;
+    while (warm < 180) : (warm += 1) {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        var fr: abi.FaceResult = undefined;
+        if (abi.goss_session_face_result(session, &fr) == .ok) break;
+    }
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves a head collider driven off the tracked head pose: a ball dropped onto
+/// the tracked head comes to rest on the head-following collider where the same
+/// ball with no collider falls straight past. Bit-stable across runs.
+fn proveHeadCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var caught: []u8 = &.{};
+    defer if (caught.len > 0) gpa.free(caught);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = (try settledHeadPhysicsCapture(gpa, engine, ".lens-packages/head-collider")) orelse return true;
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            caught = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the head collider scene is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const nocollider = (try settledHeadPhysicsCapture(gpa, engine, ".lens-packages/head-nocollider")) orelse return true;
+    defer gpa.free(nocollider);
+    if (std.mem.eql(u8, caught, nocollider)) {
+        std.debug.print("conformance: FAIL the head collider did not stop the ball\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rests on a collider driven to the tracked head where the same ball with no collider falls past, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Settles a scene over a live collider added at runtime under the ball; when
+/// `erase` is set the collider is erased partway, so the resting ball falls.
+/// Captures at frame 85.
+fn settledLiveColliderCapture(gpa: std.mem.Allocator, engine: *abi.Engine, erase: bool) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/live-collider", ".lens-packages/live-collider".len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    _ = abi.goss_session_add_collider(session, 0.0, -0.15, 0.0);
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        if (erase and i == 45) _ = abi.goss_session_erase_collider(session, 0.0, -0.15, 0.0, 0.3);
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 85) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves erasable live colliders: a ball rests on a collider added under it at
+/// runtime, and when that collider is erased partway the ball drops - the same
+/// scene lands the ball in two different places. Bit-stable across runs.
+fn proveLiveCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var resting: []u8 = &.{};
+    defer if (resting.len > 0) gpa.free(resting);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledLiveColliderCapture(gpa, engine, false);
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            resting = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the live collider scene is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const erased = try settledLiveColliderCapture(gpa, engine, true);
+    defer gpa.free(erased);
+    if (std.mem.eql(u8, resting, erased)) {
+        std.debug.print("conformance: FAIL erasing the live collider did not drop the ball\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rests on a live collider added under it and drops when that collider is erased, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves GPU mesh instancing: a 3D-mesh particle cloud drawn in one instanced
+/// call renders the same image as the same cloud drawn one mesh per particle,
+/// so the instanced path is correct. It is stable and on screen (an early frame
+/// differs from a later one), and matches the per-draw cloud.
+fn proveMeshInstancing(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const inst0 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/mesh-instanced", 40)) orelse return false;
+    defer gpa.free(inst0);
+    const inst1 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/mesh-instanced", 40)) orelse return false;
+    defer gpa.free(inst1);
+    if (!std.mem.eql(u8, inst0, inst1)) {
+        std.debug.print("conformance: FAIL the instanced mesh cloud is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const early = (try captureFountainAtFrame(gpa, engine, ".lens-packages/mesh-instanced", 4)) orelse return false;
+    defer gpa.free(early);
+    if (std.mem.eql(u8, inst0, early)) {
+        std.debug.print("conformance: FAIL the instanced mesh cloud drew nothing dynamic\n", .{});
+        return false;
+    }
+    const plain = (try captureFountainAtFrame(gpa, engine, ".lens-packages/mesh-plain", 40)) orelse return false;
+    defer gpa.free(plain);
+    if (frameDiffFraction(inst0, plain, 16) > 0.005) {
+        std.debug.print("conformance: FAIL the instanced mesh cloud does not match the per-draw cloud\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a mesh particle cloud drawn in one instanced call matches the per-draw cloud, stable and on screen\n", .{});
+    return true;
+}
+
+/// Proves rich text styling: the same string with a gradient, a drop shadow
+/// and a stroke outline renders a different frame from the plain-fill text, so
+/// the styling draws, and it is bit-stable across runs. The rasterizer's own
+/// coverage is pinned by the font module test.
+fn proveRichText(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const rich0 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-rich", 10)) orelse return false;
+    defer gpa.free(rich0);
+    const rich1 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-rich", 10)) orelse return false;
+    defer gpa.free(rich1);
+    if (!std.mem.eql(u8, rich0, rich1)) {
+        std.debug.print("conformance: FAIL rich text is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const plain = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-plain", 10)) orelse return false;
+    defer gpa.free(plain);
+    if (std.mem.eql(u8, rich0, plain)) {
+        std.debug.print("conformance: FAIL rich text styling did not change the frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF gradient, shadow and stroke restyle a text label away from the plain fill, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves extruded 3D text: the same string with a depth draws as a rotated 3D
+/// block mesh through the model path, a different frame from the flat sprite
+/// text, and bit-stable across runs. The block mesh itself is pinned by the
+/// font module test.
+fn proveExtrudedText(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const solid0 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-3d", 10)) orelse return false;
+    defer gpa.free(solid0);
+    const solid1 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-3d", 10)) orelse return false;
+    defer gpa.free(solid1);
+    if (!std.mem.eql(u8, solid0, solid1)) {
+        std.debug.print("conformance: FAIL extruded 3D text is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const flat = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-flat", 10)) orelse return false;
+    defer gpa.free(flat);
+    if (std.mem.eql(u8, solid0, flat)) {
+        std.debug.print("conformance: FAIL extruded text drew the same as the flat text\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a text label extrudes into a rotated 3D block mesh, a different frame from the flat sprite text, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Paints one fixture frame: a bright band on a dark field, its column
+/// sweeping left to right across the clip, so a decoded frame reveals how
+/// far playback has advanced.
+fn paintSweepFrame(rgba: []u8, w: u32, h: u32, i: u32, n: u32) void {
+    const span = w - 40;
+    const band: u32 = if (n > 1) (i * span) / (n - 1) else 0;
+    for (0..h) |y| {
+        for (0..w) |x| {
+            const at = (y * w + x) * 4;
+            const on = x >= band and x < band + 40;
+            rgba[at + 0] = if (on) 250 else 24;
+            rgba[at + 1] = if (on) 40 else 24;
+            rgba[at + 2] = if (on) 40 else @intCast((i * 5) % 200);
+            rgba[at + 3] = 255;
+        }
+    }
+}
+
+/// Encodes a short deterministic clip through the recording rail so the
+/// video-texture proof has a real MP4 to decode back. The sweeping band
+/// makes each frame distinct, so playback advancing is observable.
+fn encodeVideoFixture(gpa: std.mem.Allocator, engine: *abi.Engine, path: []const u8) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) return false;
+    if (abi.goss_engine_recording_start(engine, session, path.ptr, path.len, null) != .ok) return false;
+
+    const w: u32 = 400;
+    const h: u32 = 300;
+    const rgba = try gpa.alloc(u8, @as(usize, w) * h * 4);
+    defer gpa.free(rgba);
+    const total: u32 = 56;
+    for (0..total) |i| {
+        paintSweepFrame(rgba, w, h, @intCast(i), total);
+        const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = rgba }, .width = w, .height = h });
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return false;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_recording_stop(engine) != .ok) return false;
+    const shape = abi.recordingProbe(path) catch return false;
+    // The late capture reads ~27 frames in; the clip must be at least that
+    // long so playback lands mid-clip rather than looping back to the start.
+    return shape.frames >= 32 and shape.width == w and shape.height == h;
+}
+
+fn writeVideoLens(dir: []const u8, clip: []const u8, fps: f32) !void {
+    const manifest_json = try std.fmt.allocPrint(std.heap.page_allocator,
+        \\{{"glf":"1.0","id":"goss.reference.video-texture","version":"1.0.0","display_name":"Video Texture","engine_compat":">=0.5","capabilities":[],"parameters":[],
+        \\ "nodes":[{{"id":"clip","type":"video.texture","inputs":{{"frame":"camera"}},"params":{{}},
+        \\ "video":{{"source":"clip","x":0.2,"y":0.2,"w":0.6,"h":0.6,"fps":{d:.1},"loop":true}}}}],"triggers":[]}}
+    , .{fps});
+    defer std.heap.page_allocator.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/clip.mp4", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = clip });
+}
+
+/// Proves the video texture through a real MP4 round trip: a clip encoded
+/// through the recording rail decodes back onto a sprite. A late frame
+/// differs from an early one (playback advances off the frame clock), the
+/// late frame is bit-stable, and an fps-0 lens holds the first frame.
+fn proveVideoTexture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/video-lens/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/video-static/assets");
+    if (!try encodeVideoFixture(gpa, engine, "zig-out/conformance-video.mp4")) {
+        std.debug.print("conformance: FAIL the video fixture did not encode\n", .{});
+        return false;
+    }
+    const clip = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-video.mp4", gpa, .limited(64 << 20));
+    defer gpa.free(clip);
+    try writeVideoLens("zig-out/video-lens", clip, 10.0);
+    try writeVideoLens("zig-out/video-static", clip, 0.0);
+
+    const early = (try captureFountainAtFrame(gpa, engine, "zig-out/video-lens", 5)) orelse return false;
+    defer gpa.free(early);
+    const late = (try captureFountainAtFrame(gpa, engine, "zig-out/video-lens", 80)) orelse return false;
+    defer gpa.free(late);
+    const late2 = (try captureFountainAtFrame(gpa, engine, "zig-out/video-lens", 80)) orelse return false;
+    defer gpa.free(late2);
+    const held = (try captureFountainAtFrame(gpa, engine, "zig-out/video-static", 80)) orelse return false;
+    defer gpa.free(held);
+
+    if (!std.mem.eql(u8, late, late2)) {
+        std.debug.print("conformance: FAIL the decoded video frame is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, early, late)) {
+        std.debug.print("conformance: FAIL the video did not advance between an early and a late frame\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, late, held)) {
+        std.debug.print("conformance: FAIL a paused (fps 0) clip drew the same frame as a playing one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a recorded MP4 decodes onto a sprite and advances off the lens clock, bit-stable, with a paused clip holding its first frame\n", .{});
+    return true;
+}
+
+/// Proves the cylinder collider shape: the same marker dropped as a cylinder
+/// lands flat on its base and rests a half height up, where the sphere marker
+/// of the identical drop lens settles far lower - so the shape, not the model,
+/// drives the contact - each bit-stable across runs.
+fn provePhysicsShapeCylinder(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var cyl_settled: []u8 = &.{};
+    defer if (cyl_settled.len > 0) gpa.free(cyl_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/shape-cylinder");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            cyl_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL cylinder shape is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const sphere_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-drop");
+    defer gpa.free(sphere_settled);
+    if (std.mem.eql(u8, cyl_settled, sphere_settled)) {
+        std.debug.print("conformance: FAIL the cylinder marker settled the same as the sphere marker\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a cylinder marker rests a half height up where the identical sphere-marker drop settles lower, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the capsule collider and oriented bodies: a capsule laid on its side
+/// bridges a gap between two pillars, resting high, where a sphere of its
+/// radius drops straight through the same gap to the floor - so both the
+/// elongated shape and the body rotation take effect - each bit-stable.
+fn provePhysicsShapeCapsule(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var cap_settled: []u8 = &.{};
+    defer if (cap_settled.len > 0) gpa.free(cap_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/shape-capsule");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            cap_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL capsule shape is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const sphere_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/gap-sphere");
+    defer gpa.free(sphere_settled);
+    if (std.mem.eql(u8, cap_settled, sphere_settled)) {
+        std.debug.print("conformance: FAIL the bridging capsule settled the same as the sphere falling through the gap\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a side-laid capsule bridges a gap a sphere of its radius falls straight through, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves declarative jiggle: a jiggle chain builds hidden spring-linked proxy
+/// bodies that hang its ornament well below the anchor, where the same ornament
+/// rigidly welded rides at it - so the multi-link chain assembled and simulates,
+/// bit-stable. The secondary-motion lag itself is covered by the physics unit test.
+fn provePhysicsJiggle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var jiggle_settled: []u8 = &.{};
+    defer if (jiggle_settled.len > 0) gpa.free(jiggle_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/jiggle-ornament");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            jiggle_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the jiggle chain is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const rigid_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/rigid-ornament");
+    defer gpa.free(rigid_settled);
+    if (std.mem.eql(u8, jiggle_settled, rigid_settled)) {
+        std.debug.print("conformance: FAIL the jiggle ornament settled the same as the rigidly welded one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a jiggle chain hangs its ornament below the anchor where a rigid weld rides at it, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves per-body material: the same block set on the same slope holds near
+/// where it sits when it is grippy but runs to the base when it is slippery, so
+/// friction alone changes where it settles, each bit-stable across runs.
+fn provePhysicsFriction(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var grip_settled: []u8 = &.{};
+    defer if (grip_settled.len > 0) gpa.free(grip_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/friction-grip");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            grip_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the grippy block is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const slide_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/friction-slide");
+    defer gpa.free(slide_settled);
+    if (std.mem.eql(u8, grip_settled, slide_settled)) {
+        std.debug.print("conformance: FAIL the grippy block settled the same as the slippery one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a grippy block holds on a slope where a slippery one of the same shape runs to the base, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the convex-hull collider: the same ball dropped on a wedge-shaped
+/// hull rolls down its sloped face and off the low edge, where on a flat-topped
+/// box it stays where it lands, so the hull points shape the contact, each
+/// bit-stable across runs.
+fn provePhysicsHull(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var wedge_settled: []u8 = &.{};
+    defer if (wedge_settled.len > 0) gpa.free(wedge_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/hull-wedge");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            wedge_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the hull wedge is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const box_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/box-block");
+    defer gpa.free(box_settled);
+    if (std.mem.eql(u8, wedge_settled, box_settled)) {
+        std.debug.print("conformance: FAIL the ball on the hull wedge settled the same as on the flat box\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball rolls down a wedge-shaped convex hull where on a flat box it stays put, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves restitution: a bouncy ball is still rebounding above the floor at the
+/// settle frame where a dead ball of the same drop has come to rest, so the
+/// material's restitution changes the motion, each bit-stable across runs.
+fn provePhysicsRestitution(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var bouncy_settled: []u8 = &.{};
+    defer if (bouncy_settled.len > 0) gpa.free(bouncy_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/bounce-high");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            bouncy_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the bouncy ball is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const dead_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/bounce-dead");
+    defer gpa.free(dead_settled);
+    if (std.mem.eql(u8, bouncy_settled, dead_settled)) {
+        std.debug.print("conformance: FAIL the bouncy ball settled the same as the dead one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a bouncy ball still rides above the floor where a dead ball of the same drop has come to rest, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the concave mesh collider: a ball settles at the bottom of a V-groove
+/// triangle mesh where on the convex hull of the very same points it rests up on
+/// the filled-in top, so the mesh keeps a concavity a hull cannot, each
+/// bit-stable across runs.
+fn provePhysicsMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var mesh_settled: []u8 = &.{};
+    defer if (mesh_settled.len > 0) gpa.free(mesh_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/mesh-valley");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            mesh_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the mesh valley is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const hull_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/hull-valley");
+    defer gpa.free(hull_settled);
+    if (std.mem.eql(u8, mesh_settled, hull_settled)) {
+        std.debug.print("conformance: FAIL the ball in the mesh valley settled the same as on the hull of the same points\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a ball settles in a concave mesh valley where the convex hull of the same points holds it up on top, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the pressurised soft-body balloon: the same shell with internal
+/// pressure inflates to a fuller shape than the limp one at zero pressure, so
+/// the pressure drives the deformation, each bit-stable across runs.
+fn provePhysicsBalloon(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var inflated_settled: []u8 = &.{};
+    defer if (inflated_settled.len > 0) gpa.free(inflated_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/balloon-inflated");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            inflated_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the inflated balloon is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const limp_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/balloon-limp");
+    defer gpa.free(limp_settled);
+    if (std.mem.eql(u8, inflated_settled, limp_settled)) {
+        std.debug.print("conformance: FAIL the inflated balloon settled the same as the limp one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a pressurised soft-body balloon inflates to a fuller shape than the same shell left limp, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves a free soft body colliding with rigid geometry: an unpinned shell
+/// dropped on a floor holds a full shape when firm but collapses flat when
+/// limp, so pressure resists the deformation the impact and gravity apply,
+/// each bit-stable across runs.
+fn provePhysicsSoftBody(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var firm_settled: []u8 = &.{};
+    defer if (firm_settled.len > 0) gpa.free(firm_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/soft-firm");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            firm_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the firm soft body is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const squish_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/soft-squish");
+    defer gpa.free(squish_settled);
+    if (std.mem.eql(u8, firm_settled, squish_settled)) {
+        std.debug.print("conformance: FAIL the firm soft body settled the same as the limp one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a firm soft body holds its shape on a floor where a limp one collapses flat, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves 2D physics: a planar body on a z-sloped incline is confined to the
+/// z plane and rests in view where the same body free in 3D slides off in z, so
+/// the planar constraint drives a 2D world, each bit-stable across runs.
+fn provePhysicsPlanar(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var planar_settled: []u8 = &.{};
+    defer if (planar_settled.len > 0) gpa.free(planar_settled);
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const shot = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-planar");
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            planar_settled = shot;
+        } else {
+            defer gpa.free(shot);
+            if (!std.mem.eql(u8, &first_hash, &hash)) {
+                std.debug.print("conformance: FAIL the planar body is not bit-stable across runs\n", .{});
+                return false;
+            }
+        }
+    }
+    const free_settled = try settledPhysicsCapture(gpa, engine, ".lens-packages/physics-free3d");
+    defer gpa.free(free_settled);
+    if (std.mem.eql(u8, planar_settled, free_settled)) {
+        std.debug.print("conformance: FAIL the planar body settled the same as the free 3D one\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a planar body holds in the z plane where the same body free in 3D slides off in z, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves lens cloth: a simulated flag drapes under gravity across
 /// advancing frames, the settled frame differs from the initial, and
 /// two runs land bit-identical.
@@ -2876,6 +4101,559 @@ fn proveParticlePatterns(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     try png.encodeRgba(gpa, &png_bytes, settled[0], 400, 300);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-snow-fall.png", .data = png_bytes.items });
     std.debug.print("conformance: PROOF emission patterns, forces and colour render distinctly (rain snow vs spinning burst confetti), each bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves particle trails: the comet-trail lens draws each particle's recent
+/// positions as a fading tail behind it, so its settled frame differs from the
+/// comet-plain lens - identical particles with the trail off - which draws only
+/// the heads. Both stay bit-stable across runs.
+fn proveParticleTrail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const lenses = [_][]const u8{ ".lens-packages/comet-trail", ".lens-packages/comet-plain" };
+    var settled: [2][]u8 = .{ &.{}, &.{} };
+    defer for (settled) |s| if (s.len > 0) gpa.free(s);
+
+    for (lenses, 0..) |pkg, lens_idx| {
+        var first_hash: [64]u8 = undefined;
+        var runs: u32 = 0;
+        while (runs < 2) : (runs += 1) {
+            const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(engine);
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL comet lens activation\n", .{});
+                return false;
+            }
+            const corpus = try loadCorpusFrame(gpa, corpus_path);
+            defer corpus.deinit();
+            const planes = try rgbaToNv12(gpa, corpus.frame);
+            defer planes.deinit(gpa);
+            const half_w = (planes.width + 1) / 2;
+
+            var this_settled: []u8 = &.{};
+            defer if (this_settled.len > 0) gpa.free(this_settled);
+
+            for (0..90) |i| {
+                const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+                if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(engine, session);
+                c.glfwPollEvents();
+                if (i == 85) {
+                    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                    errdefer gpa.free(shot);
+                    var w: u32 = 0;
+                    var h: u32 = 0;
+                    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                        gpa.free(shot);
+                        return false;
+                    }
+                    this_settled = shot;
+                }
+            }
+            var digest: [32]u8 = undefined;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(this_settled);
+            hasher.final(&digest);
+            const hash = std.fmt.bytesToHex(digest, .lower);
+            if (runs == 0) {
+                first_hash = hash;
+            } else {
+                if (!std.mem.eql(u8, &first_hash, &hash)) {
+                    std.debug.print("conformance: FAIL a comet lens is not bit-stable across runs\n", .{});
+                    return false;
+                }
+                settled[lens_idx] = this_settled;
+                this_settled = &.{};
+            }
+        }
+    }
+    if (std.mem.eql(u8, settled[0], settled[1])) {
+        std.debug.print("conformance: FAIL the trail drew nothing the plain comet did not\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF particle trails draw a fading tail: the trailed comet differs from the same comet with no trail, each bit-stable\n", .{});
+    return true;
+}
+
+/// Proves the prebuilt VFX asset library: a node whose particles name only the
+/// `fire` preset renders exactly the same frame as the hand-tuned flame lens, so
+/// the preset expands to the curated config, each bit-stable across runs.
+fn provePresetLibrary(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const lenses = [_][]const u8{ ".lens-packages/preset-fire", ".lens-packages/flame-curl" };
+    var settled: [2][]u8 = .{ &.{}, &.{} };
+    defer for (settled) |s| if (s.len > 0) gpa.free(s);
+    for (lenses, 0..) |pkg, lens_idx| {
+        var first_hash: [64]u8 = undefined;
+        var runs: u32 = 0;
+        while (runs < 2) : (runs += 1) {
+            const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(engine);
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL preset lens activation\n", .{});
+                return false;
+            }
+            const corpus = try loadCorpusFrame(gpa, corpus_path);
+            defer corpus.deinit();
+            const planes = try rgbaToNv12(gpa, corpus.frame);
+            defer planes.deinit(gpa);
+            const half_w = (planes.width + 1) / 2;
+            var this_settled: []u8 = &.{};
+            defer if (this_settled.len > 0) gpa.free(this_settled);
+            for (0..90) |i| {
+                const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+                if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(engine, session);
+                c.glfwPollEvents();
+                if (i == 85) {
+                    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                    errdefer gpa.free(shot);
+                    var w: u32 = 0;
+                    var h: u32 = 0;
+                    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                        gpa.free(shot);
+                        return false;
+                    }
+                    this_settled = shot;
+                }
+            }
+            var digest: [32]u8 = undefined;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(this_settled);
+            hasher.final(&digest);
+            const hash = std.fmt.bytesToHex(digest, .lower);
+            if (runs == 0) {
+                first_hash = hash;
+            } else {
+                if (!std.mem.eql(u8, &first_hash, &hash)) {
+                    std.debug.print("conformance: FAIL a preset lens is not bit-stable across runs\n", .{});
+                    return false;
+                }
+                settled[lens_idx] = this_settled;
+                this_settled = &.{};
+            }
+        }
+    }
+    if (!std.mem.eql(u8, settled[0], settled[1])) {
+        std.debug.print("conformance: FAIL the fire preset did not expand to the hand-tuned flame config\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the fire VFX preset renders identically to the hand-tuned flame lens, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// The fraction of pixels where any channel differs by more than `delta`.
+fn frameDiffFraction(a: []const u8, b: []const u8, delta: u8) f32 {
+    if (a.len != b.len or a.len == 0) return 1.0;
+    var differing: usize = 0;
+    var i: usize = 0;
+    while (i + 4 <= a.len) : (i += 4) {
+        const dr = if (a[i] > b[i]) a[i] - b[i] else b[i] - a[i];
+        const dg = if (a[i + 1] > b[i + 1]) a[i + 1] - b[i + 1] else b[i + 1] - a[i + 1];
+        const db = if (a[i + 2] > b[i + 2]) a[i + 2] - b[i + 2] else b[i + 2] - a[i + 2];
+        if (dr > delta or dg > delta or db > delta) differing += 1;
+    }
+    return @as(f32, @floatFromInt(differing)) / @as(f32, @floatFromInt(a.len / 4));
+}
+
+fn captureFountain(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []const u8) !?[]u8 {
+    return captureFountainAtFrame(gpa, engine, pkg, 85);
+}
+
+fn captureFountainAtFrame(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []const u8, capture_frame: usize) !?[]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) return null;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    var settled: []u8 = &.{};
+    for (0..90) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == capture_frame) {
+            settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(settled);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return settled;
+}
+
+/// Proves the GPU-compute particle path: a fountain simmed on the GPU renders a
+/// stable frame that closely tracks the same fountain simmed on the CPU (they
+/// share the emit and integration math, off only by GPU float rounding), so the
+/// compute path stays in sync with the deterministic baseline.
+fn proveGpuParticles(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First confirm the GPU compute path is actually taken here; a backend
+    // without compute falls back to the CPU sim, which is already proven.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const pkg = ".lens-packages/gpu-fountain";
+        if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) return false;
+        if (abi.activeGpuParticleSims(session) == 0) {
+            std.debug.print("conformance: gpu-particles skipped - no compute backend here, the CPU sim runs and is already proven\n", .{});
+            return true;
+        }
+    }
+    const gpu0 = (try captureFountain(gpa, engine, ".lens-packages/gpu-fountain")) orelse return false;
+    defer gpa.free(gpu0);
+    const gpu1 = (try captureFountain(gpa, engine, ".lens-packages/gpu-fountain")) orelse return false;
+    defer gpa.free(gpu1);
+    if (!std.mem.eql(u8, gpu0, gpu1)) {
+        std.debug.print("conformance: FAIL the GPU fountain is not stable across runs\n", .{});
+        return false;
+    }
+    const cpu = (try captureFountain(gpa, engine, ".lens-packages/cpu-fountain")) orelse return false;
+    defer gpa.free(cpu);
+    // The GPU and CPU share the emit and integration math, so their frames
+    // track within GPU float rounding (here they land pixel-identical).
+    if (frameDiffFraction(gpu0, cpu, 16) > 0.15) {
+        std.debug.print("conformance: FAIL the GPU fountain does not track the CPU fountain\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a GPU-compute fountain renders on the compute path, stable across runs and tracking the CPU fountain\n", .{});
+    return true;
+}
+
+/// Proves the GPU compute path runs the force set beyond gravity: the exact-op
+/// forces (drag, wind, an attractor, a vortex) drive the fountain far from plain
+/// gravity yet pixel-identical to the CPU, and turbulence and curl churn the
+/// compute render further. Bit-stable across runs.
+fn proveGpuForces(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const pkg = ".lens-packages/gpu-swirl";
+        if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) return false;
+        if (abi.activeGpuParticleSims(session) == 0) {
+            std.debug.print("conformance: gpu-forces skipped - no compute backend here, the CPU sim runs and is already proven\n", .{});
+            return true;
+        }
+    }
+    const gpu0 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/gpu-swirl", 55)) orelse return false;
+    defer gpa.free(gpu0);
+    const gpu1 = (try captureFountainAtFrame(gpa, engine, ".lens-packages/gpu-swirl", 55)) orelse return false;
+    defer gpa.free(gpu1);
+    if (!std.mem.eql(u8, gpu0, gpu1)) {
+        std.debug.print("conformance: FAIL the GPU swirl is not stable across runs\n", .{});
+        return false;
+    }
+    const plain = (try captureFountainAtFrame(gpa, engine, ".lens-packages/gpu-fountain", 55)) orelse return false;
+    defer gpa.free(plain);
+    const cpu = (try captureFountainAtFrame(gpa, engine, ".lens-packages/cpu-swirl", 55)) orelse return false;
+    defer gpa.free(cpu);
+    const churn = (try captureFountainAtFrame(gpa, engine, ".lens-packages/gpu-churn", 55)) orelse return false;
+    defer gpa.free(churn);
+    // The exact-op force set (drag, wind, an attractor and a vortex) drives the
+    // fountain into a form far from plain gravity.
+    if (frameDiffFraction(gpu0, plain, 16) < 0.15) {
+        std.debug.print("conformance: FAIL the GPU force set did not visibly change the fountain from plain gravity\n", .{});
+        return false;
+    }
+    // Those forces are exact float ops, so the GPU compute path lands pixel-for-
+    // pixel on the CPU sim running the identical config.
+    if (frameDiffFraction(gpu0, cpu, 16) > 0.005) {
+        std.debug.print("conformance: FAIL the GPU swirl does not track the CPU swirl\n", .{});
+        return false;
+    }
+    // Turbulence and curl (transcendental forces) also drive the compute path:
+    // adding them to the same swirl visibly churns the render.
+    if (frameDiffFraction(churn, gpu0, 16) < 0.03) {
+        std.debug.print("conformance: FAIL turbulence and curl did not act on the GPU compute path\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the GPU compute path runs the force set beyond gravity - drag, wind, an attractor and a vortex driving the fountain far from plain gravity and pixel-identical to the CPU, with turbulence and curl churning it further\n", .{});
+    return true;
+}
+
+/// Proves the sub-emitter: a firework whose shells burst into child sparks
+/// renders a different frame from the same emitter with no sub-emitter, so the
+/// children the parents spawn on death are drawn, each bit-stable across runs.
+fn proveSubEmitter(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const lenses = [_][]const u8{ ".lens-packages/firework-burst", ".lens-packages/firework-plain" };
+    var settled: [2][]u8 = .{ &.{}, &.{} };
+    defer for (settled) |s| if (s.len > 0) gpa.free(s);
+    for (lenses, 0..) |pkg, lens_idx| {
+        var first_hash: [64]u8 = undefined;
+        var runs: u32 = 0;
+        while (runs < 2) : (runs += 1) {
+            const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(engine);
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL firework lens activation\n", .{});
+                return false;
+            }
+            const corpus = try loadCorpusFrame(gpa, corpus_path);
+            defer corpus.deinit();
+            const planes = try rgbaToNv12(gpa, corpus.frame);
+            defer planes.deinit(gpa);
+            const half_w = (planes.width + 1) / 2;
+            var this_settled: []u8 = &.{};
+            defer if (this_settled.len > 0) gpa.free(this_settled);
+            for (0..90) |i| {
+                const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+                if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(engine, session);
+                c.glfwPollEvents();
+                if (i == 85) {
+                    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                    errdefer gpa.free(shot);
+                    var w: u32 = 0;
+                    var h: u32 = 0;
+                    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                        gpa.free(shot);
+                        return false;
+                    }
+                    this_settled = shot;
+                }
+            }
+            var digest: [32]u8 = undefined;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(this_settled);
+            hasher.final(&digest);
+            const hash = std.fmt.bytesToHex(digest, .lower);
+            if (runs == 0) {
+                first_hash = hash;
+            } else {
+                if (!std.mem.eql(u8, &first_hash, &hash)) {
+                    std.debug.print("conformance: FAIL a firework lens is not bit-stable across runs\n", .{});
+                    return false;
+                }
+                settled[lens_idx] = this_settled;
+                this_settled = &.{};
+            }
+        }
+    }
+    if (std.mem.eql(u8, settled[0], settled[1])) {
+        std.debug.print("conformance: FAIL the sub-emitter drew nothing the plain firework did not\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a sub-emitter bursts child sparks: the firework differs from the same emitter with no sub-emitter, each bit-stable\n", .{});
+    return true;
+}
+
+/// Proves particle sphere colliders: the collide-sphere lens drops rain onto a
+/// sphere the particles bounce off, so its settled frame differs from the
+/// collide-none lens - the same rain with no collider - which falls straight
+/// through. Both stay bit-stable across runs.
+fn proveParticleCollider(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const lenses = [_][]const u8{ ".lens-packages/collide-sphere", ".lens-packages/collide-none" };
+    var settled: [2][]u8 = .{ &.{}, &.{} };
+    defer for (settled) |s| if (s.len > 0) gpa.free(s);
+
+    for (lenses, 0..) |pkg, lens_idx| {
+        var first_hash: [64]u8 = undefined;
+        var runs: u32 = 0;
+        while (runs < 2) : (runs += 1) {
+            const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(engine);
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL collide lens activation\n", .{});
+                return false;
+            }
+            const corpus = try loadCorpusFrame(gpa, corpus_path);
+            defer corpus.deinit();
+            const planes = try rgbaToNv12(gpa, corpus.frame);
+            defer planes.deinit(gpa);
+            const half_w = (planes.width + 1) / 2;
+
+            var this_settled: []u8 = &.{};
+            defer if (this_settled.len > 0) gpa.free(this_settled);
+
+            for (0..90) |i| {
+                const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+                if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(engine, session);
+                c.glfwPollEvents();
+                if (i == 85) {
+                    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                    errdefer gpa.free(shot);
+                    var w: u32 = 0;
+                    var h: u32 = 0;
+                    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                        gpa.free(shot);
+                        return false;
+                    }
+                    this_settled = shot;
+                }
+            }
+            var digest: [32]u8 = undefined;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(this_settled);
+            hasher.final(&digest);
+            const hash = std.fmt.bytesToHex(digest, .lower);
+            if (runs == 0) {
+                first_hash = hash;
+            } else {
+                if (!std.mem.eql(u8, &first_hash, &hash)) {
+                    std.debug.print("conformance: FAIL a collide lens is not bit-stable across runs\n", .{});
+                    return false;
+                }
+                settled[lens_idx] = this_settled;
+                this_settled = &.{};
+            }
+        }
+    }
+    if (std.mem.eql(u8, settled[0], settled[1])) {
+        std.debug.print("conformance: FAIL the sphere collider deflected nothing\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF particle sphere colliders deflect the sim: rain onto a collider differs from the same rain with none, each bit-stable\n", .{});
+    return true;
+}
+
+/// Proves 3D-mesh particles: the mesh-orbs lens draws each particle as a small
+/// 3D octahedron, so its settled frame differs from the mesh-orbs-flat lens -
+/// the same fountain drawn as flat billboards. Both stay bit-stable across
+/// runs.
+fn proveMeshParticles(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const lenses = [_][]const u8{ ".lens-packages/mesh-orbs", ".lens-packages/mesh-orbs-flat" };
+    var settled: [2][]u8 = .{ &.{}, &.{} };
+    defer for (settled) |s| if (s.len > 0) gpa.free(s);
+
+    for (lenses, 0..) |pkg, lens_idx| {
+        var first_hash: [64]u8 = undefined;
+        var runs: u32 = 0;
+        while (runs < 2) : (runs += 1) {
+            const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(engine);
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL mesh-orbs lens activation\n", .{});
+                return false;
+            }
+            const corpus = try loadCorpusFrame(gpa, corpus_path);
+            defer corpus.deinit();
+            const planes = try rgbaToNv12(gpa, corpus.frame);
+            defer planes.deinit(gpa);
+            const half_w = (planes.width + 1) / 2;
+
+            var this_settled: []u8 = &.{};
+            defer if (this_settled.len > 0) gpa.free(this_settled);
+
+            for (0..90) |i| {
+                const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+                if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(engine, session);
+                c.glfwPollEvents();
+                if (i == 85) {
+                    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                    errdefer gpa.free(shot);
+                    var w: u32 = 0;
+                    var h: u32 = 0;
+                    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                        gpa.free(shot);
+                        return false;
+                    }
+                    this_settled = shot;
+                }
+            }
+            var digest: [32]u8 = undefined;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(this_settled);
+            hasher.final(&digest);
+            const hash = std.fmt.bytesToHex(digest, .lower);
+            if (runs == 0) {
+                first_hash = hash;
+            } else {
+                if (!std.mem.eql(u8, &first_hash, &hash)) {
+                    std.debug.print("conformance: FAIL a mesh-orbs lens is not bit-stable across runs\n", .{});
+                    return false;
+                }
+                settled[lens_idx] = this_settled;
+                this_settled = &.{};
+            }
+        }
+    }
+    if (std.mem.eql(u8, settled[0], settled[1])) {
+        std.debug.print("conformance: FAIL mesh particles rendered the same as flat billboards\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF 3D-mesh particles draw as solid shapes: mesh orbs render differently from the same fountain as flat billboards, each bit-stable\n", .{});
+    return true;
+}
+
+/// Proves particle ribbons: the ribbon-comet lens draws each particle's trail
+/// history as one solid connected strip, so its settled frame differs from the
+/// ribbon-comet-bb lens - the same trail drawn as separate fading billboards.
+/// Both stay bit-stable across runs.
+fn proveRibbon(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const lenses = [_][]const u8{ ".lens-packages/ribbon-comet", ".lens-packages/ribbon-comet-bb" };
+    var settled: [2][]u8 = .{ &.{}, &.{} };
+    defer for (settled) |s| if (s.len > 0) gpa.free(s);
+
+    for (lenses, 0..) |pkg, lens_idx| {
+        var first_hash: [64]u8 = undefined;
+        var runs: u32 = 0;
+        while (runs < 2) : (runs += 1) {
+            const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(engine);
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL ribbon-comet lens activation\n", .{});
+                return false;
+            }
+            const corpus = try loadCorpusFrame(gpa, corpus_path);
+            defer corpus.deinit();
+            const planes = try rgbaToNv12(gpa, corpus.frame);
+            defer planes.deinit(gpa);
+            const half_w = (planes.width + 1) / 2;
+
+            var this_settled: []u8 = &.{};
+            defer if (this_settled.len > 0) gpa.free(this_settled);
+
+            for (0..90) |i| {
+                const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+                if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(engine, session);
+                c.glfwPollEvents();
+                if (i == 85) {
+                    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                    errdefer gpa.free(shot);
+                    var w: u32 = 0;
+                    var h: u32 = 0;
+                    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                        gpa.free(shot);
+                        return false;
+                    }
+                    this_settled = shot;
+                }
+            }
+            var digest: [32]u8 = undefined;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(this_settled);
+            hasher.final(&digest);
+            const hash = std.fmt.bytesToHex(digest, .lower);
+            if (runs == 0) {
+                first_hash = hash;
+            } else {
+                if (!std.mem.eql(u8, &first_hash, &hash)) {
+                    std.debug.print("conformance: FAIL a ribbon-comet lens is not bit-stable across runs\n", .{});
+                    return false;
+                }
+                settled[lens_idx] = this_settled;
+                this_settled = &.{};
+            }
+        }
+    }
+    if (std.mem.eql(u8, settled[0], settled[1])) {
+        std.debug.print("conformance: FAIL the ribbon rendered the same as separate billboards\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF particle ribbons draw a solid strip: the ribbon comet renders differently from the same trail as separate billboards, each bit-stable\n", .{});
     return true;
 }
 
@@ -4339,6 +6117,22 @@ fn proveMorphBlend(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 }
 
 /// Proves a sprite.2d node draws its image over the frame. The static
+/// Renders frames until every async image and model load has landed, so a
+/// screenshot reads a deterministic frame no matter how the loader threads were
+/// scheduled. Caps the wait so a genuinely stuck load still fails loudly.
+fn pumpUntilLoaded(engine: *abi.Engine, session: anytype) void {
+    var frames: u32 = 0;
+    while (abi.loadsPending(session) > 0 and frames < 600) : (frames += 1) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    // A few more frames so the freshly-uploaded textures are drawn.
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+}
+
 /// sprite-overlay bundle draws a badge in a centre rect; its output must
 /// differ from the same frame with no lens, so the sprite really composited.
 fn proveSpriteDraw(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
@@ -4385,10 +6179,7 @@ fn proveSpriteDraw(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
             return false;
         }
         if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
-        for (0..15) |_| {
-            _ = abi.goss_engine_render_frame(engine, session);
-            c.glfwPollEvents();
-        }
+        pumpUntilLoaded(engine, session);
         engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-drawn");
         for (0..5) |_| {
             _ = abi.goss_engine_render_frame(engine, session);
@@ -4583,10 +6374,7 @@ fn proveSpriteFade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const half_w = (planes.width + 1) / 2;
     if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
 
-    for (0..12) |_| {
-        _ = abi.goss_engine_render_frame(engine, session);
-        c.glfwPollEvents();
-    }
+    pumpUntilLoaded(engine, session);
     engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-fade-before");
     for (0..5) |_| {
         _ = abi.goss_engine_render_frame(engine, session);
@@ -4660,10 +6448,7 @@ fn proveSpriteAnim(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 
     // Let both frames decode (no tick, so the clock stays at zero), then
     // screenshot frame 0.
-    for (0..16) |_| {
-        _ = abi.goss_engine_render_frame(engine, session);
-        c.glfwPollEvents();
-    }
+    pumpUntilLoaded(engine, session);
     engine.renderer.?.requestScreenshot("zig-out/conformance-sprite-anim-frame0");
     for (0..5) |_| {
         _ = abi.goss_engine_render_frame(engine, session);
@@ -4738,11 +6523,8 @@ fn proveGifSprite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const half_w = (planes.width + 1) / 2;
     if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
 
-    // The GIF decodes to textures at activation, so frame 0 is ready at once.
-    for (0..8) |_| {
-        _ = abi.goss_engine_render_frame(engine, session);
-        c.glfwPollEvents();
-    }
+    // The GIF decodes to textures at activation; wait for the load to land.
+    pumpUntilLoaded(engine, session);
     engine.renderer.?.requestScreenshot("zig-out/conformance-gif-frame0");
     for (0..5) |_| {
         _ = abi.goss_engine_render_frame(engine, session);
@@ -5444,6 +7226,47 @@ pub fn main(init_args: std.process.Init) !u8 {
     }
     std.debug.print("conformance: PROOF all reference lenses match the pinned baseline\n", .{});
 
+    // A focused run exercises one proof (or a small group) without the full
+    // suite, so a single proof can be iterated at its own cost. It reads its
+    // selector from zig-out/conf-only.txt; absent that file the suite runs.
+    if (std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conf-only.txt", gpa, .limited(64)) catch null) |raw| {
+        defer gpa.free(raw);
+        const only = std.mem.trim(u8, raw, " \n\r\t");
+        if (std.mem.eql(u8, only, "gpu-forces")) {
+            if (!try proveGpuParticles(gpa, engine)) return 1;
+            if (!try proveGpuForces(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "2d-world")) {
+            if (!try provePhysics2dWorld(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "world-mesh")) {
+            if (!try provePhysicsWorldMesh(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "glb-collider")) {
+            if (!try provePhysicsGlbCollider(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "grab-throw")) {
+            if (!try proveGrabThrow(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "sph-fluid")) {
+            if (!try proveSphFluid(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "dof")) {
+            if (!try proveDofPass(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "head-collider")) {
+            if (!try proveHeadCollider(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "live-collider")) {
+            if (!try proveLiveCollider(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "mesh-instancing")) {
+            if (!try proveMeshInstancing(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "rich-text")) {
+            if (!try proveRichText(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "extruded-text")) {
+            if (!try proveExtrudedText(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "video-texture")) {
+            if (!try proveVideoTexture(gpa, engine)) return 1;
+        } else {
+            std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
+            return 1;
+        }
+        std.debug.print("conformance: focused run {s} complete\n", .{only});
+        return 0;
+    }
+
     if (!try proveTriggerAnimFires(gpa, engine)) return 1;
     watchHold("trigger anim fires");
     if (!try proveMixerBlend(gpa, engine)) return 1;
@@ -5510,6 +7333,56 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("physics drop");
     if (!try provePhysicsChain(gpa, engine)) return 1;
     watchHold("physics chain");
+    if (!try provePhysicsPivot(gpa, engine)) return 1;
+    watchHold("physics pivot");
+    if (!try provePhysicsFixed(gpa, engine)) return 1;
+    watchHold("physics fixed");
+    if (!try provePhysicsHinge(gpa, engine)) return 1;
+    watchHold("physics hinge");
+    if (!try provePhysicsSpring(gpa, engine)) return 1;
+    watchHold("physics spring");
+    if (!try provePhysicsShapeCylinder(gpa, engine)) return 1;
+    watchHold("physics shape cylinder");
+    if (!try provePhysicsShapeCapsule(gpa, engine)) return 1;
+    watchHold("physics shape capsule");
+    if (!try provePhysicsJiggle(gpa, engine)) return 1;
+    watchHold("physics jiggle");
+    if (!try provePhysicsFriction(gpa, engine)) return 1;
+    watchHold("physics friction");
+    if (!try provePhysicsHull(gpa, engine)) return 1;
+    watchHold("physics hull");
+    if (!try provePhysicsRestitution(gpa, engine)) return 1;
+    watchHold("physics restitution");
+    if (!try provePhysicsMesh(gpa, engine)) return 1;
+    watchHold("physics mesh");
+    if (!try provePhysicsBalloon(gpa, engine)) return 1;
+    watchHold("physics balloon");
+    if (!try provePhysicsSoftBody(gpa, engine)) return 1;
+    watchHold("physics soft body");
+    if (!try provePhysicsPlanar(gpa, engine)) return 1;
+    watchHold("physics planar");
+    if (!try provePhysics2dWorld(gpa, engine)) return 1;
+    watchHold("physics 2d world");
+    if (!try provePhysicsWorldMesh(gpa, engine)) return 1;
+    watchHold("physics world mesh");
+    if (!try provePhysicsGlbCollider(gpa, engine)) return 1;
+    watchHold("physics glb collider");
+    if (!try proveGrabThrow(gpa, engine)) return 1;
+    watchHold("grab throw");
+    if (!try proveSphFluid(gpa, engine)) return 1;
+    watchHold("sph fluid");
+    if (!try proveHeadCollider(gpa, engine)) return 1;
+    watchHold("head collider");
+    if (!try proveLiveCollider(gpa, engine)) return 1;
+    watchHold("live collider");
+    if (!try proveMeshInstancing(gpa, engine)) return 1;
+    watchHold("mesh instancing");
+    if (!try proveRichText(gpa, engine)) return 1;
+    watchHold("rich text");
+    if (!try proveExtrudedText(gpa, engine)) return 1;
+    watchHold("extruded text");
+    if (!try proveVideoTexture(gpa, engine)) return 1;
+    watchHold("video texture");
     if (!try proveClothFlag(gpa, engine)) return 1;
     watchHold("cloth flag");
     if (!try proveParticles(gpa, engine)) return 1;
@@ -5534,6 +7407,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("camera controls");
     if (!try proveEventTrigger(gpa, engine)) return 1;
     watchHold("event trigger");
+    if (!try proveVolumeTrigger(gpa, engine)) return 1;
+    watchHold("volume trigger");
     if (!try proveLayoutComposite(gpa, engine)) return 1;
     watchHold("layout composite");
     if (!try proveCompositeOpacity(gpa, engine)) return 1;
@@ -5558,6 +7433,22 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("star sprite");
     if (!try proveParticlePatterns(gpa, engine)) return 1;
     watchHold("particle patterns");
+    if (!try proveParticleTrail(gpa, engine)) return 1;
+    watchHold("particle trail");
+    if (!try provePresetLibrary(gpa, engine)) return 1;
+    watchHold("preset library");
+    if (!try proveSubEmitter(gpa, engine)) return 1;
+    watchHold("sub emitter");
+    if (!try proveGpuParticles(gpa, engine)) return 1;
+    watchHold("gpu particles");
+    if (!try proveGpuForces(gpa, engine)) return 1;
+    watchHold("gpu forces");
+    if (!try proveParticleCollider(gpa, engine)) return 1;
+    watchHold("particle collider");
+    if (!try proveMeshParticles(gpa, engine)) return 1;
+    watchHold("mesh particles");
+    if (!try proveRibbon(gpa, engine)) return 1;
+    watchHold("particle ribbon");
     if (!try proveFaceSparkle(gpa, engine)) return 1;
     watchHold("face sparkle");
     if (!try proveJsonPostEffect(gpa, engine)) return 1;

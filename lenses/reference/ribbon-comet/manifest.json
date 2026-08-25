@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.ribbon-comet",
+  "version": "1.0.0",
+  "display_name": "Ribbon Comet",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "comet", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 60, "pattern": "fountain", "gravity": 4.0, "speed": 2.0, "lifetime": 2.0, "trail": 12, "ribbon": true, "size": 30, "color": [0.5, 0.9, 1.0]}}
+  ],
+  "triggers": []
+}

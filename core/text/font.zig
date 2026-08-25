@@ -106,7 +106,9 @@ pub fn measure(text: []const u8, scale: u32) struct { w: u32, h: u32 } {
 /// Rasterizes `text` into a freshly allocated RGBA buffer: each glyph
 /// pixel set to `color`, every other pixel fully transparent. The caller
 /// owns and frees the returned bytes.
-pub fn rasterize(gpa: std.mem.Allocator, text: []const u8, scale: u32, color: [4]u8) !struct { rgba: []u8, width: u32, height: u32 } {
+pub const Raster = struct { rgba: []u8, width: u32, height: u32 };
+
+pub fn rasterize(gpa: std.mem.Allocator, text: []const u8, scale: u32, color: [4]u8) !Raster {
     const s = @max(scale, 1);
     const dim = measure(text, s);
     const width = @max(dim.w, 1);
@@ -149,6 +151,165 @@ pub fn rasterize(gpa: std.mem.Allocator, text: []const u8, scale: u32, color: [4
         }
     }
     return .{ .rgba = rgba, .width = width, .height = height };
+}
+
+fn lerpU8(a: u8, b: u8, tc: f32) u8 {
+    const af: f32 = @floatFromInt(a);
+    const bf: f32 = @floatFromInt(b);
+    return @intFromFloat(std.math.clamp(af * (1.0 - tc) + bf * tc, 0.0, 255.0));
+}
+
+fn nearMask(mask: []const bool, width: u32, height: u32, x: u32, y: u32, radius: u32) bool {
+    const x0 = x -| radius;
+    const y0 = y -| radius;
+    const x1 = @min(x + radius, width - 1);
+    const y1 = @min(y + radius, height - 1);
+    var yy = y0;
+    while (yy <= y1) : (yy += 1) {
+        var xx = x0;
+        while (xx <= x1) : (xx += 1) {
+            if (mask[yy * width + xx]) return true;
+        }
+    }
+    return false;
+}
+
+/// Rasterizes `text` with a vertical `gradient` (null holds `color`), an
+/// optional down-right `shadow`, and an optional `stroke` outline. The glyph
+/// coverage is drawn into a mask, then composited main over stroke over shadow.
+pub fn rasterizeRich(gpa: std.mem.Allocator, text: []const u8, scale: u32, color: [4]u8, gradient: ?[3]u8, shadow: bool, stroke: ?[3]u8) !Raster {
+    const s = @max(scale, 1);
+    const dim = measure(text, s);
+    const margin = 2 * s;
+    const width = @max(dim.w + 2 * margin, 1);
+    const height = @max(dim.h + 2 * margin, 1);
+    const mask = try gpa.alloc(bool, width * height);
+    defer gpa.free(mask);
+    @memset(mask, false);
+    var col: u32 = 0;
+    var line: u32 = 0;
+    for (text) |ch| {
+        if (ch == '\n') {
+            line += 1;
+            col = 0;
+            continue;
+        }
+        const rows = glyph(ch);
+        const base_x = margin + col * glyph_px * s;
+        const base_y = margin + line * glyph_px * s;
+        col += 1;
+        for (rows, 0..) |row, ry| {
+            var bit: u3 = 0;
+            while (true) : (bit += 1) {
+                if ((row & (@as(u8, 0x80) >> bit)) != 0) {
+                    var dy: u32 = 0;
+                    while (dy < s) : (dy += 1) {
+                        var dx: u32 = 0;
+                        while (dx < s) : (dx += 1) {
+                            mask[(base_y + @as(u32, @intCast(ry)) * s + dy) * width + (base_x + @as(u32, bit) * s + dx)] = true;
+                        }
+                    }
+                }
+                if (bit == 7) break;
+            }
+        }
+    }
+    const rgba = try gpa.alloc(u8, width * height * 4);
+    @memset(rgba, 0);
+    const so = @max(s * 3 / 2, 1);
+    const h_denom: f32 = @floatFromInt(@max(dim.h, 1));
+    var y: u32 = 0;
+    while (y < height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < width) : (x += 1) {
+            const idx = (y * width + x) * 4;
+            if (mask[y * width + x]) {
+                const tc = std.math.clamp(@as(f32, @floatFromInt(y -| margin)) / h_denom, 0.0, 1.0);
+                const g = gradient orelse .{ color[0], color[1], color[2] };
+                rgba[idx + 0] = lerpU8(color[0], g[0], tc);
+                rgba[idx + 1] = lerpU8(color[1], g[1], tc);
+                rgba[idx + 2] = lerpU8(color[2], g[2], tc);
+                rgba[idx + 3] = color[3];
+            } else if (stroke != null and nearMask(mask, width, height, x, y, s)) {
+                rgba[idx + 0] = stroke.?[0];
+                rgba[idx + 1] = stroke.?[1];
+                rgba[idx + 2] = stroke.?[2];
+                rgba[idx + 3] = 255;
+            } else if (shadow and x >= so and y >= so and mask[(y - so) * width + (x - so)]) {
+                rgba[idx + 3] = 160;
+            }
+        }
+    }
+    return .{ .rgba = rgba, .width = width, .height = height };
+}
+
+pub const Mesh = struct { positions: [][3]f32, indices: []u32 };
+
+fn emitBox(gpa: std.mem.Allocator, pos: *std.ArrayList([3]f32), idx: *std.ArrayList(u32), cx: f32, cy: f32, hw: f32, hh: f32, hd: f32) !void {
+    const base: u32 = @intCast(pos.items.len);
+    const verts = [8][3]f32{
+        .{ cx - hw, cy - hh, -hd }, .{ cx + hw, cy - hh, -hd }, .{ cx + hw, cy + hh, -hd }, .{ cx - hw, cy + hh, -hd },
+        .{ cx - hw, cy - hh, hd },  .{ cx + hw, cy - hh, hd },  .{ cx + hw, cy + hh, hd },  .{ cx - hw, cy + hh, hd },
+    };
+    for (verts) |v| try pos.append(gpa, v);
+    const faces = [12][3]u32{
+        .{ 4, 5, 6 }, .{ 4, 6, 7 }, .{ 0, 2, 1 }, .{ 0, 3, 2 }, .{ 0, 4, 7 }, .{ 0, 7, 3 },
+        .{ 1, 2, 6 }, .{ 1, 6, 5 }, .{ 3, 7, 6 }, .{ 3, 6, 2 }, .{ 0, 1, 5 }, .{ 0, 5, 4 },
+    };
+    for (faces) |f| {
+        try idx.append(gpa, base + f[0]);
+        try idx.append(gpa, base + f[1]);
+        try idx.append(gpa, base + f[2]);
+    }
+}
+
+/// Extrudes `text` into a 3D block mesh: one box per set glyph bit, laid out in
+/// a normalized [-1, 1] square (the caller's model matrix places and rotates
+/// it) and given `depth` in z, so the letters read as solid extruded type.
+pub fn extrudeMesh(gpa: std.mem.Allocator, text: []const u8, depth: f32) !Mesh {
+    var lines: u32 = 1;
+    var max_len: u32 = 0;
+    var cur: u32 = 0;
+    for (text) |ch| {
+        if (ch == '\n') {
+            lines += 1;
+            if (cur > max_len) max_len = cur;
+            cur = 0;
+        } else cur += 1;
+    }
+    if (cur > max_len) max_len = cur;
+    if (max_len == 0) max_len = 1;
+    const grid_w: f32 = @floatFromInt(max_len * glyph_px);
+    const grid_h: f32 = @floatFromInt(lines * glyph_px);
+    var pos: std.ArrayList([3]f32) = .empty;
+    errdefer pos.deinit(gpa);
+    var idx: std.ArrayList(u32) = .empty;
+    errdefer idx.deinit(gpa);
+    const hw = 1.0 / grid_w;
+    const hh = 1.0 / grid_h;
+    var col: u32 = 0;
+    var line: u32 = 0;
+    for (text) |ch| {
+        if (ch == '\n') {
+            line += 1;
+            col = 0;
+            continue;
+        }
+        const rows = glyph(ch);
+        for (rows, 0..) |row, ry| {
+            var bit: u3 = 0;
+            while (true) : (bit += 1) {
+                if ((row & (@as(u8, 0x80) >> bit)) != 0) {
+                    const bx: f32 = @floatFromInt(col * glyph_px + bit);
+                    const by: f32 = @floatFromInt(line * glyph_px + @as(u32, @intCast(ry)));
+                    try emitBox(gpa, &pos, &idx, (bx + 0.5) / grid_w * 2.0 - 1.0, 1.0 - (by + 0.5) / grid_h * 2.0, hw, hh, depth);
+                }
+                if (bit == 7) break;
+            }
+        }
+        col += 1;
+    }
+    return .{ .positions = try pos.toOwnedSlice(gpa), .indices = try idx.toOwnedSlice(gpa) };
 }
 
 const t = std.testing;
@@ -204,4 +365,43 @@ test "lowercase draws its own glyph, distinct from uppercase" {
     var any: u8 = 0;
     for (lower.rgba) |b| any |= b;
     try t.expect(any != 0);
+}
+
+test "extruded text builds a non-empty two-sided box mesh" {
+    const mesh = try extrudeMesh(t.allocator, "GO", 0.06);
+    defer t.allocator.free(mesh.positions);
+    defer t.allocator.free(mesh.indices);
+    try t.expect(mesh.positions.len > 0);
+    try t.expect(mesh.indices.len % 3 == 0);
+    var has_front = false;
+    var has_back = false;
+    for (mesh.positions) |v| {
+        if (v[2] > 0.0) has_front = true;
+        if (v[2] < 0.0) has_back = true;
+    }
+    // Genuinely extruded: vertices sit on both the front and back faces.
+    try t.expect(has_front and has_back);
+}
+
+test "rich text adds stroke and shadow coverage beyond the plain glyphs" {
+    const plain = try rasterize(t.allocator, "A", 4, .{ 255, 255, 255, 255 });
+    defer t.allocator.free(plain.rgba);
+    const rich = try rasterizeRich(t.allocator, "A", 4, .{ 255, 255, 255, 255 }, .{ 255, 0, 0 }, true, .{ 0, 0, 0 });
+    defer t.allocator.free(rich.rgba);
+    var plain_set: u32 = 0;
+    var pi: usize = 3;
+    while (pi < plain.rgba.len) : (pi += 4) {
+        if (plain.rgba[pi] > 0) plain_set += 1;
+    }
+    var rich_set: u32 = 0;
+    var ri: usize = 3;
+    while (ri < rich.rgba.len) : (ri += 4) {
+        if (rich.rgba[ri] > 0) rich_set += 1;
+    }
+    // The stroke outline and drop shadow add covered pixels around the glyph.
+    try t.expect(rich_set > plain_set);
+    // The gradient darkens the base of the glyph, so the fill is not flat.
+    const rich_flat = try rasterizeRich(t.allocator, "A", 4, .{ 255, 255, 255, 255 }, null, false, null);
+    defer t.allocator.free(rich_flat.rgba);
+    try t.expect(!std.mem.eql(u8, rich.rgba, rich_flat.rgba));
 }

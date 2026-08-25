@@ -82,6 +82,17 @@ pub const HairField = struct {
     length: f32,
 };
 
+pub const BalloonField = struct {
+    /// Rest radius in metres, subdivision level of the sphere shell (0..3),
+    /// and internal pressure: positive inflates, zero leaves it limp.
+    radius: f32,
+    subdivisions: u32,
+    pressure: f32,
+    /// Pin the top cap so it hangs in place (a balloon); false drops it as a
+    /// free soft body that collides with rigid bodies and squishes on impact.
+    pinned: bool = true,
+};
+
 pub const ParticleField = struct {
     /// Particle count and the fountain's gravity, launch speed, and lifetime.
     count: u32,
@@ -117,6 +128,12 @@ pub const ParticleField = struct {
     wind: [3]f32 = .{ 0, 0, 0 },
     /// A deterministic swirl amplitude added to velocity.
     turbulence: f32 = 0,
+    /// Curl-noise amplitude: a divergence-free swirl for organic smoke and
+    /// fire churn.
+    curl: f32 = 0,
+    /// How much speed a particle keeps when it bounces off the floor or a
+    /// collider (0 stops dead, 1 a perfect bounce).
+    bounce: f32 = 0.5,
     /// A point particles are pulled toward and how strongly (a gravity well).
     attract: ?[3]f32 = null,
     attract_strength: f32 = 0,
@@ -128,13 +145,56 @@ pub const ParticleField = struct {
     stretch: f32 = 0,
     /// Frames in a square sprite sheet flip-booked over life; 1 is a still.
     frames: u32 = 1,
+    /// Trail length: recent positions drawn behind each particle as a fading
+    /// ribbon (a comet tail); 0 or 1 is no trail.
+    trail: u32 = 0,
+    /// Draw the trail history as one solid connected ribbon strip per particle
+    /// instead of separate billboards. Needs `trail` set for the history.
+    ribbon: bool = false,
     /// Emit everything once and let it die out, rather than looping.
     oneshot: bool = false,
     /// Sprite size in pixels at death, if the size changes over life.
     size_end: ?u32 = null,
     /// Turns a textured sprite spins over its life.
     spin: f32 = 0,
+    /// Sphere colliders particles bounce off, each [x, y, z, radius].
+    colliders: []const [4]f32 = &.{},
+    /// Box colliders particles bounce off, each [x, y, z, hx, hy, hz].
+    box_colliders: []const [6]f32 = &.{},
+    /// Infinite plane colliders particles bounce off, each [nx, ny, nz, d].
+    plane_colliders: []const [4]f32 = &.{},
+    /// Draw each particle as a small 3D mesh instead of a flat billboard or
+    /// point, sized by `size`. Off by default.
+    mesh: bool = false,
+    /// The 3D shape a mesh particle draws: "octahedron" (default), "cube", or
+    /// "tetra". Borrowed for the system's lifetime.
+    mesh_shape: []const u8 = "octahedron",
+    /// Sub-emitter: children each particle bursts into when it dies (a firework
+    /// shell opening into sparks), plus their launch speed and lifetime. 0 off.
+    sub_count: u32 = 0,
+    sub_speed: f32 = 3.0,
+    sub_lifetime: f32 = 0.8,
+    /// Run the sim on the GPU compute path at crowd scale where the backend
+    /// supports it; otherwise the identical CPU sim runs. A gravity fountain.
+    gpu: bool = false,
+    /// Run a 2D smoothed-particle-hydrodynamics fluid instead of the fountain:
+    /// the particles carry density and pressure and pool under gravity.
+    sph: bool = false,
+    /// Draw a 3D-mesh particle cloud with one instanced call instead of one
+    /// draw per particle - the same pixels, at crowd scale.
+    instanced: bool = false,
 };
+
+/// The prebuilt VFX asset library: a named preset expands to a tuned particle
+/// config an author can then override field by field. Returns null for an
+/// unknown name.
+pub fn particlePreset(name: []const u8) ?ParticleField {
+    if (std.mem.eql(u8, name, "fire")) return .{ .count = 220, .pattern = "cone", .gravity = -1.4, .speed = 0.7, .speed_spread = 0.4, .lifetime = 1.3, .lifetime_spread = 0.4, .curl = 3.5, .drag = 0.6, .fade = true, .glow = true, .size = 16, .size_end = 2, .color = .{ 1.0, 0.6, 0.2 }, .cool = .{ 0.5, 0.05, 0.02 } };
+    if (std.mem.eql(u8, name, "smoke")) return .{ .count = 180, .pattern = "cone", .gravity = -0.7, .speed = 0.5, .speed_spread = 0.5, .lifetime = 2.6, .lifetime_spread = 0.4, .curl = 2.0, .drag = 1.1, .fade = true, .size = 8, .size_end = 34, .color = .{ 0.55, 0.55, 0.58 }, .cool = .{ 0.2, 0.2, 0.22 } };
+    if (std.mem.eql(u8, name, "magic")) return .{ .count = 240, .pattern = "sphere", .gravity = 0.0, .speed = 0.3, .lifetime = 2.2, .lifetime_spread = 0.5, .curl = 2.5, .vortex = 2.4, .attract = .{ 0.0, 0.2, 0.0 }, .attract_strength = 1.3, .fade = true, .glow = true, .spin = 3.0, .size = 10, .size_end = 3, .color = .{ 0.6, 0.3, 1.0 }, .cool = .{ 0.2, 0.8, 1.0 } };
+    if (std.mem.eql(u8, name, "sparks")) return .{ .count = 200, .pattern = "burst", .gravity = 6.0, .speed = 3.0, .speed_spread = 0.6, .lifetime = 0.9, .lifetime_spread = 0.5, .drag = 0.8, .fade = true, .glow = true, .stretch = 2.5, .size = 6, .size_end = 1, .color = .{ 1.0, 0.85, 0.35 }, .cool = .{ 0.9, 0.2, 0.05 } };
+    return null;
+}
 
 pub const GradeField = struct {
     /// A grade.pass node's parametric color grade. Defaults are the
@@ -245,6 +305,34 @@ pub const TextField = struct {
     /// Like SpriteField.opacity_param: a parameter name whose live value
     /// overrides the text's opacity each frame. Empty keeps the static one.
     opacity_param: []const u8 = "",
+    /// The rgb the glyphs fade toward at their base for a vertical gradient
+    /// (top is the main color); null draws a flat fill.
+    gradient: ?[3]u8 = null,
+    /// Drop a soft shadow down-right behind the glyphs.
+    shadow: bool = false,
+    /// An outline the glyphs are stroked with; null is no stroke.
+    stroke: ?[3]u8 = null,
+    /// Extrude the glyphs into a rotated 3D block mesh of this depth (in the
+    /// normalized text space); 0 keeps the flat 2D sprite text.
+    depth: f32 = 0,
+};
+
+pub const VideoField = struct {
+    /// A video.texture node's clip, decoded off the platform's hardware
+    /// decoder and drawn like a sprite. `source` names the asset
+    /// (assets/<source>.mp4); the screen rect and opacity match a sprite's.
+    source: []const u8 = "",
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+    w: f32 = 1.0,
+    h: f32 = 1.0,
+    opacity: f32 = 1.0,
+    /// Playback rate the clip advances at against the lens clock. Zero
+    /// holds the first decoded frame.
+    fps: f32 = 30.0,
+    /// Rewind to the start at the end of the clip rather than holding the
+    /// last frame.
+    loop: bool = true,
 };
 
 pub const LayoutField = struct {
@@ -259,10 +347,34 @@ pub const LayoutField = struct {
 };
 
 pub const PhysicsBody = struct {
-    shape: enum { box, sphere },
-    /// Box half extents; a sphere reads its radius from [0].
+    shape: enum { box, sphere, cylinder, capsule, hull, mesh },
+    /// Box half extents; a sphere reads its radius from [0]; a cylinder or
+    /// capsule (axis vertical) reads radius from [0] and half height from [1].
+    /// A hull or mesh ignores this and reads its geometry from `hull_points`.
     size: [3]f32,
+    /// Local-space points a `hull` body takes the convex hull of, or a `mesh`
+    /// body triangulates; empty for the analytic shapes.
+    hull_points: []const [3]f32 = &.{},
+    /// Triangle indices (three per face) for a concave `mesh` collider; empty
+    /// otherwise.
+    mesh_indices: []const u32 = &.{},
+    /// A `mesh` body with no explicit points derives its collider from the
+    /// node's own glb geometry, once that finishes decoding.
+    mesh_from_glb: bool = false,
     position: [3]f32,
+    /// Orientation in euler degrees (x, y, z), so an elongated shape can lie
+    /// on its side or a static collider can tilt. Zero is upright.
+    rotation: [3]f32 = .{ 0, 0, 0 },
+    /// Surface material: friction (0 slippery, ~1 grippy) and restitution
+    /// (0 dead, 1 bouncy). Defaults match the engine's plain body.
+    friction: f32 = 0.2,
+    restitution: f32 = 0.0,
+    /// Confine the body to the z = 0 plane (x/y motion and z spin only) for a
+    /// 2D world laid into the 3D scene.
+    planar: bool = false,
+    /// The engine drives this (kinematic) body to a tracked target each frame:
+    /// `head` follows the tracked head pose, so content collides with the head.
+    follow: enum { none, head } = .none,
     dynamic: bool,
     /// The engine drives this body's pose from its anchor each frame;
     /// chained bodies hang off it.
@@ -271,6 +383,19 @@ pub const PhysicsBody = struct {
     /// length, for content hanging off an anchor.
     chain_to: ?[]const u8 = null,
     chain_length: f32 = 0,
+    /// How the body links to its `chain_to` anchor: a distance constraint
+    /// bounded by `chain_length`, a point (ball) joint it swings about, a
+    /// fixed weld that rides the anchor, a hinge that swings in one plane
+    /// about z, or a spring that tethers softly and bobs at `chain_length`.
+    joint: enum { distance, point, fixed, hinge, spring } = .distance,
+    /// Secondary motion: when > 1, the chain is built from this many spring
+    /// links through hidden proxy bodies between the anchor and this node, so
+    /// the node lags and sways after the anchor moves - jiggle for hair,
+    /// jewelry, and tails. 0 or 1 leaves the plain single-link chain.
+    jiggle_segments: u32 = 0,
+    /// Spring frequency in Hz and damping 0..1 for each jiggle link.
+    jiggle_stiffness: f32 = 3.0,
+    jiggle_damping: f32 = 0.3,
 };
 
 pub const Node = struct {
@@ -292,6 +417,8 @@ pub const Node = struct {
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
     cloth: ?ClothField = null,
+    /// Set when the node is a pressurised soft-body balloon instead of a glb.
+    balloon: ?BalloonField = null,
     /// Set when the node is simulated strand hair instead of a glb.
     hair: ?HairField = null,
     /// Set when the node is a particle fountain instead of a glb.
@@ -332,6 +459,9 @@ pub const Node = struct {
     /// Set only on a text.2d node: the string, rect, opacity, and color it
     /// draws.
     text: ?TextField = null,
+    /// Set only on a video.texture node: the clip source, rect, opacity, and
+    /// playback rate it decodes and draws at.
+    video: ?VideoField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -395,6 +525,15 @@ pub const EngineRange = struct {
     }
 };
 
+/// A lens-level trigger region the tracked device is tested against each tick,
+/// feeding the device.in_volume trigger signal. A sphere when `radius` > 0,
+/// otherwise an axis-aligned box of `half`-extents, both centered at `center`.
+pub const Volume = struct {
+    center: [3]f32 = .{ 0, 0, 0 },
+    radius: f32 = 0,
+    half: [3]f32 = .{ 0, 0, 0 },
+};
+
 pub const Manifest = struct {
     arena: std.heap.ArenaAllocator,
     glf_minor: u16,
@@ -406,6 +545,7 @@ pub const Manifest = struct {
     parameters: []const Parameter,
     nodes: []const Node,
     triggers: []const Trigger,
+    volume: ?Volume = null,
 
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
@@ -479,6 +619,30 @@ fn jsonDepth(value: std.json.Value) usize {
 
 fn readVec3(value: std.json.Value, out: *[3]f32) bool {
     if (value != .array or value.array.items.len != 3) return false;
+    for (value.array.items, 0..) |item, i| {
+        out[i] = switch (item) {
+            .float => |f| @floatCast(f),
+            .integer => |n| @floatFromInt(n),
+            else => return false,
+        };
+    }
+    return true;
+}
+
+fn readVec4(value: std.json.Value, out: *[4]f32) bool {
+    if (value != .array or value.array.items.len != 4) return false;
+    for (value.array.items, 0..) |item, i| {
+        out[i] = switch (item) {
+            .float => |f| @floatCast(f),
+            .integer => |n| @floatFromInt(n),
+            else => return false,
+        };
+    }
+    return true;
+}
+
+fn readVec6(value: std.json.Value, out: *[6]f32) bool {
+    if (value != .array or value.array.items.len != 6) return false;
     for (value.array.items, 0..) |item, i| {
         out[i] = switch (item) {
             .float => |f| @floatCast(f),
@@ -932,6 +1096,15 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 try diags.add(path.slice(), "particles must be an object", .{});
             } else {
                 var field: ParticleField = .{ .count = 128, .gravity = 9.8, .speed = 2.0, .lifetime = 2.0 };
+                if (getField(pv.object, "preset")) |v| {
+                    if (try expectString(diags, path, v)) |preset_name| {
+                        if (particlePreset(preset_name)) |preset| {
+                            field = preset;
+                        } else {
+                            try diags.add(path.slice(), "unknown particle preset '{s}'", .{preset_name});
+                        }
+                    }
+                }
                 if (getField(pv.object, "count")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= 4096) field.count = @intCast(v.integer);
                 }
@@ -972,6 +1145,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(pv.object, "lifetime_spread")) |v| field.lifetime_spread = @floatCast(numberOf(v) orelse field.lifetime_spread);
                 if (getField(pv.object, "drag")) |v| field.drag = @floatCast(numberOf(v) orelse field.drag);
                 if (getField(pv.object, "turbulence")) |v| field.turbulence = @floatCast(numberOf(v) orelse field.turbulence);
+                if (getField(pv.object, "curl")) |v| field.curl = @floatCast(numberOf(v) orelse field.curl);
+                if (getField(pv.object, "bounce")) |v| field.bounce = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.bounce)), 0.0, 1.0);
                 if (getField(pv.object, "spin")) |v| field.spin = @floatCast(numberOf(v) orelse field.spin);
                 if (getField(pv.object, "vortex")) |v| field.vortex = @floatCast(numberOf(v) orelse field.vortex);
                 if (getField(pv.object, "attract_strength")) |v| field.attract_strength = @floatCast(numberOf(v) orelse field.attract_strength);
@@ -984,6 +1159,12 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(pv.object, "frames")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= 64) field.frames = @intCast(v.integer) else try diags.add(path.slice(), "particles frames must be an integer 1..64", .{});
                 }
+                if (getField(pv.object, "trail")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer <= 32) field.trail = @intCast(v.integer) else try diags.add(path.slice(), "particles trail must be an integer 0..32", .{});
+                }
+                if (getField(pv.object, "ribbon")) |v| {
+                    if (v == .bool) field.ribbon = v.bool;
+                }
                 if (getField(pv.object, "wind")) |v| {
                     var w: [3]f32 = .{ 0, 0, 0 };
                     if (readVec3(v, &w)) field.wind = w else try diags.add(path.slice(), "particles wind must be three numbers", .{});
@@ -993,6 +1174,62 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "size_end")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= 64) field.size_end = @intCast(v.integer) else try diags.add(path.slice(), "particles size_end must be an integer 1..64", .{});
+                }
+                if (getField(pv.object, "colliders")) |v| {
+                    if (v == .array and v.array.items.len <= 16) {
+                        const cols = try arena.alloc([4]f32, v.array.items.len);
+                        var ok = true;
+                        for (v.array.items, 0..) |cv, ci| {
+                            if (!readVec4(cv, &cols[ci])) ok = false;
+                        }
+                        if (ok) field.colliders = cols else try diags.add(path.slice(), "particles colliders must be arrays of [x, y, z, radius]", .{});
+                    } else try diags.add(path.slice(), "particles colliders must be an array of up to 16 spheres", .{});
+                }
+                if (getField(pv.object, "box_colliders")) |v| {
+                    if (v == .array and v.array.items.len <= 16) {
+                        const boxes = try arena.alloc([6]f32, v.array.items.len);
+                        var ok = true;
+                        for (v.array.items, 0..) |bv, bi| {
+                            if (!readVec6(bv, &boxes[bi])) ok = false;
+                        }
+                        if (ok) field.box_colliders = boxes else try diags.add(path.slice(), "particles box_colliders must be arrays of [x, y, z, hx, hy, hz]", .{});
+                    } else try diags.add(path.slice(), "particles box_colliders must be an array of up to 16 boxes", .{});
+                }
+                if (getField(pv.object, "plane_colliders")) |v| {
+                    if (v == .array and v.array.items.len <= 16) {
+                        const planes = try arena.alloc([4]f32, v.array.items.len);
+                        var ok = true;
+                        for (v.array.items, 0..) |pcv, pi| {
+                            if (!readVec4(pcv, &planes[pi])) ok = false;
+                        }
+                        if (ok) field.plane_colliders = planes else try diags.add(path.slice(), "particles plane_colliders must be arrays of [nx, ny, nz, d]", .{});
+                    } else try diags.add(path.slice(), "particles plane_colliders must be an array of up to 16 planes", .{});
+                }
+                if (getField(pv.object, "mesh")) |v| {
+                    if (v == .bool) field.mesh = v.bool;
+                }
+                if (getField(pv.object, "mesh_shape")) |v| {
+                    if (try expectString(diags, path, v)) |sname| {
+                        if (std.mem.eql(u8, sname, "octahedron") or std.mem.eql(u8, sname, "cube") or std.mem.eql(u8, sname, "tetra")) {
+                            field.mesh_shape = try arena.dupe(u8, sname);
+                        } else try diags.add(path.slice(), "particles mesh_shape must be octahedron, cube, or tetra", .{});
+                    }
+                }
+                if (getField(pv.object, "sub_count")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer <= 64) field.sub_count = @intCast(v.integer) else {
+                        try diags.add(path.slice(), "particles sub_count must be an integer 0..64", .{});
+                    }
+                }
+                if (getField(pv.object, "sub_speed")) |v| field.sub_speed = @floatCast(numberOf(v) orelse field.sub_speed);
+                if (getField(pv.object, "sub_lifetime")) |v| field.sub_lifetime = @floatCast(numberOf(v) orelse field.sub_lifetime);
+                if (getField(pv.object, "gpu")) |v| {
+                    if (v == .bool) field.gpu = v.bool;
+                }
+                if (getField(pv.object, "sph")) |v| {
+                    if (v == .bool) field.sph = v.bool;
+                }
+                if (getField(pv.object, "instanced")) |v| {
+                    if (v == .bool) field.instanced = v.bool;
                 }
                 particle_field = field;
             }
@@ -1240,11 +1477,63 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(tv.object, "opacity_param")) |v| {
                     if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
                 }
+                if (getField(tv.object, "gradient")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.gradient = .{
+                            @intFromFloat(std.math.clamp(rgb[0], 0.0, 1.0) * 255.0),
+                            @intFromFloat(std.math.clamp(rgb[1], 0.0, 1.0) * 255.0),
+                            @intFromFloat(std.math.clamp(rgb[2], 0.0, 1.0) * 255.0),
+                        };
+                    } else try diags.add(path.slice(), "text gradient must be three numbers", .{});
+                }
+                if (getField(tv.object, "stroke")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.stroke = .{
+                            @intFromFloat(std.math.clamp(rgb[0], 0.0, 1.0) * 255.0),
+                            @intFromFloat(std.math.clamp(rgb[1], 0.0, 1.0) * 255.0),
+                            @intFromFloat(std.math.clamp(rgb[2], 0.0, 1.0) * 255.0),
+                        };
+                    } else try diags.add(path.slice(), "text stroke must be three numbers", .{});
+                }
+                if (getField(tv.object, "shadow")) |v| {
+                    if (v == .bool) field.shadow = v.bool;
+                }
+                if (getField(tv.object, "depth")) |v| field.depth = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.depth)));
                 text_field = field;
             }
             path.pop(tmark);
         } else if (std.mem.eql(u8, node_type, "text.2d")) {
             try diags.add(path.slice(), "a text.2d node needs a text block", .{});
+        }
+        var video_field: ?VideoField = null;
+        if (getField(object, "video")) |vv| {
+            const vmark = path.push("video");
+            if (!std.mem.eql(u8, node_type, "video.texture")) {
+                try diags.add(path.slice(), "video is a video.texture field, found it on '{s}'", .{node_type});
+            } else if (vv != .object) {
+                try diags.add(path.slice(), "video must be an object", .{});
+            } else {
+                var field: VideoField = .{};
+                if (getField(vv.object, "source")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.source = try arena.dupe(u8, s);
+                }
+                if (getField(vv.object, "x")) |v| field.x = @floatCast(numberOf(v) orelse field.x);
+                if (getField(vv.object, "y")) |v| field.y = @floatCast(numberOf(v) orelse field.y);
+                if (getField(vv.object, "w")) |v| field.w = @floatCast(numberOf(v) orelse field.w);
+                if (getField(vv.object, "h")) |v| field.h = @floatCast(numberOf(v) orelse field.h);
+                if (getField(vv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(vv.object, "fps")) |v| field.fps = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.fps)));
+                if (getField(vv.object, "loop")) |v| {
+                    if (v == .bool) field.loop = v.bool;
+                }
+                if (field.source.len == 0) try diags.add(path.slice(), "a video.texture node needs a source", .{});
+                video_field = field;
+            }
+            path.pop(vmark);
+        } else if (std.mem.eql(u8, node_type, "video.texture")) {
+            try diags.add(path.slice(), "a video.texture node needs a video block", .{});
         }
         var layout_field: ?LayoutField = null;
         if (getField(object, "layout")) |lv| {
@@ -1345,6 +1634,52 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(cloth_mark);
         }
+        var balloon_field: ?BalloonField = null;
+        if (getField(object, "balloon")) |balloon_value| {
+            const balloon_mark = path.push("balloon");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "balloon is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (balloon_value != .object) {
+                try diags.add(path.slice(), "balloon must be an object", .{});
+            } else {
+                var field: BalloonField = .{ .radius = 0.3, .subdivisions = 2, .pressure = 20.0 };
+                var ok = true;
+                if (getField(balloon_value.object, "pinned")) |v| {
+                    if (v == .bool) field.pinned = v.bool else {
+                        try diags.add(path.slice(), "balloon pinned must be a boolean", .{});
+                        ok = false;
+                    }
+                }
+                if (getField(balloon_value.object, "radius")) |v| {
+                    switch (v) {
+                        .float => |f| field.radius = @floatCast(f),
+                        .integer => |n| field.radius = @floatFromInt(n),
+                        else => {
+                            try diags.add(path.slice(), "balloon radius must be a number", .{});
+                            ok = false;
+                        },
+                    }
+                }
+                if (getField(balloon_value.object, "subdivisions")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer <= 3) field.subdivisions = @intCast(v.integer) else {
+                        try diags.add(path.slice(), "balloon subdivisions must be an integer 0..3", .{});
+                        ok = false;
+                    }
+                }
+                if (getField(balloon_value.object, "pressure")) |v| {
+                    switch (v) {
+                        .float => |f| field.pressure = @floatCast(f),
+                        .integer => |n| field.pressure = @floatFromInt(n),
+                        else => {
+                            try diags.add(path.slice(), "balloon pressure must be a number", .{});
+                            ok = false;
+                        },
+                    }
+                }
+                if (ok) balloon_field = field;
+            }
+            path.pop(balloon_mark);
+        }
         if (getField(object, "physics")) |physics_value| {
             const physics_mark = path.push("physics");
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -1362,6 +1697,18 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         } else if (std.mem.eql(u8, body_name, "sphere")) {
                             body.shape = .sphere;
                             shape_ok = true;
+                        } else if (std.mem.eql(u8, body_name, "cylinder")) {
+                            body.shape = .cylinder;
+                            shape_ok = true;
+                        } else if (std.mem.eql(u8, body_name, "capsule")) {
+                            body.shape = .capsule;
+                            shape_ok = true;
+                        } else if (std.mem.eql(u8, body_name, "hull")) {
+                            body.shape = .hull;
+                            shape_ok = true;
+                        } else if (std.mem.eql(u8, body_name, "mesh")) {
+                            body.shape = .mesh;
+                            shape_ok = true;
                         } else {
                             try diags.add(path.slice(), "unknown physics body '{s}'", .{body_name});
                         }
@@ -1375,10 +1722,95 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         shape_ok = false;
                     }
                 }
+                if (getField(physics_value.object, "points")) |points_value| {
+                    if (points_value != .array or points_value.array.items.len < 4) {
+                        try diags.add(path.slice(), "physics hull points must be an array of at least four [x, y, z]", .{});
+                        shape_ok = false;
+                    } else {
+                        const pts = try arena.alloc([3]f32, points_value.array.items.len);
+                        var pi: usize = 0;
+                        var pts_ok = true;
+                        for (points_value.array.items) |point_value| {
+                            if (!readVec3(point_value, &pts[pi])) {
+                                try diags.add(path.slice(), "physics hull point must be three numbers", .{});
+                                pts_ok = false;
+                                break;
+                            }
+                            pi += 1;
+                        }
+                        if (pts_ok) body.hull_points = pts else shape_ok = false;
+                    }
+                }
+                if (getField(physics_value.object, "indices")) |indices_value| {
+                    if (indices_value != .array or indices_value.array.items.len < 3 or indices_value.array.items.len % 3 != 0) {
+                        try diags.add(path.slice(), "physics mesh indices must be a whole number of triangles (three per face)", .{});
+                        shape_ok = false;
+                    } else {
+                        const idx = try arena.alloc(u32, indices_value.array.items.len);
+                        var ii: usize = 0;
+                        var idx_ok = true;
+                        for (indices_value.array.items) |index_value| {
+                            switch (index_value) {
+                                .integer => |n| {
+                                    if (n < 0) {
+                                        idx_ok = false;
+                                    } else {
+                                        idx[ii] = @intCast(n);
+                                    }
+                                },
+                                else => idx_ok = false,
+                            }
+                            if (!idx_ok) break;
+                            ii += 1;
+                        }
+                        if (idx_ok) body.mesh_indices = idx else {
+                            try diags.add(path.slice(), "physics mesh index must be a non-negative whole number", .{});
+                            shape_ok = false;
+                        }
+                    }
+                }
                 if (getField(physics_value.object, "position")) |position_value| {
                     if (!readVec3(position_value, &body.position)) {
                         try diags.add(path.slice(), "physics position must be three numbers", .{});
                         shape_ok = false;
+                    }
+                }
+                if (getField(physics_value.object, "rotation")) |rotation_value| {
+                    if (!readVec3(rotation_value, &body.rotation)) {
+                        try diags.add(path.slice(), "physics rotation must be three numbers (euler degrees)", .{});
+                        shape_ok = false;
+                    }
+                }
+                // A mesh body with no explicit points takes its collider from
+                // the node's own decoded glb geometry.
+                if (body.shape == .mesh and body.hull_points.len == 0) body.mesh_from_glb = true;
+                if (getField(physics_value.object, "friction")) |friction_value| {
+                    switch (friction_value) {
+                        .float => |f| body.friction = @floatCast(f),
+                        .integer => |n| body.friction = @floatFromInt(n),
+                        else => try diags.add(path.slice(), "physics friction must be a number", .{}),
+                    }
+                }
+                if (getField(physics_value.object, "restitution")) |restitution_value| {
+                    switch (restitution_value) {
+                        .float => |f| body.restitution = @floatCast(f),
+                        .integer => |n| body.restitution = @floatFromInt(n),
+                        else => try diags.add(path.slice(), "physics restitution must be a number", .{}),
+                    }
+                }
+                if (getField(physics_value.object, "planar")) |planar_value| {
+                    if (planar_value == .bool) body.planar = planar_value.bool else {
+                        try diags.add(path.slice(), "physics planar must be a boolean", .{});
+                    }
+                }
+                if (getField(physics_value.object, "follow")) |follow_value| {
+                    if (try expectString(diags, path, follow_value)) |follow_name| {
+                        if (std.mem.eql(u8, follow_name, "head")) {
+                            body.follow = .head;
+                            body.kinematic = true;
+                        } else if (!std.mem.eql(u8, follow_name, "none")) {
+                            try diags.add(path.slice(), "unknown physics follow '{s}'", .{follow_name});
+                        }
                     }
                 }
                 if (getField(physics_value.object, "motion")) |motion_value| {
@@ -1411,6 +1843,49 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                                 .float => |f| body.chain_length = @floatCast(f),
                                 .integer => |n| body.chain_length = @floatFromInt(n),
                                 else => try diags.add(path.slice(), "physics chain length must be a number", .{}),
+                            }
+                        }
+                        if (getField(chain_value.object, "joint")) |joint_value| {
+                            if (try expectString(diags, path, joint_value)) |joint_name| {
+                                if (std.mem.eql(u8, joint_name, "distance")) {
+                                    body.joint = .distance;
+                                } else if (std.mem.eql(u8, joint_name, "point")) {
+                                    body.joint = .point;
+                                } else if (std.mem.eql(u8, joint_name, "fixed")) {
+                                    body.joint = .fixed;
+                                } else if (std.mem.eql(u8, joint_name, "hinge")) {
+                                    body.joint = .hinge;
+                                } else if (std.mem.eql(u8, joint_name, "spring")) {
+                                    body.joint = .spring;
+                                } else {
+                                    try diags.add(path.slice(), "physics chain joint must be distance, point, fixed, hinge, or spring", .{});
+                                }
+                            }
+                        }
+                        if (getField(chain_value.object, "jiggle")) |jiggle_value| {
+                            if (jiggle_value != .object) {
+                                try diags.add(path.slice(), "physics chain jiggle must be an object", .{});
+                            } else {
+                                if (getField(jiggle_value.object, "segments")) |seg_value| {
+                                    switch (seg_value) {
+                                        .integer => |n| body.jiggle_segments = if (n > 0) @intCast(n) else 0,
+                                        else => try diags.add(path.slice(), "physics chain jiggle segments must be a whole number", .{}),
+                                    }
+                                }
+                                if (getField(jiggle_value.object, "stiffness")) |stiff_value| {
+                                    switch (stiff_value) {
+                                        .float => |f| body.jiggle_stiffness = @floatCast(f),
+                                        .integer => |n| body.jiggle_stiffness = @floatFromInt(n),
+                                        else => try diags.add(path.slice(), "physics chain jiggle stiffness must be a number", .{}),
+                                    }
+                                }
+                                if (getField(jiggle_value.object, "damping")) |damp_value| {
+                                    switch (damp_value) {
+                                        .float => |f| body.jiggle_damping = @floatCast(f),
+                                        .integer => |n| body.jiggle_damping = @floatFromInt(n),
+                                        else => try diags.add(path.slice(), "physics chain jiggle damping must be a number", .{}),
+                                    }
+                                }
                             }
                         }
                     }
@@ -1482,6 +1957,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .world_anchor = world_anchor,
             .physics = physics_body,
             .cloth = cloth_field,
+            .balloon = balloon_field,
             .hair = hair_field,
             .particles = particle_field,
             .clip_weights = clip_weights,
@@ -1498,6 +1974,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .layout = layout_field,
             .sprite = sprite_field,
             .text = text_field,
+            .video = video_field,
             .script = script_source,
         });
     }
@@ -1705,6 +2182,29 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
         const mark = path.push("triggers");
         if (try expectArray(diags, &path, getField(root, "triggers"))) |array| {
             manifest.triggers = try parseTriggers(arena, diags, &path, array) orelse &.{};
+        }
+        path.pop(mark);
+    }
+    if (getField(root, "volume")) |vv| {
+        const mark = path.push("volume");
+        if (vv != .object) {
+            try diags.add(path.slice(), "volume must be an object", .{});
+        } else {
+            var vol: Volume = .{};
+            if (getField(vv.object, "center")) |c| {
+                if (!readVec3(c, &vol.center)) try diags.add(path.slice(), "volume center must be three numbers", .{});
+            }
+            if (getField(vv.object, "radius")) |r| {
+                vol.radius = std.math.clamp(@as(f32, @floatCast(numberOf(r) orelse 0)), 0.0, 1000.0);
+            }
+            if (getField(vv.object, "half")) |h| {
+                if (!readVec3(h, &vol.half)) try diags.add(path.slice(), "volume half must be three numbers", .{});
+            }
+            if (vol.radius <= 0 and vol.half[0] <= 0 and vol.half[1] <= 0 and vol.half[2] <= 0) {
+                try diags.add(path.slice(), "volume needs a positive radius (sphere) or half extents (box)", .{});
+            } else {
+                manifest.volume = vol;
+            }
         }
         path.pop(mark);
     }

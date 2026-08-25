@@ -1,0 +1,16 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.hull-valley",
+  "version": "1.0.0",
+  "display_name": "Hull Valley",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "collider", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "physics": {"body": "hull", "points": [[-0.5,0.4,-0.5],[0,0,-0.5],[0.5,0.4,-0.5],[-0.5,0.4,0.5],[0,0,0.5],[0.5,0.4,0.5]], "position": [0, -0.3, 0], "motion": "static"}},
+    {"id": "ball", "type": "model.gltf", "inputs": {"frame": "collider"}, "params": {},
+     "physics": {"body": "sphere", "size": [0.12, 0, 0], "position": [0.2, 0.8, 0], "motion": "dynamic"}}
+  ],
+  "triggers": []
+}

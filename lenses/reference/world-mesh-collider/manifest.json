@@ -1,0 +1,18 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.world-mesh-collider",
+  "version": "1.0.0",
+  "display_name": "World Mesh Collider",
+  "engine_compat": ">=0.16",
+  "capabilities": ["world"],
+  "parameters": [],
+  "nodes": [
+    {"id": "collider", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "world",
+     "physics": {"body": "mesh",
+                 "points": [[-0.5, 0.4, -0.5], [0, 0, -0.5], [0.5, 0.4, -0.5], [-0.5, 0.4, 0.5], [0, 0, 0.5], [0.5, 0.4, 0.5]],
+                 "indices": [0, 4, 1, 0, 3, 4, 1, 5, 2, 1, 4, 5], "position": [0, -0.3, 0], "motion": "static", "friction": 0.6}},
+    {"id": "ball", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "world",
+     "physics": {"body": "sphere", "size": [0.12, 0, 0], "position": [0.06, 0.8, 0], "motion": "dynamic", "friction": 0.4}}
+  ],
+  "triggers": []
+}

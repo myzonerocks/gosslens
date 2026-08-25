@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.comet-trail",
+  "version": "1.0.0",
+  "display_name": "comet-trail",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "comet", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 128, "pattern": "fountain", "gravity": 9.8, "speed": 2.0, "lifetime": 2.0, "trail": 24, "fade": true, "size": 8, "color": [0.5, 0.8, 1.0], "cool": [0.2, 0.3, 0.9]}}
+  ],
+  "triggers": []
+}

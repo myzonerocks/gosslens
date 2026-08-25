@@ -152,6 +152,19 @@ pub const Renderer = struct {
         return .{};
     }
 
+    pub fn createDynamicBgraTexture(width: u16, height: u16) TextureHandle {
+        _ = width;
+        _ = height;
+        return .{};
+    }
+
+    pub fn updateDynamicBgraTexture(handle: TextureHandle, width: u16, height: u16, bgra: []const u8) void {
+        _ = handle;
+        _ = width;
+        _ = height;
+        _ = bgra;
+    }
+
     pub fn passthroughProgram(r: *Renderer) ProgramHandle {
         _ = r;
         return .{};
@@ -451,6 +464,30 @@ pub const Renderer = struct {
         _ = aspect_ratio;
     }
 
+    pub fn submitParticleMeshes(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, positions: []const f32, scale: f32, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = positions;
+        _ = scale;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
+    pub fn submitParticleMeshesInstanced(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, positions: []const f32, scale: f32, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = positions;
+        _ = scale;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
     pub const SkinnedMesh = struct {
         position_buffer: TextureHandle = .{},
         index_buffer: IndexBufferHandle = .{},
@@ -548,6 +585,13 @@ pub const Renderer = struct {
         return .{};
     }
 
+    pub fn createSoftMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !ClothMesh {
+        _ = r;
+        _ = vertex_count;
+        _ = indices;
+        return .{};
+    }
+
     pub fn updateClothMesh(r: *Renderer, mesh: ClothMesh, positions: []const f32) void {
         _ = r;
         _ = mesh;
@@ -562,6 +606,44 @@ pub const Renderer = struct {
         position_buffer: TextureHandle = .{},
         vertex_count: u32 = 0,
     };
+
+    pub const GpuParticleSim = struct {
+        state_buffer: TextureHandle = .{},
+        billboard: ParticleMesh = .{},
+        count: u32 = 0,
+        seeded: bool = false,
+    };
+
+    pub const ParticleForces = struct {
+        drag: f32 = 0,
+        turbulence: f32 = 0,
+        wind: [3]f32 = .{ 0, 0, 0 },
+        curl: f32 = 0,
+        attract: [3]f32 = .{ 0, 0, 0 },
+        attract_strength: f32 = 0,
+        vortex: f32 = 0,
+    };
+
+    pub fn createGpuParticleSim(r: *Renderer, count: u32) ?GpuParticleSim {
+        _ = r;
+        _ = count;
+        return null;
+    }
+
+    pub fn dispatchGpuParticles(r: *Renderer, view: u16, sim: *GpuParticleSim, dt: f32, gravity: f32, speed: f32, lifetime: f32, forces: ParticleForces) void {
+        _ = r;
+        _ = view;
+        _ = sim;
+        _ = dt;
+        _ = gravity;
+        _ = speed;
+        _ = lifetime;
+        _ = forces;
+    }
+
+    pub fn destroyGpuParticleSim(sim: GpuParticleSim) void {
+        _ = sim;
+    }
 
     pub fn createParticleMesh(r: *Renderer, count: u32, fade: bool) !ParticleMesh {
         _ = r;
@@ -604,6 +686,16 @@ pub const Renderer = struct {
         _ = particle_fx;
         _ = glow;
         _ = sprite_texture;
+    }
+
+    pub fn submitRibbons(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = base_color;
+        _ = aspect_ratio;
     }
 
     pub const HairMesh = struct {

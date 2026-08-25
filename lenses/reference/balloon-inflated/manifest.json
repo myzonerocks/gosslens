@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.balloon-inflated",
+  "version": "1.0.0",
+  "display_name": "Balloon Inflated",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "balloon", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "balloon": {"radius": 0.3, "subdivisions": 2, "pressure": 300}}
+  ],
+  "triggers": []
+}

@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.mesh-orbs",
+  "version": "1.0.0",
+  "display_name": "Mesh Orbs",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "orbs", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 80, "pattern": "fountain", "gravity": 4.0, "speed": 2.0, "lifetime": 2.0, "mesh": true, "mesh_shape": "cube", "size": 22, "color": [0.9, 0.6, 0.3]}}
+  ],
+  "triggers": []
+}

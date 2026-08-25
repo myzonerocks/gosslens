@@ -34,6 +34,8 @@ const physics = @import("physics");
 const script = @import("script");
 const audio_playback = @import("audio_playback");
 const particles = @import("particles");
+const sph = @import("sph");
+const video = @import("media_video");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -144,6 +146,10 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_ar_brush_end(goss_session *session)",
     "goss_status goss_session_ar_brush_undo(goss_session *session)",
     "goss_status goss_session_ar_brush_clear(goss_session *session)",
+    "goss_status goss_session_grab(goss_session *session, float x, float y, float z)",
+    "goss_status goss_session_release(goss_session *session)",
+    "goss_status goss_session_add_collider(goss_session *session, float x, float y, float z)",
+    "goss_status goss_session_erase_collider(goss_session *session, float x, float y, float z, float radius)",
     "goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)",
     "goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)",
     "goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
@@ -384,6 +390,33 @@ const WorldStore = struct {
 
 const identity16 = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
+// A unit octahedron the mesh-particle draw scales and places at each particle:
+// six axis tips and the eight triangles joining a pole to the equator ring.
+const octahedron_positions = [6][3]f32{
+    .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 }, .{ 0, 0, 1 }, .{ 0, 0, -1 },
+};
+const octahedron_indices = [24]u32{
+    4, 0, 2, 4, 2, 1, 4, 1, 3, 4, 3, 0,
+    5, 2, 0, 5, 1, 2, 5, 3, 1, 5, 0, 3,
+};
+
+// A unit cube: eight corners and the two triangles of each of its six faces.
+const cube_positions = [8][3]f32{
+    .{ -1, -1, -1 }, .{ 1, -1, -1 }, .{ 1, 1, -1 }, .{ -1, 1, -1 },
+    .{ -1, -1, 1 },  .{ 1, -1, 1 },  .{ 1, 1, 1 },  .{ -1, 1, 1 },
+};
+const cube_indices = [36]u32{
+    0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
+    0, 4, 5, 0, 5, 1, 3, 2, 6, 3, 6, 7,
+    0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+};
+
+// A unit tetrahedron: four corners and its four triangular faces.
+const tetra_positions = [4][3]f32{
+    .{ 1, 1, 1 }, .{ 1, -1, -1 }, .{ -1, 1, -1 }, .{ -1, -1, 1 },
+};
+const tetra_indices = [12]u32{ 0, 1, 2, 0, 3, 1, 0, 2, 3, 1, 3, 2 };
+
 const RecordingSlot = struct {
     persistent: render.Renderer.PersistentTexture = .{},
     target: ?render.Renderer.OffscreenTarget = null,
@@ -422,6 +455,22 @@ pub const GeoRegion = union(enum) {
     }
 };
 
+/// A particle node whose sim runs on the GPU: the compute buffers plus the
+/// field the draw reads its colour and size from.
+const GpuParticleNode = struct {
+    sim: render.Renderer.GpuParticleSim,
+    field: manifest.ParticleField,
+};
+
+/// A deferred mesh collider: the placement to build the body at once the
+/// node's glb geometry finishes decoding.
+const PendingGlbCollider = struct {
+    position: [3]f32,
+    rotation: [4]f32,
+    friction: f32,
+    restitution: f32,
+};
+
 pub const Session = struct {
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
     /// once fed, its level and beat outrank the host's tick value.
@@ -436,6 +485,20 @@ pub const Session = struct {
     /// model node declares a body; poses drive those model matrices.
     physics_world: ?physics.World = null,
     physics_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    /// Mesh colliders whose geometry is the node's own glb: their body is built
+    /// once the glb decodes, from the decoded positions, at these placements.
+    pending_glb_colliders: std.AutoHashMapUnmanaged(graph.NodeIndex, PendingGlbCollider) = .empty,
+    /// Dynamic bodies a pointer can grab, the currently grabbed one (driven
+    /// kinematically to grab_target each tick), and where it is being dragged.
+    grabbable_bodies: std.ArrayListUnmanaged(u32) = .empty,
+    grab_body: ?u32 = null,
+    grab_target: [3]f32 = .{ 0, 0, 0 },
+    /// A kinematic collider the engine drives to the tracked head each physics
+    /// tick, so lens content collides with the head.
+    head_collider_body: ?u32 = null,
+    /// Static colliders added live by a pointer, each its body id and where it
+    /// sits, so an erase pass can remove the ones near a point.
+    live_colliders: std.ArrayListUnmanaged(struct { id: u32, pos: [3]f32 }) = .empty,
     /// Cloth nodes: the solver body and the dynamic render mesh, by
     /// graph index. Cloth replaces the glb mesh with a simulated grid.
     cloth_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
@@ -447,6 +510,18 @@ pub const Session = struct {
     hair_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.HairMesh) = .empty,
     particle_systems: std.AutoHashMapUnmanaged(graph.NodeIndex, particles.System) = .empty,
     particle_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ParticleMesh) = .empty,
+    /// A mesh-mode particle node's shared base octahedron, drawn once per
+    /// particle at its position instead of a billboard.
+    particle_base_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ModelMesh) = .empty,
+    /// 2D SPH fluid nodes: the fluid sim and the shared base mesh each particle
+    /// draws at its position, by graph index.
+    fluid_sims: std.AutoHashMapUnmanaged(graph.NodeIndex, sph.Fluid) = .empty,
+    fluid_base_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ModelMesh) = .empty,
+    /// A ribbon-mode particle node's dynamic strip buffer, rebaked each frame
+    /// from the trail history and drawn as one connected ribbon per particle.
+    particle_ribbon_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ParticleMesh) = .empty,
+    /// Particle nodes whose sim runs on the GPU compute path.
+    gpu_particle_sims: std.AutoHashMapUnmanaged(graph.NodeIndex, GpuParticleNode) = .empty,
     /// A fading fountain's own sprite texture, loaded once at activation from
     /// assets/<stem>.png when the particles field names one.
     particle_sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
@@ -781,6 +856,13 @@ pub const Session = struct {
     sprite_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     sprite_rects: std.AutoHashMapUnmanaged(graph.NodeIndex, [5]f32) = .empty,
+    /// Extruded 3D text nodes: the glyph block mesh and its color, drawn via
+    /// the model path, by graph index.
+    text3d_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { mesh: render.Renderer.ModelMesh, color: [4]f32 }) = .empty,
+    /// video.texture nodes: the streaming decoder, the dynamic texture its
+    /// frames upload into, and the playback cursor, by graph index. Drawn in
+    /// the sprite branch like an animated sprite, one decoded frame at a time.
+    video_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, VideoPlayback) = .empty,
     /// A sprite/text node's opacity parameter name (a slice into the lens
     /// manifest arena), when it binds one, so the draw reads a live opacity.
     sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
@@ -1311,6 +1393,22 @@ fn tiledAspect(s: *Session, rect_w: u16, rect_h: u16) f32 {
     return @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
 }
 
+/// The tracked head's world position for the head collider: the head pose's
+/// origin in landmark pixels, mapped into world space the same way the
+/// face-anchored draw path maps content (the pixel_to_world transform). Null
+/// when no head is tracked.
+fn headWorldPosition(s: *Session, current: anytype) ?[3]f32 {
+    const worker = s.face_tracking orelse return null;
+    var tracked: face.Result = undefined;
+    if (!(tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5)) return null;
+    const h = face_geometry.estimateHeadPose(&tracked.landmarks) orelse return null;
+    const fw: f32 = @floatFromInt(current.desc.width);
+    const fh: f32 = @floatFromInt(current.desc.height);
+    const world_height: f32 = 1.6568542;
+    const scale = world_height / fh;
+    return .{ scale * (h.cols[3][0] - 0.5 * fw), scale * (0.5 * fh - h.cols[3][1]), -scale * h.cols[3][2] };
+}
+
 /// True when the active lens carries a draw.board node, which draws the board
 /// at its own place in the chain. The end-overlay stands down then so the board
 /// is not drawn twice.
@@ -1432,7 +1530,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Like blend's mask: the face is a capability input whose
             // absence degrades (no draw), never blocks the chain.
             .mesh => s.mesh_face_textures.contains(entry.graph_index),
-            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index),
+            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index) or s.particle_base_meshes.contains(entry.graph_index) or s.particle_ribbon_meshes.contains(entry.graph_index) or s.gpu_particle_sims.contains(entry.graph_index) or s.fluid_sims.contains(entry.graph_index),
             // The draw board carries no loaded asset: it passes the frame
             // through and draws the session's brush strokes over it, so it is
             // always ready.
@@ -1440,7 +1538,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // A sprite draws once its image has decoded (an animated sprite
             // once all its frames have); until then it holds the frame
             // through, never blocking the chain.
-            .sprite => s.sprite_textures.contains(entry.graph_index) or
+            .sprite => s.sprite_textures.contains(entry.graph_index) or s.text3d_meshes.contains(entry.graph_index) or
+                s.video_textures.contains(entry.graph_index) or
                 (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
         };
         if (ready) ready_count += 1;
@@ -1817,8 +1916,47 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .sprite => {
+                if (s.text3d_meshes.get(entry.graph_index)) |text3d| {
+                    drawn += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const out_w: u16 = if (output != null and !is_final) width else output_width;
+                    const out_h: u16 = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, out_w, out_h);
+                        render.Renderer.setViewTarget(mesh_view, target, out_w, out_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    const aspect: f32 = tiledAspect(s, out_w, out_h);
+                    r.tile = if (is_final) s.capture_tile else null;
+                    const rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
+                    const cx = (rect[0] + rect[2] * 0.5) * 2.0 - 1.0;
+                    const cy = 1.0 - (rect[1] + rect[3] * 0.5) * 2.0;
+                    const sc = @max(rect[2], 0.1) * 0.7;
+                    // Place the text at its rect centre and rotate it so the
+                    // extruded sides show rather than reading as a flat label.
+                    const model = math.Mat4.translation(.{ cx * 0.7, cy * 0.7, 0 }).mul(math.Mat4.rotationY(0.6)).mul(math.Mat4.rotationX(0.25)).mul(math.Mat4.scaling(.{ sc, sc, sc }));
+                    r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                    r.drawModelMesh(mesh_view, text3d.mesh, model, text3d.color, aspect);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 var sprite_texture: render.TextureHandle = undefined;
-                if (s.sprite_anims.get(entry.graph_index)) |anim| {
+                if (s.video_textures.getPtr(entry.graph_index)) |vid| {
+                    // A video clip advances its decoded frame off the lens clock,
+                    // uploading the next one into its dynamic texture.
+                    advanceVideo(s, vid);
+                    sprite_texture = vid.texture;
+                } else if (s.sprite_anims.get(entry.graph_index)) |anim| {
                     // An animated sprite cycles its frames off the lens clock;
                     // wait until every frame has landed so the cycle is whole.
                     if (anim.loaded != anim.frames) continue;
@@ -1865,6 +2003,123 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .model => {
+                if (s.particle_ribbon_meshes.get(entry.graph_index)) |ribbon_mesh| {
+                    drawn += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const rect_w = if (output != null and !is_final) width else output_width;
+                    const rect_h = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                        render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    var base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
+                    if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
+                        if (sys.field.pattern == .face) feedFaceEmitters(s, sys, width, height);
+                        if (!s.capture_requested) sys.step(1.0 / 60.0);
+                        if (sys.field.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
+                        const sz: f32 = if (sys.field.size > 0) @floatFromInt(sys.field.size) else 8.0;
+                        const width_w: f32 = sz * 0.003;
+                        const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                        r.tile = if (is_final) s.capture_tile else null;
+                        if (s.engine.gpa.alloc(f32, sys.ribbonVertexCount() * 3)) |verts| {
+                            defer s.engine.gpa.free(verts);
+                            sys.writeRibbons(verts, width_w);
+                            r.updateParticleMesh(ribbon_mesh, verts);
+                            r.submitRibbons(blit_view, mesh_view, input_texture, ribbon_mesh, base_color, aspect_ratio);
+                        } else |_| {}
+                    }
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
+                if (s.fluid_sims.getPtr(entry.graph_index)) |fluid| {
+                    drawn += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const rect_w = if (output != null and !is_final) width else output_width;
+                    const rect_h = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                        render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    if (!s.capture_requested) fluid.step(1.0 / 60.0);
+                    if (s.fluid_base_meshes.get(entry.graph_index)) |base_mesh| {
+                        const count: usize = fluid.particles.len;
+                        if (s.engine.gpa.alloc(f32, count * 3)) |verts| {
+                            defer s.engine.gpa.free(verts);
+                            fluid.writePositions(verts);
+                            const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                            r.tile = if (is_final) s.capture_tile else null;
+                            r.submitParticleMeshes(blit_view, mesh_view, input_texture, base_mesh, verts, 0.03, .{ 0.3, 0.6, 0.95, 1.0 }, aspect_ratio);
+                        } else |_| {}
+                    }
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
+                if (s.particle_base_meshes.get(entry.graph_index)) |base_mesh| {
+                    drawn += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const rect_w = if (output != null and !is_final) width else output_width;
+                    const rect_h = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                        render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    var base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
+                    var scale: f32 = 0.04;
+                    if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
+                        if (sys.field.pattern == .face) feedFaceEmitters(s, sys, width, height);
+                        if (!s.capture_requested) sys.step(1.0 / 60.0);
+                        if (sys.field.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
+                        const sz: f32 = if (sys.field.size > 0) @floatFromInt(sys.field.size) else 8.0;
+                        scale = sz * 0.005;
+                        const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                        r.tile = if (is_final) s.capture_tile else null;
+                        const count = sys.field.count;
+                        if (s.engine.gpa.alloc(f32, count * 3)) |verts| {
+                            defer s.engine.gpa.free(verts);
+                            sys.writePositions(verts);
+                            if (sys.field.instanced) {
+                                r.submitParticleMeshesInstanced(blit_view, mesh_view, input_texture, base_mesh, verts, scale, base_color, aspect_ratio);
+                            } else {
+                                r.submitParticleMeshes(blit_view, mesh_view, input_texture, base_mesh, verts, scale, base_color, aspect_ratio);
+                            }
+                        } else |_| {}
+                    }
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 if (s.particle_meshes.get(entry.graph_index)) |particle_mesh| {
                     drawn += 1;
                     const blit_view = next_view_id;
@@ -1893,12 +2148,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
                         if (sys.field.pattern == .face) feedFaceEmitters(s, sys, width, height);
                         if (!s.capture_requested) sys.step(1.0 / 60.0);
-                        fade = sys.field.fade;
+                        // A trail draws through the fading billboard program
+                        // too, so it counts as a faded draw here.
+                        const has_trail = sys.field.trail > 1;
+                        fade = sys.field.fade or has_trail;
                         glow = sys.field.glow;
                         if (sys.field.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
                         cool_color = base_color;
                         if (sys.field.cool) |c_| cool_color = .{ c_[0], c_[1], c_[2], 1.0 };
-                        const count = sys.field.count;
+                        const count: u32 = @intCast(sys.renderCount());
                         if (fade) {
                             const sprite_px: f32 = if (sys.field.size > 0) @floatFromInt(sys.field.size) else 8.0;
                             // Size at death relative to birth (1 = unchanged), and
@@ -1910,7 +2168,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             const frames: f32 = @floatFromInt(@max(sys.field.frames, 1));
                             const sheet_dim: f32 = @ceil(@sqrt(frames));
                             particle_fx = .{ frames, sheet_dim, sys.field.stretch, 0 };
-                            if (s.engine.gpa.alloc(f32, count * 6 * 8)) |verts| {
+                            if (has_trail) {
+                                if (s.engine.gpa.alloc(f32, sys.trailVertexCount() * 8)) |verts| {
+                                    defer s.engine.gpa.free(verts);
+                                    sys.writeTrailBillboards(verts);
+                                    render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
+                                } else |_| {}
+                            } else if (s.engine.gpa.alloc(f32, count * 6 * 8)) |verts| {
                                 defer s.engine.gpa.free(verts);
                                 sys.writeBillboards(verts);
                                 render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
@@ -1929,6 +2193,59 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // crops the 3D sub-frustum (and the blit's UV) to its slice.
                     r.tile = if (is_final) s.capture_tile else null;
                     r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, base_color, cool_color, aspect_ratio, fade, particle_params, particle_fx, glow, sprite_texture);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
+                if (s.gpu_particle_sims.getPtr(entry.graph_index)) |node| {
+                    drawn += 1;
+                    // The compute runs on its own view, ordered before the draw
+                    // views so bgfx barriers its written billboards into the draw.
+                    const compute_view = next_view_id;
+                    next_view_id += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const rect_w = if (output != null and !is_final) width else output_width;
+                    const rect_h = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                        render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    const pf = node.field;
+                    // A capture is a snapshot; only a live frame advances the sim.
+                    if (!s.capture_requested) {
+                        const forces: render.Renderer.ParticleForces = .{
+                            .drag = pf.drag,
+                            .turbulence = pf.turbulence,
+                            .wind = pf.wind,
+                            .curl = pf.curl,
+                            .attract = pf.attract orelse .{ 0, 0, 0 },
+                            .attract_strength = if (pf.attract != null) pf.attract_strength else 0,
+                            .vortex = pf.vortex,
+                        };
+                        r.dispatchGpuParticles(compute_view, &node.sim, 1.0 / 60.0, pf.gravity, pf.speed, pf.lifetime, forces);
+                    }
+                    var base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
+                    if (pf.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
+                    var cool_color = base_color;
+                    if (pf.cool) |c_| cool_color = .{ c_[0], c_[1], c_[2], 1.0 };
+                    const sprite_px: f32 = if (pf.size > 0) @floatFromInt(pf.size) else 8.0;
+                    const end_ratio: f32 = if (pf.size_end) |end_px| @as(f32, @floatFromInt(end_px)) / @max(sprite_px, 1.0) else 1.0;
+                    const particle_params: [4]f32 = .{ sprite_px / @as(f32, @floatFromInt(rect_w)), sprite_px / @as(f32, @floatFromInt(rect_h)), end_ratio, pf.spin };
+                    const frames: f32 = @floatFromInt(@max(pf.frames, 1));
+                    const particle_fx: [4]f32 = .{ frames, @ceil(@sqrt(frames)), pf.stretch, 0 };
+                    const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                    r.tile = if (is_final) s.capture_tile else null;
+                    r.submitParticles(blit_view, mesh_view, input_texture, node.sim.billboard, base_color, cool_color, aspect_ratio, true, particle_params, particle_fx, pf.glow, r.defaultSpriteTexture());
                     if (output) |target| {
                         input_texture = target.texture;
                         if (!is_final) next_slot += 1;
@@ -2378,6 +2695,8 @@ pub fn destroySession(session: *Session) void {
     session.env_textures.deinit(session.engine.gpa);
     session.sprite_loaders.deinit(session.engine.gpa);
     session.sprite_textures.deinit(session.engine.gpa);
+    session.text3d_meshes.deinit(session.engine.gpa);
+    session.video_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
@@ -2401,6 +2720,9 @@ pub fn destroySession(session: *Session) void {
     session.model_world_anchors.deinit(session.engine.gpa);
     if (session.physics_world) |world| world.destroy();
     session.physics_bodies.deinit(session.engine.gpa);
+    session.pending_glb_colliders.deinit(session.engine.gpa);
+    session.grabbable_bodies.deinit(session.engine.gpa);
+    session.live_colliders.deinit(session.engine.gpa);
     session.cloth_bodies.deinit(session.engine.gpa);
     session.cloth_meshes.deinit(session.engine.gpa);
     session.cloth_cols.deinit(session.engine.gpa);
@@ -2408,7 +2730,12 @@ pub fn destroySession(session: *Session) void {
     session.hair_meshes.deinit(session.engine.gpa);
     session.hair_vcount.deinit(session.engine.gpa);
     session.particle_meshes.deinit(session.engine.gpa);
+    session.particle_base_meshes.deinit(session.engine.gpa);
+    session.particle_ribbon_meshes.deinit(session.engine.gpa);
+    session.gpu_particle_sims.deinit(session.engine.gpa);
     session.particle_systems.deinit(session.engine.gpa);
+    session.fluid_sims.deinit(session.engine.gpa);
+    session.fluid_base_meshes.deinit(session.engine.gpa);
     session.particle_sprite_textures.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
@@ -2724,6 +3051,15 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
                 const now_us = current.desc.timestamp_us;
                 if (s.physics_last_us != 0 and now_us > s.physics_last_us) {
                     const dt: f32 = @as(f32, @floatFromInt(now_us - s.physics_last_us)) / 1_000_000.0;
+                    // A grabbed body is dragged toward the pointer each tick; the
+                    // kinematic move imparts the velocity it throws with on release.
+                    if (s.grab_body) |gid| world.moveBody(gid, s.grab_target, @min(dt, 0.25));
+                    // A head collider is driven to the tracked head, its landmark
+                    // pose mapped into world space the same way face-anchored
+                    // content is, so lens content collides with the head.
+                    if (s.head_collider_body) |hid| {
+                        if (headWorldPosition(s, current)) |wp| world.moveBody(hid, wp, @min(dt, 0.25));
+                    }
                     world.step(@min(dt, 0.25));
                 }
                 s.physics_last_us = now_us;
@@ -4041,6 +4377,97 @@ pub export fn goss_session_ar_brush_undo(session: ?*Session) Status {
     return .ok;
 }
 
+/// Grabs the nearest dynamic body to a world point and drags it there; while
+/// something is grabbed the point just updates the drag target. The body is
+/// driven kinematically each tick, so it follows the pointer and builds the
+/// velocity it will throw with.
+pub export fn goss_session_grab(session: ?*Session, x: f32, y: f32, z: f32) Status {
+    const s = session orelse return .invalid_argument;
+    if (s.physics_world) |world| {
+        if (s.grab_body == null) {
+            var best: ?u32 = null;
+            var best_d2: f32 = 0.36;
+            for (s.grabbable_bodies.items) |id| {
+                const body_pose = world.bodyPose(id) catch continue;
+                const dx = body_pose[12] - x;
+                const dy = body_pose[13] - y;
+                const dz = body_pose[14] - z;
+                const d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 < best_d2) {
+                    best_d2 = d2;
+                    best = id;
+                }
+            }
+            if (best) |id| {
+                world.setBodyMotion(id, .kinematic);
+                s.grab_body = id;
+            }
+        }
+        s.grab_target = .{ x, y, z };
+    }
+    return .ok;
+}
+
+/// Releases the grabbed body back to dynamic, so it flies off carrying the
+/// velocity the drag gave it - the throw.
+pub export fn goss_session_release(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    if (s.physics_world) |world| {
+        if (s.grab_body) |id| {
+            world.setBodyMotion(id, .dynamic);
+            s.grab_body = null;
+        }
+    }
+    return .ok;
+}
+
+/// Adds a static sphere collider at a world point, live: dynamic content lands
+/// on it at once. Drawing colliders in as the pointer moves builds a live 2D
+/// world; goss_session_erase_collider takes them back out.
+pub export fn goss_session_add_collider(session: ?*Session, x: f32, y: f32, z: f32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!physics.supported) return .ok;
+    if (s.physics_world == null) {
+        s.physics_world = physics.World.create(-9.81) catch return .ok;
+        s.physics_last_us = 0;
+    }
+    if (s.physics_world) |world| {
+        const id = world.addBody(.sphere, .{ x, y, z }, .{ 0.12, 0, 0 }, .static) catch return .ok;
+        s.live_colliders.append(s.engine.gpa, .{ .id = id, .pos = .{ x, y, z } }) catch {};
+    }
+    return .ok;
+}
+
+/// Erases every live collider within `radius` of a world point - the eraser
+/// stroke over drawn colliders.
+pub export fn goss_session_erase_collider(session: ?*Session, x: f32, y: f32, z: f32, radius: f32) Status {
+    const s = session orelse return .invalid_argument;
+    if (s.physics_world) |world| {
+        const r2 = radius * radius;
+        var i: usize = 0;
+        var erased_any = false;
+        while (i < s.live_colliders.items.len) {
+            const lc = s.live_colliders.items[i];
+            const dx = lc.pos[0] - x;
+            const dy = lc.pos[1] - y;
+            const dz = lc.pos[2] - z;
+            if (dx * dx + dy * dy + dz * dz <= r2) {
+                world.removeBody(lc.id);
+                _ = s.live_colliders.swapRemove(i);
+                erased_any = true;
+            } else {
+                i += 1;
+            }
+        }
+        // A body asleep on an erased collider must wake so it falls.
+        if (erased_any) {
+            var it = s.physics_bodies.valueIterator();
+            while (it.next()) |bid| world.wakeBody(bid.*);
+        }
+    }
+    return .ok;
+}
+
 pub export fn goss_session_ar_brush_clear(session: ?*Session) Status {
     const s = session orelse return .invalid_argument;
     s.ar_board.clear();
@@ -4449,6 +4876,28 @@ pub export fn goss_session_face_count(session: ?*Session, out_count: ?*u32) Stat
     const out = out_count orelse return .invalid_argument;
     out.* = s.face_count;
     return .ok;
+}
+
+/// How many of the active lens's image and model assets are still decoding on
+/// their loader threads. Zero once every asset has landed, so the harness can
+/// wait for a deterministic frame before it reads the output.
+pub fn loadsPending(session: ?*Session) u32 {
+    const s = session orelse return 0;
+    var n: usize = s.sprite_loaders.count() + s.model_loaders.count() + s.lut_loaders.count() + s.blend_loaders.count() + s.env_loaders.count() + s.mesh_face_loaders.count();
+    var it = s.sprite_anims.valueIterator();
+    while (it.next()) |anim| {
+        for (anim.loaders) |maybe| {
+            if (maybe != null) n += 1;
+        }
+    }
+    return @intCast(n);
+}
+
+/// How many of the active lens's particle nodes run on the GPU compute path,
+/// so the harness can prove the GPU sim was taken rather than the CPU fallback.
+pub fn activeGpuParticleSims(session: ?*Session) u32 {
+    const s = session orelse return 0;
+    return @intCast(s.gpu_particle_sims.count());
 }
 
 /// Reads the index-th submitted face. invalid_argument once index reaches
@@ -5057,7 +5506,17 @@ fn destroySpriteState(session: *Session) void {
     if (session.engine.renderer) |*r| {
         var texture_it = session.sprite_textures.valueIterator();
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
+        var mesh_it = session.text3d_meshes.valueIterator();
+        while (mesh_it.next()) |t3d| render.Renderer.destroyModelMesh(t3d.mesh);
+        var video_it = session.video_textures.valueIterator();
+        while (video_it.next()) |vid| {
+            r.destroyTexture(vid.texture);
+            vid.decoder.close();
+            session.engine.gpa.free(vid.rgba);
+        }
     }
+    session.video_textures.clearRetainingCapacity();
+    session.text3d_meshes.clearRetainingCapacity();
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
     session.sprite_opacity_params.clearRetainingCapacity();
@@ -5091,12 +5550,27 @@ fn destroyMeshFaceState(session: *Session) void {
     if (session.engine.renderer) |*r| {
         var pm_it = session.particle_meshes.valueIterator();
         while (pm_it.next()) |mesh| render.Renderer.destroyParticleMesh(mesh.*);
+        var pbm_it = session.particle_base_meshes.valueIterator();
+        while (pbm_it.next()) |mesh| render.Renderer.destroyModelMesh(mesh.*);
+        var prm_it = session.particle_ribbon_meshes.valueIterator();
+        while (prm_it.next()) |mesh| render.Renderer.destroyParticleMesh(mesh.*);
         var sprite_it = session.particle_sprite_textures.valueIterator();
         while (sprite_it.next()) |tex| r.destroyTexture(tex.*);
+        var gps_it = session.gpu_particle_sims.valueIterator();
+        while (gps_it.next()) |node| render.Renderer.destroyGpuParticleSim(node.sim);
+        var fbm_it = session.fluid_base_meshes.valueIterator();
+        while (fbm_it.next()) |mesh| render.Renderer.destroyModelMesh(mesh.*);
     }
     var ps_it = session.particle_systems.valueIterator();
     while (ps_it.next()) |sys| sys.deinit();
+    var fl_it = session.fluid_sims.valueIterator();
+    while (fl_it.next()) |fluid| fluid.deinit();
+    session.gpu_particle_sims.clearRetainingCapacity();
+    session.fluid_sims.clearRetainingCapacity();
+    session.fluid_base_meshes.clearRetainingCapacity();
     session.particle_meshes.clearRetainingCapacity();
+    session.particle_base_meshes.clearRetainingCapacity();
+    session.particle_ribbon_meshes.clearRetainingCapacity();
     session.particle_systems.clearRetainingCapacity();
     session.particle_sprite_textures.clearRetainingCapacity();
     session.hair_meshes.clearRetainingCapacity();
@@ -5108,6 +5582,11 @@ fn destroyMeshFaceState(session: *Session) void {
     if (session.physics_world) |world| world.destroy();
     session.physics_world = null;
     session.physics_bodies.clearRetainingCapacity();
+    session.pending_glb_colliders.clearRetainingCapacity();
+    session.grabbable_bodies.clearRetainingCapacity();
+    session.grab_body = null;
+    session.head_collider_body = null;
+    session.live_colliders.clearRetainingCapacity();
     var loader_it = session.mesh_face_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
     session.mesh_face_loaders.clearRetainingCapacity();
@@ -5692,6 +6171,30 @@ const SpriteAnim = struct {
     loaded: u32 = 0,
 };
 
+/// A video.texture node's live playback: the streaming decoder, the
+/// dynamic texture the current frame sits in, a reused decode buffer,
+/// and how many frames have been pulled so the draw only advances when
+/// the lens clock crosses the next frame boundary.
+const VideoPlayback = struct {
+    decoder: video.Decoder,
+    texture: render.TextureHandle,
+    rgba: []u8,
+    width: u32,
+    height: u32,
+    fps: f32,
+    loop: bool,
+    /// Frames pulled and presented so far; the first frame lands at load,
+    /// so this starts at 1.
+    advanced: u64 = 1,
+    /// The frame timestamp playback started from, so the clip advances off
+    /// the same submitted-frame clock physics rides. Unset until the first
+    /// draw stamps it.
+    base_us: i64 = std.math.minInt(i64),
+    /// Set once a non-looping clip runs out, so the draw holds the last
+    /// frame instead of retrying the decoder every frame.
+    ended: bool = false,
+};
+
 /// Loads a sprite.2d node's animated GIF (assets/<stem>.gif) as a video
 /// texture: every frame decodes to a texture up front and a fully-loaded
 /// SpriteAnim the render loop cycles at the clip's own rate. Returns false
@@ -5755,6 +6258,78 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
         session.sprite_loaders.put(gpa, sprite.graph_index, loader) catch {
             loader.deinit();
         };
+    }
+}
+
+/// Opens each video.texture node's clip (assets/<source>.mp4) on the
+/// platform decoder, decodes its first frame into a dynamic texture, and
+/// registers it so the sprite branch draws and advances it. Best-effort
+/// per node: a missing or undecodable clip just leaves the node blank.
+fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const videos = try lens.videoNodes(gpa, &session.lens_graph);
+    defer gpa.free(videos);
+    for (videos) |v| {
+        session.sprite_rects.put(gpa, v.graph_index, .{ v.rect[0], v.rect[1], v.rect[2], v.rect[3], v.opacity }) catch {};
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.mp4", .{ bundle_path, v.source }) catch continue;
+        defer gpa.free(path);
+        var decoder = video.Decoder.open(path) orelse continue;
+        const rgba = gpa.alloc(u8, @as(usize, decoder.width) * decoder.height * 4) catch {
+            decoder.close();
+            continue;
+        };
+        if (decoder.read(rgba) != .frame) {
+            gpa.free(rgba);
+            decoder.close();
+            continue;
+        }
+        const tex = render.Renderer.createDynamicBgraTexture(@intCast(decoder.width), @intCast(decoder.height));
+        render.Renderer.updateDynamicBgraTexture(tex, @intCast(decoder.width), @intCast(decoder.height), rgba);
+        session.video_textures.put(gpa, v.graph_index, .{
+            .decoder = decoder,
+            .texture = tex,
+            .rgba = rgba,
+            .width = decoder.width,
+            .height = decoder.height,
+            .fps = v.fps,
+            .loop = v.loop,
+        }) catch {
+            if (session.engine.renderer) |*r| r.destroyTexture(tex);
+            gpa.free(rgba);
+            decoder.close();
+        };
+    }
+}
+
+/// Pulls decoded frames forward until the texture holds the frame the
+/// lens clock now points at, uploading each. A non-looping clip holds its
+/// last frame; a looping one rewinds. Catch-up is bounded so a long clock
+/// jump cannot stall a frame decoding hundreds of frames.
+fn advanceVideo(s: *Session, vid: *VideoPlayback) void {
+    if (vid.fps <= 0 or vid.ended) return;
+    const current = s.current orelse return;
+    if (vid.base_us == std.math.minInt(i64)) vid.base_us = current.desc.timestamp_us;
+    const elapsed_us = current.desc.timestamp_us - vid.base_us;
+    if (elapsed_us <= 0) return;
+    const target: u64 = @as(u64, @intFromFloat(@as(f64, @floatFromInt(elapsed_us)) / 1_000_000.0 * @as(f64, vid.fps))) + 1;
+    var budget: u32 = 512;
+    while (vid.advanced < target and budget > 0) : (budget -= 1) {
+        switch (vid.decoder.read(vid.rgba)) {
+            .frame => {
+                render.Renderer.updateDynamicBgraTexture(vid.texture, @intCast(vid.width), @intCast(vid.height), vid.rgba);
+                vid.advanced += 1;
+            },
+            .end => {
+                if (!(vid.loop and vid.decoder.reset())) {
+                    vid.ended = true;
+                    break;
+                }
+            },
+            .failed => {
+                vid.ended = true;
+                break;
+            },
+        }
     }
 }
 
@@ -5836,7 +6411,24 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
     const texts = try lens.textNodes(gpa, &session.lens_graph);
     defer gpa.free(texts);
     for (texts) |txt| {
-        const raster = font.rasterize(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
+        // Extruded text builds a 3D block mesh drawn through the model path,
+        // instead of a flat sprite texture.
+        if (txt.depth > 0) {
+            const mesh_geo = font.extrudeMesh(gpa, txt.content, txt.depth) catch continue;
+            defer gpa.free(mesh_geo.positions);
+            defer gpa.free(mesh_geo.indices);
+            if (r.createModelMesh(mesh_geo.positions, mesh_geo.indices)) |mesh| {
+                const col: [4]f32 = .{ @as(f32, @floatFromInt(txt.color[0])) / 255.0, @as(f32, @floatFromInt(txt.color[1])) / 255.0, @as(f32, @floatFromInt(txt.color[2])) / 255.0, 1.0 };
+                session.text3d_meshes.put(gpa, txt.graph_index, .{ .mesh = mesh, .color = col }) catch {};
+                session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
+            } else |_| {}
+            continue;
+        }
+        const rich = txt.gradient != null or txt.shadow or txt.stroke != null;
+        const raster = if (rich)
+            font.rasterizeRich(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }, txt.gradient, txt.shadow, txt.stroke) catch continue
+        else
+            font.rasterize(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
         defer gpa.free(raster.rgba);
         const texture = render.Renderer.createStaticTexture(@intCast(raster.width), @intCast(raster.height), raster.rgba);
         session.sprite_textures.put(gpa, txt.graph_index, texture) catch {
@@ -5978,21 +6570,84 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
+                if (pf.sph) {
+                    // A 2D SPH fluid: its own sim, drawn as a shared base mesh
+                    // per particle at that particle's pooled position.
+                    if (sph.Fluid.init(gpa, pf.count, .{ .gravity = pf.gravity })) |fluid| {
+                        if (r.createModelMesh(&octahedron_positions, &octahedron_indices)) |base| {
+                            session.fluid_sims.put(gpa, model.graph_index, fluid) catch {
+                                var f = fluid;
+                                f.deinit();
+                            };
+                            session.fluid_base_meshes.put(gpa, model.graph_index, base) catch {};
+                        } else |_| {
+                            var f = fluid;
+                            f.deinit();
+                        }
+                    } else |_| {}
+                    continue;
+                }
+                if (pf.gpu) {
+                    if (r.createGpuParticleSim(pf.count)) |sim| {
+                        session.gpu_particle_sims.put(gpa, model.graph_index, .{ .sim = sim, .field = pf }) catch {
+                            render.Renderer.destroyGpuParticleSim(sim);
+                        };
+                        // The GPU node generates its own billboards; no glb, no CPU sim.
+                        continue;
+                    }
+                    // Compute is unavailable on this backend; fall through to the CPU sim.
+                }
                 const pattern = particlePattern(pf.pattern);
-                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .pattern = pattern })) |sys| {
-                    // A fading fountain draws six-vertex sprite quads; a plain
-                    // one draws one point per particle.
-                    const vertex_count = if (pf.fade) pf.count * 6 else pf.count;
-                    if (r.createParticleMesh(vertex_count, pf.fade)) |mesh| {
-                        session.particle_systems.put(gpa, model.graph_index, sys) catch {
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .curl = pf.curl, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .bounce = pf.bounce, .colliders = pf.colliders, .box_colliders = pf.box_colliders, .plane_colliders = pf.plane_colliders, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .trail = pf.trail, .sub_count = pf.sub_count, .sub_speed = pf.sub_speed, .sub_lifetime = pf.sub_lifetime, .instanced = pf.instanced, .pattern = pattern })) |sys| {
+                    // A trail draws a fading billboard per particle per trail
+                    // slot; a fading fountain one quad per particle; a plain one
+                    // a single point each. Trails and fades share the billboard
+                    // program, so both take the faded mesh path.
+                    if (pf.mesh) {
+                        // Mesh mode: each particle draws a shared 3D shape, so
+                        // there is no billboard buffer, just the base mesh.
+                        const base_positions: []const [3]f32 = if (std.mem.eql(u8, pf.mesh_shape, "cube")) &cube_positions else if (std.mem.eql(u8, pf.mesh_shape, "tetra")) &tetra_positions else &octahedron_positions;
+                        const base_indices: []const u32 = if (std.mem.eql(u8, pf.mesh_shape, "cube")) &cube_indices else if (std.mem.eql(u8, pf.mesh_shape, "tetra")) &tetra_indices else &octahedron_indices;
+                        if (r.createModelMesh(base_positions, base_indices)) |base| {
+                            session.particle_systems.put(gpa, model.graph_index, sys) catch {
+                                var s2 = sys;
+                                s2.deinit();
+                            };
+                            session.particle_base_meshes.put(gpa, model.graph_index, base) catch {
+                                render.Renderer.destroyModelMesh(base);
+                            };
+                        } else |_| {
                             var s2 = sys;
                             s2.deinit();
-                        };
-                        session.particle_meshes.put(gpa, model.graph_index, mesh) catch {};
-                        if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
-                    } else |_| {
-                        var s2 = sys;
-                        s2.deinit();
+                        }
+                    } else if (pf.ribbon and pf.trail > 1) {
+                        // Ribbon mode: a solid strip baked from the trail history
+                        // each frame, drawn as flat triangles, not billboards.
+                        if (r.createParticleMesh(@intCast(sys.ribbonVertexCount()), false)) |mesh| {
+                            session.particle_systems.put(gpa, model.graph_index, sys) catch {
+                                var s2 = sys;
+                                s2.deinit();
+                            };
+                            session.particle_ribbon_meshes.put(gpa, model.graph_index, mesh) catch {};
+                        } else |_| {
+                            var s2 = sys;
+                            s2.deinit();
+                        }
+                    } else {
+                        const faded = pf.fade or pf.trail > 1;
+                        const render_count: u32 = @intCast(sys.renderCount());
+                        const vertex_count: u32 = if (pf.trail > 1) @intCast(sys.trailVertexCount()) else if (pf.fade) render_count * 6 else render_count;
+                        if (r.createParticleMesh(vertex_count, faded)) |mesh| {
+                            session.particle_systems.put(gpa, model.graph_index, sys) catch {
+                                var s2 = sys;
+                                s2.deinit();
+                            };
+                            session.particle_meshes.put(gpa, model.graph_index, mesh) catch {};
+                            if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
+                        } else |_| {
+                            var s2 = sys;
+                            s2.deinit();
+                        }
                     }
                 } else |_| {}
             }
@@ -6042,6 +6697,31 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             // Cloth generates its own mesh; no glb load.
             continue;
         }
+        if (model.balloon) |balloon| {
+            if (physics.supported) {
+                if (session.physics_world == null) {
+                    session.physics_world = physics.World.create(-9.81) catch null;
+                    session.physics_last_us = 0;
+                }
+                if (session.physics_world) |world| {
+                    if (buildUnitSphere(gpa, balloon.subdivisions, balloon.radius)) |sphere| {
+                        defer sphere.deinit(gpa);
+                        const body = world.addSoftBody(sphere.verts, sphere.indices, balloon.pressure, balloon.pinned, .{ 0, 0.4, 0 }) catch physics.invalid_body;
+                        if (body != physics.invalid_body) {
+                            if (session.engine.renderer) |*r| {
+                                if (r.createSoftMesh(@intCast(sphere.verts.len), sphere.indices)) |mesh| {
+                                    session.cloth_bodies.put(gpa, model.graph_index, body) catch {};
+                                    session.cloth_meshes.put(gpa, model.graph_index, mesh) catch {};
+                                    session.cloth_cols.put(gpa, model.graph_index, @intCast(sphere.verts.len)) catch {};
+                                } else |_| {}
+                            }
+                        }
+                    } else |_| {}
+                }
+            }
+            // The balloon generates its own mesh; no glb load.
+            continue;
+        }
         if (model.physics) |body| {
             if (physics.supported) {
                 if (session.physics_world == null) {
@@ -6050,14 +6730,32 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 }
                 if (session.physics_world) |world| {
                     const motion: physics.Motion = if (body.kinematic) .kinematic else if (body.dynamic) .dynamic else .static;
-                    const id = world.addBody(
-                        if (body.shape == .box) .box else .sphere,
-                        body.position,
-                        body.size,
-                        motion,
-                    ) catch physics.invalid_body;
+                    const rotation = eulerDegreesToQuat(body.rotation);
+                    const id = if (body.shape == .mesh and body.mesh_from_glb) id: {
+                        // The collider is the node's own glb; build it once the
+                        // geometry decodes (pollModelLoaders), not now.
+                        session.pending_glb_colliders.put(gpa, model.graph_index, .{ .position = body.position, .rotation = rotation, .friction = body.friction, .restitution = body.restitution }) catch {};
+                        break :id physics.invalid_body;
+                    } else switch (body.shape) {
+                        .hull => world.addBodyHull(body.hull_points, body.position, rotation, body.friction, body.restitution, motion, body.planar) catch physics.invalid_body,
+                        .mesh => world.addBodyMesh(body.hull_points, body.mesh_indices, body.position, rotation, body.friction, body.restitution) catch physics.invalid_body,
+                        else => id: {
+                            const shape: physics.Shape = switch (body.shape) {
+                                .box => .box,
+                                .sphere => .sphere,
+                                .cylinder => .cylinder,
+                                .capsule => .capsule,
+                                .hull, .mesh => unreachable,
+                            };
+                            break :id world.addBodyMaterial(shape, body.position, body.size, rotation, body.friction, body.restitution, motion, body.planar) catch physics.invalid_body;
+                        },
+                    };
                     if (id != physics.invalid_body) {
                         session.physics_bodies.put(gpa, model.graph_index, id) catch {};
+                        // A dynamic body can be grabbed and thrown by a pointer.
+                        if (body.dynamic and !body.kinematic) session.grabbable_bodies.append(gpa, id) catch {};
+                        // A head-following collider is driven to the tracked head.
+                        if (body.follow == .head) session.head_collider_body = id;
                     }
                 }
             }
@@ -6081,7 +6779,39 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             for (models) |anchor_model| {
                 if (!std.mem.eql(u8, anchor_model.node_id, chain_to)) continue;
                 const anchor = session.physics_bodies.get(anchor_model.graph_index) orelse break;
-                world.constrainDistance(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, body.chain_length) catch {};
+                if (body.jiggle_segments > 1) {
+                    // Build a spring chain of hidden proxy bodies between the
+                    // anchor and this node, so the node lags and sways after the
+                    // anchor moves - jiggle for hair, jewelry, and tails. The
+                    // node's own body is the tip; the proxies hang between.
+                    const segments = body.jiggle_segments;
+                    const seg_len = body.chain_length / @as(f32, @floatFromInt(segments));
+                    const anchor_pos = if (anchor_model.physics) |ap| ap.position else .{ 0, 0, 0 };
+                    var prev = anchor;
+                    var prev_pos = anchor_pos;
+                    var link: u32 = 1;
+                    while (link < segments) : (link += 1) {
+                        const pos: [3]f32 = .{ prev_pos[0], prev_pos[1] - seg_len, prev_pos[2] };
+                        const proxy = world.addBody(.sphere, pos, .{ 0.02, 0, 0 }, .dynamic) catch break;
+                        world.constrainSpring(prev, proxy, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg_len, body.jiggle_stiffness, body.jiggle_damping) catch {};
+                        prev = proxy;
+                        prev_pos = pos;
+                    }
+                    world.constrainSpring(prev, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg_len, body.jiggle_stiffness, body.jiggle_damping) catch {};
+                    break;
+                }
+                switch (body.joint) {
+                    .distance => world.constrainDistance(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, body.chain_length) catch {},
+                    .point => world.constrainPoint(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }) catch {},
+                    .fixed => world.constrainFixed(anchor, child) catch {},
+                    .hinge => {
+                        // Hinge about z at the anchor's world position, so the
+                        // child swings in the anchor's xy plane only.
+                        const pivot = if (anchor_model.physics) |ap| ap.position else .{ 0, 0, 0 };
+                        world.constrainHinge(anchor, child, pivot, .{ 0, 0, 1 }) catch {};
+                    },
+                    .spring => world.constrainSpring(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, body.chain_length, 1.2, 0.6) catch {},
+                }
                 break;
             }
         }
@@ -6103,6 +6833,16 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     while (it.next()) |entry| {
         const loader = entry.value_ptr.*;
         if (loader.take()) |decoded| {
+            // A node whose mesh collider is its own glb builds that static body
+            // now, from the just-decoded geometry, before it is freed below.
+            if (session.pending_glb_colliders.get(entry.key_ptr.*)) |pc| {
+                if (session.physics_world) |world| {
+                    if (world.addBodyMesh(decoded.positions, decoded.indices, pc.position, pc.rotation, pc.friction, pc.restitution)) |bid| {
+                        session.physics_bodies.put(gpa, entry.key_ptr.*, bid) catch {};
+                    } else |_| {}
+                }
+                _ = session.pending_glb_colliders.remove(entry.key_ptr.*);
+            }
             // A morphable mesh draws from a dynamic buffer the morph pass
             // re-uploads each frame; a plain mesh uploads once and stays static.
             const has_morph = decoded.morph_targets.len > 0;
@@ -6195,6 +6935,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createEnvLoaders(session, gpa, bundle_path);
     try createMeshFaceLoaders(session, gpa, bundle_path);
     try createSpriteLoaders(session, gpa, bundle_path);
+    try createVideoLoaders(session, gpa, bundle_path);
     try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
@@ -6823,6 +7564,113 @@ fn detectBodyActions(s: *Session) struct { jump: bool, wave: bool, dance: bool }
     return .{ .jump = jump, .wave = wave, .dance = dancing };
 }
 
+/// Whether a world-space point is inside a lens trigger volume - a sphere when
+/// its radius is set, otherwise an axis-aligned box of its half-extents.
+fn volumeContains(vol: manifest.Volume, p: [3]f32) bool {
+    const dx = p[0] - vol.center[0];
+    const dy = p[1] - vol.center[1];
+    const dz = p[2] - vol.center[2];
+    if (vol.radius > 0) return dx * dx + dy * dy + dz * dz <= vol.radius * vol.radius;
+    return @abs(dx) <= vol.half[0] and @abs(dy) <= vol.half[1] and @abs(dz) <= vol.half[2];
+}
+
+const SphereMesh = struct {
+    verts: [][3]f32,
+    indices: []u32,
+    fn deinit(self: SphereMesh, gpa: std.mem.Allocator) void {
+        gpa.free(self.verts);
+        gpa.free(self.indices);
+    }
+};
+
+/// Builds a closed sphere shell of `radius` by subdividing an octahedron
+/// `subdivisions` times and projecting each vertex onto the sphere, with every
+/// triangle wound outward. Used for a soft-body balloon's mesh and render.
+fn buildUnitSphere(gpa: std.mem.Allocator, subdivisions: u32, radius: f32) !SphereMesh {
+    var verts: std.ArrayList([3]f32) = .empty;
+    errdefer verts.deinit(gpa);
+    var faces: std.ArrayList([3]u32) = .empty;
+    defer faces.deinit(gpa);
+    try verts.appendSlice(gpa, &.{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 }, .{ 0, 0, 1 }, .{ 0, 0, -1 } });
+    try faces.appendSlice(gpa, &.{
+        .{ 2, 0, 4 }, .{ 2, 4, 1 }, .{ 2, 1, 5 }, .{ 2, 5, 0 },
+        .{ 3, 4, 0 }, .{ 3, 1, 4 }, .{ 3, 5, 1 }, .{ 3, 0, 5 },
+    });
+    var s: u32 = 0;
+    while (s < subdivisions) : (s += 1) {
+        var midpoints: std.AutoHashMapUnmanaged(u64, u32) = .empty;
+        defer midpoints.deinit(gpa);
+        var next: std.ArrayList([3]u32) = .empty;
+        errdefer next.deinit(gpa);
+        for (faces.items) |f| {
+            const ab = try edgeMidpoint(gpa, &verts, &midpoints, f[0], f[1]);
+            const bc = try edgeMidpoint(gpa, &verts, &midpoints, f[1], f[2]);
+            const ca = try edgeMidpoint(gpa, &verts, &midpoints, f[2], f[0]);
+            try next.appendSlice(gpa, &.{ .{ f[0], ab, ca }, .{ ab, f[1], bc }, .{ ca, bc, f[2] }, .{ ab, bc, ca } });
+        }
+        faces.deinit(gpa);
+        faces = next;
+    }
+    const indices = try gpa.alloc(u32, faces.items.len * 3);
+    errdefer gpa.free(indices);
+    for (faces.items, 0..) |f, i| {
+        const a = verts.items[f[0]];
+        const b = verts.items[f[1]];
+        const c = verts.items[f[2]];
+        // Wind outward: flip if the triangle normal points toward the centre.
+        const n = cross3(sub3(b, a), sub3(c, a));
+        const outward = n[0] * (a[0] + b[0] + c[0]) + n[1] * (a[1] + b[1] + c[1]) + n[2] * (a[2] + b[2] + c[2]);
+        indices[i * 3] = f[0];
+        indices[i * 3 + 1] = if (outward < 0) f[2] else f[1];
+        indices[i * 3 + 2] = if (outward < 0) f[1] else f[2];
+    }
+    for (verts.items) |*v| v.* = .{ v[0] * radius, v[1] * radius, v[2] * radius };
+    return .{ .verts = try verts.toOwnedSlice(gpa), .indices = indices };
+}
+
+fn sub3(a: [3]f32, b: [3]f32) [3]f32 {
+    return .{ a[0] - b[0], a[1] - b[1], a[2] - b[2] };
+}
+
+fn cross3(a: [3]f32, b: [3]f32) [3]f32 {
+    return .{ a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0] };
+}
+
+fn edgeMidpoint(gpa: std.mem.Allocator, verts: *std.ArrayList([3]f32), midpoints: *std.AutoHashMapUnmanaged(u64, u32), a: u32, b: u32) !u32 {
+    const key = (@as(u64, @min(a, b)) << 32) | @as(u64, @max(a, b));
+    if (midpoints.get(key)) |idx| return idx;
+    const va = verts.items[a];
+    const vb = verts.items[b];
+    var mid: [3]f32 = .{ (va[0] + vb[0]) / 2, (va[1] + vb[1]) / 2, (va[2] + vb[2]) / 2 };
+    const len = @sqrt(mid[0] * mid[0] + mid[1] * mid[1] + mid[2] * mid[2]);
+    if (len > 0) mid = .{ mid[0] / len, mid[1] / len, mid[2] / len };
+    const idx: u32 = @intCast(verts.items.len);
+    try verts.append(gpa, mid);
+    try midpoints.put(gpa, key, idx);
+    return idx;
+}
+
+/// Turns an euler orientation in degrees (x, y, z) into a quaternion
+/// (x, y, z, w) for a physics body, applied in x-then-y-then-z order.
+fn eulerDegreesToQuat(euler: [3]f32) [4]f32 {
+    const deg2rad = std.math.pi / 180.0;
+    const hx = euler[0] * deg2rad * 0.5;
+    const hy = euler[1] * deg2rad * 0.5;
+    const hz = euler[2] * deg2rad * 0.5;
+    const cx = @cos(hx);
+    const sx = @sin(hx);
+    const cy = @cos(hy);
+    const sy = @sin(hy);
+    const cz = @cos(hz);
+    const sz = @sin(hz);
+    return .{
+        sx * cy * cz - cx * sy * sz,
+        cx * sy * cz + sx * cy * sz,
+        cx * cy * sz - sx * sy * cz,
+        cx * cy * cz + sx * sy * sz,
+    };
+}
+
 pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
@@ -6886,6 +7734,13 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     }
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
+        // The device's world position is the translation column of the pose;
+        // a lens with a trigger volume fires device.in_volume while it is
+        // inside the region, computed on-device (the pose never reaches a lens).
+        if (s.active_lens.?.manifest.volume) |vol| {
+            const wfc = s.world.state.world_from_camera;
+            live_signals.device_in_volume = volumeContains(vol, .{ wfc[12], wfc[13], wfc[14] });
+        }
     }
     if (s.location_engine_fed) {
         if (s.geofence) |region| {

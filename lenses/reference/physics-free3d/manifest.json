@@ -1,0 +1,16 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.physics-free3d",
+  "version": "1.0.0",
+  "display_name": "Physics Free 3D",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "incline", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "physics": {"body": "box", "size": [0.7, 0.04, 0.7], "position": [0, -0.3, 0], "rotation": [30, 0, 0], "motion": "static", "friction": 1.0}},
+    {"id": "body", "type": "model.gltf", "inputs": {"frame": "incline"}, "params": {},
+     "physics": {"body": "box", "size": [0.09, 0.09, 0.09], "position": [0, 0.6, 0], "motion": "dynamic", "friction": 0.02, "planar": false}}
+  ],
+  "triggers": []
+}

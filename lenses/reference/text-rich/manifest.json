@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.text-rich",
+  "version": "1.0.0",
+  "display_name": "Text Rich",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "label", "type": "text.2d", "inputs": {"frame": "camera"}, "params": {},
+     "text": {"content": "GOSS", "x": 0.2, "y": 0.4, "w": 0.6, "h": 0.2, "color": [1.0, 0.9, 0.3], "gradient": [0.9, 0.2, 0.1], "shadow": true, "stroke": [0.0, 0.0, 0.0]}}
+  ],
+  "triggers": []
+}

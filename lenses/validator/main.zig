@@ -30,7 +30,7 @@ const max_manifest_bytes: u64 = manifest.max_manifest_bytes;
 
 const permitted_top_level = [_][]const u8{ "shaders", "assets", "sounds" };
 const shader_extensions = [_][]const u8{".glsl"};
-const asset_extensions = [_][]const u8{ ".gltf", ".glb", ".png", ".gif" };
+const asset_extensions = [_][]const u8{ ".gltf", ".glb", ".png", ".gif", ".mp4" };
 const sound_extensions = [_][]const u8{ ".wav", ".mp3", ".flac", ".ogg" };
 
 fn hasAnyExtension(name: []const u8, extensions: []const []const u8) bool {

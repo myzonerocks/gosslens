@@ -175,14 +175,34 @@ a declared parameter, a target past the list contributes nothing, and with
 no `morph_weights` the mesh draws unmorphed.
 
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
-pose drives the model matrix once simulation starts. `body` is `box`
-or `sphere`, `size` is box half extents (a sphere reads its radius
-from the first element), `position` places the body at activation, and
+pose drives the model matrix once simulation starts. `body` is `box`,
+`sphere`, `cylinder`, `capsule` (the last two axis vertical), `hull`, or
+`mesh`, `size` is box half extents (a sphere reads its radius from the
+first element; a cylinder or capsule reads radius from the first and half
+height from the second), a `hull` instead lists `points` as at least
+four `[x, y, z]` and its collider is their convex hull, a `mesh` lists
+`points` and `indices` (three per triangle) for a concave collider and is
+always static, `position` places the body at activation, an optional
+`rotation` in euler degrees lays an elongated body on its side or tilts a
+collider, optional `friction` (0 slippery, ~1 grippy) and `restitution`
+(0 dead, 1 bouncy) set its surface material, `"planar": true` confines a
+body to the z=0 plane (it moves in x and y and spins about z only) for a
+2D world laid into the scene, and
 `motion` is `dynamic`, `static`, or `kinematic` (the engine holds the
 body, so chained content can hang off it). A body may add
 `"chain": {"to": "<node id>", "length": <meters>}`, a distance
 constraint hanging it off another node's body - earrings off a
-kinematic anchor, a pendant off a bead. Simulation steps at a fixed
+kinematic anchor, a pendant off a bead. Adding `"joint": "point"` to
+the chain links the two at a pivot the body swings freely about (a ball
+joint) instead, `"joint": "fixed"` welds them rigidly so the body rides
+the anchor, `"joint": "hinge"` lets it swing about a single axis like a
+door or a pendulum, `"joint": "spring"` tethers them softly at `length`
+so the body stretches and bobs, and `"joint": "distance"` (the default)
+bounds their separation up to `length`. Adding
+`"jiggle": {"segments": <n>, "stiffness": <hz>, "damping": <0..1>}` to
+the chain instead builds the link from `n` soft springs through hidden
+proxy bodies, so the content lags and sways after the anchor moves -
+secondary motion for hair, jewelry, and tails. Simulation steps at a fixed
 rate from frame timestamps, so the same frames replay the same motion;
 on a session without physics support the node holds its initial pose.
 
@@ -191,6 +211,16 @@ A model.gltf node may instead carry a `"cloth": {"cols", "rows",
 (a grid of the given resolution and world size, top edge pinned)
 rather than a glb mesh, its deformed vertices drawn each frame. It
 needs no glb asset.
+
+A model.gltf node may instead carry a `"balloon": {"radius",
+"subdivisions", "pressure"}` field: the node becomes a closed soft-body
+shell (a sphere subdivided from an octahedron) that its internal
+`pressure` inflates - a positive pressure puffs it out, zero leaves it
+limp. `radius` is the rest size in metres, `subdivisions` (0 to 3) sets
+the shell resolution, and `pinned` (default true) holds the top cap so it
+hangs; set it false to drop the shell as a free soft body that collides
+with rigid bodies and squishes on impact. All are optional with engine
+defaults. Like cloth it needs no glb asset.
 
 A model.gltf node may instead carry a `"hair": {"strands", "verts",
 "length"}` field: the node becomes a set of simulated hair strands
@@ -206,8 +236,11 @@ a particle system instead of a glb mesh, drawn over the frame. The sim is a
 deterministic CPU integration - no clock, no randomness, every particle a
 pure function of its index and elapsed steps - so the same field and frame
 count produce the same picture, conformance bit-stable; it needs no glb
-asset. `count` is how many (1 to 4096); the rest of the field tunes emission,
-motion, and appearance:
+asset. A `"preset"` names a prebuilt effect from the VFX asset library -
+`fire`, `smoke`, `magic`, or `sparks` - that fills in a curated config the
+other fields then override, so `{"preset": "fire"}` is a finished flame and
+`{"preset": "fire", "count": 400}` is a bigger one. `count` is how many
+(1 to 4096); the rest of the field tunes emission, motion, and appearance:
 
 - Emission `"pattern"`: `fountain` (default), `rain`, `burst`, `ring`,
   `cone`, `sphere`, `box`, `disc`, `hemisphere`, or `face` - the last spawns
@@ -215,17 +248,38 @@ motion, and appearance:
   nothing without a tracked subject.
 - Motion: `"gravity"`, `"speed"` and `"lifetime"` (each with a 0..1
   `"speed_spread"` / `"lifetime_spread"` to vary it per particle), `"drag"`
-  (air resistance), `"wind": [x, y, z]`, `"turbulence"` (swirl), `"attract":
-  [x, y, z]` with `"attract_strength"` (a gravity well), `"vortex"` (orbital
-  swirl), `"floor"` (a height particles bounce off), and `"oneshot"` (emit
-  once and die out rather than looping).
+  (air resistance), `"wind": [x, y, z]`, `"turbulence"` (swirl), `"curl"`
+  (a divergence-free curl-noise swirl, the organic churn of smoke and fire),
+  `"attract": [x, y, z]` with `"attract_strength"` (a gravity well),
+  `"vortex"` (orbital swirl), `"floor"` (a height particles bounce off),
+  `"bounce"` (0..1, how much speed a floor or collider bounce keeps),
+  `"colliders": [[x, y, z, radius], ...]` (up to sixteen spheres particles
+  bounce off, kept outside each), `"box_colliders": [[x, y, z, hx, hy, hz],
+  ...]` (up to sixteen axis-aligned boxes they bounce off), `"plane_colliders":
+  [[nx, ny, nz, d], ...]` (up to sixteen infinite planes - walls, ramps, slides
+  - they bounce off), and `"oneshot"` (emit once and die out rather than
+  looping).
 - Appearance (with `"fade": true` each particle is a camera-facing sprite,
   otherwise a one-pixel point): `"size"` px at birth with an optional
   `"size_end"`, `"color": [r, g, b]` crossing to a `"cool"` colour over life,
   `"spin"` turns over life, `"stretch"` along the screen velocity (streaks),
   `"glow": true` for additive blending, a `"sprite": "<stem>"` textured with
-  `assets/<stem>.png`, and `"frames"` to flip-book through a square sprite
-  sheet over life.
+  `assets/<stem>.png`, `"frames"` to flip-book through a square sprite sheet
+  over life, `"trail"` to draw that many of each particle's recent
+  positions as a fading ribbon of billboards behind it (a comet tail),
+  `"ribbon": true` to draw that trail history as one solid connected strip
+  instead (it needs `"trail"` set for the history), and `"mesh": true` to draw
+  each particle as a small 3D shape sized by `"size"` rather than a flat
+  billboard, its `"mesh_shape"` one of `"octahedron"` (default), `"cube"`, or
+  `"tetra"`.
+- Sub-emitter: `"sub_count"` (0 to 64) children each particle bursts into
+  when it dies, on an even outward spray, with `"sub_speed"` and
+  `"sub_lifetime"` for their launch and life - a firework shell opening into
+  sparks. The children fade and fall on their own; pair with `"fade"` so
+  spent sparks vanish.
+- `"gpu": true` runs the fountain sim on the GPU compute path at crowd scale
+  where the backend supports compute; elsewhere the identical CPU sim runs, so
+  the same field draws the same picture either way.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the
@@ -339,6 +393,21 @@ like a sprite; it takes the same `"opacity_param"` for a parameter-driven
 fade. A newline in the `content` starts a new line, so a multi-line caption
 fits the rect as several rows. The font covers space, digits, upper- and
 lowercase letters, and common punctuation; any other character draws blank.
+The text block also styles the glyphs: `"gradient"` (an rgb the glyphs fade
+toward at their base, the top staying the main color), `"shadow"` (a soft
+drop shadow), `"stroke"` (an rgb outline), and `"depth"` (a value above zero
+extrudes the glyphs into a rotated 3D block mesh rather than flat sprite text).
+
+A `"video.texture"` node plays an MP4 clip over the frame like a sprite. It
+ships its clip as `assets/<source>.mp4` and carries a `"video": {"source",
+"x", "y", "w", "h", "opacity", "fps", "loop"}` block: the asset stem, the same
+normalized rect and opacity a sprite takes, the playback rate the clip advances
+at off the frame clock, and whether it loops. The engine decodes the clip off
+the platform's hardware decoder, streaming the next frame onto the sprite one
+frame at a time, so playback stays O(1) per frame rather than reopening the
+file. `"fps": 0` holds the first frame; `"loop": false` holds the last frame at
+the end instead of rewinding. Targets without a hardware decoder play a
+deterministic synthetic clip so the node still runs.
 
 A `"layout.composite"` node lets a lens drive the head composite instead of the
 host: it carries a `"layout": {"arrangement", "key", "chroma", "similarity",
@@ -420,7 +489,9 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   `body.jump` / `body.wave` (true for one tick when a hop or a raised-hand wave
   completes), `body.dance` (true while rhythmic whole-body motion lasts),
   `timer('name')` (seconds since the
-  timer's last reset, see actions below), `tap`, `param('name')`.
+  timer's last reset, see actions below), `device.in_volume` (true while the
+  tracked device is inside the lens's `volume` region, see below), `tap`,
+  `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
   numeric or boolean literal.
 - Boolean combinators: `&&`, `||`, `!`, grouped with parens.
@@ -429,6 +500,13 @@ That is the entire grammar. No arithmetic between two signals, no function
 calls beyond the fixed signal readers above, no string concatenation, no
 loops. A `when` expression nests at most 8 deep (parens or combinators);
 deeper fails validation closed.
+
+A `device.in_volume` signal reads a top-level `"volume"` region on the
+manifest: `{"center": [x, y, z], "radius": r}` for a sphere or `{"center":
+[x, y, z], "half": [hx, hy, hz]}` for an axis-aligned box, in world space. The
+engine tests the submitted device pose against it on-device each tick and only
+the inside/outside boolean reaches the lens; the pose itself never crosses the
+ABI. With no world tracking or no volume declared, the signal reads false.
 
 ### 6.2 Actions
 

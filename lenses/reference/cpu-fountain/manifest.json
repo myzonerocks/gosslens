@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.cpu-fountain",
+  "version": "1.0.0",
+  "display_name": "CPU Fountain",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "fx", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 300, "pattern": "fountain", "gravity": 9.8, "speed": 2.0, "lifetime": 2.5, "fade": true, "glow": true, "size": 44, "color": [0.9, 0.8, 0.3], "gpu": false}}
+  ],
+  "triggers": []
+}

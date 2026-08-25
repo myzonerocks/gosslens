@@ -8,6 +8,8 @@ pub const supported = false;
 pub const Shape = enum(u32) {
     box = 0,
     sphere = 1,
+    cylinder = 2,
+    capsule = 3,
 };
 
 pub const Motion = enum(u32) {
@@ -40,6 +42,52 @@ pub const World = struct {
         return error.BodyAddFailed;
     }
 
+    pub fn addBodyOriented(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, motion: Motion) !u32 {
+        _ = world;
+        _ = shape;
+        _ = position;
+        _ = size;
+        _ = rotation;
+        _ = motion;
+        return error.BodyAddFailed;
+    }
+
+    pub fn addBodyMaterial(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
+        _ = world;
+        _ = shape;
+        _ = position;
+        _ = size;
+        _ = rotation;
+        _ = friction;
+        _ = restitution;
+        _ = motion;
+        _ = planar;
+        return error.BodyAddFailed;
+    }
+
+    pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
+        _ = world;
+        _ = points;
+        _ = position;
+        _ = rotation;
+        _ = friction;
+        _ = restitution;
+        _ = motion;
+        _ = planar;
+        return error.BodyAddFailed;
+    }
+
+    pub fn addBodyMesh(world: World, points: []const [3]f32, indices: []const u32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32) !u32 {
+        _ = world;
+        _ = points;
+        _ = indices;
+        _ = position;
+        _ = rotation;
+        _ = friction;
+        _ = restitution;
+        return error.BodyAddFailed;
+    }
+
     pub fn step(world: World, dt_seconds: f32) void {
         _ = world;
         _ = dt_seconds;
@@ -56,11 +104,64 @@ pub const World = struct {
         return error.WorldCreateFailed;
     }
 
+    pub fn constrainPoint(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32) !void {
+        _ = world;
+        _ = a;
+        _ = b;
+        _ = point_a;
+        _ = point_b;
+        return error.WorldCreateFailed;
+    }
+
+    pub fn constrainFixed(world: World, a: u32, b: u32) !void {
+        _ = world;
+        _ = a;
+        _ = b;
+        return error.WorldCreateFailed;
+    }
+
+    pub fn constrainHinge(world: World, a: u32, b: u32, pivot: [3]f32, axis: [3]f32) !void {
+        _ = world;
+        _ = a;
+        _ = b;
+        _ = pivot;
+        _ = axis;
+        return error.WorldCreateFailed;
+    }
+
+    pub fn constrainSpring(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32, rest_length: f32, frequency: f32, damping: f32) !void {
+        _ = world;
+        _ = a;
+        _ = b;
+        _ = point_a;
+        _ = point_b;
+        _ = rest_length;
+        _ = frequency;
+        _ = damping;
+        return error.WorldCreateFailed;
+    }
+
     pub fn moveBody(world: World, body: u32, position: [3]f32, dt_seconds: f32) void {
         _ = world;
         _ = body;
         _ = position;
         _ = dt_seconds;
+    }
+
+    pub fn setBodyMotion(world: World, body: u32, motion: Motion) void {
+        _ = world;
+        _ = body;
+        _ = motion;
+    }
+
+    pub fn removeBody(world: World, body: u32) void {
+        _ = world;
+        _ = body;
+    }
+
+    pub fn wakeBody(world: World, body: u32) void {
+        _ = world;
+        _ = body;
     }
 
     pub fn addCloth(world: World, cols: u32, rows: u32, width: f32, height: f32, position: [3]f32) !u32 {
@@ -69,6 +170,16 @@ pub const World = struct {
         _ = rows;
         _ = width;
         _ = height;
+        _ = position;
+        return error.BodyAddFailed;
+    }
+
+    pub fn addSoftBody(world: World, verts: []const [3]f32, faces: []const u32, pressure: f32, pin_top: bool, position: [3]f32) !u32 {
+        _ = world;
+        _ = verts;
+        _ = faces;
+        _ = pressure;
+        _ = pin_top;
         _ = position;
         return error.BodyAddFailed;
     }

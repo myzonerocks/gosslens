@@ -10,6 +10,10 @@ pub const supported = true;
 pub const Shape = enum(u32) {
     box = 0,
     sphere = 1,
+    /// Axis vertical; size is radius, half-height.
+    cylinder = 2,
+    /// Axis vertical; size is radius, half-height of the cylinder part.
+    capsule = 3,
 };
 
 pub const Motion = enum(u32) {
@@ -24,11 +28,23 @@ pub const invalid_body: u32 = std.math.maxInt(u32);
 extern fn goss_physics_world_create(gravity_y: f32) ?*anyopaque;
 extern fn goss_physics_world_destroy(handle: *anyopaque) void;
 extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, motion: u32) u32;
+extern fn goss_physics_body_add_oriented(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, motion: u32) u32;
+extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, pos: *const [3]f32, size: *const [3]f32, quat: *const [4]f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
+extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, pos: *const [3]f32, quat: *const [4]f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
+extern fn goss_physics_body_add_mesh(handle: *anyopaque, points: [*]const f32, point_count: u32, indices: [*]const u32, index_count: u32, pos: *const [3]f32, quat: *const [4]f32, friction: f32, restitution: f32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
+extern fn goss_physics_body_set_motion(handle: *anyopaque, body: u32, motion: u32) void;
+extern fn goss_physics_body_remove(handle: *anyopaque, body: u32) void;
+extern fn goss_physics_body_wake(handle: *anyopaque, body: u32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
+extern fn goss_physics_constrain_point(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) i32;
+extern fn goss_physics_constrain_fixed(handle: *anyopaque, a: u32, b: u32) i32;
+extern fn goss_physics_constrain_hinge(handle: *anyopaque, a: u32, b: u32, px: f32, py: f32, pz: f32, hx: f32, hy: f32, hz: f32) i32;
+extern fn goss_physics_constrain_spring(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, rest_length: f32, frequency: f32, damping: f32) i32;
 extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
 extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, px: f32, py: f32, pz: f32) u32;
+extern fn goss_physics_add_softbody(handle: *anyopaque, verts: [*]const f32, vert_count: u32, faces: [*]const u32, face_count: u32, pressure: f32, pin_top: u32, px: f32, py: f32, pz: f32) u32;
 extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
 extern fn goss_physics_add_hair(handle: *anyopaque, strand_count: u32, verts: u32, length: f32) u32;
 extern fn goss_physics_hair_update(handle: *anyopaque, hair_id: u32, head_transform: [*]const f32, dt: f32) void;
@@ -52,6 +68,41 @@ pub const World = struct {
         return id;
     }
 
+    /// Adds a body rotated by a quaternion (x, y, z, w), so an elongated
+    /// shape can lie on its side or a static collider can tilt.
+    pub fn addBodyOriented(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, motion: Motion) !u32 {
+        const id = goss_physics_body_add_oriented(world.handle, @intFromEnum(shape), position[0], position[1], position[2], size[0], size[1], size[2], rotation[0], rotation[1], rotation[2], rotation[3], @intFromEnum(motion));
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Adds a rotated body with a surface material: friction (0 slippery,
+    /// ~1 grippy) and restitution (0 dead, 1 bouncy). `planar` confines it to
+    /// the z = 0 plane (x/y translation and z spin only) for a 2D world.
+    pub fn addBodyMaterial(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
+        const id = goss_physics_body_add_material(world.handle, @intFromEnum(shape), &position, &size, &rotation, friction, restitution, @intFromEnum(motion), @intFromBool(planar));
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Adds a body whose shape is the convex hull of `points` (local space),
+    /// an arbitrary faceted collider. Needs at least four points.
+    pub fn addBodyHull(world: World, points: []const [3]f32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32, motion: Motion, planar: bool) !u32 {
+        const flat: [*]const f32 = @ptrCast(points.ptr);
+        const id = goss_physics_body_add_hull(world.handle, flat, @intCast(points.len), &position, &rotation, friction, restitution, @intFromEnum(motion), @intFromBool(planar));
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Adds a static body whose collider is the concave triangle mesh of
+    /// `points` and `indices` (three per triangle). Concave meshes are static.
+    pub fn addBodyMesh(world: World, points: []const [3]f32, indices: []const u32, position: [3]f32, rotation: [4]f32, friction: f32, restitution: f32) !u32 {
+        const flat: [*]const f32 = @ptrCast(points.ptr);
+        const id = goss_physics_body_add_mesh(world.handle, flat, @intCast(points.len), indices.ptr, @intCast(indices.len), &position, &rotation, friction, restitution);
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
     /// Accumulates dt into fixed 60 Hz substeps - the determinism
     /// contract: the same dt sequence always lands the same poses.
     pub fn step(world: World, dt_seconds: f32) void {
@@ -64,15 +115,71 @@ pub const World = struct {
         if (goss_physics_constrain_distance(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], min, max) != 0) return error.ConstraintFailed;
     }
 
+    /// Pins two bodies at a single point (a ball joint): the point stays
+    /// coincident while the bodies rotate freely about it - a pendulum pivot,
+    /// unlike a distance constraint that only bounds separation.
+    pub fn constrainPoint(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32) !void {
+        if (goss_physics_constrain_point(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2]) != 0) return error.ConstraintFailed;
+    }
+
+    /// Welds two bodies together rigidly at their current relative pose (a
+    /// fixed joint): no relative translation or rotation, so the body rides its
+    /// anchor, unlike a point joint that lets it swing.
+    pub fn constrainFixed(world: World, a: u32, b: u32) !void {
+        if (goss_physics_constrain_fixed(world.handle, a, b) != 0) return error.ConstraintFailed;
+    }
+
+    /// Hinges two bodies at a world pivot about an axis: the body swings in the
+    /// one plane perpendicular to the axis (a door or single-axis pendulum),
+    /// unlike a point joint that swings every way.
+    pub fn constrainHinge(world: World, a: u32, b: u32, pivot: [3]f32, axis: [3]f32) !void {
+        if (goss_physics_constrain_hinge(world.handle, a, b, pivot[0], pivot[1], pivot[2], axis[0], axis[1], axis[2]) != 0) return error.ConstraintFailed;
+    }
+
+    /// Tethers two bodies with a spring held at rest_length (frequency in
+    /// Hz, damping 0..1): it stretches under load and bobs back, unlike the
+    /// rigid distance chain.
+    pub fn constrainSpring(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32, rest_length: f32, frequency: f32, damping: f32) !void {
+        if (goss_physics_constrain_spring(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], rest_length, frequency, damping) != 0) return error.ConstraintFailed;
+    }
+
     /// Drives a kinematic body toward a pose over dt; chained bodies
     /// swing after it.
     pub fn moveBody(world: World, body: u32, position: [3]f32, dt_seconds: f32) void {
         goss_physics_body_move(world.handle, body, position[0], position[1], position[2], dt_seconds);
     }
 
+    /// Switches a body's motion type at runtime - a dynamic body grabbed into
+    /// a kinematic drag, then released back to dynamic so it flies off with
+    /// the velocity the drag imparted.
+    pub fn setBodyMotion(world: World, body: u32, motion: Motion) void {
+        goss_physics_body_set_motion(world.handle, body, @intFromEnum(motion));
+    }
+
+    /// Removes a body from the world and destroys it - an erased live collider.
+    pub fn removeBody(world: World, body: u32) void {
+        goss_physics_body_remove(world.handle, body);
+    }
+
+    /// Wakes a body so it re-evaluates its support after a collider it rested
+    /// on was erased.
+    pub fn wakeBody(world: World, body: u32) void {
+        goss_physics_body_wake(world.handle, body);
+    }
+
     /// Adds a pinned-top cloth grid; its deformed vertices drive a mesh.
     pub fn addCloth(world: World, cols: u32, rows: u32, width: f32, height: f32, position: [3]f32) !u32 {
         const id = goss_physics_add_cloth(world.handle, cols, rows, width, height, position[0], position[1], position[2]);
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Adds a closed soft body from a mesh (verts + triangle faces) with an
+    /// internal pressure: positive inflates the volume, zero leaves it limp.
+    /// `pin_top` holds the top cap so it hangs in place. Reads back with clothRead.
+    pub fn addSoftBody(world: World, verts: []const [3]f32, faces: []const u32, pressure: f32, pin_top: bool, position: [3]f32) !u32 {
+        const flat: [*]const f32 = @ptrCast(verts.ptr);
+        const id = goss_physics_add_softbody(world.handle, flat, @intCast(verts.len), faces.ptr, @intCast(faces.len / 3), pressure, @intFromBool(pin_top), position[0], position[1], position[2]);
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -123,6 +230,337 @@ test "a dropped sphere comes to rest on the floor" {
     // Resting height: floor top (0) plus the radius, less the solver's
     // documented penetration slop (0.02 by default).
     try t.expectApproxEqAbs(@as(f32, 0.25), pose[13], 0.03);
+}
+
+test "a point joint pins a body to its pivot instead of letting it fall" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.sphere, .{ 0, 2.0, 0 }, .{ 0.1, 0, 0 }, .static);
+    const hung = try world.addBody(.sphere, .{ 0, 2.0, 0 }, .{ 0.1, 0, 0 }, .dynamic);
+    try world.constrainPoint(anchor, hung, .{ 0, 0, 0 }, .{ 0, 0, 0 });
+
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const pose = try world.bodyPose(hung);
+    // The pivot pins its centre of mass at the anchor, so it never falls the
+    // way an unconstrained body under -9.81 gravity would over four seconds.
+    try t.expectApproxEqAbs(@as(f32, 2.0), pose[13], 0.05);
+}
+
+test "a point joint holds against a kinematic anchor" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.box, .{ 0, 2.0, 0 }, .{ 0.05, 0.05, 0.05 }, .kinematic);
+    const hung = try world.addBody(.sphere, .{ 0, 2.0, 0 }, .{ 0.1, 0, 0 }, .dynamic);
+    try world.constrainPoint(anchor, hung, .{ 0, 0, 0 }, .{ 0, 0, 0 });
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const pose = try world.bodyPose(hung);
+    // A kinematic anchor pins the constraint the same as a static one; the
+    // body must not free-fall away from y = 2.
+    try t.expectApproxEqAbs(@as(f32, 2.0), pose[13], 0.05);
+}
+
+test "a hinge joint swings a body in one plane about its axis" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.box, .{ 0, 2.0, 0 }, .{ 0.05, 0.05, 0.05 }, .kinematic);
+    // The pendant starts out along +x in the anchor's z = 0 plane; a z-axis
+    // hinge lets it swing down in that plane but pins its depth so it never
+    // leaves z = 0 (rotation about z preserves the depth coordinate).
+    const pend = try world.addBody(.sphere, .{ 0.5, 2.0, 0 }, .{ 0.08, 0, 0 }, .dynamic);
+    try world.constrainHinge(anchor, pend, .{ 0, 2.0, 0 }, .{ 0, 0, 1 });
+
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const p = try world.bodyPose(pend);
+    // The hinge pins the depth exactly to its plane (z stays 0, the distinctive
+    // single-axis behavior), and the pendant swings down under gravity within
+    // its swing radius about the pivot.
+    try t.expectApproxEqAbs(@as(f32, 0.0), p[14], 0.01);
+    try t.expect(p[13] < 1.9);
+    try t.expect(@abs(p[12]) <= 0.55);
+}
+
+test "a fixed joint welds a body rigidly to its anchor" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.box, .{ 0, 2.0, 0 }, .{ 0.05, 0.05, 0.05 }, .static);
+    // The dynamic body sits offset from the anchor; a fixed joint must hold
+    // that exact offset (no swing toward the anchor, no fall under gravity).
+    const welded = try world.addBody(.sphere, .{ 0.5, 2.0, 0 }, .{ 0.1, 0, 0 }, .dynamic);
+    try world.constrainFixed(anchor, welded);
+
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const pose = try world.bodyPose(welded);
+    try t.expectApproxEqAbs(@as(f32, 0.5), pose[12], 0.05); // keeps its x offset
+    try t.expectApproxEqAbs(@as(f32, 2.0), pose[13], 0.05); // does not fall
+}
+
+test "a spring joint stretches under gravity and settles below its rest length" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.box, .{ 0, 2.0, 0 }, .{ 0.05, 0.05, 0.05 }, .kinematic);
+    // The pendant starts exactly a rest length (0.5) below the anchor. A rigid
+    // rope would hold it there; the spring is soft, so gravity stretches it and
+    // it settles below that rest position, hanging straight down.
+    const pend = try world.addBody(.sphere, .{ 0, 1.5, 0 }, .{ 0.08, 0, 0 }, .dynamic);
+    try world.constrainSpring(anchor, pend, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.5, 2.0, 0.5);
+
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const p = try world.bodyPose(pend);
+    // Stretched below the 1.5 rest position, but bounded by the spring (not a
+    // free fall), and hanging straight under the anchor.
+    try t.expect(p[13] < 1.48);
+    try t.expect(p[13] > 1.30);
+    try t.expect(@abs(p[12]) < 0.05);
+    try t.expect(@abs(p[14]) < 0.05);
+}
+
+test "a cylinder rests upright at its half height, above where a sphere sits" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    _ = try world.addBody(.box, .{ 0, -0.1, 0 }, .{ 4, 0.1, 4 }, .static); // floor top at y = 0
+    // A cylinder dropped straight down with no spin lands flat on its base and
+    // rests with its centre a half height (0.3) above the floor.
+    const cyl = try world.addBody(.cylinder, .{ 0, 1.0, 0 }, .{ 0.1, 0.3, 0.1 }, .dynamic);
+    // A sphere of the same radius rests far lower, its centre one radius up.
+    const ball = try world.addBody(.sphere, .{ 1.0, 1.0, 0 }, .{ 0.1, 0, 0 }, .dynamic);
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const cyl_pose = try world.bodyPose(cyl);
+    const ball_pose = try world.bodyPose(ball);
+    try t.expectApproxEqAbs(@as(f32, 0.3), cyl_pose[13], 0.03);
+    try t.expectApproxEqAbs(@as(f32, 0.1), ball_pose[13], 0.03);
+    try t.expect(cyl_pose[13] > ball_pose[13] + 0.15);
+}
+
+test "a horizontal capsule bridges a gap a sphere falls through" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    _ = try world.addBody(.box, .{ 0, -0.1, 0 }, .{ 4, 0.1, 4 }, .static); // floor top at y = 0
+    _ = try world.addBody(.box, .{ -0.5, 0.25, 0 }, .{ 0.1, 0.25, 0.4 }, .static); // pillar tops at y = 0.5,
+    _ = try world.addBody(.box, .{ 0.5, 0.25, 0 }, .{ 0.1, 0.25, 0.4 }, .static); // inner faces at x = +-0.4
+    // A capsule laid on its side (a quarter turn about z) spans wider than the
+    // 0.8 gap, so it rests bridging the pillar tops well above the floor.
+    const quarter_turn_z = [4]f32{ 0, 0, 0.70710678, 0.70710678 };
+    const cap = try world.addBodyOriented(.capsule, .{ 0, 1.0, 0 }, .{ 0.12, 0.35, 0 }, quarter_turn_z, .dynamic);
+    // A sphere of the capsule's radius drops straight through the gap to the floor.
+    const ball = try world.addBody(.sphere, .{ 0, 1.0, 0 }, .{ 0.12, 0, 0 }, .dynamic);
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const cap_pose = try world.bodyPose(cap);
+    const ball_pose = try world.bodyPose(ball);
+    try t.expect(cap_pose[13] > 0.4); // bridging, up near the pillar tops
+    try t.expect(ball_pose[13] < 0.2); // fallen through, resting on the floor
+    try t.expect(cap_pose[13] > ball_pose[13] + 0.3);
+}
+
+test "a jiggle chain trails a swept anchor with secondary motion" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.sphere, .{ 0, 1.0, 0 }, .{ 0.02, 0, 0 }, .kinematic);
+    // Four soft spring links hanging below the anchor; the last body is the tip.
+    const seg: f32 = 0.125;
+    var prev = anchor;
+    var prev_y: f32 = 1.0;
+    var tip = anchor;
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        const y = prev_y - seg;
+        const b = try world.addBody(.sphere, .{ 0, y, 0 }, .{ 0.02, 0, 0 }, .dynamic);
+        try world.constrainSpring(prev, b, .{ 0, 0, 0 }, .{ 0, 0, 0 }, seg, 2.0, 0.3);
+        prev = b;
+        prev_y = y;
+        tip = b;
+    }
+    // Sweep the anchor to +x; the soft chain cannot keep up, so the tip trails
+    // behind the anchor's x - the secondary motion a rigid attach never shows.
+    var step: usize = 0;
+    while (step < 48) : (step += 1) {
+        const x = 0.8 * @as(f32, @floatFromInt(step + 1)) / 48.0;
+        world.moveBody(anchor, .{ x, 1.0, 0 }, 1.0 / 60.0);
+        world.step(1.0 / 60.0);
+    }
+    const anchor_pose = try world.bodyPose(anchor);
+    const tip_pose = try world.bodyPose(tip);
+    try t.expect(tip_pose[12] < anchor_pose[12] - 0.05); // lags well behind in x
+    try t.expect(tip_pose[13] < anchor_pose[13] - 0.2); // still hanging below
+}
+
+test "friction decides whether a body grips a slope or slides down it" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    // A wide slab tilted a quarter turn's eighth (25 degrees about z) is a ramp.
+    const tilt = [4]f32{ 0, 0, 0.21644, 0.97630 };
+    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.5, 0.2, 0.8 }, tilt, 1.0, 0.0, .static, false);
+    // Two blocks dropped onto the ramp aligned to it, apart in z so they never
+    // touch: one grippy, one nearly frictionless. Blocks slide rather than
+    // roll, so friction alone decides whether they hold or run down.
+    const gripper = try world.addBodyMaterial(.box, .{ -0.1, 0.45, -0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 2.0, 0.0, .dynamic, false);
+    const slider = try world.addBodyMaterial(.box, .{ -0.1, 0.45, 0.3 }, .{ 0.1, 0.1, 0.1 }, tilt, 0.02, 0.0, .dynamic, false);
+    for (0..180) |_| world.step(1.0 / 60.0);
+    const gripper_pose = try world.bodyPose(gripper);
+    const slider_pose = try world.bodyPose(slider);
+    // 25 degrees is below the grippy block's friction, so it holds near where it
+    // sits; the slippery one runs down the slope a long way.
+    try t.expect(@abs(gripper_pose[12]) < 0.35); // the grippy block holds near where it sits
+    try t.expect(@abs(slider_pose[12]) > @abs(gripper_pose[12]) + 0.2); // the slippery one runs well past it
+}
+
+test "a convex hull collider gives a ball a slope to roll down" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    // A static wedge: a right-triangle prism whose long face rises to +x, so its
+    // hull is a genuine ramp, not a box or sphere.
+    const wedge = [_][3]f32{
+        .{ -0.6, 0.0, -0.4 }, .{ 0.6, 0.0, -0.4 }, .{ 0.6, 0.6, -0.4 },
+        .{ -0.6, 0.0, 0.4 },  .{ 0.6, 0.0, 0.4 },  .{ 0.6, 0.6, 0.4 },
+    };
+    _ = try world.addBodyHull(&wedge, .{ 0, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0, .static, false);
+    // A ball set on the high side of the ramp rolls down to -x and off the low
+    // edge; on a flat floor it would have stayed put.
+    const ball = try world.addBody(.sphere, .{ 0.4, 1.0, 0 }, .{ 0.12, 0, 0 }, .dynamic);
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const ball_pose = try world.bodyPose(ball);
+    try t.expect(ball_pose[12] < -0.1); // rolled downhill from x = 0.4
+}
+
+test "restitution decides whether a ball bounces back or lands dead" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    _ = try world.addBody(.box, .{ 0, -0.3, 0 }, .{ 4, 0.3, 4 }, .static); // thick floor, top at y = 0
+    const bouncy = try world.addBodyMaterial(.sphere, .{ -0.5, 0.8, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.7, .dynamic, false);
+    const dead = try world.addBodyMaterial(.sphere, .{ 0.5, 0.8, 0 }, .{ 0.12, 0, 0 }, .{ 0, 0, 0, 1 }, 0.2, 0.0, .dynamic, false);
+    // After the first impact the bouncy ball rebounds high while the dead one
+    // just settles, so their peak heights over the rebound window diverge.
+    var bouncy_peak: f32 = 0;
+    var dead_peak: f32 = 0;
+    for (0..200) |i| {
+        world.step(1.0 / 60.0);
+        if (i >= 40) {
+            const bp = try world.bodyPose(bouncy);
+            const dp = try world.bodyPose(dead);
+            bouncy_peak = @max(bouncy_peak, bp[13]);
+            dead_peak = @max(dead_peak, dp[13]);
+        }
+    }
+    try t.expect(bouncy_peak > dead_peak + 0.1); // clearly rebounds higher than the dead ball
+    try t.expect(dead_peak < 0.2); // stays down near rest
+}
+
+test "a concave mesh collider holds a ball in a valley a hull would fill" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    // A V-groove: two slanted strips meeting at the bottom, so its concavity
+    // survives where a convex hull of the same points would fill it flat.
+    const points = [_][3]f32{
+        .{ -0.5, 0.4, -0.5 }, .{ 0.0, 0.0, -0.5 }, .{ 0.5, 0.4, -0.5 },
+        .{ -0.5, 0.4, 0.5 },  .{ 0.0, 0.0, 0.5 },  .{ 0.5, 0.4, 0.5 },
+    };
+    const indices = [_]u32{ 0, 4, 1, 0, 3, 4, 1, 5, 2, 1, 4, 5 };
+    _ = try world.addBodyMesh(&points, &indices, .{ 0, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0);
+    const ball = try world.addBody(.sphere, .{ 0.2, 1.0, 0 }, .{ 0.12, 0, 0 }, .dynamic);
+    for (0..240) |_| world.step(1.0 / 60.0);
+    const ball_pose = try world.bodyPose(ball);
+    // The ball rolls to the bottom of the groove: low and near centre, well
+    // below the y=0.4 lip where a filled hull would hold it.
+    try t.expect(ball_pose[13] < 0.25);
+    try t.expect(@abs(ball_pose[12]) < 0.2);
+}
+
+test "pressure inflates a closed soft body" {
+    // No gravity, so we measure pure inflation, not a fall.
+    const world = try World.create(0.0);
+    defer world.destroy();
+    const r: f32 = 0.4;
+    const verts = [_][3]f32{ .{ r, 0, 0 }, .{ -r, 0, 0 }, .{ 0, r, 0 }, .{ 0, -r, 0 }, .{ 0, 0, r }, .{ 0, 0, -r } };
+    const faces = [_]u32{ 2, 4, 0, 2, 1, 4, 2, 5, 1, 2, 0, 5, 3, 0, 4, 3, 4, 1, 3, 1, 5, 3, 5, 0 };
+    const inflated = try world.addSoftBody(&verts, &faces, 300.0, false, .{ 0, 0, 0 });
+    const limp = try world.addSoftBody(&verts, &faces, 0.0, false, .{ 2, 0, 0 });
+    for (0..180) |_| world.step(1.0 / 60.0);
+    var ibuf: [6 * 3]f32 = undefined;
+    var lbuf: [6 * 3]f32 = undefined;
+    _ = world.clothRead(inflated, &ibuf);
+    _ = world.clothRead(limp, &lbuf);
+    const ir = maxRadius(&ibuf, .{ 0, 0, 0 });
+    const lr = maxRadius(&lbuf, .{ 2, 0, 0 });
+    try t.expect(ir > lr + 0.1); // pressure pushed the shell out past the limp one
+}
+
+fn maxRadius(buf: []const f32, center: [3]f32) f32 {
+    var m: f32 = 0;
+    var i: usize = 0;
+    while (i + 3 <= buf.len) : (i += 3) {
+        const dx = buf[i] - center[0];
+        const dy = buf[i + 1] - center[1];
+        const dz = buf[i + 2] - center[2];
+        m = @max(m, @sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    return m;
+}
+
+test "an unpinned soft body rests on a rigid floor" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    _ = try world.addBody(.box, .{ 0, -0.1, 0 }, .{ 4, 0.1, 4 }, .static); // floor top at y = 0
+    const r: f32 = 0.3;
+    const verts = [_][3]f32{ .{ r, 0, 0 }, .{ -r, 0, 0 }, .{ 0, r, 0 }, .{ 0, -r, 0 }, .{ 0, 0, r }, .{ 0, 0, -r } };
+    const faces = [_]u32{ 2, 4, 0, 2, 1, 4, 2, 5, 1, 2, 0, 5, 3, 0, 4, 3, 4, 1, 3, 1, 5, 3, 5, 0 };
+    const ball = try world.addSoftBody(&verts, &faces, 200.0, false, .{ 0, 0.8, 0 });
+    for (0..240) |_| world.step(1.0 / 60.0);
+    var buf: [6 * 3]f32 = undefined;
+    _ = world.clothRead(ball, &buf);
+    // Lowest vertex should rest at or just above the floor, not tunnel below it.
+    var min_y: f32 = buf[1];
+    var i: usize = 0;
+    while (i + 3 <= buf.len) : (i += 3) min_y = @min(min_y, buf[i + 1]);
+    try t.expect(min_y > -0.15); // did not fall through
+    try t.expect(min_y < 0.3); // actually came down and rests near the floor
+}
+
+test "a planar body is confined to the z plane where a 3D body slides off in z" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    // An incline tilted about x, so its slope runs in z: a free body slides in
+    // z, a planar body cannot leave the z = 0 plane.
+    const tilt_x = [4]f32{ 0.2588, 0, 0, 0.9659 }; // 30 degrees about x
+    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.0, 0.3, 1.0 }, tilt_x, 1.0, 0.0, .static, false);
+    const free3d = try world.addBodyMaterial(.box, .{ -0.3, 0.5, 0 }, .{ 0.08, 0.08, 0.08 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, false);
+    const planar = try world.addBodyMaterial(.box, .{ 0.3, 0.5, 0 }, .{ 0.08, 0.08, 0.08 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, true);
+    for (0..180) |_| world.step(1.0 / 60.0);
+    const p3 = try world.bodyPose(free3d);
+    const pp = try world.bodyPose(planar);
+    try t.expect(@abs(pp[14]) < 0.15); // planar held near the z = 0 plane
+    try t.expect(@abs(p3[14]) > @abs(pp[14]) + 0.15); // the free body ran off in z, well past the planar one
+}
+
+test "a planar hull collider is confined to the z plane where a free hull slides off in z" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const tilt_x = [4]f32{ 0.2588, 0, 0, 0.9659 }; // 30 degrees about x
+    _ = try world.addBodyMaterial(.box, .{ 0, 0, 0 }, .{ 1.0, 0.3, 1.0 }, tilt_x, 1.0, 0.0, .static, false);
+    const cube = [_][3]f32{
+        .{ -0.08, -0.08, -0.08 }, .{ 0.08, -0.08, -0.08 }, .{ 0.08, 0.08, -0.08 }, .{ -0.08, 0.08, -0.08 },
+        .{ -0.08, -0.08, 0.08 },  .{ 0.08, -0.08, 0.08 },  .{ 0.08, 0.08, 0.08 },  .{ -0.08, 0.08, 0.08 },
+    };
+    const free3d = try world.addBodyHull(&cube, .{ -0.3, 0.5, 0 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, false);
+    const planar = try world.addBodyHull(&cube, .{ 0.3, 0.5, 0 }, .{ 0, 0, 0, 1 }, 0.02, 0.0, .dynamic, true);
+    for (0..180) |_| world.step(1.0 / 60.0);
+    const p3 = try world.bodyPose(free3d);
+    const pp = try world.bodyPose(planar);
+    try t.expect(@abs(pp[14]) < 0.15); // the planar polygon held near the z = 0 plane
+    try t.expect(@abs(p3[14]) > @abs(pp[14]) + 0.15); // the free polygon ran off in z, well past the planar one
+}
+
+test "a 2D spring between two planar bodies stays in the plane while it stretches" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    // A planar anchor and a planar bob, joined by a soft spring: gravity pulls
+    // the bob down, the spring stretches, and both stay in the z = 0 plane.
+    const anchor = try world.addBodyMaterial(.sphere, .{ 0, 0.8, 0 }, .{ 0.03, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0, .kinematic, true);
+    const bob = try world.addBodyMaterial(.sphere, .{ 0.2, 0.8, 0 }, .{ 0.05, 0, 0 }, .{ 0, 0, 0, 1 }, 0.5, 0.0, .dynamic, true);
+    try world.constrainSpring(anchor, bob, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.3, 2.0, 0.2);
+    for (0..180) |_| world.step(1.0 / 60.0);
+    const pa = try world.bodyPose(anchor);
+    const pb = try world.bodyPose(bob);
+    try t.expect(@abs(pb[14]) < 0.1); // the bob stays near the plane
+    try t.expect(pb[13] < pa[13] - 0.1); // gravity stretched the spring, bob hangs below the anchor
 }
 
 test "two identical worlds land bit-identical poses" {

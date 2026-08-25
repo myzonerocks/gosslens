@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.firework-burst",
+  "version": "1.0.0",
+  "display_name": "Firework Burst",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "fw", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 8, "pattern": "fountain", "gravity": 4.0, "speed": 2.0, "lifetime": 0.8, "fade": true, "glow": true, "size": 8, "color": [1.0, 0.8, 0.3], "cool": [1.0, 0.2, 0.1], "sub_count": 16, "sub_speed": 2.5, "sub_lifetime": 1.0}}
+  ],
+  "triggers": []
+}
