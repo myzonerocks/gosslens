@@ -382,6 +382,18 @@ extern "C" int32_t goss_physics_constrain_hinge(void* handle, uint32_t body_a, u
 extern "C" int32_t goss_physics_constrain_spring(void* handle, uint32_t body_a, uint32_t body_b, float ax, float ay, float az, float bx, float by, float bz, float rest_length, float frequency, float damping) {
   auto* world = static_cast<World*>(handle);
   if (world == nullptr) return -1;
+  JPH::Body* a = nullptr;
+  JPH::Body* b = nullptr;
+  {
+    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
+    if (!lock_a.Succeeded()) return -1;
+    a = &lock_a.GetBody();
+  }
+  {
+    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
+    if (!lock_b.Succeeded()) return -1;
+    b = &lock_b.GetBody();
+  }
   JPH::DistanceConstraintSettings settings;
   settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
   settings.mPoint1 = JPH::RVec3(ax, ay, az);
@@ -389,12 +401,7 @@ extern "C" int32_t goss_physics_constrain_spring(void* handle, uint32_t body_a, 
   settings.mMinDistance = rest_length;
   settings.mMaxDistance = rest_length;
   settings.mLimitsSpringSettings = JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, frequency, damping);
-  // Both locks stay held through Create so the bodies are never read after
-  // their write lock is released.
-  JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
-  JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
-  if (!lock_a.Succeeded() || !lock_b.Succeeded()) return -1;
-  world->system.AddConstraint(settings.Create(lock_a.GetBody(), lock_b.GetBody()));
+  world->system.AddConstraint(settings.Create(*a, *b));
   return 0;
 }
 
