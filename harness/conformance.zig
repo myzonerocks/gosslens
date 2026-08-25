@@ -5727,6 +5727,35 @@ fn proveSceneSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveClassOutline(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // An outline.pass with a "person" mask traces the subject boundary off the
+    // segmentation mask instead of depth; with no segmenter the class is the
+    // zero mask, so the outline degrades to nothing.
+    try renderOnce(gpa, engine, ".lens-packages/outline-person", "zig-out/conformance-outline-a", single_class_model_path);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/outline-person", "zig-out/conformance-outline-b", single_class_model_path);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/outline-person", "zig-out/conformance-outline-unseg", null);
+    settle(engine);
+
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the person-mask outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const unseg = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-unseg.tga", gpa, .limited(8 << 20));
+    defer gpa.free(unseg);
+    if (std.mem.eql(u8, a, unseg)) {
+        std.debug.print("conformance: FAIL the person-mask outline drew nothing - the mask edge never traced\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an outline.pass traces a segmentation class edge, a rim absent when the class is, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7259,6 +7288,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveExtrudedText(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "video-texture")) {
             if (!try proveVideoTexture(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "class-outline")) {
+            if (!try proveClassOutline(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7307,6 +7338,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("material graph");
     if (!try proveSceneSegmentation(gpa, engine)) return 1;
     watchHold("scene segmentation");
+    if (!try proveClassOutline(gpa, engine)) return 1;
+    watchHold("class outline");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;

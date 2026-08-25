@@ -231,12 +231,15 @@ pub const FogField = struct {
 };
 
 pub const OutlineField = struct {
-    /// An outline.pass node's line color (rgb, 0..1) and the depth jump
-    /// between neighbors above which an outline draws. Default a black line.
+    /// An outline.pass node's line color (rgb, 0..1) and the jump between
+    /// neighbors above which an outline draws. Default a black line.
     r: f32 = 0.0,
     g: f32 = 0.0,
     b: f32 = 0.0,
     threshold: f32 = 0.08,
+    /// The mask channel whose edge is outlined; null traces the submitted
+    /// depth instead, so an outline can rim a segmentation class or the depth.
+    mask_channel: ?u8 = null,
 };
 
 pub const TrailField = struct {
@@ -1348,6 +1351,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     } else try diags.add(path.slice(), "outline color must be three numbers", .{});
                 }
                 if (getField(ov.object, "threshold")) |v| field.threshold = @floatCast(numberOf(v) orelse field.threshold);
+                if (getField(ov.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "outline mask names an unknown channel '{s}'", .{name});
+                    }
+                }
                 outline_field = field;
             }
             path.pop(omark);

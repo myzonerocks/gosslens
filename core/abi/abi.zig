@@ -685,6 +685,9 @@ pub const Session = struct {
     fog_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     /// outline.pass nodes by graph index: their line color (rgb) and threshold.
     outline_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// outline.pass nodes that trace a mask channel's edge instead of depth,
+    /// by graph index, holding the channel (0 person, else a class).
+    outline_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     /// ssr.pass nodes by graph index: their reflection strength and floor plane.
     ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
@@ -1509,7 +1512,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Depth fog degrades the same way: it needs the submitted depth.
             .fog => s.fog_params.contains(entry.graph_index) and s.depth_texture != null,
             // The depth-edge outline needs the submitted depth to find edges.
-            .outline => s.outline_params.contains(entry.graph_index) and s.depth_texture != null,
+            .outline => s.outline_params.contains(entry.graph_index) and (s.outline_masks.contains(entry.graph_index) or s.depth_texture != null),
             // A motion trail owns the frame it echoes (a session target it
             // seeds from the current frame on the first pass), so it is ready
             // as soon as its echo amount is resolved - no host input to gate on.
@@ -1716,7 +1719,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             },
             .outline => {
                 const line = s.outline_params.get(entry.graph_index) orelse continue;
-                const depth_tex = s.depth_texture orelse continue;
+                // Trace a named mask channel's edge when the node has one, else
+                // the submitted depth; an absent class serves the zero mask, so
+                // the outline degrades to nothing rather than drawing wrong.
+                const edge_tex = if (s.outline_masks.get(entry.graph_index)) |channel|
+                    (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
+                else
+                    s.depth_texture orelse continue;
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -1724,7 +1733,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitOutlinePass(view_id, input_texture, depth_tex, .{ line[0], line[1], line[2] }, line[3]);
+                r.submitOutlinePass(view_id, input_texture, edge_tex, .{ line[0], line[1], line[2] }, line[3]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2704,6 +2713,7 @@ pub fn destroySession(session: *Session) void {
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
+    session.outline_masks.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
@@ -5502,6 +5512,7 @@ fn destroyBlendState(session: *Session) void {
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
+    session.outline_masks.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
     session.ssr_params.clearRetainingCapacity();
     session.env_params.clearRetainingCapacity();
@@ -5984,6 +5995,7 @@ fn createOutlineParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(outlines);
     for (outlines) |o| {
         session.outline_params.put(gpa, o.graph_index, .{ o.color[0], o.color[1], o.color[2], o.threshold }) catch {};
+        if (o.mask_channel) |channel| session.outline_masks.put(gpa, o.graph_index, channel) catch {};
     }
 }
 

@@ -296,6 +296,8 @@ pub const OutlinePassNode = struct {
     graph_index: graph.NodeIndex,
     color: [3]f32,
     threshold: f32,
+    /// The mask channel to outline, or null to trace the submitted depth.
+    mask_channel: ?u8,
 };
 
 pub const TrailPassNode = struct {
@@ -518,7 +520,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .outline_pass) continue;
             const o = node.outline orelse manifest.OutlineField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ o.r, o.g, o.b }, .threshold = o.threshold });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ o.r, o.g, o.b }, .threshold = o.threshold, .mask_channel = o.mask_channel });
         }
         return out.toOwnedSlice(gpa);
     }
