@@ -34,6 +34,7 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -75,14 +76,24 @@ struct HairInstance {
   JPH::Hair* hair = nullptr;
 };
 
-// A body confined to a plane: its z coordinate and out-of-plane motion are
-// reset after every substep. This keeps a 2D world stable where Jolt's
-// Plane2D allowed-DOFs mode divides by a zeroed inverse mass on a contact
-// along the locked axis and blows up to a NaN on some float paths.
-struct PlanarBody {
+// A moving body tracked for the post-substep guard. Its last finite pose is
+// kept so a step that blows a velocity or position non-finite is rolled back
+// rather than propagating a NaN through the world; a planar body also has its
+// z and out-of-plane motion reset each substep for a stable 2D world.
+struct TrackedBody {
   JPH::BodyID id;
+  JPH::RVec3 last_pos;
+  JPH::Quat last_rot;
+  bool planar;
   float plane_z;
 };
+
+bool poseIsFinite(JPH::RVec3Arg p, JPH::QuatArg q, JPH::Vec3Arg lv, JPH::Vec3Arg av) {
+  return std::isfinite(p.GetX()) && std::isfinite(p.GetY()) && std::isfinite(p.GetZ()) &&
+         std::isfinite(q.GetX()) && std::isfinite(q.GetY()) && std::isfinite(q.GetZ()) && std::isfinite(q.GetW()) &&
+         std::isfinite(lv.GetX()) && std::isfinite(lv.GetY()) && std::isfinite(lv.GetZ()) &&
+         std::isfinite(av.GetX()) && std::isfinite(av.GetY()) && std::isfinite(av.GetZ());
+}
 
 struct World {
   JPH::TempAllocatorImpl temp{4 * 1024 * 1024};
@@ -98,7 +109,7 @@ struct World {
   JPH::HairShaders hair_shaders;
   bool hair_ready = false;
   std::vector<HairInstance> hairs;
-  std::vector<PlanarBody> planar_bodies;
+  std::vector<TrackedBody> tracked_bodies;
 };
 
 int world_count = 0;
@@ -170,7 +181,7 @@ static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, flo
   const JPH::BodyID id = world->system.GetBodyInterface().CreateAndAddBody(
       settings, moving ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
   if (id.IsInvalid()) return UINT32_MAX;
-  if (planar != 0) world->planar_bodies.push_back({id, pz});
+  if (moving) world->tracked_bodies.push_back({id, JPH::RVec3(px, py, pz), rotation, planar != 0, pz});
   return id.GetIndexAndSequenceNumber();
 }
 
@@ -417,9 +428,9 @@ extern "C" void goss_physics_body_remove(void* handle, uint32_t body) {
   if (world == nullptr) return;
   auto& bi = world->system.GetBodyInterface();
   const JPH::BodyID id(body);
-  for (size_t i = 0; i < world->planar_bodies.size(); ++i) {
-    if (world->planar_bodies[i].id == id) {
-      world->planar_bodies.erase(world->planar_bodies.begin() + i);
+  for (size_t i = 0; i < world->tracked_bodies.size(); ++i) {
+    if (world->tracked_bodies[i].id == id) {
+      world->tracked_bodies.erase(world->tracked_bodies.begin() + i);
       break;
     }
   }
@@ -441,22 +452,34 @@ extern "C" void goss_physics_step(void* handle, float dt_seconds) {
   if (world == nullptr) return;
   world->accumulator += dt_seconds;
   const double step = 1.0 / 60.0;
+  JPH::BodyInterface& bi = world->system.GetBodyInterface();
   while (world->accumulator >= step) {
     world->system.Update((float)step, 1, &world->temp, &world->jobs);
     world->accumulator -= step;
-    // Hold each planar body in its plane: reset the z coordinate and drop the
-    // out-of-plane translation and tumble the step may have added, leaving x/y
-    // motion and z spin - a stable 2D world with no zeroed inverse mass.
-    if (!world->planar_bodies.empty()) {
-      JPH::BodyInterface& bi = world->system.GetBodyInterface();
-      for (const PlanarBody& pb : world->planar_bodies) {
-        const JPH::RVec3 pos = bi.GetPosition(pb.id);
-        const JPH::Vec3 lv = bi.GetLinearVelocity(pb.id);
-        const JPH::Vec3 av = bi.GetAngularVelocity(pb.id);
-        bi.SetPosition(pb.id, JPH::RVec3(pos.GetX(), pos.GetY(), pb.plane_z), JPH::EActivation::DontActivate);
-        bi.SetLinearVelocity(pb.id, JPH::Vec3(lv.GetX(), lv.GetY(), 0.0f));
-        bi.SetAngularVelocity(pb.id, JPH::Vec3(0.0f, 0.0f, av.GetZ()));
+    for (TrackedBody& tb : world->tracked_bodies) {
+      JPH::RVec3 pos = bi.GetPosition(tb.id);
+      JPH::Quat rot = bi.GetRotation(tb.id);
+      JPH::Vec3 lv = bi.GetLinearVelocity(tb.id);
+      JPH::Vec3 av = bi.GetAngularVelocity(tb.id);
+      // Roll a body that blew up back to its last finite pose rather than let
+      // the NaN spread; the world stays stable where one float path diverges.
+      if (!poseIsFinite(pos, rot, lv, av)) {
+        fprintf(stderr, "jolt guard: body %u non-finite, restoring last pose\n", tb.id.GetIndexAndSequenceNumber());
+        bi.SetPositionAndRotation(tb.id, tb.last_pos, tb.last_rot, JPH::EActivation::DontActivate);
+        bi.SetLinearVelocity(tb.id, JPH::Vec3::sZero());
+        bi.SetAngularVelocity(tb.id, JPH::Vec3::sZero());
+        pos = tb.last_pos;
+        rot = tb.last_rot;
+      } else if (tb.planar) {
+        // Hold the planar body in its plane: reset z and the out-of-plane
+        // motion the step added, leaving x/y translation and z spin.
+        pos = JPH::RVec3(pos.GetX(), pos.GetY(), tb.plane_z);
+        bi.SetPosition(tb.id, pos, JPH::EActivation::DontActivate);
+        bi.SetLinearVelocity(tb.id, JPH::Vec3(lv.GetX(), lv.GetY(), 0.0f));
+        bi.SetAngularVelocity(tb.id, JPH::Vec3(0.0f, 0.0f, av.GetZ()));
       }
+      tb.last_pos = pos;
+      tb.last_rot = rot;
     }
   }
 }
