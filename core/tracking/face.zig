@@ -127,6 +127,13 @@ pub const outer_lip_loop = [_]u16{
     291, 409, 270, 269, 267, 0,   37,  39,  40,  185,
 };
 
+/// The inner-lip contour as a closed ring, the mouth aperture inside the
+/// outer lip, so a face-part matte fills the teeth when the mouth opens.
+pub const inner_lip_loop = [_]u16{
+    78,  95,  88,  178, 87,  14,  317, 402, 318, 324,
+    308, 415, 310, 311, 312, 13,  82,  81,  80,  191,
+};
+
 /// Each eye's lid contour as a closed ring, the outer corner first (263 and
 /// 33), lower lid then upper, so a face-part matte fills each eye straight
 /// from tracking.

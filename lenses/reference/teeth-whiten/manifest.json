@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.teeth-whiten",
+  "version": "1.0.0",
+  "display_name": "Teeth Whiten",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "tint", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [0.98, 0.98, 0.95], "opacity": 0.4, "mask": "teeth"}}
+  ],
+  "triggers": []
+}

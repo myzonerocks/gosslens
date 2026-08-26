@@ -87,6 +87,7 @@ pub const left_brow_loop = face.left_brow_loop;
 pub const right_brow_loop = face.right_brow_loop;
 pub const left_iris_loop = face.left_iris_loop;
 pub const right_iris_loop = face.right_iris_loop;
+pub const inner_lip_loop = face.inner_lip_loop;
 
 pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
@@ -5665,6 +5666,7 @@ fn pollLandmarkMattes(session: *Session) void {
     pollFacePartMatte(session, manifest.eyes_channel, &.{ &face.left_eye_loop, &face.right_eye_loop });
     pollFacePartMatte(session, manifest.brows_channel, &.{ &face.left_brow_loop, &face.right_brow_loop });
     pollFacePartMatte(session, manifest.iris_channel, &.{ &face.left_iris_loop, &face.right_iris_loop });
+    pollFacePartMatte(session, manifest.teeth_channel, &.{&face.inner_lip_loop});
 }
 
 /// Builds a face-part matte channel from one or more landmark loops, unioned,

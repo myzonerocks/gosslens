@@ -57,7 +57,7 @@ pub const NodeParam = struct { name: []const u8, binding: ParamBinding };
 pub const mask_channels = [_][]const u8{
     "person",  "background", "hair", "body_skin", "face_skin",
     "clothes", "others",     "head", "hand",      "lips",
-    "eyes",    "brows",      "iris",
+    "eyes",    "brows",      "iris", "teeth",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -71,6 +71,7 @@ pub const lips_channel = 9;
 pub const eyes_channel = 10;
 pub const brows_channel = 11;
 pub const iris_channel = 12;
+pub const teeth_channel = 13;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {

@@ -6405,6 +6405,87 @@ fn proveSmooth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveTeeth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // The teeth matte fills the inner-lip loop, the mouth aperture inside the
+    // outer lip. First prove the loop is the inner mouth: its centroid sits
+    // below the nose, above the chin, and between the mouth corners.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL teeth face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        const inner = ringCentroid(lm, &abi.inner_lip_loop);
+        const nose_y = lm[1 * 3 + 1];
+        const chin_y = lm[152 * 3 + 1];
+        if (!(nose_y < inner[1] and inner[1] < chin_y)) {
+            std.debug.print("conformance: FAIL inner-lip centroid not between nose and chin (y {d:.1} {d:.1} {d:.1})\n", .{ nose_y, inner[1], chin_y });
+            return false;
+        }
+        const lo_x = @min(lm[61 * 3], lm[291 * 3]);
+        const hi_x = @max(lm[61 * 3], lm[291 * 3]);
+        if (!(lo_x < inner[0] and inner[0] < hi_x)) {
+            std.debug.print("conformance: FAIL inner-lip centroid not between the mouth corners (x {d:.1} {d:.1} {d:.1})\n", .{ lo_x, inner[0], hi_x });
+            return false;
+        }
+    }
+
+    // Then prove the render: a whitening tint over the inner lip colors a
+    // smaller region than a lip tint over the outer lip, gone with no face.
+    try renderOnceWith(gpa, engine, ".lens-packages/teeth-whiten", "zig-out/conformance-teeth-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/teeth-whiten", "zig-out/conformance-teeth-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/teeth-whiten", "zig-out/conformance-teeth-control", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-teeth-lip", .{});
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-teeth-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-teeth-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-teeth-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    const lip = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-teeth-lip.tga", gpa, .limited(8 << 20));
+    defer gpa.free(lip);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL teeth whiten is not deterministic across runs\n", .{});
+        return false;
+    }
+    const teeth_d = countDiff(a, control);
+    const lip_d = countDiff(lip, control);
+    if (teeth_d == 0) {
+        std.debug.print("conformance: FAIL teeth whiten drew nothing over the inner lip\n", .{});
+        return false;
+    }
+    if (teeth_d >= lip_d) {
+        std.debug.print("conformance: FAIL the inner-lip region is not smaller than the outer lip (teeth {d} lip {d})\n", .{ teeth_d, lip_d });
+        return false;
+    }
+    std.debug.print("conformance: PROOF teeth whiten fills the inner-lip mouth, a smaller region than the outer lip, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7963,6 +8044,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveDepthMatting(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "smooth")) {
             if (!try proveSmooth(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "teeth")) {
+            if (!try proveTeeth(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -8037,6 +8120,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("depth matting");
     if (!try proveSmooth(gpa, engine)) return 1;
     watchHold("face smooth");
+    if (!try proveTeeth(gpa, engine)) return 1;
+    watchHold("teeth whiten");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
