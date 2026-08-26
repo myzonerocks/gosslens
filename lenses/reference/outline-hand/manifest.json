@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.outline-hand",
+  "version": "1.0.0",
+  "display_name": "Hand Outline",
+  "engine_compat": ">=0.5",
+  "capabilities": ["hands"],
+  "parameters": [],
+  "nodes": [
+    {"id": "outline", "type": "outline.pass", "inputs": {"frame": "camera"}, "params": {},
+     "outline": {"color": [1.0, 0.8, 0.1], "threshold": 0.3, "mask": "hand"}}
+  ],
+  "triggers": []
+}

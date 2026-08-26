@@ -5503,13 +5503,16 @@ fn hullCross(o: [2]f32, a: [2]f32, b: [2]f32) f32 {
     return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
 }
 
-/// Rasterizes the convex hull of the face landmarks into the subject mask
-/// grid. The outermost landmarks trace the face oval, so the filled hull is
-/// a head matte from tracking alone. Monotone chain over points sorted by x
-/// then y, then a per-row span fill; a convex row enters and exits once.
-fn landmarkHullMask(points: *const [face.landmark_count][2]f32, mask: *[segmentation.mask_len]f32) void {
-    var pts = points.*;
-    std.sort.pdq([2]f32, &pts, {}, struct {
+/// Rasterizes the convex hull of the landmark points into the mask grid,
+/// setting one inside the hull without clearing, so several hulls union by
+/// filling in turn. Monotone chain over points sorted by x then y, then a
+/// per-row span fill; a convex row enters and exits once.
+fn fillLandmarkHull(points: []const [2]f32, mask: *[segmentation.mask_len]f32) void {
+    if (points.len < 3 or points.len > face.landmark_count) return;
+    var pts_buf: [face.landmark_count][2]f32 = undefined;
+    @memcpy(pts_buf[0..points.len], points);
+    const pts = pts_buf[0..points.len];
+    std.sort.pdq([2]f32, pts, {}, struct {
         fn lt(_: void, a: [2]f32, b: [2]f32) bool {
             return if (a[0] == b[0]) a[1] < b[1] else a[0] < b[0];
         }
@@ -5530,8 +5533,8 @@ fn landmarkHullMask(points: *const [face.landmark_count][2]f32, mask: *[segmenta
         k += 1;
     }
     const hull_len = k - 1;
+    if (hull_len < 3) return;
 
-    @memset(mask, 0);
     const side = segmentation.mask_side;
     const side_f: f32 = @floatFromInt(side);
     for (0..side) |y| {
@@ -5559,22 +5562,49 @@ fn landmarkHullMask(points: *const [face.landmark_count][2]f32, mask: *[segmenta
     }
 }
 
-/// Builds the head matte from the tracked face's landmark hull when a lens
-/// names the head channel, so any mask consumer can rim or key the face
-/// region with no segmentation model. No face this frame leaves the channel
-/// on the zero mask.
+/// Builds the landmark-derived mattes each frame: the face hull feeds the
+/// head channel, every tracked hand's hull unions into the hand channel, so
+/// a mask consumer can rim or key those regions with no segmentation model.
 fn pollLandmarkMattes(session: *Session) void {
+    pollHeadMatte(session);
+    pollHandMatte(session);
+}
+
+fn pollHeadMatte(session: *Session) void {
     const head: u8 = manifest.head_channel;
     if (!maskChannelNeeded(session, head)) return;
     var points: [face.landmark_count][2]f32 = undefined;
-    if (!faceMattePoints(session, &points)) {
-        clearClassTexture(session, head);
-        return;
-    }
+    if (!faceMattePoints(session, &points)) return clearClassTexture(session, head);
     var mask: [segmentation.mask_len]f32 = undefined;
-    landmarkHullMask(&points, &mask);
+    @memset(&mask, 0);
+    fillLandmarkHull(points[0..], &mask);
     clearClassTexture(session, head);
     session.segmentation_class_textures[head] = maskToTexture(&mask);
+}
+
+fn pollHandMatte(session: *Session) void {
+    const chan: u8 = manifest.hand_channel;
+    if (!maskChannelNeeded(session, chan)) return;
+    const worker = session.hand_tracking orelse return clearClassTexture(session, chan);
+    const desc = (session.current orelse return clearClassTexture(session, chan)).desc;
+    const w: f32 = @floatFromInt(desc.width);
+    const h: f32 = @floatFromInt(desc.height);
+    var result: hand.Result = undefined;
+    if (w <= 0 or h <= 0 or !tracking.hand_worker.readResult(worker, &result) or result.hand_count == 0) {
+        return clearClassTexture(session, chan);
+    }
+    var mask: [segmentation.mask_len]f32 = undefined;
+    @memset(&mask, 0);
+    var any = false;
+    for (result.hands[0..result.hand_count]) |tracked| {
+        if (tracked.presence < 0.5) continue;
+        var pts: [hand.landmark_count][2]f32 = undefined;
+        for (0..hand.landmark_count) |i| pts[i] = .{ tracked.landmarks[i * 3] / w, tracked.landmarks[i * 3 + 1] / h };
+        fillLandmarkHull(pts[0..], &mask);
+        any = true;
+    }
+    clearClassTexture(session, chan);
+    if (any) session.segmentation_class_textures[chan] = maskToTexture(&mask);
 }
 
 /// When the host submits depth and no in-engine segmenter runs, the depth
