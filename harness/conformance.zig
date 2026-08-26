@@ -6486,6 +6486,40 @@ fn proveTeeth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveSharpen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A smooth.pass with a negative amount sharpens instead of blurs: it
+    // pushes the masked region away from its local average, raising total
+    // variation, the opposite of the smooth pass. Gone with no face.
+    try renderOnceWith(gpa, engine, ".lens-packages/detail-sharpen", "zig-out/conformance-sharpen-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/detail-sharpen", "zig-out/conformance-sharpen-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/detail-sharpen", "zig-out/conformance-sharpen-control", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sharpen-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sharpen-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sharpen-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL detail sharpen is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, a, control)) {
+        std.debug.print("conformance: FAIL detail sharpen drew nothing over the head\n", .{});
+        return false;
+    }
+    const tv_a = totalVariation(a);
+    const tv_control = totalVariation(control);
+    if (tv_a <= tv_control) {
+        std.debug.print("conformance: FAIL detail sharpen did not raise detail (tv {d} vs {d})\n", .{ tv_a, tv_control });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a negative smooth amount sharpens the masked region, raising total variation, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -8046,6 +8080,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveSmooth(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "teeth")) {
             if (!try proveTeeth(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "sharpen")) {
+            if (!try proveSharpen(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -8122,6 +8158,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("face smooth");
     if (!try proveTeeth(gpa, engine)) return 1;
     watchHold("teeth whiten");
+    if (!try proveSharpen(gpa, engine)) return 1;
+    watchHold("detail sharpen");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;

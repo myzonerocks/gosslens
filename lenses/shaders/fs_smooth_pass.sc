@@ -6,10 +6,10 @@ SAMPLER2D(s_texColor, 0);
 SAMPLER2D(s_texDepth, 1);
 uniform vec4 u_smooth;
 
-// A masked skin-smoothing pass: averages a small cross of neighbors and
-// blends the frame toward that average, scaled by the mask on unit 1 and
-// u_smooth.x amount. Zero mask leaves the frame untouched, so retouch stays
-// on the named region.
+// A masked detail pass: averages a small cross of neighbors and mixes the
+// frame toward that average by the mask on unit 1 times u_smooth.x. A
+// positive amount blurs (smooth), a negative one extrapolates away from the
+// average (sharpen). Zero mask leaves the frame untouched.
 void main()
 {
 	vec2 uv = v_texcoord0;

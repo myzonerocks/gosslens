@@ -269,8 +269,9 @@ pub const TintField = struct {
 };
 
 pub const SmoothField = struct {
-    /// A smooth.pass node's retouch amount (0..1), how far the masked region
-    /// blends toward a local average, and the mask channel it smooths.
+    /// A smooth.pass node's retouch amount (-1..1): positive blends the masked
+    /// region toward a local average (smooth), negative pushes away from it
+    /// (sharpen). mask_channel is the region it acts on.
     amount: f32 = 0.5,
     /// The mask channel the smooth acts on; a smooth naming none is inert.
     mask_channel: ?u8 = null,
@@ -1438,7 +1439,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 try diags.add(path.slice(), "smooth must be an object", .{});
             } else {
                 var field: SmoothField = .{};
-                if (getField(sv.object, "amount")) |v| field.amount = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.amount)), 0.0, 1.0);
+                if (getField(sv.object, "amount")) |v| field.amount = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.amount)), -1.0, 1.0);
                 if (getField(sv.object, "mask")) |v| {
                     if (try expectString(diags, path, v)) |name| {
                         if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "smooth mask names an unknown channel '{s}'", .{name});

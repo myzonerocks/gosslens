@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.detail-sharpen",
+  "version": "1.0.0",
+  "display_name": "Detail Sharpen",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "sharpen", "type": "smooth.pass", "inputs": {"frame": "camera"}, "params": {},
+     "smooth": {"amount": -0.7, "mask": "head"}}
+  ],
+  "triggers": []
+}
