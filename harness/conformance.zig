@@ -6112,6 +6112,38 @@ fn proveTint(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveMakeup(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // Eyeshadow and brow tint reuse tint.pass over the eyes and brows mattes.
+    // Each colors its own region, so both differ from the plain frame and
+    // from each other; with no face the control is the untouched frame.
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow", "zig-out/conformance-eyeshadow", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow", "zig-out/conformance-makeup-control", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/brow-tint", "zig-out/conformance-brow-tint", .{});
+    settle(engine);
+    const eyeshadow = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyeshadow.tga", gpa, .limited(8 << 20));
+    defer gpa.free(eyeshadow);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-makeup-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    const brow_tint = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-brow-tint.tga", gpa, .limited(8 << 20));
+    defer gpa.free(brow_tint);
+    if (std.mem.eql(u8, eyeshadow, control)) {
+        std.debug.print("conformance: FAIL eyeshadow drew nothing over the eyes\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, brow_tint, control)) {
+        std.debug.print("conformance: FAIL brow tint drew nothing over the brows\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, eyeshadow, brow_tint)) {
+        std.debug.print("conformance: FAIL eyeshadow and brow tint colored the same region\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF eyeshadow and brow tint each color their own matte, both differ from the plain frame and from each other\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7658,6 +7690,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveBrowsMatte(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "tint")) {
             if (!try proveTint(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "makeup")) {
+            if (!try proveMakeup(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7720,6 +7754,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("brows matte");
     if (!try proveTint(gpa, engine)) return 1;
     watchHold("tint pass");
+    if (!try proveMakeup(gpa, engine)) return 1;
+    watchHold("makeup lenses");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
