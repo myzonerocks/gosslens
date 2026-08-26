@@ -314,6 +314,14 @@ pub const Renderer = struct {
         _ = opacity;
     }
 
+    pub fn submitSmoothPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, amount: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = amount;
+    }
+
     pub fn submitTrailPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, prev_texture: TextureHandle, amount: f32) void {
         _ = r;
         _ = view_id;

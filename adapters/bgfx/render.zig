@@ -107,6 +107,7 @@ pub const Renderer = struct {
     fog_program: c.bgfx_program_handle_t,
     outline_program: c.bgfx_program_handle_t,
     tint_program: c.bgfx_program_handle_t,
+    smooth_program: c.bgfx_program_handle_t,
     trail_program: c.bgfx_program_handle_t,
     ssr_program: c.bgfx_program_handle_t,
     env_program: c.bgfx_program_handle_t,
@@ -169,6 +170,7 @@ pub const Renderer = struct {
     fog_uniform: c.bgfx_uniform_handle_t,
     outline_uniform: c.bgfx_uniform_handle_t,
     tint_uniform: c.bgfx_uniform_handle_t,
+    smooth_uniform: c.bgfx_uniform_handle_t,
     tex_prev: c.bgfx_uniform_handle_t,
     trail_uniform: c.bgfx_uniform_handle_t,
     ssr_uniform: c.bgfx_uniform_handle_t,
@@ -333,6 +335,7 @@ pub const Renderer = struct {
         const fog_program = try loadFogProgram();
         const outline_program = try loadOutlineProgram();
         const tint_program = try loadTintProgram();
+        const smooth_program = try loadSmoothProgram();
         const trail_program = try loadTrailProgram();
         const ssr_program = try loadSsrProgram();
         const env_program = try loadEnvProgram();
@@ -412,6 +415,7 @@ pub const Renderer = struct {
             .fog_program = fog_program,
             .outline_program = outline_program,
             .tint_program = tint_program,
+            .smooth_program = smooth_program,
             .trail_program = trail_program,
             .ssr_program = ssr_program,
             .env_program = env_program,
@@ -460,6 +464,7 @@ pub const Renderer = struct {
             .fog_uniform = c.bgfx_create_uniform("u_fog", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .outline_uniform = c.bgfx_create_uniform("u_outline", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tint_uniform = c.bgfx_create_uniform("u_tint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .smooth_uniform = c.bgfx_create_uniform("u_smooth", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tex_prev = c.bgfx_create_uniform("s_texPrev", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .trail_uniform = c.bgfx_create_uniform("u_trail", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .ssr_uniform = c.bgfx_create_uniform("u_ssr", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -607,6 +612,16 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_tint_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_tint_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_tint_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    pub fn loadSmoothProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_smooth_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_smooth_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_smooth_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_smooth_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -886,6 +901,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.fog_program);
         c.bgfx_destroy_program(r.outline_program);
         c.bgfx_destroy_program(r.tint_program);
+        c.bgfx_destroy_program(r.smooth_program);
         c.bgfx_destroy_program(r.trail_program);
         c.bgfx_destroy_program(r.ssr_program);
         c.bgfx_destroy_program(r.env_program);
@@ -1418,6 +1434,19 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.tint_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.tint_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Blends the frame toward a small neighbor average, masked by the texture
+    /// on unit 1 and scaled by amount, so a named region reads smoother. amount
+    /// 0..1; mask_texture is a single-channel mask.
+    pub fn submitSmoothPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, amount: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ amount, 0, 0, 0 };
+        c.bgfx_set_uniform(r.smooth_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.smooth_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws a motion-trail pass into view_id: the current frame on unit 0

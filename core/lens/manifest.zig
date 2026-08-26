@@ -267,6 +267,14 @@ pub const TintField = struct {
     mask_channel: ?u8 = null,
 };
 
+pub const SmoothField = struct {
+    /// A smooth.pass node's retouch amount (0..1), how far the masked region
+    /// blends toward a local average, and the mask channel it smooths.
+    amount: f32 = 0.5,
+    /// The mask channel the smooth acts on; a smooth naming none is inert.
+    mask_channel: ?u8 = null,
+};
+
 pub const TrailField = struct {
     /// A trail.pass node's echo amount (0..1): how much of the previous
     /// frame blends into this one, so moving content leaves a motion trail.
@@ -475,6 +483,8 @@ pub const Node = struct {
     outline: ?OutlineField = null,
     /// Set only on a tint.pass node: its color, opacity, and mask channel.
     tint: ?TintField = null,
+    /// Set only on a smooth.pass node: its amount and mask channel.
+    smooth: ?SmoothField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -1418,6 +1428,27 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "tint.pass")) {
             tint_field = .{};
         }
+        var smooth_field: ?SmoothField = null;
+        if (getField(object, "smooth")) |sv| {
+            const smoothmark = path.push("smooth");
+            if (!std.mem.eql(u8, node_type, "smooth.pass")) {
+                try diags.add(path.slice(), "smooth is a smooth.pass field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "smooth must be an object", .{});
+            } else {
+                var field: SmoothField = .{};
+                if (getField(sv.object, "amount")) |v| field.amount = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.amount)), 0.0, 1.0);
+                if (getField(sv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "smooth mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                smooth_field = field;
+            }
+            path.pop(smoothmark);
+        } else if (std.mem.eql(u8, node_type, "smooth.pass")) {
+            smooth_field = .{};
+        }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
             const tmark = path.push("trail");
@@ -2033,6 +2064,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .fog = fog_field,
             .outline = outline_field,
             .tint = tint_field,
+            .smooth = smooth_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,
