@@ -145,6 +145,12 @@ pub const right_eye_loop = [_]u16{
 pub const left_brow_loop = [_]u16{ 276, 283, 282, 295, 285, 336, 296, 334, 293, 300 };
 pub const right_brow_loop = [_]u16{ 46, 53, 52, 65, 55, 107, 66, 105, 63, 70 };
 
+/// Each iris as the four refined iris landmarks ringing its center, so a
+/// face-part matte fills just the iris (a subset of the eye) for a colored
+/// contact. Present only when the model refines iris landmarks.
+pub const left_iris_loop = [_]u16{ 474, 475, 476, 477 };
+pub const right_iris_loop = [_]u16{ 469, 470, 471, 472 };
+
 /// The tracked point for a region: x, y in frame pixels and z in the same
 /// scale, read straight from the mesh. landmarks is a result's flat array.
 pub fn regionPoint(landmarks: *const [landmark_count * 3]f32, region: Region) [3]f32 {
