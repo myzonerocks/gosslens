@@ -255,6 +255,17 @@ pub const OutlineField = struct {
     mask_channel: ?u8 = null,
 };
 
+pub const TintField = struct {
+    /// A tint.pass node's color (rgb, 0..1) and the opacity it blends into
+    /// the masked region, so a face-part matte reads as a soft makeup layer.
+    r: f32 = 0.0,
+    g: f32 = 0.0,
+    b: f32 = 0.0,
+    opacity: f32 = 0.5,
+    /// The mask channel the tint fills; a tint naming none is inert.
+    mask_channel: ?u8 = null,
+};
+
 pub const TrailField = struct {
     /// A trail.pass node's echo amount (0..1): how much of the previous
     /// frame blends into this one, so moving content leaves a motion trail.
@@ -461,6 +472,8 @@ pub const Node = struct {
     fog: ?FogField = null,
     /// Set only on an outline.pass node: its line color and depth threshold.
     outline: ?OutlineField = null,
+    /// Set only on a tint.pass node: its color, opacity, and mask channel.
+    tint: ?TintField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -1375,6 +1388,35 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "outline.pass")) {
             outline_field = .{};
         }
+        var tint_field: ?TintField = null;
+        if (getField(object, "tint")) |tv| {
+            const tintmark = path.push("tint");
+            if (!std.mem.eql(u8, node_type, "tint.pass")) {
+                try diags.add(path.slice(), "tint is a tint.pass field, found it on '{s}'", .{node_type});
+            } else if (tv != .object) {
+                try diags.add(path.slice(), "tint must be an object", .{});
+            } else {
+                var field: TintField = .{};
+                if (getField(tv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "tint color must be three numbers", .{});
+                }
+                if (getField(tv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(tv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "tint mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                tint_field = field;
+            }
+            path.pop(tintmark);
+        } else if (std.mem.eql(u8, node_type, "tint.pass")) {
+            tint_field = .{};
+        }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
             const tmark = path.push("trail");
@@ -1989,6 +2031,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .dof = dof_field,
             .fog = fog_field,
             .outline = outline_field,
+            .tint = tint_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,

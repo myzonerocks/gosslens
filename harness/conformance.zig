@@ -6084,6 +6084,34 @@ fn proveBrowsMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveTint(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A tint.pass masked to "lips" blends its color into the lip region off
+    // the lips matte; with no face the mask is empty, so the tint fades to
+    // nothing and the frame passes through.
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-tint-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-tint-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-tint-noface", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-tint-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-tint-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the lip tint is not deterministic across runs\n", .{});
+        return false;
+    }
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-tint-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the lip tint drew nothing - the mask never keyed the color\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a tint.pass blends its color into the lips matte, gone with no face, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7628,6 +7656,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveEyesMatte(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "brows-matte")) {
             if (!try proveBrowsMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "tint")) {
+            if (!try proveTint(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7688,6 +7718,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("eyes matte");
     if (!try proveBrowsMatte(gpa, engine)) return 1;
     watchHold("brows matte");
+    if (!try proveTint(gpa, engine)) return 1;
+    watchHold("tint pass");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;

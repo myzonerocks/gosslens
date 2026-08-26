@@ -696,6 +696,10 @@ pub const Session = struct {
     /// outline.pass nodes that trace a mask channel's edge instead of depth,
     /// by graph index, holding the channel (0 person, else a class).
     outline_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// tint.pass nodes by graph index: their color (rgb) and opacity.
+    tint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// tint.pass nodes' mask channel by graph index (0 person, else a class).
+    tint_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     /// ssr.pass nodes by graph index: their reflection strength and floor plane.
     ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
@@ -1521,6 +1525,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .fog => s.fog_params.contains(entry.graph_index) and s.depth_texture != null,
             // The depth-edge outline needs the submitted depth to find edges.
             .outline => s.outline_params.contains(entry.graph_index) and (s.outline_masks.contains(entry.graph_index) or s.depth_texture != null),
+            // A tint is a masked color layer: it needs both its params and a
+            // named mask channel, else it holds the frame through.
+            .tint => s.tint_params.contains(entry.graph_index) and s.tint_masks.contains(entry.graph_index),
             // A motion trail owns the frame it echoes (a session target it
             // seeds from the current frame on the first pass), so it is ready
             // as soon as its echo amount is resolved - no host input to gate on.
@@ -1742,6 +1749,25 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitOutlinePass(view_id, input_texture, edge_tex, .{ line[0], line[1], line[2] }, line[3]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .tint => {
+                const params = s.tint_params.get(entry.graph_index) orelse continue;
+                const channel = s.tint_masks.get(entry.graph_index) orelse continue;
+                // The named channel's mask keys the color layer; an absent
+                // class serves the zero mask, so the tint fades to nothing.
+                const mask_tex = if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitTintPass(view_id, input_texture, mask_tex, .{ params[0], params[1], params[2] }, params[3]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2722,6 +2748,8 @@ pub fn destroySession(session: *Session) void {
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
     session.outline_masks.deinit(session.engine.gpa);
+    session.tint_params.deinit(session.engine.gpa);
+    session.tint_masks.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
@@ -5472,6 +5500,8 @@ fn maskChannelNeeded(session: *Session, channel: u8) bool {
     while (shader_it.next()) |c| if (c.* == channel) return true;
     var outline_it = session.outline_masks.valueIterator();
     while (outline_it.next()) |c| if (c.* == channel) return true;
+    var tint_it = session.tint_masks.valueIterator();
+    while (tint_it.next()) |c| if (c.* == channel) return true;
     return false;
 }
 
@@ -5707,6 +5737,8 @@ fn destroyBlendState(session: *Session) void {
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
     session.outline_masks.clearRetainingCapacity();
+    session.tint_params.clearRetainingCapacity();
+    session.tint_masks.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
     session.ssr_params.clearRetainingCapacity();
     session.env_params.clearRetainingCapacity();
@@ -6104,6 +6136,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createDofParams(s, gpa) catch {};
     createFogParams(s, gpa) catch {};
     createOutlineParams(s, gpa) catch {};
+    createTintParams(s, gpa) catch {};
     createTrailParams(s, gpa) catch {};
     createSsrParams(s, gpa) catch {};
     createEnvParams(s, gpa) catch {};
@@ -6190,6 +6223,18 @@ fn createOutlineParams(session: *Session, gpa: std.mem.Allocator) !void {
     for (outlines) |o| {
         session.outline_params.put(gpa, o.graph_index, .{ o.color[0], o.color[1], o.color[2], o.threshold }) catch {};
         if (o.mask_channel) |channel| session.outline_masks.put(gpa, o.graph_index, channel) catch {};
+    }
+}
+
+/// Resolves the active lens's tint.pass nodes into session.tint_params and
+/// tint_masks, once at activation - mirrors createOutlineParams.
+fn createTintParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const tints = try lens.tintPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(tints);
+    for (tints) |tp| {
+        session.tint_params.put(gpa, tp.graph_index, .{ tp.color[0], tp.color[1], tp.color[2], tp.opacity }) catch {};
+        if (tp.mask_channel) |channel| session.tint_masks.put(gpa, tp.graph_index, channel) catch {};
     }
 }
 
@@ -7161,6 +7206,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createDofParams(session, gpa);
     try createFogParams(session, gpa);
     try createOutlineParams(session, gpa);
+    try createTintParams(session, gpa);
     try createTrailParams(session, gpa);
     try createSsrParams(session, gpa);
     try createEnvParams(session, gpa);
