@@ -6263,6 +6263,54 @@ fn proveFoundation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveGlam(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // The glam look chains three tint.pass nodes (lips, eyes, brows), each
+    // reading the previous one's output, so it stacks all three regions and
+    // touches more of the frame than any single tint - proving passes compose.
+    try renderOnceWith(gpa, engine, ".lens-packages/glam-look", "zig-out/conformance-glam-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/glam-look", "zig-out/conformance-glam-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/glam-look", "zig-out/conformance-glam-control", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-glam-lip", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow", "zig-out/conformance-glam-eye", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/brow-tint", "zig-out/conformance-glam-brow", .{});
+    settle(engine);
+    const glam_a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(glam_a);
+    const glam_b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(glam_b);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    const lip = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-lip.tga", gpa, .limited(8 << 20));
+    defer gpa.free(lip);
+    const eye = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-eye.tga", gpa, .limited(8 << 20));
+    defer gpa.free(eye);
+    const brow = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-brow.tga", gpa, .limited(8 << 20));
+    defer gpa.free(brow);
+    if (!std.mem.eql(u8, glam_a, glam_b)) {
+        std.debug.print("conformance: FAIL the glam look is not deterministic across runs\n", .{});
+        return false;
+    }
+    const glam_d = countDiff(glam_a, control);
+    const lip_d = countDiff(lip, control);
+    const eye_d = countDiff(eye, control);
+    const brow_d = countDiff(brow, control);
+    if (glam_d == 0) {
+        std.debug.print("conformance: FAIL the glam look drew nothing\n", .{});
+        return false;
+    }
+    if (!(glam_d > lip_d and glam_d > eye_d and glam_d > brow_d)) {
+        std.debug.print("conformance: FAIL the glam look does not stack past a single region (glam {d} lip {d} eye {d} brow {d})\n", .{ glam_d, lip_d, eye_d, brow_d });
+        return false;
+    }
+    std.debug.print("conformance: PROOF three tint.pass nodes chain into one look, touching more than any single tint, bit-stable\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7815,6 +7863,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveIris(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "foundation")) {
             if (!try proveFoundation(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "glam")) {
+            if (!try proveGlam(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7883,6 +7933,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("iris tint");
     if (!try proveFoundation(gpa, engine)) return 1;
     watchHold("foundation");
+    if (!try proveGlam(gpa, engine)) return 1;
+    watchHold("glam look");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
