@@ -6235,6 +6235,34 @@ fn proveIris(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveFoundation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // Foundation tints the face_skin class, a model-derived channel, so this
+    // proves tint.pass keys the multiclass segmenter's classes as well as the
+    // landmark mattes; with no segmenter the class is empty and it fades out.
+    try renderOnceWith(gpa, engine, ".lens-packages/foundation", "zig-out/conformance-foundation-a", .{ .segmentation_model = multiclass_model_path, .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/foundation", "zig-out/conformance-foundation-b", .{ .segmentation_model = multiclass_model_path, .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/foundation", "zig-out/conformance-foundation-unseg", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-foundation-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-foundation-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the foundation tint is not deterministic across runs\n", .{});
+        return false;
+    }
+    const unseg = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-foundation-unseg.tga", gpa, .limited(8 << 20));
+    defer gpa.free(unseg);
+    if (std.mem.eql(u8, a, unseg)) {
+        std.debug.print("conformance: FAIL the foundation tint drew nothing - the model class never keyed the color\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a tint.pass keys a model class, foundation over face_skin, gone with no segmenter, bit-stable\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7785,6 +7813,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveMakeup(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "iris")) {
             if (!try proveIris(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "foundation")) {
+            if (!try proveFoundation(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7851,6 +7881,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("makeup lenses");
     if (!try proveIris(gpa, engine)) return 1;
     watchHold("iris tint");
+    if (!try proveFoundation(gpa, engine)) return 1;
+    watchHold("foundation");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;

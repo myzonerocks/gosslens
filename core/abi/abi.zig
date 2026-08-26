@@ -5480,23 +5480,21 @@ fn pollSegmentationMask(session: *Session) void {
     destroySegmentationTexture(session);
     session.segmentation_texture = maskToTexture(&mask);
 
-    // Class channels upload only when the active lens names them and the
-    // active model's label order maps to them; the person channel (index
-    // zero) rides the subject texture above.
+    // Class channels upload only when a consumer of the active lens names
+    // them, shader or outline or tint, and the active model's label order
+    // maps to them; the person channel (index zero) rides the subject
+    // texture above.
     const class_count = segmentation.classCount(worker);
-    var it = session.shader_masks.valueIterator();
-    var needed: [manifest.mask_channels.len]bool = @splat(false);
-    while (it.next()) |channel| needed[channel.*] = true;
-    for (needed[1..], 1..) |need, channel| {
-        if (!need) continue;
+    for (1..manifest.mask_channels.len) |channel| {
+        if (!maskChannelNeeded(session, @intCast(channel))) continue;
         const source = classChannelSource(class_count, channel) orelse continue;
         if (!segmentation.readClassMask(worker, source, &mask)) continue;
         session.segmentation_class_textures[channel] = maskToTexture(&mask);
     }
 }
 
-/// True when any active mask consumer, shader or outline, names this channel,
-/// so a class the running lens never reads is never built.
+/// True when any active mask consumer, shader or outline or tint, names this
+/// channel, so a class the running lens never reads is never built.
 fn maskChannelNeeded(session: *Session, channel: u8) bool {
     var shader_it = session.shader_masks.valueIterator();
     while (shader_it.next()) |c| if (c.* == channel) return true;
