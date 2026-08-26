@@ -5472,10 +5472,28 @@ fn classChannelSource(class_count: u32, channel: usize) ?u32 {
     return null;
 }
 
+/// When depth is submitted alongside the segmenter, prunes subject pixels the
+/// depth places at or behind the occlusion plane, so the two fuse into a
+/// sharper cut than the segmentation mask alone. No depth leaves it untouched.
+fn fuseDepthIntoMask(session: *Session, mask: *[segmentation.mask_len]f32) void {
+    if (session.depth_data.len == 0) return;
+    const plane = (session.depth_near + session.depth_far) * 0.5;
+    const side = segmentation.mask_side;
+    for (0..side) |y| {
+        for (0..side) |x| {
+            const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(side));
+            const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(side));
+            const scene = depthAt(session, u, v) orelse continue;
+            if (scene > 0 and scene >= plane) mask[y * side + x] = 0;
+        }
+    }
+}
+
 fn pollSegmentationMask(session: *Session) void {
     const worker = session.segmentation_worker orelse return;
     var mask: [segmentation.mask_len]f32 = undefined;
     if (!segmentation.readMask(worker, &mask)) return;
+    fuseDepthIntoMask(session, &mask);
 
     destroySegmentationTexture(session);
     session.segmentation_texture = maskToTexture(&mask);

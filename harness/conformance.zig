@@ -117,6 +117,11 @@ const RenderOpts = struct {
     corpus: []const u8 = corpus_path,
     face: bool = true,
     hands: bool = false,
+    depth: ?[]const f32 = null,
+    depth_w: u32 = 0,
+    depth_h: u32 = 0,
+    depth_near: f32 = 0,
+    depth_far: f32 = 0,
 };
 
 fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const u8, out_path: [:0]const u8, segmentation_model: ?[]const u8) !void {
@@ -188,6 +193,13 @@ fn renderOnceWith(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []co
     if (opts.face or opts.hands or opts.segmentation_model != null) {
         if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
             return error.TrackFrameFailed;
+        }
+    }
+    // Depth submitted before the mask settles below, so a segmenter's mask
+    // fuses with it; a lens with no segmenter uses the depth as its own mask.
+    if (opts.depth) |depth| {
+        if (abi.goss_session_submit_depth(session, depth.ptr, opts.depth_w, opts.depth_h, opts.depth_near, opts.depth_far) != .ok) {
+            return error.SubmitDepthFailed;
         }
     }
 
@@ -6311,6 +6323,42 @@ fn proveGlam(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveDepthMatting(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // With a segmenter AND depth submitted, the subject mask is the two
+    // fused: depth prunes segmentation foreground behind the plane. A near
+    // depth keeps the subject, a far depth prunes it, so a subject-
+    // compositing lens differs between them.
+    const dw = 64;
+    const dh = 48;
+    var near_map: [dw * dh]f32 = undefined;
+    var far_map: [dw * dh]f32 = undefined;
+    for (&near_map) |*d| d.* = 0.5;
+    for (&far_map) |*d| d.* = 3.0;
+    const near_opts: RenderOpts = .{ .segmentation_model = single_class_model_path, .face = false, .depth = &near_map, .depth_w = dw, .depth_h = dh, .depth_near = 0.1, .depth_far = 5.0 };
+    try renderOnceWith(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-fuse-near-a", near_opts);
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-fuse-near-b", near_opts);
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-fuse-far", .{ .segmentation_model = single_class_model_path, .face = false, .depth = &far_map, .depth_w = dw, .depth_h = dh, .depth_near = 0.1, .depth_far = 5.0 });
+    settle(engine);
+    const near_a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-fuse-near-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(near_a);
+    const near_b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-fuse-near-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(near_b);
+    const far = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-fuse-far.tga", gpa, .limited(8 << 20));
+    defer gpa.free(far);
+    if (!std.mem.eql(u8, near_a, near_b)) {
+        std.debug.print("conformance: FAIL depth-fused matting is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, near_a, far)) {
+        std.debug.print("conformance: FAIL depth did not refine the segmentation mask - near and far match\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF depth fuses with the segmenter: a far depth prunes subject the mask kept, differing from a near depth, bit-stable\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7865,6 +7913,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveFoundation(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "glam")) {
             if (!try proveGlam(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "depth-matting")) {
+            if (!try proveDepthMatting(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7935,6 +7985,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("foundation");
     if (!try proveGlam(gpa, engine)) return 1;
     watchHold("glam look");
+    if (!try proveDepthMatting(gpa, engine)) return 1;
+    watchHold("depth matting");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
