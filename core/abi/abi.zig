@@ -78,6 +78,10 @@ pub const FaceResult = face.Result;
 pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
+/// Re-exported for the conformance harness, which reads a face result's raw
+/// landmarks and needs the same lip loop the lips matte fills.
+pub const outer_lip_loop = face.outer_lip_loop;
+
 pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
@@ -5424,11 +5428,10 @@ fn maskToTexture(mask: *const [segmentation.mask_len]f32) ?render.TextureHandle 
     return render.Renderer.createMaskTexture(segmentation.mask_side, segmentation.mask_side, &bytes);
 }
 
-/// Which model output class feeds a named mask channel, for the active
-/// segmenter's class count. selfie_multiclass lays its six labels out in the
-/// mask_channels[1..model_class_end] order, so channel c reads class c-1.
-/// Channels past the model range derive another way, and any other model's
-/// order is unknown, so both get no source and serve the zero mask.
+/// Which model output class feeds a named mask channel. selfie_multiclass
+/// lays its six labels in mask_channels[1..model_class_end] order, so channel
+/// c reads class c-1. Channels past that range derive another way and any
+/// other model's order is unknown, so both serve the zero mask.
 fn classChannelSource(class_count: u32, channel: usize) ?u32 {
     if (channel >= manifest.model_class_end) return null;
     if (class_count == manifest.model_class_end - 1) return @intCast(channel - 1);
@@ -5504,9 +5507,8 @@ fn hullCross(o: [2]f32, a: [2]f32, b: [2]f32) f32 {
 }
 
 /// Rasterizes the convex hull of the landmark points into the mask grid,
-/// setting one inside the hull without clearing, so several hulls union by
-/// filling in turn. Monotone chain over points sorted by x then y, then a
-/// per-row span fill; a convex row enters and exits once.
+/// without clearing, so several hulls union by filling in turn. Monotone
+/// chain over points sorted by x then y, then fillPolygon fills the hull.
 fn fillLandmarkHull(points: []const [2]f32, mask: *[segmentation.mask_len]f32) void {
     if (points.len < 3 or points.len > face.landmark_count) return;
     var pts_buf: [face.landmark_count][2]f32 = undefined;
@@ -5533,32 +5535,44 @@ fn fillLandmarkHull(points: []const [2]f32, mask: *[segmentation.mask_len]f32) v
         k += 1;
     }
     const hull_len = k - 1;
-    if (hull_len < 3) return;
+    fillPolygon(hull[0..hull_len], mask);
+}
 
+/// Rasterizes an ordered polygon into the mask grid by the even-odd rule,
+/// setting one inside without clearing, so several fills union. Sorts each
+/// scanline's edge crossings and fills between successive pairs, so a concave
+/// ring rasterizes as faithfully as a convex one.
+fn fillPolygon(poly: []const [2]f32, mask: *[segmentation.mask_len]f32) void {
+    if (poly.len < 3) return;
     const side = segmentation.mask_side;
     const side_f: f32 = @floatFromInt(side);
     for (0..side) |y| {
         const v = (@as(f32, @floatFromInt(y)) + 0.5) / side_f;
-        var lo: f32 = 0;
-        var hi: f32 = 0;
-        var hit = false;
+        var xs: [face.landmark_count]f32 = undefined;
+        var n: usize = 0;
         var e: usize = 0;
-        while (e < hull_len) : (e += 1) {
-            const a = hull[e];
-            const b = hull[(e + 1) % hull_len];
+        while (e < poly.len and n < xs.len) : (e += 1) {
+            const a = poly[e];
+            const b = poly[(e + 1) % poly.len];
             if ((a[1] <= v) == (b[1] <= v)) continue;
-            const ix = a[0] + (v - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
-            if (!hit or ix < lo) lo = ix;
-            if (!hit or ix > hi) hi = ix;
-            hit = true;
+            xs[n] = a[0] + (v - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+            n += 1;
         }
-        if (!hit) continue;
-        var x0: i64 = @intFromFloat(@floor(lo * side_f));
-        var x1: i64 = @intFromFloat(@ceil(hi * side_f));
-        if (x0 < 0) x0 = 0;
-        if (x1 > @as(i64, @intCast(side))) x1 = @intCast(side);
-        var x: i64 = x0;
-        while (x < x1) : (x += 1) mask[y * side + @as(usize, @intCast(x))] = 1;
+        if (n < 2) continue;
+        std.sort.pdq(f32, xs[0..n], {}, struct {
+            fn lt(_: void, p: f32, q: f32) bool {
+                return p < q;
+            }
+        }.lt);
+        var i: usize = 0;
+        while (i + 1 < n) : (i += 2) {
+            var x0: i64 = @intFromFloat(@floor(xs[i] * side_f));
+            var x1: i64 = @intFromFloat(@ceil(xs[i + 1] * side_f));
+            if (x0 < 0) x0 = 0;
+            if (x1 > @as(i64, @intCast(side))) x1 = @intCast(side);
+            var x: i64 = x0;
+            while (x < x1) : (x += 1) mask[y * side + @as(usize, @intCast(x))] = 1;
+        }
     }
 }
 
@@ -5568,6 +5582,25 @@ fn fillLandmarkHull(points: []const [2]f32, mask: *[segmentation.mask_len]f32) v
 fn pollLandmarkMattes(session: *Session) void {
     pollHeadMatte(session);
     pollHandMatte(session);
+    pollLipsMatte(session);
+}
+
+/// Builds the lips matte from the face's outer-lip landmark loop when a lens
+/// names the lips channel, so a consumer can rim or tint the mouth with no
+/// segmentation model. No face this frame leaves the channel on the zero
+/// mask.
+fn pollLipsMatte(session: *Session) void {
+    const chan: u8 = manifest.lips_channel;
+    if (!maskChannelNeeded(session, chan)) return;
+    var points: [face.landmark_count][2]f32 = undefined;
+    if (!faceMattePoints(session, &points)) return clearClassTexture(session, chan);
+    var loop: [face.outer_lip_loop.len][2]f32 = undefined;
+    for (face.outer_lip_loop, 0..) |idx, i| loop[i] = points[idx];
+    var mask: [segmentation.mask_len]f32 = undefined;
+    @memset(&mask, 0);
+    fillPolygon(loop[0..], &mask);
+    clearClassTexture(session, chan);
+    session.segmentation_class_textures[chan] = maskToTexture(&mask);
 }
 
 fn pollHeadMatte(session: *Session) void {

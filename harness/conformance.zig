@@ -5852,6 +5852,84 @@ fn proveHandMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveLipsMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First prove the outer-lip loop is anatomically the lips: on a real
+    // tracked face its centroid sits below the nose, above the chin, and
+    // between the two mouth corners, so a wrong loop would fail here.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL lips face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        var cx: f32 = 0;
+        var cy: f32 = 0;
+        for (abi.outer_lip_loop) |idx| {
+            cx += lm[@as(usize, idx) * 3];
+            cy += lm[@as(usize, idx) * 3 + 1];
+        }
+        cx /= @floatFromInt(abi.outer_lip_loop.len);
+        cy /= @floatFromInt(abi.outer_lip_loop.len);
+        const nose_y = lm[1 * 3 + 1];
+        const chin_y = lm[152 * 3 + 1];
+        if (!(nose_y < cy and cy < chin_y)) {
+            std.debug.print("conformance: FAIL lip centroid not between nose and chin (y {d:.1} {d:.1} {d:.1})\n", .{ nose_y, cy, chin_y });
+            return false;
+        }
+        const lo_x = @min(lm[61 * 3], lm[291 * 3]);
+        const hi_x = @max(lm[61 * 3], lm[291 * 3]);
+        if (!(lo_x < cx and cx < hi_x)) {
+            std.debug.print("conformance: FAIL lip centroid not between the mouth corners (x {d:.1} {d:.1} {d:.1})\n", .{ lo_x, cx, hi_x });
+            return false;
+        }
+    }
+
+    // Then prove the render: the outline rims the lips, gone with no face,
+    // bit-stable across runs.
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-lips", "zig-out/conformance-lips-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-lips", "zig-out/conformance-lips-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-lips", "zig-out/conformance-lips-noface", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-lips-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-lips-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the lips matte outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-lips-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the lips matte drew nothing - the lip loop never rasterized\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the lips matte fills the outer-lip loop below the nose between the corners, rims the mouth, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7390,6 +7468,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveHeadMatte(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hand-matte")) {
             if (!try proveHandMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "lips-matte")) {
+            if (!try proveLipsMatte(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7444,6 +7524,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("head matte");
     if (!try proveHandMatte(gpa, engine)) return 1;
     watchHold("hand matte");
+    if (!try proveLipsMatte(gpa, engine)) return 1;
+    watchHold("lips matte");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;

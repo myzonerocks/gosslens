@@ -119,6 +119,14 @@ pub fn regionLandmark(region: Region) u16 {
     return region_landmark[@intFromEnum(region)];
 }
 
+/// The outer-lip contour as a closed ring of mesh landmarks, the two corners
+/// at 61 and 291 and the rest in order around the lip, so a face-part matte
+/// fills this polygon straight from tracking.
+pub const outer_lip_loop = [_]u16{
+    61, 146, 91,  181, 84,  17,  314, 405, 321, 375,
+    291, 409, 270, 269, 267, 0,   37,  39,  40,  185,
+};
+
 /// The tracked point for a region: x, y in frame pixels and z in the same
 /// scale, read straight from the mesh. landmarks is a result's flat array.
 pub fn regionPoint(landmarks: *const [landmark_count * 3]f32, region: Region) [3]f32 {
