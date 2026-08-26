@@ -79,8 +79,10 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 /// Re-exported for the conformance harness, which reads a face result's raw
-/// landmarks and needs the same lip loop the lips matte fills.
+/// landmarks and needs the same loops the face-part mattes fill.
 pub const outer_lip_loop = face.outer_lip_loop;
+pub const left_eye_loop = face.left_eye_loop;
+pub const right_eye_loop = face.right_eye_loop;
 
 pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
@@ -5582,25 +5584,27 @@ fn fillPolygon(poly: []const [2]f32, mask: *[segmentation.mask_len]f32) void {
 fn pollLandmarkMattes(session: *Session) void {
     pollHeadMatte(session);
     pollHandMatte(session);
-    pollLipsMatte(session);
+    pollFacePartMatte(session, manifest.lips_channel, &.{&face.outer_lip_loop});
+    pollFacePartMatte(session, manifest.eyes_channel, &.{ &face.left_eye_loop, &face.right_eye_loop });
 }
 
-/// Builds the lips matte from the face's outer-lip landmark loop when a lens
-/// names the lips channel, so a consumer can rim or tint the mouth with no
-/// segmentation model. No face this frame leaves the channel on the zero
-/// mask.
-fn pollLipsMatte(session: *Session) void {
-    const chan: u8 = manifest.lips_channel;
-    if (!maskChannelNeeded(session, chan)) return;
+/// Builds a face-part matte channel from one or more landmark loops, unioned,
+/// when a lens names it: each loop is a ring of mesh landmark indices filled
+/// as a polygon, so a consumer can rim or tint the mouth or eyes with no
+/// segmentation model. No face this frame leaves the channel on the zero mask.
+fn pollFacePartMatte(session: *Session, channel: u8, loops: []const []const u16) void {
+    if (!maskChannelNeeded(session, channel)) return;
     var points: [face.landmark_count][2]f32 = undefined;
-    if (!faceMattePoints(session, &points)) return clearClassTexture(session, chan);
-    var loop: [face.outer_lip_loop.len][2]f32 = undefined;
-    for (face.outer_lip_loop, 0..) |idx, i| loop[i] = points[idx];
+    if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
     var mask: [segmentation.mask_len]f32 = undefined;
     @memset(&mask, 0);
-    fillPolygon(loop[0..], &mask);
-    clearClassTexture(session, chan);
-    session.segmentation_class_textures[chan] = maskToTexture(&mask);
+    var ring: [face.landmark_count][2]f32 = undefined;
+    for (loops) |loop| {
+        for (loop, 0..) |idx, i| ring[i] = points[idx];
+        fillPolygon(ring[0..loop.len], &mask);
+    }
+    clearClassTexture(session, channel);
+    session.segmentation_class_textures[channel] = maskToTexture(&mask);
 }
 
 fn pollHeadMatte(session: *Session) void {

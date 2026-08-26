@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.outline-eyes",
+  "version": "1.0.0",
+  "display_name": "Eyes Outline",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "outline", "type": "outline.pass", "inputs": {"frame": "camera"}, "params": {},
+     "outline": {"color": [0.3, 0.8, 0.4], "threshold": 0.3, "mask": "eyes"}}
+  ],
+  "triggers": []
+}

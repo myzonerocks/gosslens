@@ -55,17 +55,20 @@ pub const NodeParam = struct { name: []const u8, binding: ParamBinding };
 /// lens-format vocabulary; a running session without the class serves
 /// the zero mask, so the effect draws nothing rather than everywhere.
 pub const mask_channels = [_][]const u8{
-    "person", "background", "hair", "body_skin", "face_skin", "clothes", "others", "head", "hand", "lips",
+    "person",  "background", "hair", "body_skin", "face_skin",
+    "clothes", "others",     "head", "hand",      "lips",
+    "eyes",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
 /// in label order; channels from model_class_end on derive another way, so
-/// the model-class mapping must not reach them. head, hand and lips ride the
-/// face and hand landmarks, not a segmentation model.
+/// the model-class mapping must not reach them. head, hand, lips and eyes
+/// ride the face and hand landmarks, not a segmentation model.
 pub const model_class_end = 7;
 pub const head_channel = 7;
 pub const hand_channel = 8;
 pub const lips_channel = 9;
+pub const eyes_channel = 10;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {

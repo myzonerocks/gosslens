@@ -127,6 +127,18 @@ pub const outer_lip_loop = [_]u16{
     291, 409, 270, 269, 267, 0,   37,  39,  40,  185,
 };
 
+/// Each eye's lid contour as a closed ring, the outer corner first (263 and
+/// 33), lower lid then upper, so a face-part matte fills each eye straight
+/// from tracking.
+pub const left_eye_loop = [_]u16{
+    263, 249, 390, 373, 374, 380, 381, 382,
+    362, 398, 384, 385, 386, 387, 388, 466,
+};
+pub const right_eye_loop = [_]u16{
+    33,  7,   163, 144, 145, 153, 154, 155,
+    133, 173, 157, 158, 159, 160, 161, 246,
+};
+
 /// The tracked point for a region: x, y in frame pixels and z in the same
 /// scale, read straight from the mesh. landmarks is a result's flat array.
 pub fn regionPoint(landmarks: *const [landmark_count * 3]f32, region: Region) [3]f32 {

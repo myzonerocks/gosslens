@@ -5930,6 +5930,89 @@ fn proveLipsMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The centroid (x, y in frame pixels) of a ring of mesh landmarks, read from
+/// a face result's flat landmark array.
+fn ringCentroid(lm: []const f32, loop: []const u16) [2]f32 {
+    var cx: f32 = 0;
+    var cy: f32 = 0;
+    for (loop) |idx| {
+        cx += lm[@as(usize, idx) * 3];
+        cy += lm[@as(usize, idx) * 3 + 1];
+    }
+    const n: f32 = @floatFromInt(loop.len);
+    return .{ cx / n, cy / n };
+}
+
+fn proveEyesMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First prove the eye loops are anatomically the eyes: on a real tracked
+    // face each eye centroid sits above the lips and the two flank the nose,
+    // so a swapped or wrong loop would fail here.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL eyes face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        const left = ringCentroid(lm, &abi.left_eye_loop);
+        const right = ringCentroid(lm, &abi.right_eye_loop);
+        const lips = ringCentroid(lm, &abi.outer_lip_loop);
+        if (!(left[1] < lips[1] and right[1] < lips[1])) {
+            std.debug.print("conformance: FAIL an eye centroid not above the lips (y L {d:.1} R {d:.1} lips {d:.1})\n", .{ left[1], right[1], lips[1] });
+            return false;
+        }
+        const nose_x = lm[1 * 3];
+        if ((left[0] > nose_x) == (right[0] > nose_x)) {
+            std.debug.print("conformance: FAIL the eyes not on opposite sides of the nose (x L {d:.1} R {d:.1} nose {d:.1})\n", .{ left[0], right[0], nose_x });
+            return false;
+        }
+    }
+
+    // Then prove the render: the outline rims both eyes, gone with no face,
+    // bit-stable across runs.
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-eyes", "zig-out/conformance-eyes-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-eyes", "zig-out/conformance-eyes-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-eyes", "zig-out/conformance-eyes-noface", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyes-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyes-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the eyes matte outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyes-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the eyes matte drew nothing - the eye loops never rasterized\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the eyes matte fills both eye loops above the lips and flanking the nose, rims the eyes, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -7470,6 +7553,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveHandMatte(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "lips-matte")) {
             if (!try proveLipsMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "eyes-matte")) {
+            if (!try proveEyesMatte(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7526,6 +7611,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("hand matte");
     if (!try proveLipsMatte(gpa, engine)) return 1;
     watchHold("lips matte");
+    if (!try proveEyesMatte(gpa, engine)) return 1;
+    watchHold("eyes matte");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
