@@ -61,6 +61,22 @@ pub fn fill(landmarks: *const [face.landmark_count]face.Landmark, width: f32, he
     }
 }
 
+/// Two derived anchors the reshape bank needs but the raw 106 has no
+/// landmark for: the nose-bridge midpoint and a forehead-center point above
+/// the brow line. Both come from the between-brows point (43) and the nose
+/// tip (46) of an already fill()-ed contour, normalized like the rest.
+pub fn reshapeHubs(contour: *const [point_count * 2]f32) [4]f32 {
+    const brow_x = contour[43 * 2];
+    const brow_y = contour[43 * 2 + 1];
+    const tip_x = contour[46 * 2];
+    const tip_y = contour[46 * 2 + 1];
+    const bridge_x = (brow_x + tip_x) * 0.5;
+    const bridge_y = (brow_y + tip_y) * 0.5;
+    const forehead_x = brow_x + (brow_x - tip_x) * 0.85;
+    const forehead_y = brow_y + (brow_y - tip_y) * 0.85;
+    return .{ forehead_x, forehead_y, bridge_x, bridge_y };
+}
+
 /// Maps a fill()-normalized point from sensor space into the space of
 /// a frame drawn with the preview blit's mirror and quarter turns -
 /// mirror first, then rotation, the blit's own transform order.
@@ -130,6 +146,23 @@ test "each hub point is exactly its neighbors' centroid" {
         try t.expectApproxEqAbs(sum_x / count, out[hub * 2], 1e-6);
         try t.expectApproxEqAbs(sum_y / count, out[hub * 2 + 1], 1e-6);
     }
+}
+
+test "reshape hubs sit above the brows and midway down the nose bridge" {
+    var landmarks: [face.landmark_count]face.Landmark = undefined;
+    for (&landmarks, 0..) |*landmark, at| {
+        landmark.* = .{ .x = @floatFromInt((at * 7) % 640), .y = @floatFromInt((at * 11) % 480), .z = 0 };
+    }
+    var out: [point_count * 2]f32 = undefined;
+    fill(&landmarks, 640, 480, &out);
+    const hubs = reshapeHubs(&out);
+    const brow_y = out[43 * 2 + 1];
+    const tip_y = out[46 * 2 + 1];
+    // The nose-bridge midpoint lands between the two source points.
+    try t.expectApproxEqAbs((out[43 * 2 + 1] + tip_y) * 0.5, hubs[3], 1e-6);
+    // The forehead center is the between-brows point pushed away from the tip.
+    const expect_forehead_y = brow_y + (brow_y - tip_y) * 0.85;
+    try t.expectApproxEqAbs(expect_forehead_y, hubs[1], 1e-6);
 }
 
 test "transformPoint matches the preview blit for every camera pose" {

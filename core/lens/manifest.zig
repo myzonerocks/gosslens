@@ -381,6 +381,79 @@ pub const WarpField = struct {
     aspect_auto: bool = true,
 };
 
+pub const ReshapeField = struct {
+    /// A reshape.bank node's per-region face sculpt: sixty-six landmark
+    /// driven deformations, each in [-1,1] with 0 the identity. Every field
+    /// warps the frame around one facial region and decays to identity away
+    /// from it, so the banks compose without a global resample.
+    nose_width: f32 = 0,
+    nose_bridge_width: f32 = 0,
+    nose_bridge_height: f32 = 0,
+    nose_tip_size: f32 = 0,
+    nose_tip_height: f32 = 0,
+    nose_length: f32 = 0,
+    nostril_size: f32 = 0,
+    nose_scale: f32 = 0,
+    jaw_width: f32 = 0,
+    jaw_slim: f32 = 0,
+    jaw_left: f32 = 0,
+    jaw_right: f32 = 0,
+    jaw_angle: f32 = 0,
+    jaw_height: f32 = 0,
+    jaw_v_line: f32 = 0,
+    chin_length: f32 = 0,
+    chin_width: f32 = 0,
+    chin_point: f32 = 0,
+    chin_height: f32 = 0,
+    chin_forward: f32 = 0,
+    chin_size: f32 = 0,
+    lip_size: f32 = 0,
+    lip_width: f32 = 0,
+    lip_height: f32 = 0,
+    lip_upper: f32 = 0,
+    lip_lower: f32 = 0,
+    mouth_position: f32 = 0,
+    mouth_corner: f32 = 0,
+    cupid_bow: f32 = 0,
+    philtrum_length: f32 = 0,
+    cheek_fullness_l: f32 = 0,
+    cheek_fullness_r: f32 = 0,
+    cheek_slim_l: f32 = 0,
+    cheek_slim_r: f32 = 0,
+    cheekbone_height: f32 = 0,
+    cheekbone_width: f32 = 0,
+    cheek_lower_slim: f32 = 0,
+    cheek_scale: f32 = 0,
+    brow_height_l: f32 = 0,
+    brow_height_r: f32 = 0,
+    brow_tilt: f32 = 0,
+    brow_thickness: f32 = 0,
+    brow_distance: f32 = 0,
+    brow_peak: f32 = 0,
+    forehead_height: f32 = 0,
+    forehead_width: f32 = 0,
+    forehead_round: f32 = 0,
+    forehead_size: f32 = 0,
+    eye_size_l: f32 = 0,
+    eye_size_r: f32 = 0,
+    eye_width: f32 = 0,
+    eye_height: f32 = 0,
+    eye_distance: f32 = 0,
+    eye_tilt: f32 = 0,
+    eye_inner_corner: f32 = 0,
+    eye_outer_corner: f32 = 0,
+    eye_lower: f32 = 0,
+    eye_scale: f32 = 0,
+    face_slim: f32 = 0,
+    face_width: f32 = 0,
+    face_length: f32 = 0,
+    face_v_shape: f32 = 0,
+    temple_width: f32 = 0,
+    face_scale: f32 = 0,
+    face_symmetry: f32 = 0,
+    face_overall: f32 = 0,
+};
+
 pub const TrailField = struct {
     /// A trail.pass node's echo amount (0..1): how much of the previous
     /// frame blends into this one, so moving content leaves a motion trail.
@@ -600,6 +673,9 @@ pub const Node = struct {
     edge: ?EdgeField = null,
     /// Set only on a warp.pass node: its distortion mode and parameters.
     warp: ?WarpField = null,
+    /// Set only on a reshape.bank node: its sixty-six per-region face sculpt
+    /// amounts.
+    reshape: ?ReshapeField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -1694,6 +1770,26 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "warp.pass")) {
             warp_field = .{};
         }
+        var reshape_field: ?ReshapeField = null;
+        if (getField(object, "reshape")) |rv| {
+            const rmark = path.push("reshape");
+            if (!std.mem.eql(u8, node_type, "reshape.bank")) {
+                try diags.add(path.slice(), "reshape is a reshape.bank field, found it on '{s}'", .{node_type});
+            } else if (rv != .object) {
+                try diags.add(path.slice(), "reshape must be an object", .{});
+            } else {
+                var field: ReshapeField = .{};
+                inline for (std.meta.fields(ReshapeField)) |f| {
+                    if (getField(rv.object, f.name)) |v| {
+                        @field(field, f.name) = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse @field(field, f.name))), -1.0, 1.0);
+                    }
+                }
+                reshape_field = field;
+            }
+            path.pop(rmark);
+        } else if (std.mem.eql(u8, node_type, "reshape.bank")) {
+            reshape_field = .{};
+        }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
             const tmark = path.push("trail");
@@ -2314,6 +2410,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .stylize = stylize_field,
             .edge = edge_field,
             .warp = warp_field,
+            .reshape = reshape_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,

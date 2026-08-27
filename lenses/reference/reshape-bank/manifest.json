@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.reshape-bank",
+  "version": "1.0.0",
+  "display_name": "Reshape Bank",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "sculpt", "type": "reshape.bank", "inputs": {"frame": "camera"}, "params": {},
+     "reshape": {"jaw_slim": 0.4, "chin_length": -0.2, "nose_width": -0.3, "eye_size_l": 0.25, "eye_size_r": 0.25, "cheek_slim_l": 0.2, "cheek_slim_r": 0.2, "brow_height_l": 0.15, "brow_height_r": 0.15}}
+  ],
+  "triggers": []
+}

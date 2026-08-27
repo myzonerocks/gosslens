@@ -5715,6 +5715,181 @@ fn proveWarp(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Builds a one-node reshape.bank lens whose reshape block is `body`, over a
+/// real corpus face. The empty body "{}" is the identity control every param
+/// capture shares its resample path with.
+fn reshapeManifest(gpa: std.mem.Allocator, body: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa,
+        \\{{"glf":"1.0","id":"goss.reference.reshape-proof","version":"1.0.0","display_name":"Reshape Proof","engine_compat":">=0.5","capabilities":["face"],"parameters":[],"nodes":[{{"id":"sculpt","type":"reshape.bank","inputs":{{"frame":"camera"}},"params":{{}},"reshape":{s}}}],"triggers":[]}}
+    , .{body});
+}
+
+/// Renders one reshape.bank lens over the corpus face through the real ABI
+/// with native face tracking, warming until a face lands then capturing a
+/// settled frame. Null when the face model is unavailable, so a machine
+/// without it skips the proof rather than failing it.
+fn captureReshapeShot(gpa: std.mem.Allocator, engine: *abi.Engine, manifest_json: []const u8) !?[]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const face_bytes = std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20)) catch return null;
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return null;
+    if (abi.goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len) != .ok) return error.ActivationFailed;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+    var result: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &result) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    var shot: []u8 = &.{};
+    for (0..8) |i| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 6) {
+            shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(shot);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return shot;
+}
+
+/// Counts the pixels that differ between a sculpted capture and its identity
+/// control and accumulates their centroid, so the proof knows both that a
+/// region moved and where the movement landed.
+fn changedRegion(a: []const u8, b: []const u8, cap_width: usize, cap_height: usize, out_cx: *f32, out_cy: *f32) usize {
+    var count: usize = 0;
+    var sum_x: f64 = 0;
+    var sum_y: f64 = 0;
+    var y: usize = 0;
+    while (y < cap_height) : (y += 1) {
+        var x: usize = 0;
+        while (x < cap_width) : (x += 1) {
+            const i = (y * cap_width + x) * 4;
+            if (!std.mem.eql(u8, a[i .. i + 4], b[i .. i + 4])) {
+                count += 1;
+                sum_x += @floatFromInt(x);
+                sum_y += @floatFromInt(y);
+            }
+        }
+    }
+    if (count > 0) {
+        out_cx.* = @floatCast(sum_x / @as(f64, @floatFromInt(count)));
+        out_cy.* = @floatCast(sum_y / @as(f64, @floatFromInt(count)));
+    }
+    return count;
+}
+
+/// True when the block of half-width `half` centered on (cx, cy) is byte
+/// identical between two captures - the proof one region's sculpt leaves a
+/// different region untouched.
+fn blockEqualAt(a: []const u8, b: []const u8, cap_width: usize, cap_height: usize, cx: f32, cy: f32, half: usize) bool {
+    const ix: usize = @intFromFloat(@max(0.0, cx));
+    const iy: usize = @intFromFloat(@max(0.0, cy));
+    const x0 = if (ix > half) ix - half else 0;
+    const y0 = if (iy > half) iy - half else 0;
+    const x1 = @min(cap_width, ix + half);
+    const y1 = @min(cap_height, iy + half);
+    var y = y0;
+    while (y < y1) : (y += 1) {
+        const start = (y * cap_width + x0) * 4;
+        const end = (y * cap_width + x1) * 4;
+        if (!std.mem.eql(u8, a[start..end], b[start..end])) return false;
+    }
+    return true;
+}
+
+/// Proves the reshape.bank sculpt on a real corpus face: nose width, chin
+/// length, left eye size and jaw slim each move their own region versus the
+/// identity control, leave the far corner and the other tested region byte
+/// identical, and the whole face-tracked path is bit-stable across two runs.
+fn proveReshapeBank(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const cap_w: usize = 400;
+    const cap_h: usize = 300;
+    const control_json = try reshapeManifest(gpa, "{}");
+    defer gpa.free(control_json);
+    const control = (try captureReshapeShot(gpa, engine, control_json)) orelse return true;
+    defer gpa.free(control);
+    const control2 = (try captureReshapeShot(gpa, engine, control_json)) orelse return true;
+    defer gpa.free(control2);
+    if (!std.mem.eql(u8, control, control2)) {
+        std.debug.print("conformance: FAIL reshape.bank identity control is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    const cases = [_]struct { name: []const u8, body: []const u8 }{
+        .{ .name = "nose_width", .body = "{\"nose_width\":0.9}" },
+        .{ .name = "chin_length", .body = "{\"chin_length\":0.9}" },
+        .{ .name = "eye_size_l", .body = "{\"eye_size_l\":0.9}" },
+        .{ .name = "jaw_slim", .body = "{\"jaw_slim\":0.9}" },
+    };
+
+    var shots: [cases.len][]u8 = undefined;
+    var cx: [cases.len]f32 = undefined;
+    var cy: [cases.len]f32 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (cases, 0..) |cse, idx| {
+        const json = try reshapeManifest(gpa, cse.body);
+        defer gpa.free(json);
+        const shot = (try captureReshapeShot(gpa, engine, json)) orelse return true;
+        shots[idx] = shot;
+        taken += 1;
+        const count = changedRegion(shot, control, cap_w, cap_h, &cx[idx], &cy[idx]);
+        if (count < 100) {
+            std.debug.print("conformance: FAIL reshape.bank {s} did not move its region ({d} px changed)\n", .{ cse.name, count });
+            return false;
+        }
+        if (!cornerBlockEqual(shot, control, cap_w, 40)) {
+            std.debug.print("conformance: FAIL reshape.bank {s} changed the far background corner (not localized)\n", .{cse.name});
+            return false;
+        }
+    }
+
+    // Localization between regions: one region's sculpt leaves the other
+    // tested region's block byte-identical to the control, in both directions.
+    const pairs = [_][2]usize{ .{ 0, 1 }, .{ 2, 3 } };
+    for (pairs) |pr| {
+        const a = pr[0];
+        const b = pr[1];
+        const dx = cx[a] - cx[b];
+        const dy = cy[a] - cy[b];
+        if (dx * dx + dy * dy < 225.0) {
+            std.debug.print("conformance: FAIL reshape.bank {s} and {s} centroids not separated\n", .{ cases[a].name, cases[b].name });
+            return false;
+        }
+        if (!blockEqualAt(shots[a], control, cap_w, cap_h, cx[b], cy[b], 8)) {
+            std.debug.print("conformance: FAIL reshape.bank {s} disturbed the {s} region\n", .{ cases[a].name, cases[b].name });
+            return false;
+        }
+        if (!blockEqualAt(shots[b], control, cap_w, cap_h, cx[a], cy[a], 8)) {
+            std.debug.print("conformance: FAIL reshape.bank {s} disturbed the {s} region\n", .{ cases[b].name, cases[a].name });
+            return false;
+        }
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[3], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-reshape-bank.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF reshape.bank sculpts each face region locally - nose, chin, eye and jaw each move their own region while the far corner and the other region stay byte-identical to the identity control, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves a bloom.pass post-effect: the bright pass, separable blur and
 /// additive composite bleed a glow from the highlights, so a bloomed
 /// capture differs from the plain one and is bit-stable across runs (no
@@ -9649,6 +9824,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveEdge(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "warp")) {
             if (!try proveWarp(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "reshape")) {
+            if (!try proveReshapeBank(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "material-ops")) {
             if (!try proveMaterialOps(gpa, engine)) return 1;
         } else {
@@ -9871,6 +10048,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("edge");
     if (!try proveWarp(gpa, engine)) return 1;
     watchHold("warp");
+    if (!try proveReshapeBank(gpa, engine)) return 1;
+    watchHold("reshape bank");
     if (!try proveExpressionScript(gpa, engine)) return 1;
     watchHold("expression script");
     if (!try proveEmber(gpa, engine)) return 1;

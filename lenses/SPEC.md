@@ -433,6 +433,29 @@ is the glass index the two sphere modes bend the view ray by; the three UV warps
 ignore it. `aspect_auto` keeps the region circular on screen by correcting for
 the frame's aspect. It reads no host input, ships no asset, and is always ready.
 
+A `"reshape.bank"` node is a landmark-driven face sculpt: sixty-six per-region
+deformations that warp the frame around the tracked face and decay to identity
+away from each region, so one bank never bleeds into another. It carries a
+`"reshape"` block whose fields each take a value in `[-1,1]` with `0` the
+identity, grouped by region: nose (`nose_width`, `nose_bridge_width`,
+`nose_bridge_height`, `nose_tip_size`, `nose_tip_height`, `nose_length`,
+`nostril_size`, `nose_scale`), jaw (`jaw_width`, `jaw_slim`, `jaw_left`,
+`jaw_right`, `jaw_angle`, `jaw_height`, `jaw_v_line`), chin (`chin_length`,
+`chin_width`, `chin_point`, `chin_height`, `chin_forward`, `chin_size`), lip
+(`lip_size`, `lip_width`, `lip_height`, `lip_upper`, `lip_lower`,
+`mouth_position`, `mouth_corner`, `cupid_bow`, `philtrum_length`), cheek
+(`cheek_fullness_l`, `cheek_fullness_r`, `cheek_slim_l`, `cheek_slim_r`,
+`cheekbone_height`, `cheekbone_width`, `cheek_lower_slim`, `cheek_scale`), brow
+(`brow_height_l`, `brow_height_r`, `brow_tilt`, `brow_thickness`,
+`brow_distance`, `brow_peak`), forehead (`forehead_height`, `forehead_width`,
+`forehead_round`, `forehead_size`), eye (`eye_size_l`, `eye_size_r`,
+`eye_width`, `eye_height`, `eye_distance`, `eye_tilt`, `eye_inner_corner`,
+`eye_outer_corner`, `eye_lower`, `eye_scale`) and whole face (`face_slim`,
+`face_width`, `face_length`, `face_v_shape`, `temple_width`, `face_scale`,
+`face_symmetry`, `face_overall`). Every field is optional and defaults to zero.
+It reads the tracked face landmarks, so it declares the `face` capability and
+holds the frame through untouched without a tracked face, and it ships no asset.
+
 A `"trail.pass"` node is a motion-trail post-effect. It carries a `"trail":
 {"amount"}` block: `amount` (0..1) is how much of the previous frame the
 current one keeps, so moving subjects smear a fading echo behind them while a

@@ -28,6 +28,11 @@ pub const invalid_handle: u16 = std.math.maxInt(u16);
 /// appends for lipstick/blush's own mesh.
 pub const face_point_vec4_count = 53;
 
+/// fs_reshape_bank.sc packs its sixty-six per-region sculpt amounts four per
+/// vec4 into u_reshapeBank, so seventeen vec4s cover them with two slots to
+/// spare, indexed only by compile-time constants for essl safety.
+pub const face_reshape_bank_vec4_count = 17;
+
 /// A named alias for bgfx's own texture handle, matching the stub
 /// module's TextureHandle - lets callers that need to name the type
 /// (a hashmap value type, say) write render.TextureHandle uniformly
@@ -124,6 +129,7 @@ pub const Renderer = struct {
     composite_program: c.bgfx_program_handle_t,
     beauty_face_program: c.bgfx_program_handle_t,
     beauty_reshape_program: c.bgfx_program_handle_t,
+    reshape_bank_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
     model_instanced_program: c.bgfx_program_handle_t,
@@ -200,6 +206,10 @@ pub const Renderer = struct {
     beauty_params_uniform: c.bgfx_uniform_handle_t,
     reshape_params_uniform: c.bgfx_uniform_handle_t,
     makeup_params_uniform: c.bgfx_uniform_handle_t,
+    /// The reshape bank's sixty-six sculpt amounts, four per vec4, and its two
+    /// derived anchors (forehead center xy, nose-bridge midpoint zw).
+    reshape_bank_uniform: c.bgfx_uniform_handle_t,
+    reshape_hubs_uniform: c.bgfx_uniform_handle_t,
     /// 106 tracked face points, two per vec4 (xy, zw) - matching
     /// fs_beauty_reshape.sc's own u_facePoints packing.
     face_points_uniform: c.bgfx_uniform_handle_t,
@@ -366,6 +376,7 @@ pub const Renderer = struct {
         const composite_program = try loadCompositeProgram();
         const beauty_face_program = try loadBeautyFaceProgram();
         const beauty_reshape_program = try loadBeautyReshapeProgram();
+        const reshape_bank_program = try loadReshapeBankProgram();
         const makeup_program = try loadMakeupProgram();
         const model_program = try loadModelProgram();
         const model_instanced_program = try loadModelInstancedProgram();
@@ -452,6 +463,7 @@ pub const Renderer = struct {
             .composite_program = composite_program,
             .beauty_face_program = beauty_face_program,
             .beauty_reshape_program = beauty_reshape_program,
+            .reshape_bank_program = reshape_bank_program,
             .makeup_program = makeup_program,
             .model_program = model_program,
             .model_instanced_program = model_instanced_program,
@@ -513,6 +525,8 @@ pub const Renderer = struct {
             .tex_bloom = c.bgfx_create_uniform("s_texBloom", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .beauty_params_uniform = c.bgfx_create_uniform("u_beautyParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .reshape_params_uniform = c.bgfx_create_uniform("u_reshapeParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .reshape_bank_uniform = c.bgfx_create_uniform("u_reshapeBank", c.BGFX_UNIFORM_TYPE_VEC4, face_reshape_bank_vec4_count),
+            .reshape_hubs_uniform = c.bgfx_create_uniform("u_reshapeHubs", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -853,6 +867,19 @@ pub const Renderer = struct {
         };
     }
 
+    /// The one fixed reshape.bank program every lens shares - the sixty-six
+    /// per-region face sculpt over the shared vs_lens_pass quad, kit-authored
+    /// like loadBeautyReshapeProgram above.
+    pub fn loadReshapeBankProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_reshape_bank_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_reshape_bank_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_reshape_bank_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_reshape_bank_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// The one fixed beauty.lipstick/beauty.blusher program every lens
     /// shares - its own vertex stage (vs_makeup, not vs_lens_pass; the
     /// mesh needs two vertex attributes, not a full-screen quad).
@@ -1000,6 +1027,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_bloom);
         c.bgfx_destroy_uniform(r.beauty_params_uniform);
         c.bgfx_destroy_uniform(r.reshape_params_uniform);
+        c.bgfx_destroy_uniform(r.reshape_bank_uniform);
+        c.bgfx_destroy_uniform(r.reshape_hubs_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
         c.bgfx_destroy_uniform(r.face_points_uniform);
         c.bgfx_destroy_uniform(r.model_color_uniform);
@@ -1033,6 +1062,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.bloom_composite_program);
         c.bgfx_destroy_program(r.beauty_face_program);
         c.bgfx_destroy_program(r.beauty_reshape_program);
+        c.bgfx_destroy_program(r.reshape_bank_program);
         c.bgfx_destroy_program(r.makeup_program);
         c.bgfx_destroy_program(r.model_program);
         c.bgfx_destroy_program(r.model_instanced_program);
@@ -1777,6 +1807,24 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.face_points_uniform, face_points, face_point_vec4_count);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.beauty_reshape_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one reshape.bank node as a full-screen pass into view_id. It
+    /// reuses fs_beauty_reshape.sc's u_facePoints contour and u_reshapeParams
+    /// header (aspect, presence, softness), adds the two derived anchors in
+    /// u_reshapeHubs, and the sixty-six sculpt amounts padded into u_reshapeBank.
+    pub fn submitReshapeBank(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, face_points: *const [face_point_vec4_count * 4]f32, hubs: [4]f32, bank: *const [66]f32, aspect_ratio: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        const header = [4]f32{ aspect_ratio, 1.0, 1.0, 0.0 };
+        c.bgfx_set_uniform(r.reshape_params_uniform, &header, 1);
+        c.bgfx_set_uniform(r.reshape_hubs_uniform, &hubs, 1);
+        c.bgfx_set_uniform(r.face_points_uniform, face_points, face_point_vec4_count);
+        var slots: [face_reshape_bank_vec4_count * 4]f32 = @splat(0);
+        @memcpy(slots[0..66], bank);
+        c.bgfx_set_uniform(r.reshape_bank_uniform, &slots, face_reshape_bank_vec4_count);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.reshape_bank_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one beauty.lipstick or beauty.blusher node: the 176-triangle

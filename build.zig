@@ -286,6 +286,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
+    abi_module.addImport("face106", face106_module);
 
     const lens_manifest_module = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
@@ -759,6 +760,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_tracking_module.addImport("particles", particlesModule(b, target, optimize));
         abi_tracking_module.addImport("sph", sphModule(b, target, optimize));
+        abi_tracking_module.addImport("face106", face106_module);
         if (target.result.os.tag == .macos) {
             abi_tracking_module.addImport("beauty", beauty_real_module);
         } else {
@@ -979,6 +981,12 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("particles", particlesModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("sph", sphModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("face106", b.createModule(.{
+            .root_source_file = b.path("core/tracking/face106.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{.{ .name = "face", .module = tracking_cores_wasm.face }},
+        }));
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
@@ -1161,6 +1169,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_conformance_module.addImport("particles", particlesModule(b, target, optimize));
         abi_conformance_module.addImport("sph", sphModule(b, target, optimize));
+        abi_conformance_module.addImport("face106", face106_module);
         if (host_asset) |am| {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
@@ -1586,6 +1595,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
             .optimize = optimize,
             .imports = &.{.{ .name = "face", .module = tracking_cores_android.face }},
         });
+        abi_android.addImport("face106", face106_android);
         const beauty_android_module = b.createModule(.{
             .root_source_file = b.path("adapters/beauty/beauty.zig"),
             .target = android_target,
@@ -3619,6 +3629,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             .optimize = optimize,
             .imports = &.{.{ .name = "face", .module = tracking_cores_ios.face }},
         });
+        abi_ios.addImport("face106", face106_ios);
         const beauty_ios_module = b.createModule(.{
             .root_source_file = b.path("adapters/beauty/beauty.zig"),
             .target = ios_target,
@@ -4393,6 +4404,9 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // beauty.reshape's own fixed fragment shader: thin_face and
         // big_eye, same reasoning as fs_lut_pass above.
         .{ .name = "fs_beauty_reshape", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // reshape.bank's own fixed fragment shader: the sixty-six per-region
+        // face sculpt, same reasoning as fs_lut_pass above.
+        .{ .name = "fs_reshape_bank", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // beauty.lipstick/beauty.blusher's own mesh vertex stage - its
         // own varying def, a_position is vec2 here, not the vec3 every
         // other vertex contract in this project shares.

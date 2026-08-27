@@ -456,6 +456,16 @@ pub const Renderer = struct {
         _ = big_eye_amount;
     }
 
+    pub fn submitReshapeBank(r: *Renderer, view_id: u16, input_texture: TextureHandle, face_points: *const [face_point_vec4_count * 4]f32, hubs: [4]f32, bank: *const [66]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = face_points;
+        _ = hubs;
+        _ = bank;
+        _ = aspect_ratio;
+    }
+
     // 111 tracked points, two floats each - makeup_mesh.canonical_uv.len
     // in the real module, mirrored as a literal here rather than
     // importing makeup_mesh into a stub that otherwise has zero
@@ -899,6 +909,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadBeautyReshapeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadReshapeBankProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

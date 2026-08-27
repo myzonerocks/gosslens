@@ -752,6 +752,10 @@ pub const Session = struct {
     /// center_x, center_y, radius, strength, refractive_index, aspect_auto, 0),
     /// resolved at activation.
     warp_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [8]f32) = .empty,
+    /// reshape.bank nodes by graph index: their sixty-six per-region sculpt
+    /// amounts in ReshapeField order, resolved at activation. The live tracked
+    /// contour joins them each frame in the draw arm.
+    reshape_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [66]f32) = .empty,
     /// ssr.pass nodes by graph index: their reflection strength and floor plane.
     ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
@@ -1561,6 +1565,52 @@ fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, w
     if (draw_ar) drawBrushStrokes(r, &s.ar_projected, view_id);
 }
 
+/// Whether a reshape.bank node has a face to sculpt this frame: a valid
+/// host-submitted face, else a valid native tracking result. readResult is
+/// idempotent within a frame, so this matches fillReshapeContour's own gate
+/// and the readiness pass and the draw arm never disagree.
+fn reshapeFaceReady(s: *Session) bool {
+    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) return true;
+    if (s.face_tracking) |worker| {
+        var result: face.Result = undefined;
+        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) return true;
+    }
+    return false;
+}
+
+/// Fills the reshape contour and its two derived hub anchors from the same
+/// face reshapeFaceReady saw, normalized then carried into the preview blit's
+/// own mirror-and-rotation space so the sculpt lands where the frame draws.
+/// Returns false when no usable face holds, the hold-through degradation.
+fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirror: bool, contour: *[face106.point_count * 2]f32, hubs: *[4]f32) bool {
+    var result: face.Result = undefined;
+    var flat: ?*const [face.landmark_count * 3]f32 = null;
+    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+        flat = &s.face_results[0].landmarks;
+    } else if (s.face_tracking) |worker| {
+        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+            flat = &result.landmarks;
+        }
+    }
+    const src = flat orelse return false;
+    var landmarks: [face.landmark_count]face.Landmark = undefined;
+    for (&landmarks, 0..) |*landmark, at| {
+        landmark.* = .{ .x = src[at * 3], .y = src[at * 3 + 1], .z = src[at * 3 + 2] };
+    }
+    face106.fill(&landmarks, @floatFromInt(width), @floatFromInt(height), contour);
+    const raw_hubs = face106.reshapeHubs(contour);
+    const fore = face106.transformPoint(raw_hubs[0], raw_hubs[1], rotation, mirror);
+    const bridge = face106.transformPoint(raw_hubs[2], raw_hubs[3], rotation, mirror);
+    hubs.* = .{ fore[0], fore[1], bridge[0], bridge[1] };
+    var at: usize = 0;
+    while (at < face106.point_count) : (at += 1) {
+        const out = face106.transformPoint(contour[at * 2], contour[at * 2 + 1], rotation, mirror);
+        contour[at * 2] = out[0];
+        contour[at * 2 + 1] = out[1];
+    }
+    return true;
+}
+
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
     // The tile is set per final full-screen pass below; every source-res
     // intermediate draw and every non-capture frame renders untiled.
@@ -1602,6 +1652,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // A warp pass ships no asset; its distortion params resolve at
             // activation, so it is ready as soon as they are in place.
             .warp => s.warp_params.contains(entry.graph_index),
+            // A reshape bank needs a tracked face to sculpt around, like dof
+            // needs depth: with its params resolved but no face it holds the
+            // frame through, the standard capability degradation.
+            .reshape => s.reshape_params.contains(entry.graph_index) and reshapeFaceReady(s),
             // A motion trail owns the frame it echoes (a session target it
             // seeds from the current frame on the first pass), so it is ready
             // as soon as its echo amount is resolved - no host input to gate on.
@@ -1861,6 +1915,27 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // gpupixel's sphere filters do; off keeps it square.
                 const aspect = if (wp[6] > 0.5) @as(f32, @floatFromInt(height)) / @as(f32, @floatFromInt(width)) else 1.0;
                 r.submitWarpPass(view_id, input_texture, .{ wp[0], wp[1], wp[2], wp[3] }, .{ wp[4], wp[5], aspect, 0.0 });
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .reshape => {
+                const bank = s.reshape_params.getPtr(entry.graph_index) orelse continue;
+                var contour: [face106.point_count * 2]f32 = undefined;
+                var hubs: [4]f32 = undefined;
+                // Same gate the readiness pass used; readResult is idempotent
+                // within a frame, so the two agree and is_final stays exact.
+                if (!fillReshapeContour(s, width, height, rotation, mirror, &contour, &hubs)) continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const aspect_ratio = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                r.submitReshapeBank(view_id, input_texture, contour[0 .. render.face_point_vec4_count * 4], hubs, bank, aspect_ratio);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2974,6 +3049,7 @@ pub fn destroySession(session: *Session) void {
     session.stylize_params.deinit(session.engine.gpa);
     session.edge_params.deinit(session.engine.gpa);
     session.warp_params.deinit(session.engine.gpa);
+    session.reshape_params.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
@@ -6101,6 +6177,7 @@ fn destroyBlendState(session: *Session) void {
     session.stylize_params.clearRetainingCapacity();
     session.edge_params.clearRetainingCapacity();
     session.warp_params.clearRetainingCapacity();
+    session.reshape_params.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
     session.ssr_params.clearRetainingCapacity();
     session.env_params.clearRetainingCapacity();
@@ -6504,6 +6581,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createStylizeParams(s, gpa) catch {};
     createEdgeParams(s, gpa) catch {};
     createWarpParams(s, gpa) catch {};
+    createReshapeParams(s, gpa) catch {};
     createTrailParams(s, gpa) catch {};
     createSsrParams(s, gpa) catch {};
     createEnvParams(s, gpa) catch {};
@@ -6663,6 +6741,18 @@ fn createWarpParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(warps);
     for (warps) |wp| {
         session.warp_params.put(gpa, wp.graph_index, wp.params) catch {};
+    }
+}
+
+/// Resolves the active lens's reshape.bank nodes into session.reshape_params,
+/// once at activation - mirrors createWarpParams, no asset or loader. The live
+/// tracked contour joins these amounts each frame in the draw arm.
+fn createReshapeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const reshapes = try lens.reshapePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(reshapes);
+    for (reshapes) |rp| {
+        session.reshape_params.put(gpa, rp.graph_index, rp.params) catch {};
     }
 }
 
@@ -7640,6 +7730,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createStylizeParams(session, gpa);
     try createEdgeParams(session, gpa);
     try createWarpParams(session, gpa);
+    try createReshapeParams(session, gpa);
     try createTrailParams(session, gpa);
     try createSsrParams(session, gpa);
     try createEnvParams(session, gpa);
