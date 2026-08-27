@@ -2,10 +2,75 @@
 // unstable ABI across the Zig boundary) behind a plain interface, the same
 // pattern as the jolt and gpupixel shims. The script runs hardened (no
 // clock, no RNG) and fuel-bounded, so it can never hang or vary per run.
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "quickjs.h"
+
+// QuickJS allocates on the C heap, invisible to the Zig leak gate; a counting
+// malloc set makes a leaked runtime or value show as live bytes the vendor
+// heap proof reads across a lifecycle. A 16-byte header holds each block's
+// size for the free and realloc paths and keeps the payload 16-aligned.
+static _Atomic size_t g_qjs_live_bytes = 0;
+
+typedef struct { size_t size; size_t pad; } QjsHeader;
+
+static void *goss_qjs_malloc(void *opaque, size_t size) {
+    (void)opaque;
+    QjsHeader *h = (QjsHeader *)malloc(size + sizeof(QjsHeader));
+    if (!h) return NULL;
+    h->size = size;
+    atomic_fetch_add(&g_qjs_live_bytes, size);
+    return h + 1;
+}
+
+static void goss_qjs_free(void *opaque, void *ptr) {
+    (void)opaque;
+    if (!ptr) return;
+    QjsHeader *h = (QjsHeader *)ptr - 1;
+    atomic_fetch_sub(&g_qjs_live_bytes, h->size);
+    free(h);
+}
+
+static void *goss_qjs_realloc(void *opaque, void *ptr, size_t size) {
+    (void)opaque;
+    if (!ptr) return goss_qjs_malloc(opaque, size);
+    if (size == 0) { goss_qjs_free(opaque, ptr); return NULL; }
+    QjsHeader *h = (QjsHeader *)ptr - 1;
+    size_t old = h->size;
+    QjsHeader *n = (QjsHeader *)realloc(h, size + sizeof(QjsHeader));
+    if (!n) return NULL;
+    n->size = size;
+    atomic_fetch_add(&g_qjs_live_bytes, size);
+    atomic_fetch_sub(&g_qjs_live_bytes, old);
+    return n + 1;
+}
+
+static void *goss_qjs_calloc(void *opaque, size_t count, size_t size) {
+    if (size != 0 && count > ((size_t)-1) / size) return NULL;
+    size_t total = count * size;
+    void *p = goss_qjs_malloc(opaque, total);
+    if (p) memset(p, 0, total);
+    return p;
+}
+
+static size_t goss_qjs_usable_size(const void *ptr) {
+    if (!ptr) return 0;
+    const QjsHeader *h = (const QjsHeader *)ptr - 1;
+    return h->size;
+}
+
+static const JSMallocFunctions goss_qjs_mf = {
+    .js_calloc = goss_qjs_calloc,
+    .js_malloc = goss_qjs_malloc,
+    .js_free = goss_qjs_free,
+    .js_realloc = goss_qjs_realloc,
+    .js_malloc_usable_size = goss_qjs_usable_size,
+};
+
+// Live bytes on the QuickJS heap right now, read by the vendor-heap proof.
+size_t goss_qjs_live_bytes(void) { return atomic_load(&g_qjs_live_bytes); }
 
 // Fuel bounds CPU, not bytes: a hostile script could otherwise allocate
 // hundreds of megabytes in one tick. Bytes and native stack get their
@@ -54,7 +119,7 @@ static int goss_on_interrupt(JSRuntime *rt, void *opaque) {
 GossScript *goss_script_new(const char *source, size_t source_len, long fuel_per_tick) {
     GossScript *s = (GossScript *)calloc(1, sizeof(GossScript));
     if (!s) return NULL;
-    s->rt = JS_NewRuntime();
+    s->rt = JS_NewRuntime2(&goss_qjs_mf, NULL);
     if (!s->rt) { free(s); return NULL; }
     s->ctx = JS_NewContext(s->rt);
     if (!s->ctx) { JS_FreeRuntime(s->rt); free(s); return NULL; }

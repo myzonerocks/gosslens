@@ -35,10 +35,12 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 #include <utility>
@@ -146,6 +148,51 @@ bool assertFailedImpl(const char* expression, const char* message, const char* f
 }
 #endif
 
+// Jolt allocates on the C++ heap, invisible to the Zig leak gate; route its
+// allocator through a counter so a leaked Jolt object (a Hair and its compute
+// buffers especially) surfaces as live bytes the vendor-heap proof reads
+// across a lifecycle. A prefix header records size and base for the free path.
+std::atomic<size_t> g_jolt_live_bytes{0};
+
+struct JoltBlock {
+  void* base;
+  size_t size;
+};
+
+void* joltCountedAlloc(size_t size, size_t alignment) {
+  const size_t total = sizeof(JoltBlock) + alignment + size;
+  void* base = std::malloc(total);
+  if (base == nullptr) return nullptr;
+  const uintptr_t raw = reinterpret_cast<uintptr_t>(base) + sizeof(JoltBlock);
+  const uintptr_t user = (raw + (alignment - 1)) & ~static_cast<uintptr_t>(alignment - 1);
+  JoltBlock* block = reinterpret_cast<JoltBlock*>(user) - 1;
+  block->base = base;
+  block->size = size;
+  g_jolt_live_bytes.fetch_add(size, std::memory_order_relaxed);
+  return reinterpret_cast<void*>(user);
+}
+
+void joltCountedFree(void* ptr) {
+  if (ptr == nullptr) return;
+  JoltBlock* block = reinterpret_cast<JoltBlock*>(ptr) - 1;
+  g_jolt_live_bytes.fetch_sub(block->size, std::memory_order_relaxed);
+  std::free(block->base);
+}
+
+void* joltAllocate(size_t size) { return joltCountedAlloc(size, 16); }
+void joltFree(void* ptr) { joltCountedFree(ptr); }
+void* joltAlignedAllocate(size_t size, size_t alignment) { return joltCountedAlloc(size, alignment); }
+void joltAlignedFree(void* ptr) { joltCountedFree(ptr); }
+
+void* joltReallocate(void* block, size_t old_size, size_t new_size) {
+  if (block == nullptr) return joltCountedAlloc(new_size, 16);
+  void* fresh = joltCountedAlloc(new_size, 16);
+  if (fresh == nullptr) return nullptr;
+  std::memcpy(fresh, block, old_size < new_size ? old_size : new_size);
+  joltCountedFree(block);
+  return fresh;
+}
+
 // Jolt classes override operator new without a nothrow form, so OOM
 // there cannot come back as null. Allocates through the same Jolt
 // allocator branch the class operator delete will free, then
@@ -163,7 +210,11 @@ T* nothrowNew(A&&... args) {
 
 extern "C" void* goss_physics_world_create(float gravity_y) {
   if (world_count == 0 && JPH::Factory::sInstance == nullptr) {
-    JPH::RegisterDefaultAllocator();
+    JPH::Allocate = joltAllocate;
+    JPH::Free = joltFree;
+    JPH::Reallocate = joltReallocate;
+    JPH::AlignedAllocate = joltAlignedAllocate;
+    JPH::AlignedFree = joltAlignedFree;
     JPH::Trace = traceImpl;
     JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = assertFailedImpl;)
     JPH::Factory::sInstance = nothrowNew<JPH::Factory>();
@@ -191,6 +242,13 @@ extern "C" void goss_physics_world_destroy(void* handle) {
     // register hair again in the fresh one.
     g_hair_registered = false;
   }
+}
+
+// Live bytes held on the Jolt heap right now. The vendor-heap proof reads it
+// between lifecycles; a value above baseline means a Jolt object outlived its
+// world. Internal to the harness, not part of the public C ABI.
+extern "C" size_t goss_jolt_live_bytes(void) {
+  return g_jolt_live_bytes.load(std::memory_order_relaxed);
 }
 
 // Places a finished shape as a body at a pose with a surface material.

@@ -5,8 +5,57 @@
 #define MA_NO_DEVICE_IO
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+// miniaudio decodes on the C heap, invisible to the Zig leak gate; a counting
+// allocator over the decoder and the cached PCM makes a leaked sound show as
+// live bytes the vendor-heap proof reads across a lifecycle. A 16-byte header
+// records each block's size for the free and realloc paths.
+static _Atomic size_t g_ma_live_bytes = 0;
+
+typedef struct { size_t size; size_t pad; } MaHeader;
+
+static void *goss_ma_malloc(size_t size, void *user) {
+    (void)user;
+    MaHeader *h = (MaHeader *)malloc(size + sizeof(MaHeader));
+    if (!h) return NULL;
+    h->size = size;
+    atomic_fetch_add(&g_ma_live_bytes, size);
+    return h + 1;
+}
+
+static void goss_ma_free(void *ptr, void *user) {
+    (void)user;
+    if (!ptr) return;
+    MaHeader *h = (MaHeader *)ptr - 1;
+    atomic_fetch_sub(&g_ma_live_bytes, h->size);
+    free(h);
+}
+
+static void *goss_ma_realloc(void *ptr, size_t size, void *user) {
+    if (!ptr) return goss_ma_malloc(size, user);
+    if (size == 0) { goss_ma_free(ptr, user); return NULL; }
+    MaHeader *h = (MaHeader *)ptr - 1;
+    size_t old = h->size;
+    MaHeader *n = (MaHeader *)realloc(h, size + sizeof(MaHeader));
+    if (!n) return NULL;
+    n->size = size;
+    atomic_fetch_add(&g_ma_live_bytes, size);
+    atomic_fetch_sub(&g_ma_live_bytes, old);
+    return n + 1;
+}
+
+static const ma_allocation_callbacks goss_ma_allocs = {
+    .pUserData = NULL,
+    .onMalloc = goss_ma_malloc,
+    .onRealloc = goss_ma_realloc,
+    .onFree = goss_ma_free,
+};
+
+// Live bytes on the miniaudio heap right now, read by the vendor-heap proof.
+size_t goss_ma_live_bytes(void) { return atomic_load(&g_ma_live_bytes); }
 
 #define GOSS_MAX_SOUNDS 32
 #define GOSS_MAX_VOICES 32
@@ -36,7 +85,7 @@ static int goss_mixer_take(GossMixer *m, ma_decoder *dec) {
     ma_uint64 total = 0;
     ma_decoder_get_length_in_pcm_frames(dec, &total);
     if (total == 0) { ma_decoder_uninit(dec); return -1; }
-    short *pcm = (short *)malloc((size_t)total * m->channels * sizeof(short));
+    short *pcm = (short *)goss_ma_malloc((size_t)total * m->channels * sizeof(short), NULL);
     if (!pcm) { ma_decoder_uninit(dec); return -1; }
     ma_uint64 got = 0;
     ma_decoder_read_pcm_frames(dec, pcm, total, &got);
@@ -57,7 +106,7 @@ GossMixer *goss_mixer_create(int sample_rate, int channels) {
 
 void goss_mixer_destroy(GossMixer *m) {
     if (!m) return;
-    for (int i = 0; i < m->sound_count; i++) free(m->sounds[i].pcm);
+    for (int i = 0; i < m->sound_count; i++) goss_ma_free(m->sounds[i].pcm, NULL);
     free(m);
 }
 
@@ -71,6 +120,7 @@ int goss_mixer_load(GossMixer *m, const char *path, size_t path_len) {
     pbuf[path_len] = '\0';
 
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_s16, m->channels, m->sample_rate);
+    cfg.allocationCallbacks = goss_ma_allocs;
     ma_decoder dec;
     if (ma_decoder_init_file(pbuf, &cfg, &dec) != MA_SUCCESS) return -1;
     return goss_mixer_take(m, &dec);
@@ -79,6 +129,7 @@ int goss_mixer_load(GossMixer *m, const char *path, size_t path_len) {
 int goss_mixer_load_memory(GossMixer *m, const void *data, size_t size) {
     if (!m || m->sound_count >= GOSS_MAX_SOUNDS) return -1;
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_s16, m->channels, m->sample_rate);
+    cfg.allocationCallbacks = goss_ma_allocs;
     ma_decoder dec;
     if (ma_decoder_init_memory(data, size, &cfg, &dec) != MA_SUCCESS) return -1;
     return goss_mixer_take(m, &dec);

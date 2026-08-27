@@ -25,6 +25,14 @@ const stb = @cImport(@cInclude("stb_image.h"));
 
 extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 
+// Live bytes each vendor holds on its own C/C++ heap, which the Zig leak
+// gate cannot see. The vendor-heap proof reads these across a lifecycle so a
+// leaked Jolt Hair, QuickJS runtime, or miniaudio sound is caught where the
+// GPA is blind. Internal harness probes, not part of the public C ABI.
+extern fn goss_jolt_live_bytes() usize;
+extern fn goss_qjs_live_bytes() usize;
+extern fn goss_ma_live_bytes() usize;
+
 const width: u32 = 400;
 const height: u32 = 300;
 /// Each lens runs with the segmentation model a real host would pick
@@ -6225,9 +6233,31 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
             try submitFrames(g, e, session, 40);
             if (abi.goss_engine_recording_stop(e) != .ok) return error.RecordStopFailed;
         }
+        fn scriptLifecycle(e: *abi.Engine) !void {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/script-param", ".lens-packages/script-param".len) != .ok) return error.ActivationFailed;
+            var present = std.mem.zeroes(abi.LensSignals);
+            present.has_face = true;
+            for (0..8) |_| _ = abi.goss_session_tick_lens(session, 16000, &present);
+        }
+        fn soundLifecycle(e: *abi.Engine) !void {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/sound-beat", ".lens-packages/sound-beat".len) != .ok) return error.ActivationFailed;
+            var present = std.mem.zeroes(abi.LensSignals);
+            present.has_face = true;
+            _ = abi.goss_session_tick_lens(session, 16000, &present);
+            var block: [512]i16 = undefined;
+            _ = abi.goss_session_pull_audio(session, &block, 512);
+        }
         fn all(g: std.mem.Allocator, e: *abi.Engine) !void {
             try lensLifecycle(g, e, ".lens-packages/soft-blur");
             try lensLifecycle(g, e, ".lens-packages/hair-sim");
+            try scriptLifecycle(e);
+            try soundLifecycle(e);
             if (abi.recording_supported) try recordingLifecycle(g, e);
         }
     };
@@ -6238,6 +6268,9 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
     try round.all(gpa, engine);
     settle(engine);
     const base = counter.in_use;
+    const jolt_base = goss_jolt_live_bytes();
+    const qjs_base = goss_qjs_live_bytes();
+    const ma_base = goss_ma_live_bytes();
 
     // Second round: the same work again, no lasting growth allowed.
     try round.all(gpa, engine);
@@ -6248,7 +6281,19 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
         std.debug.print("conformance: FAIL a subsystem grew the heap {d} -> {d} bytes across a second lifecycle\n", .{ base, after });
         return false;
     }
-    std.debug.print("conformance: PROOF session, hair, and recording survive a second create/use/destroy with no heap growth\n", .{});
+
+    // The vendor heaps the Zig GPA cannot see: Jolt, QuickJS, and miniaudio
+    // each report live bytes, and a hair, runtime, or sound leaked past its
+    // owner shows as growth here where the GPA is blind.
+    const jolt_after = goss_jolt_live_bytes();
+    const qjs_after = goss_qjs_live_bytes();
+    const ma_after = goss_ma_live_bytes();
+    if (jolt_after > jolt_base or qjs_after > qjs_base or ma_after > ma_base) {
+        std.debug.print("conformance: FAIL a vendor heap grew across a second lifecycle (jolt {d}->{d}, qjs {d}->{d}, miniaudio {d}->{d})\n", .{ jolt_base, jolt_after, qjs_base, qjs_after, ma_base, ma_after });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF session, hair, script, sound, and recording survive a second create/use/destroy with no Zig or vendor-heap growth\n", .{});
     return true;
 }
 
