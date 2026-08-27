@@ -348,9 +348,9 @@ depth and holds the frame through when none is submitted. It ships no asset
 and defaults its fields.
 
 A `"tint.pass"` node is a masked color layer. It carries a `"tint": {"color",
-"opacity", "mask", "source", "blend"}` block: it folds `color` (three 0..1
-numbers) into the region a named `mask` channel marks, scaled by the mask and
-`opacity` (0..1), so a face-part matte or a segmentation class reads as soft
+"opacity", "mask", "source", "blend", "finish"}` block: it folds `color` (three
+0..1 numbers) into the region a named `mask` channel marks, scaled by the mask
+and `opacity` (0..1), so a face-part matte or a segmentation class reads as soft
 makeup. `blend` picks how the color folds in: `normal` (the default) blends
 straight toward the color for flat makeup, `multiply` darkens through it for a
 contour shadow, and `screen` lightens through it for a highlight, the two
@@ -361,6 +361,18 @@ lips, eyes, brows, and a cheek-and-forehead skin patch, so a foundation over
 `face_skin` matches the reference's skin tone. A tint naming no mask, or
 a channel the running lens never fills, serves the zero mask and draws
 nothing.
+
+`finish` sets the surface the layer wears within the mask. A 2D camera makeup
+has no per-pixel face normal, so the finish reads its light from the frame's own
+highlights inside the region. `matte` (the default) is the flat blend above,
+byte-for-byte the plain tint. `gloss` lifts the region's existing highlights
+into a soft specular sheen, so a lit lip catches more light. `shimmer` adds a
+stable, screen-locked micro-glint that sparkles the highlights, deterministic
+across frames and runs with no runtime randomness. `metallic` drives a stronger
+contrast and chroma boost with a harder specular follow for a metallic read.
+Every finish scales with the mask, so it fades to nothing where the region does,
+and `matte` leaves the flat layer untouched. `none` is accepted as a synonym for
+`matte`.
 
 A `"smooth.pass"` node is a masked detail pass. It carries a `"smooth":
 {"amount", "mask"}` block: it mixes the masked region toward a small neighbor

@@ -7111,6 +7111,113 @@ fn proveContourHighlight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The summed per-pixel colorfulness (brightest channel minus darkest) after
+/// the 18-byte TGA header, a proxy for contrast and chroma: a boost that pushes
+/// a pixel's channels apart around its mid raises it, while a flat uniform lift
+/// leaves it unchanged.
+fn chromaSpread(tga: []const u8) u64 {
+    if (tga.len <= 18) return 0;
+    const px = tga[18..];
+    var sum: u64 = 0;
+    var i: usize = 0;
+    while (i + 4 <= px.len) : (i += 4) {
+        const hi = @max(px[i], @max(px[i + 1], px[i + 2]));
+        const lo = @min(px[i], @min(px[i + 1], px[i + 2]));
+        sum += hi - lo;
+    }
+    return sum;
+}
+
+fn proveMakeupFinish(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // Each finish rides the same masked tint (lip-gloss and metallic-lip share
+    // lip-tint's color, eyeshadow-shimmer shares eyeshadow's), differing only
+    // in the finish uniform, so any difference is the finish alone.
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-gloss", "zig-out/conformance-finish-gloss-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-gloss", "zig-out/conformance-finish-gloss-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-finish-matte-lips", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/metallic-lip", "zig-out/conformance-finish-metallic", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow-shimmer", "zig-out/conformance-finish-shimmer", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow", "zig-out/conformance-finish-matte-eyes", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-finish-lips-noface", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow", "zig-out/conformance-finish-eyes-noface", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-gloss", "zig-out/conformance-finish-gloss-noface", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/metallic-lip", "zig-out/conformance-finish-metallic-noface", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow-shimmer", "zig-out/conformance-finish-shimmer-noface", .{ .face = false });
+    settle(engine);
+
+    const gloss_a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-gloss-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(gloss_a);
+    const gloss_b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-gloss-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(gloss_b);
+    const matte_lips = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-matte-lips.tga", gpa, .limited(8 << 20));
+    defer gpa.free(matte_lips);
+    const metallic = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-metallic.tga", gpa, .limited(8 << 20));
+    defer gpa.free(metallic);
+    const shimmer = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-shimmer.tga", gpa, .limited(8 << 20));
+    defer gpa.free(shimmer);
+    const matte_eyes = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-matte-eyes.tga", gpa, .limited(8 << 20));
+    defer gpa.free(matte_eyes);
+    const lips_noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-lips-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(lips_noface);
+    const eyes_noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-eyes-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(eyes_noface);
+    const gloss_noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-gloss-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(gloss_noface);
+    const metallic_noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-metallic-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(metallic_noface);
+    const shimmer_noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-finish-shimmer-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(shimmer_noface);
+
+    if (!std.mem.eql(u8, gloss_a, gloss_b)) {
+        std.debug.print("conformance: FAIL a finish is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, gloss_a, matte_lips) or std.mem.eql(u8, metallic, matte_lips) or std.mem.eql(u8, shimmer, matte_eyes)) {
+        std.debug.print("conformance: FAIL a finish left the flat matte layer unchanged\n", .{});
+        return false;
+    }
+    // Gloss lifts the region's highlights, so its masked layer is brighter than
+    // the flat matte; matte itself stays byte-for-byte the plain tint.
+    if (!(pixelByteSum(gloss_a) > pixelByteSum(matte_lips))) {
+        std.debug.print("conformance: FAIL gloss did not lift the region's highlights (gloss {d} matte {d})\n", .{ pixelByteSum(gloss_a), pixelByteSum(matte_lips) });
+        return false;
+    }
+    // Shimmer's per-cell glint adds high-frequency variance the flat matte over
+    // the same region lacks.
+    if (!(totalVariation(shimmer) > totalVariation(matte_eyes))) {
+        std.debug.print("conformance: FAIL shimmer added no high-frequency sparkle (shimmer {d} matte {d})\n", .{ totalVariation(shimmer), totalVariation(matte_eyes) });
+        return false;
+    }
+    // Metallic's contrast and chroma boost pushes the region's channels apart,
+    // raising its colorfulness over the flat matte.
+    if (!(chromaSpread(metallic) > chromaSpread(matte_lips))) {
+        std.debug.print("conformance: FAIL metallic did not raise contrast (metallic {d} matte {d})\n", .{ chromaSpread(metallic), chromaSpread(matte_lips) });
+        return false;
+    }
+    // With no face the mask is empty, so every finish reduces to the plain frame
+    // its matte would - the finish is keyed to the mask and gone without it.
+    if (!std.mem.eql(u8, gloss_noface, lips_noface) or !std.mem.eql(u8, metallic_noface, lips_noface)) {
+        std.debug.print("conformance: FAIL a lip finish drew without a face mask\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shimmer_noface, eyes_noface)) {
+        std.debug.print("conformance: FAIL the eye shimmer drew without a face mask\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF gloss lifts highlights, shimmer sparkles high-frequency variance, metallic raises contrast, each over the same masked tint, keyed to the mask and bit-stable\n", .{});
+    return true;
+}
+
 fn proveDepthMatting(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // With a segmenter AND depth submitted, the subject mask is the two
     // fused: depth prunes segmentation foreground behind the plane. A near
@@ -9405,6 +9512,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveGlam(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "contour-highlight")) {
             if (!try proveContourHighlight(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "makeup-finish")) {
+            if (!try proveMakeupFinish(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "depth-matting")) {
             if (!try proveDepthMatting(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "smooth")) {
@@ -9505,6 +9614,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("glam look");
     if (!try proveContourHighlight(gpa, engine)) return 1;
     watchHold("contour highlight");
+    if (!try proveMakeupFinish(gpa, engine)) return 1;
+    watchHold("makeup finish");
     if (!try proveDepthMatting(gpa, engine)) return 1;
     watchHold("depth matting");
     if (!try proveSmooth(gpa, engine)) return 1;

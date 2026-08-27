@@ -305,7 +305,7 @@ pub const Renderer = struct {
         _ = threshold;
     }
 
-    pub fn submitTintPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, color: [3]f32, opacity: f32, mode: u8) void {
+    pub fn submitTintPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, color: [3]f32, opacity: f32, mode: u8, finish: u8) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
@@ -313,6 +313,7 @@ pub const Renderer = struct {
         _ = color;
         _ = opacity;
         _ = mode;
+        _ = finish;
     }
 
     pub fn submitSmoothPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, amount: f32) void {

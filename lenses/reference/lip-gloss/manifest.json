@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.lip-gloss",
+  "version": "1.0.0",
+  "display_name": "Lip Gloss",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "tint", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [0.8, 0.1, 0.3], "opacity": 0.6, "mask": "lips", "finish": "gloss"}}
+  ],
+  "triggers": []
+}

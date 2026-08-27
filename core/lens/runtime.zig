@@ -329,6 +329,8 @@ pub const TintPassNode = struct {
     from_reference: bool,
     /// How the color folds in: 0 blend, 1 multiply (darken), 2 screen (lighten).
     blend: u8,
+    /// The finish: 0 matte (flat), 1 gloss, 2 shimmer, 3 metallic.
+    finish: u8,
 };
 
 pub const SmoothPassNode = struct {
@@ -613,7 +615,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .tint_pass) continue;
             const tf = node.tint orelse manifest.TintField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ tf.r, tf.g, tf.b }, .opacity = tf.opacity, .mask_channel = tf.mask_channel, .from_reference = tf.from_reference, .blend = @intFromEnum(tf.blend) });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ tf.r, tf.g, tf.b }, .opacity = tf.opacity, .mask_channel = tf.mask_channel, .from_reference = tf.from_reference, .blend = @intFromEnum(tf.blend), .finish = @intFromEnum(tf.finish) });
         }
         return out.toOwnedSlice(gpa);
     }

@@ -720,6 +720,9 @@ pub const Session = struct {
     /// tint.pass nodes' blend mode by graph index: 0 normal blend, 1 multiply
     /// (contour darken), 2 screen (highlight lighten). Absent reads as normal.
     tint_modes: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// tint.pass nodes' finish by graph index: 1 gloss, 2 shimmer, 3 metallic.
+    /// Absent reads as matte, the flat blend, so the effect is byte-identical.
+    tint_finishes: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     /// tint.pass nodes whose color comes from the makeup reference, not the
     /// static field, by graph index.
     tint_reference: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
@@ -1929,6 +1932,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 else
                     [3]f32{ params[0], params[1], params[2] };
                 const mode = s.tint_modes.get(entry.graph_index) orelse 0;
+                const finish = s.tint_finishes.get(entry.graph_index) orelse 0;
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -1936,7 +1940,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitTintPass(view_id, input_texture, mask_tex, tint_color, params[3], mode);
+                r.submitTintPass(view_id, input_texture, mask_tex, tint_color, params[3], mode, finish);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2959,6 +2963,7 @@ pub fn destroySession(session: *Session) void {
     session.tint_params.deinit(session.engine.gpa);
     session.tint_masks.deinit(session.engine.gpa);
     session.tint_modes.deinit(session.engine.gpa);
+    session.tint_finishes.deinit(session.engine.gpa);
     session.tint_reference.deinit(session.engine.gpa);
     session.smooth_params.deinit(session.engine.gpa);
     session.smooth_masks.deinit(session.engine.gpa);
@@ -6067,6 +6072,7 @@ fn destroyBlendState(session: *Session) void {
     session.tint_params.clearRetainingCapacity();
     session.tint_masks.clearRetainingCapacity();
     session.tint_modes.clearRetainingCapacity();
+    session.tint_finishes.clearRetainingCapacity();
     session.tint_reference.clearRetainingCapacity();
     session.smooth_params.clearRetainingCapacity();
     session.smooth_masks.clearRetainingCapacity();
@@ -6578,6 +6584,7 @@ fn createTintParams(session: *Session, gpa: std.mem.Allocator) !void {
         if (tp.mask_channel) |channel| session.tint_masks.put(gpa, tp.graph_index, channel) catch {};
         if (tp.from_reference) session.tint_reference.put(gpa, tp.graph_index, {}) catch {};
         if (tp.blend != 0) session.tint_modes.put(gpa, tp.graph_index, tp.blend) catch {};
+        if (tp.finish != 0) session.tint_finishes.put(gpa, tp.graph_index, tp.finish) catch {};
     }
 }
 

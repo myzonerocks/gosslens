@@ -279,6 +279,12 @@ pub const OutlineField = struct {
 /// keeping the underlying skin texture the flat blend would wash out.
 pub const TintBlend = enum { normal, multiply, screen };
 
+/// The surface finish a tint.pass layer takes on within its mask, derived
+/// from the frame's own highlights since a 2D camera makeup has no per-pixel
+/// normal. matte is the flat blend today's tint already draws; gloss, shimmer,
+/// and metallic each add a sheen on top of it.
+pub const TintFinish = enum { matte, gloss, shimmer, metallic };
+
 pub const TintField = struct {
     /// A tint.pass node's color (rgb, 0..1) and the opacity it blends into
     /// the masked region, so a face-part matte reads as a soft makeup layer.
@@ -293,6 +299,10 @@ pub const TintField = struct {
     from_reference: bool = false,
     /// How the color folds into the region: straight blend, darken, or lighten.
     blend: TintBlend = .normal,
+    /// The finish the layer wears: matte is the flat default, gloss lifts the
+    /// region's real highlights, shimmer adds a stable micro-glint, metallic
+    /// drives a stronger sheen with a contrast boost.
+    finish: TintFinish = .matte,
 };
 
 pub const SmoothField = struct {
@@ -1541,6 +1551,15 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(tv.object, "blend")) |v| {
                     if (try expectString(diags, path, v)) |name| {
                         if (std.meta.stringToEnum(TintBlend, name)) |mode| field.blend = mode else try diags.add(path.slice(), "tint blend must be normal, multiply, or screen", .{});
+                    }
+                }
+                if (getField(tv.object, "finish")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.mem.eql(u8, name, "none")) {
+                            field.finish = .matte;
+                        } else if (std.meta.stringToEnum(TintFinish, name)) |mode| {
+                            field.finish = mode;
+                        } else try diags.add(path.slice(), "tint finish must be matte, gloss, shimmer, or metallic", .{});
                     }
                 }
                 tint_field = field;
