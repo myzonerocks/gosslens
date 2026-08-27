@@ -326,13 +326,37 @@ so distant geometry sinks into haze while near content stays clear. Like
 `dof.pass` it reads the host's depth and holds the frame through when none
 is submitted, ships no asset, and defaults its fields.
 
-An `"outline.pass"` node is a depth-edge outline post-effect. It carries an
-`"outline": {"color", "threshold"}` block: where the submitted depth jumps
-between neighboring pixels by more than `threshold` it draws `color` (three
-0..1 numbers) over the frame, so silhouettes and creases get a toon outline
-while flat depth stays untouched. Like `dof.pass` and `fog.pass` it reads the
-host's depth, holds the frame through with none submitted, ships no asset,
+An `"outline.pass"` node is an edge outline post-effect. It carries an
+`"outline": {"color", "threshold", "mask"}` block: where the submitted depth,
+or a named `mask` channel's edge, jumps between neighboring pixels by more
+than `threshold` it draws `color` (three 0..1 numbers) over the frame, so a
+silhouette, crease, segmentation class, or face-part matte gets a toon
+outline while flat regions stay untouched. With no `mask` it reads the host's
+depth and holds the frame through when none is submitted. It ships no asset
 and defaults its fields.
+
+A `"tint.pass"` node is a masked color layer. It carries a `"tint": {"color",
+"opacity", "mask", "source"}` block: it blends `color` (three 0..1 numbers)
+into the region a named `mask` channel marks, scaled by the mask and
+`opacity` (0..1), so a face-part matte or a segmentation class reads as soft
+makeup. With `"source": "reference"` the color comes from the makeup
+reference set through the ABI for that channel instead of the static rgb. A
+tint naming no mask, or a channel the running lens never fills, serves the
+zero mask and draws nothing.
+
+A `"smooth.pass"` node is a masked detail pass. It carries a `"smooth":
+{"amount", "mask"}` block: it mixes the masked region toward a small neighbor
+average by `amount`, so a positive amount blurs (skin smoothing) and a
+negative one (down to -1) sharpens. It keys the same mask channels as
+`tint.pass`; a smooth naming none is inert.
+
+A `"stylize.pass"` node is a single-pass artistic filter over the whole
+frame. It carries a `"stylize": {"mode", "strength", "threshold", "levels"}`
+block: `mode` is `sketch` (a pencil edge over pale paper), `toon` (color
+quantized to `levels` with edges past `threshold` knocked to black), `emboss`
+(a mid-gray relief), or `crosshatch` (ink hatching keyed by luminance).
+`strength` scales the edge or emboss response. It reads no host input, ships
+no asset, and is always ready.
 
 A `"trail.pass"` node is a motion-trail post-effect. It carries a `"trail":
 {"amount"}` block: `amount` (0..1) is how much of the previous frame the

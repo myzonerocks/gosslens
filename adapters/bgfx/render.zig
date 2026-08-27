@@ -108,6 +108,7 @@ pub const Renderer = struct {
     outline_program: c.bgfx_program_handle_t,
     tint_program: c.bgfx_program_handle_t,
     smooth_program: c.bgfx_program_handle_t,
+    stylize_program: c.bgfx_program_handle_t,
     trail_program: c.bgfx_program_handle_t,
     ssr_program: c.bgfx_program_handle_t,
     env_program: c.bgfx_program_handle_t,
@@ -171,6 +172,7 @@ pub const Renderer = struct {
     outline_uniform: c.bgfx_uniform_handle_t,
     tint_uniform: c.bgfx_uniform_handle_t,
     smooth_uniform: c.bgfx_uniform_handle_t,
+    stylize_uniform: c.bgfx_uniform_handle_t,
     tex_prev: c.bgfx_uniform_handle_t,
     trail_uniform: c.bgfx_uniform_handle_t,
     ssr_uniform: c.bgfx_uniform_handle_t,
@@ -336,6 +338,7 @@ pub const Renderer = struct {
         const outline_program = try loadOutlineProgram();
         const tint_program = try loadTintProgram();
         const smooth_program = try loadSmoothProgram();
+        const stylize_program = try loadStylizeProgram();
         const trail_program = try loadTrailProgram();
         const ssr_program = try loadSsrProgram();
         const env_program = try loadEnvProgram();
@@ -416,6 +419,7 @@ pub const Renderer = struct {
             .outline_program = outline_program,
             .tint_program = tint_program,
             .smooth_program = smooth_program,
+            .stylize_program = stylize_program,
             .trail_program = trail_program,
             .ssr_program = ssr_program,
             .env_program = env_program,
@@ -465,6 +469,7 @@ pub const Renderer = struct {
             .outline_uniform = c.bgfx_create_uniform("u_outline", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tint_uniform = c.bgfx_create_uniform("u_tint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .smooth_uniform = c.bgfx_create_uniform("u_smooth", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .stylize_uniform = c.bgfx_create_uniform("u_stylize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tex_prev = c.bgfx_create_uniform("s_texPrev", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .trail_uniform = c.bgfx_create_uniform("u_trail", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .ssr_uniform = c.bgfx_create_uniform("u_ssr", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -686,6 +691,18 @@ pub const Renderer = struct {
         };
     }
 
+    /// stylize.pass's own fixed program: one artistic filter that branches on
+    /// its mode uniform, shared by every stylize.pass node like grade_program.
+    pub fn loadStylizeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_stylize_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_stylize_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_stylize_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_stylize_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// layout.composite's per-source blend program, shared by every source: the
     /// shared vertex contract plus the composite fragment shader.
     pub fn loadCompositeProgram() !c.bgfx_program_handle_t {
@@ -871,6 +888,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.dof_uniform);
         c.bgfx_destroy_uniform(r.fog_uniform);
         c.bgfx_destroy_uniform(r.outline_uniform);
+        c.bgfx_destroy_uniform(r.stylize_uniform);
         c.bgfx_destroy_uniform(r.tex_prev);
         c.bgfx_destroy_uniform(r.trail_uniform);
         c.bgfx_destroy_uniform(r.ssr_uniform);
@@ -902,6 +920,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.outline_program);
         c.bgfx_destroy_program(r.tint_program);
         c.bgfx_destroy_program(r.smooth_program);
+        c.bgfx_destroy_program(r.stylize_program);
         c.bgfx_destroy_program(r.trail_program);
         c.bgfx_destroy_program(r.ssr_program);
         c.bgfx_destroy_program(r.env_program);
@@ -1518,6 +1537,17 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.grade_params_uniform, &grade, 3);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.grade_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one lens stylize.pass node as a full-screen pass into view_id:
+    /// the frame on unit 0 and its filter in u_stylize (mode, strength,
+    /// threshold, levels), the one fixed stylize_program every node shares.
+    pub fn submitStylizePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.stylize_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.stylize_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// bloom.pass's bright-extract stage into view_id: the frame on unit 0,

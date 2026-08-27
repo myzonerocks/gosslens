@@ -287,6 +287,17 @@ pub const SmoothField = struct {
     mask_channel: ?u8 = null,
 };
 
+pub const StylizeField = struct {
+    /// A stylize.pass node's artistic mode and its parameters: strength drives
+    /// the sketch edge and emboss depth, threshold and levels the toon edge
+    /// cutoff and colour quantization, and a crosshatch reads strength as its
+    /// stroke weight. Defaults match the source filters GPUPixel ships.
+    mode: enum { sketch, toon, emboss, crosshatch } = .sketch,
+    strength: f32 = 1.0,
+    threshold: f32 = 0.2,
+    levels: f32 = 10.0,
+};
+
 pub const TrailField = struct {
     /// A trail.pass node's echo amount (0..1): how much of the previous
     /// frame blends into this one, so moving content leaves a motion trail.
@@ -497,6 +508,8 @@ pub const Node = struct {
     tint: ?TintField = null,
     /// Set only on a smooth.pass node: its amount and mask channel.
     smooth: ?SmoothField = null,
+    /// Set only on a stylize.pass node: its artistic mode and parameters.
+    stylize: ?StylizeField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -1476,6 +1489,29 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "smooth.pass")) {
             smooth_field = .{};
         }
+        var stylize_field: ?StylizeField = null;
+        if (getField(object, "stylize")) |yv| {
+            const ymark = path.push("stylize");
+            if (!std.mem.eql(u8, node_type, "stylize.pass")) {
+                try diags.add(path.slice(), "stylize is a stylize.pass field, found it on '{s}'", .{node_type});
+            } else if (yv != .object) {
+                try diags.add(path.slice(), "stylize must be an object", .{});
+            } else {
+                var field: StylizeField = .{};
+                if (getField(yv.object, "mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "stylize mode names an unknown filter '{s}'", .{name});
+                    }
+                }
+                if (getField(yv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 4.0);
+                if (getField(yv.object, "threshold")) |v| field.threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.threshold)), 0.0, 1.0);
+                if (getField(yv.object, "levels")) |v| field.levels = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.levels)), 1.0, 256.0);
+                stylize_field = field;
+            }
+            path.pop(ymark);
+        } else if (std.mem.eql(u8, node_type, "stylize.pass")) {
+            stylize_field = .{};
+        }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
             const tmark = path.push("trail");
@@ -2092,6 +2128,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .outline = outline_field,
             .tint = tint_field,
             .smooth = smooth_field,
+            .stylize = stylize_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,

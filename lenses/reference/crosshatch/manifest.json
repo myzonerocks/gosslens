@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.crosshatch",
+  "version": "1.0.0",
+  "display_name": "Crosshatch",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "crosshatch", "type": "stylize.pass", "inputs": {"frame": "camera"}, "params": {}, "stylize": {"mode": "crosshatch", "strength": 1.0}}
+  ],
+  "triggers": []
+}

@@ -5244,6 +5244,205 @@ fn proveColorAdjust(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Captures one lens (or the plain frame when pkg is null) over the corpus:
+/// three settle frames then a readback, the shared body proveStylize's
+/// per-mode checks run on. The caller owns the returned RGBA8 buffer.
+fn captureStylizeShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, pkg: ?[]const u8) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (pkg) |p| {
+        if (abi.goss_session_activate_lens_from_directory(session, p.ptr, p.len) != .ok) {
+            std.debug.print("conformance: FAIL stylize lens activation {s}\n", .{p});
+            return error.ActivationFailed;
+        }
+    }
+    for (0..3) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+        return error.CaptureFailed;
+    }
+    return shot;
+}
+
+fn lumaByte(r: u8, g: u8, b: u8) u8 {
+    return @intCast((@as(u32, r) * 54 + @as(u32, g) * 183 + @as(u32, b) * 19) >> 8);
+}
+
+/// The largest gap between a pixel's channels anywhere in the frame - zero
+/// for a monochrome image (equal channels), large for a colour one.
+fn maxChannelSpread(buf: []const u8) u8 {
+    var spread: u8 = 0;
+    var i: usize = 0;
+    while (i + 3 < buf.len) : (i += 4) {
+        const r = buf[i];
+        const g = buf[i + 1];
+        const b = buf[i + 2];
+        const rg = if (r > g) r - g else g - r;
+        const gb = if (g > b) g - b else b - g;
+        if (rg > spread) spread = rg;
+        if (gb > spread) spread = gb;
+    }
+    return spread;
+}
+
+/// How many distinct byte values one channel takes across the frame - a
+/// quantized image collapses to a handful, a photo spans most of the range.
+fn distinctChannelValues(buf: []const u8, channel: usize) usize {
+    var seen = [_]bool{false} ** 256;
+    var i: usize = channel;
+    while (i < buf.len) : (i += 4) seen[buf[i]] = true;
+    var n: usize = 0;
+    for (seen) |s| {
+        if (s) n += 1;
+    }
+    return n;
+}
+
+/// The mean of every RGB byte in the frame - near 128 for a mid-grey relief.
+fn meanRgbByte(buf: []const u8) u32 {
+    var sum: u64 = 0;
+    var count: u64 = 0;
+    var i: usize = 0;
+    while (i + 3 < buf.len) : (i += 4) {
+        sum += @as(u64, buf[i]) + buf[i + 1] + buf[i + 2];
+        count += 3;
+    }
+    if (count == 0) return 0;
+    return @intCast(sum / count);
+}
+
+/// The fraction of pixels whose luma sits at one extreme - near 1.0 for an
+/// ink-on-paper image, low for a continuous-tone one.
+fn nearBinaryFraction(buf: []const u8) f32 {
+    var near: usize = 0;
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i + 3 < buf.len) : (i += 4) {
+        const l = lumaByte(buf[i], buf[i + 1], buf[i + 2]);
+        if (l < 24 or l > 232) near += 1;
+        total += 1;
+    }
+    if (total == 0) return 0;
+    return @as(f32, @floatFromInt(near)) / @as(f32, @floatFromInt(total));
+}
+
+/// Proves the stylize.pass modes, each with a signature only that filter
+/// makes, captured twice for bit-stability: sketch reduces to a monochrome
+/// pencil, toon quantizes each channel to a few levels, emboss recenters on
+/// mid-grey, and crosshatch binarizes to ink and paper.
+fn proveStylize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const control = try captureStylizeShot(gpa, engine, planes, null);
+    defer gpa.free(control);
+    const control_reds = distinctChannelValues(control, 0);
+
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/sketch");
+        defer gpa.free(a);
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/sketch");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL sketch is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL sketch did not change the frame\n", .{});
+            return false;
+        }
+        const spread = maxChannelSpread(a);
+        if (spread > 2) {
+            std.debug.print("conformance: FAIL sketch is not monochrome (channel spread {d})\n", .{spread});
+            return false;
+        }
+    }
+
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/toon");
+        defer gpa.free(a);
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/toon");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL toon is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL toon did not change the frame\n", .{});
+            return false;
+        }
+        const reds = distinctChannelValues(a, 0);
+        if (reds > 40 or reds * 2 >= control_reds) {
+            std.debug.print("conformance: FAIL toon did not quantize (distinct reds {d} vs frame {d})\n", .{ reds, control_reds });
+            return false;
+        }
+    }
+
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/emboss");
+        defer gpa.free(a);
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/emboss");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL emboss is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL emboss did not change the frame\n", .{});
+            return false;
+        }
+        const mean = meanRgbByte(a);
+        if (mean < 108 or mean > 148) {
+            std.debug.print("conformance: FAIL emboss is not centered on mid-grey (mean {d})\n", .{mean});
+            return false;
+        }
+    }
+
+    var hatch_shot: ?[]u8 = null;
+    defer if (hatch_shot) |h| gpa.free(h);
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/crosshatch");
+        hatch_shot = a;
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/crosshatch");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL crosshatch is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL crosshatch did not change the frame\n", .{});
+            return false;
+        }
+        const spread = maxChannelSpread(a);
+        const binary = nearBinaryFraction(a);
+        if (spread > 2 or binary < 0.80) {
+            std.debug.print("conformance: FAIL crosshatch is not ink-on-paper (spread {d}, binary {d:.2})\n", .{ spread, binary });
+            return false;
+        }
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, hatch_shot.?, 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-crosshatch.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF stylize.pass filters are deterministic - sketch monochrome, toon quantized, emboss mid-grey, crosshatch ink-on-paper\n", .{});
+    return true;
+}
+
 /// Proves a bloom.pass post-effect: the bright pass, separable blur and
 /// additive composite bleed a glow from the highlights, so a bloomed
 /// capture differs from the plain one and is bit-stable across runs (no
@@ -8389,6 +8588,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveMakeupTransfer(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "color-adjust")) {
             if (!try proveColorAdjust(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "stylize")) {
+            if (!try proveStylize(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -8591,6 +8792,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("bloom");
     if (!try proveStackedPostEffects(gpa, engine)) return 1;
     watchHold("stacked post effects");
+    if (!try proveStylize(gpa, engine)) return 1;
+    watchHold("stylize");
     if (!try proveExpressionScript(gpa, engine)) return 1;
     watchHold("expression script");
     if (!try proveEmber(gpa, engine)) return 1;
