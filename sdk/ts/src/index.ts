@@ -1337,6 +1337,25 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, rgba.length]);
   }
 
+  /// Samples a reference photo's makeup color per face part, so a tint.pass
+  /// with a reference source paints the live face in that color. rgba is width
+  /// by height RGBA8; landmarks is the reference face's 478 x, y, z points. An
+  /// empty landmarks array clears the reference.
+  setMakeupReference(rgba: Uint8Array, width: number, height: number, landmarks: Float32Array): void {
+    if (landmarks.length === 0) {
+      this.mod.ccall("goss_session_set_makeup_reference", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, 0, 0, 0, 0, 0]);
+      return;
+    }
+    const rptr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    this.mod.HEAPU8.set(rgba, rptr);
+    const lbytes = landmarks.length * 4;
+    const lptr = this.mod.ccall("goss_alloc", "number", ["number"], [lbytes]) as number;
+    this.mod.HEAPF32.set(landmarks, lptr >> 2);
+    this.mod.ccall("goss_session_set_makeup_reference", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, rptr, width, height, lptr, landmarks.length / 3]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [rptr, rgba.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [lptr, lbytes]);
+  }
+
   /// The number of bodies the last submitBodies kept, zero to GOSS_BODY_MAX.
   bodyCount(): number {
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
