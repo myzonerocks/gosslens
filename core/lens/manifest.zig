@@ -66,6 +66,9 @@ pub const mask_channels = [_][]const u8{
 /// the model-class mapping must not reach them. head, hand and the face parts
 /// ride the face and hand landmarks, not a segmentation model.
 pub const model_class_end = 7;
+/// face_skin is segmenter class 4; a foundation tint keys its mask and a
+/// reference photo can fill its color, so name the channel for both.
+pub const skin_channel = 4;
 pub const head_channel = 7;
 pub const hand_channel = 8;
 pub const lips_channel = 9;

@@ -90,6 +90,7 @@ pub const right_iris_loop = face.right_iris_loop;
 pub const inner_lip_loop = face.inner_lip_loop;
 pub const contour_regions = face.contour_regions;
 pub const highlight_regions = face.highlight_regions;
+pub const skin_patch = face.skin_patch;
 
 pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
@@ -5317,6 +5318,7 @@ pub export fn goss_session_set_makeup_reference(session: ?*Session, rgba: ?[*]co
     s.makeup_reference[manifest.lips_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.outer_lip_loop);
     s.makeup_reference[manifest.eyes_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.left_eye_loop);
     s.makeup_reference[manifest.brows_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.left_brow_loop);
+    s.makeup_reference[manifest.skin_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.skin_patch);
     return .ok;
 }
 

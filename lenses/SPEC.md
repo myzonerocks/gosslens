@@ -356,7 +356,9 @@ straight toward the color for flat makeup, `multiply` darkens through it for a
 contour shadow, and `screen` lightens through it for a highlight, the two
 folds keeping the skin texture a flat blend would wash out. With
 `"source": "reference"` the color comes from the makeup reference set through
-the ABI for that channel instead of the static rgb. A tint naming no mask, or
+the ABI for that channel instead of the static rgb. The reference samples the
+lips, eyes, brows, and a cheek-and-forehead skin patch, so a foundation over
+`face_skin` matches the reference's skin tone. A tint naming no mask, or
 a channel the running lens never fills, serves the zero mask and draws
 nothing.
 

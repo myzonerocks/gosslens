@@ -185,6 +185,16 @@ pub const highlight_regions = [_][]const u16{
     &.{ 152, 199, 148, 377 },
 };
 
+/// A stable skin patch for reading skin tone from a reference photo: mid-cheek
+/// and mid-forehead landmarks, clear of the lips, eyes, brows, and hairline, so
+/// a reference-driven foundation samples skin, not a feature. averageLoopColor
+/// reads these points the same way it reads the face-part loops.
+pub const skin_patch = [_]u16{
+    117, 118, 50,  101, 205,
+    346, 347, 280, 330, 425,
+    151, 108, 337,
+};
+
 /// The tracked point for a region: x, y in frame pixels and z in the same
 /// scale, read straight from the mesh. landmarks is a result's flat array.
 pub fn regionPoint(landmarks: *const [landmark_count * 3]f32, region: Region) [3]f32 {

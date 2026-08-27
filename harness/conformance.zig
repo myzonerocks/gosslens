@@ -7672,6 +7672,183 @@ fn proveMakeupTransfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Paints the reference gray, then the skin-patch landmarks a strong green, so
+/// a correct skin-tone sample reads green while a lips or brow sample would
+/// read the gray base - the reference's skin region is a distinct known color.
+fn paintSkinPatch(ref: []u8, rw: u32, rh: u32, lm: [*]const f32) void {
+    fillSolid(ref, 128, 128, 128);
+    const max_x: i64 = @intCast(rw - 1);
+    const max_y: i64 = @intCast(rh - 1);
+    for (abi.skin_patch) |idx| {
+        const cx: i64 = @intFromFloat(std.math.clamp(lm[@as(usize, idx) * 3], 0, @as(f32, @floatFromInt(max_x))));
+        const cy: i64 = @intFromFloat(std.math.clamp(lm[@as(usize, idx) * 3 + 1], 0, @as(f32, @floatFromInt(max_y))));
+        var dy: i64 = -2;
+        while (dy <= 2) : (dy += 1) {
+            var dx: i64 = -2;
+            while (dx <= 2) : (dx += 1) {
+                const px: usize = @intCast(std.math.clamp(cx + dx, 0, max_x));
+                const py: usize = @intCast(std.math.clamp(cy + dy, 0, max_y));
+                const o = (py * rw + px) * 4;
+                ref[o] = 20;
+                ref[o + 1] = 220;
+                ref[o + 2] = 40;
+                ref[o + 3] = 255;
+            }
+        }
+    }
+}
+
+/// The mean green bias over an RGBA buffer: how far green leads the red/blue
+/// average, so a green skin tint reads high and the warm static foundation
+/// reads near zero, a scalar for which color drove the face_skin region.
+fn greenness(buf: []const u8) f32 {
+    var sum_r: u64 = 0;
+    var sum_g: u64 = 0;
+    var sum_b: u64 = 0;
+    var i: usize = 0;
+    while (i + 4 <= buf.len) : (i += 4) {
+        sum_r += buf[i];
+        sum_g += buf[i + 1];
+        sum_b += buf[i + 2];
+    }
+    const n: f32 = @floatFromInt(buf.len / 4);
+    const mr: f32 = @as(f32, @floatFromInt(sum_r)) / n;
+    const mg: f32 = @as(f32, @floatFromInt(sum_g)) / n;
+    const mb: f32 = @as(f32, @floatFromInt(sum_b)) / n;
+    return mg - (mr + mb) / 2.0;
+}
+
+fn proveFoundationShadeMatch(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A reference-driven foundation reads the reference photo's skin tone from
+    // the skin patch and tints the live face_skin class in it, so a green skin
+    // reference pushes the segmented face toward green, differs from the static
+    // foundation color, and vanishes without the face_skin mask.
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, multiclass_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const rw = corpus.frame.width;
+    const rh = corpus.frame.height;
+
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const matched_a = try gpa.alloc(u8, cap);
+    defer gpa.free(matched_a);
+    const matched_b = try gpa.alloc(u8, cap);
+    defer gpa.free(matched_b);
+    const static = try gpa.alloc(u8, cap);
+    defer gpa.free(static);
+    const noseg = try gpa.alloc(u8, cap);
+    defer gpa.free(noseg);
+    const ref = try gpa.alloc(u8, @as(usize, rw) * rh * 4);
+    defer gpa.free(ref);
+    var wma: u32 = 0;
+    var hma: u32 = 0;
+    var wmb: u32 = 0;
+    var hmb: u32 = 0;
+    var ws: u32 = 0;
+    var hs: u32 = 0;
+    var wn: u32 = 0;
+    var hn: u32 = 0;
+
+    // Session one carries face tracking and segmentation, so the face_skin
+    // class exists and the reference skin tone drives the tint over it.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return error.EnableFaceTrackingFailed;
+        if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/foundation-match", ".lens-packages/foundation-match".len) != .ok) {
+            std.debug.print("conformance: FAIL foundation-match lens activation\n", .{});
+            return false;
+        }
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        var mask_polls: usize = 0;
+        while (session.segmentation_texture == null) {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            mask_polls += 1;
+            if (mask_polls > 100_000) return error.SegmentationTimedOut;
+        }
+        paintSkinPatch(ref, rw, rh, &result.landmarks);
+        const count: u32 = @intCast(result.landmarks.len / 3);
+        if (abi.goss_session_set_makeup_reference(session, ref.ptr, rw, rh, &result.landmarks, count) != .ok) {
+            std.debug.print("conformance: FAIL set_makeup_reference rejected the skin reference\n", .{});
+            return false;
+        }
+        try renderCapture(engine, session, &desc, planes, half_w, matched_a, &wma, &hma);
+        try renderCapture(engine, session, &desc, planes, half_w, matched_b, &wmb, &hmb);
+        // Clearing the reference drops the skin tone, so the same lens now
+        // paints its own static foundation color and the shade match is gone.
+        if (abi.goss_session_set_makeup_reference(session, null, 0, 0, null, 0) != .ok) return error.ClearReferenceFailed;
+        try renderCapture(engine, session, &desc, planes, half_w, static, &ws, &hs);
+    }
+
+    // Session two tracks the face but runs no segmenter, so face_skin serves
+    // the zero mask: the reference-driven foundation has nothing to key and
+    // must fade to the untouched frame.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return error.EnableFaceTrackingFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/foundation-match", ".lens-packages/foundation-match".len) != .ok) return error.ActivationFailed;
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const count: u32 = @intCast(result.landmarks.len / 3);
+        if (abi.goss_session_set_makeup_reference(session, ref.ptr, rw, rh, &result.landmarks, count) != .ok) return error.SetMakeupReferenceFailed;
+        try renderCapture(engine, session, &desc, planes, half_w, noseg, &wn, &hn);
+    }
+
+    if (wma == 0 or wma != wmb or hma != hmb or wma != ws or hma != hs or wma != wn or hma != hn) {
+        std.debug.print("conformance: FAIL foundation-match capture size mismatch\n", .{});
+        return false;
+    }
+    const bytes = @as(usize, wma) * hma * 4;
+    const matched_slice = matched_a[0..bytes];
+    if (!std.mem.eql(u8, matched_slice, matched_b[0..bytes])) {
+        std.debug.print("conformance: FAIL the foundation shade match is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, matched_slice, static[0..bytes])) {
+        std.debug.print("conformance: FAIL the reference skin tone did not drive the tint - matched equals the static foundation\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, matched_slice, noseg[0..bytes])) {
+        std.debug.print("conformance: FAIL the foundation drew with no face_skin mask - not keyed to the face\n", .{});
+        return false;
+    }
+    const matched_green = greenness(matched_slice);
+    const static_green = greenness(static[0..bytes]);
+    if (matched_green <= static_green + 0.5) {
+        std.debug.print("conformance: FAIL the face did not shift toward the green skin reference (matched {d:.2} static {d:.2})\n", .{ matched_green, static_green });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a reference-driven foundation matches the reference skin tone over face_skin, greener than the static color, gone with no mask, bit-stable\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -9242,6 +9419,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveUserMediaSeg(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "makeup-transfer")) {
             if (!try proveMakeupTransfer(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "foundation-shade-match")) {
+            if (!try proveFoundationShadeMatch(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "color-adjust")) {
             if (!try proveColorAdjust(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "stylize")) {
@@ -9340,6 +9519,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("user-media segmentation");
     if (!try proveMakeupTransfer(gpa, engine)) return 1;
     watchHold("makeup transfer");
+    if (!try proveFoundationShadeMatch(gpa, engine)) return 1;
+    watchHold("foundation shade match");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;

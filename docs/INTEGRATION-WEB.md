@@ -137,10 +137,11 @@ decodes the PNGs, and until they resolve the matching setter stays a no-op:
     await session.loadWhitenLuts(new URL("./res/", baseUrl));     // the four lookup_*.png
     await session.loadMakeupTextures(new URL("./res/", baseUrl)); // mouth.png, blusher.png
 
-`setMakeupReference` samples a reference photo's makeup color per face part, so a
-lens's `tint.pass` with a reference source paints the live face in that color.
-Pass the reference RGBA and its 478-point face landmarks; an empty landmarks
-array clears it:
+`setMakeupReference` samples a reference photo's makeup color per face part: the
+lips, eyes, brows, and a cheek-and-forehead skin patch, so a lens's `tint.pass`
+with a reference source paints the live face in that color and a foundation over
+`face_skin` matches the reference's skin tone. Pass the reference RGBA and its
+478-point face landmarks; an empty landmarks array clears it:
 
     session.setMakeupReference(refRgba, refWidth, refHeight, refLandmarks);
 

@@ -201,9 +201,11 @@ shader and image assets, then drive one effect at a time:
 activation and animates them as its triggers fire, so a manifest and hand-set
 values drive the same chain.
 
-`setMakeupReference` samples a reference photo's makeup color per face part, so a
-tint.pass with a "reference" source paints the live face in that color. Pass the
-photo as RGBA8 with its own 478-point face landmarks; an empty array clears it:
+`setMakeupReference` samples a reference photo's makeup color per face part: the
+lips, eyes, brows, and a cheek-and-forehead skin patch, so a tint.pass with a
+"reference" source paints the live face in that color and a foundation over
+`face_skin` matches the reference's skin tone. Pass the photo as RGBA8 with its
+own 478-point face landmarks; an empty array clears it:
 
     session.setMakeupReference(rgba, width, height, referenceLandmarks)
 
