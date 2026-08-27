@@ -1,6 +1,8 @@
 package com.gosslens
 
+import android.os.Build
 import android.view.Surface
+import java.lang.ref.Cleaner
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -309,8 +311,34 @@ data class GossCaptureUi(
     val screenFlashWarmth: Float = 0.5f,
 )
 
+/** One daemon-backed cleaner for the whole SDK. The cleaning action holds
+ * only the native handle, never the wrapper, so a dropped engine or session
+ * still frees its native side. java.lang.ref.Cleaner lands at API 33; below
+ * that the explicit close() path is the only release, so every call site
+ * guards on the level before ever touching this object. */
+internal object NativeCleaner {
+    private val cleaner: Cleaner = Cleaner.create()
+
+    fun register(owner: Any, action: Runnable): Any = cleaner.register(owner, action)
+
+    fun disarm(registration: Any) = (registration as Cleaner.Cleanable).clean()
+}
+
+/** Create/destroy/init/resize/render. Confined to the thread that creates
+ * it. Destroy sessions before the engine: nativeEngineDestroy tears down any
+ * still-live session, after which that session's own handle is stale. On the
+ * garbage-collected path a session holds its engine strongly, so a dropped
+ * pair is always cleaned session-first. */
 class GossEngine private constructor(internal val handle: Long) : AutoCloseable {
     private var closed = false
+    /** Frees the native engine if the wrapper is dropped without close();
+     * only registered on API 33+, where Cleaner exists. */
+    private val cleanable: Any? =
+        if (Build.VERSION.SDK_INT >= 33) NativeCleaner.register(this, EngineDisposer(handle)) else null
+
+    private class EngineDisposer(private val handle: Long) : Runnable {
+        override fun run() = Gosslens.nativeEngineDestroy(handle)
+    }
 
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
@@ -466,11 +494,13 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         Gosslens.nativeReleaseLiveTexture(handle, nativeHandle) == 0
 
     // Idempotent like destroy() everywhere else - a second close() must
-    // not hand the native side an already-freed handle.
+    // not hand the native side an already-freed handle. Disarming the
+    // Cleaner runs the same disposer once; below API 33 there is no
+    // registration, so free the handle directly.
     override fun close() {
         if (closed) return
         closed = true
-        Gosslens.nativeEngineDestroy(handle)
+        if (cleanable != null) NativeCleaner.disarm(cleanable) else Gosslens.nativeEngineDestroy(handle)
     }
 }
 
@@ -600,15 +630,30 @@ class GossPoseResult {
     }
 }
 
-class GossSession private constructor(internal val handle: Long) : AutoCloseable {
+/** Per-preview runtime. Every call and the teardown dereference engine
+ * state, so the session holds its engine strongly: the engine cannot be
+ * collected while a session is live, which keeps nativeSessionDestroy
+ * ordered before nativeEngineDestroy on the garbage-collected path. */
+class GossSession private constructor(
+    private val engine: GossEngine,
+    internal val handle: Long,
+) : AutoCloseable {
     private var closed = false
+    /** Frees the native session if the wrapper is dropped without close();
+     * only registered on API 33+, where Cleaner exists. */
+    private val cleanable: Any? =
+        if (Build.VERSION.SDK_INT >= 33) NativeCleaner.register(this, SessionDisposer(handle)) else null
+
+    private class SessionDisposer(private val handle: Long) : Runnable {
+        override fun run() = Gosslens.nativeSessionDestroy(handle)
+    }
 
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
         fun create(engine: GossEngine, config: GossSessionConfig? = null): GossSession {
             val handle = Gosslens.nativeSessionCreate(engine.handle, config?.frameBudgetUs ?: -1)
             check(handle != 0L) { "session create failed" }
-            return GossSession(handle)
+            return GossSession(engine, handle)
         }
     }
 
@@ -1202,6 +1247,6 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     override fun close() {
         if (closed) return
         closed = true
-        Gosslens.nativeSessionDestroy(handle)
+        if (cleanable != null) NativeCleaner.disarm(cleanable) else Gosslens.nativeSessionDestroy(handle)
     }
 }

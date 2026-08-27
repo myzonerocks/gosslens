@@ -15,6 +15,11 @@ public struct GossSessionConfig {
 /// same reason (see GossEngine's own note).
 public final class GossSession: @unchecked Sendable {
     let handle: OpaquePointer
+    /// A live session dereferences engine state (gpa, renderer, recording)
+    /// on every call and at destroy, so it holds the engine strongly: ARC
+    /// cannot deinit the engine while any session is still alive, which
+    /// keeps goss_session_destroy ordered before goss_engine_destroy.
+    private let engine: GossEngine
     private var destroyed = false
 
     public static func create(engine: GossEngine, config: GossSessionConfig = GossSessionConfig()) throws -> GossSession {
@@ -22,10 +27,11 @@ public final class GossSession: @unchecked Sendable {
         var handle: OpaquePointer?
         try checked(goss_session_create(engine.handle, &raw, &handle))
         guard let handle else { throw GossStatus.outOfMemory }
-        return GossSession(handle: handle)
+        return GossSession(engine: engine, handle: handle)
     }
 
-    private init(handle: OpaquePointer) {
+    private init(engine: GossEngine, handle: OpaquePointer) {
+        self.engine = engine
         self.handle = handle
     }
 

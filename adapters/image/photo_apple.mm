@@ -56,6 +56,10 @@ int32_t photo_encode_impl(const uint8_t* rgba, uint32_t width, uint32_t height,
     if (image == nullptr) return -1;
 
     CFMutableDataRef data = CFDataCreateMutable(kCFAllocatorDefault, 0);
+    if (data == nullptr) {
+      CGImageRelease(image);
+      return -1;
+    }
     CGImageDestinationRef dest = CGImageDestinationCreateWithData(data, uti, 1, nullptr);
     if (dest == nullptr) {
       CFRelease(data);

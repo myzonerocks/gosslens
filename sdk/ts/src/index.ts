@@ -399,6 +399,11 @@ export class GossEngine {
   /// bind one context type for its lifetime. capturePixels() branches
   /// on this: readPixels when set, goss_engine_capture_frame otherwise.
   private gl: WebGL2RenderingContext | null = null;
+  /// bgfx's HTML5 backend keeps referencing the canvas selector string
+  /// for the renderer's life, so the engine owns it and frees it in
+  /// destroy() once goss_engine_destroy has torn the renderer down.
+  private selectorPtr = 0;
+  private selectorCapacity = 0;
 
   private constructor(
     private readonly mod: EngineModule,
@@ -435,9 +440,16 @@ export class GossEngine {
   async initRenderer(canvas: HTMLCanvasElement): Promise<void> {
     if (!canvas.id) throw new Error("canvas needs a stable id for bgfx's own selector lookup");
     const mod = this.mod;
-    const selectorPtr = mod.stringToNewUTF8(`#${canvas.id}`);
+    // Encode the selector into engine-owned heap so its lifetime matches
+    // the renderer, not this call; a re-init frees the prior one first.
+    const selectorBytes = new TextEncoder().encode(`#${canvas.id}`);
+    if (this.selectorPtr !== 0) mod.ccall("goss_free", null, ["number", "number"], [this.selectorPtr, this.selectorCapacity]);
+    this.selectorCapacity = selectorBytes.length + 1;
+    this.selectorPtr = mod.ccall("goss_alloc", "number", ["number"], [this.selectorCapacity]);
+    mod.HEAPU8.set(selectorBytes, this.selectorPtr);
+    mod.HEAPU8[this.selectorPtr + selectorBytes.length] = 0;
     const rendererDescPtr = mod.ccall("goss_alloc", "number", ["number"], [12]);
-    mod.setValue(rendererDescPtr, selectorPtr, "i32");
+    mod.setValue(rendererDescPtr, this.selectorPtr, "i32");
     mod.setValue(rendererDescPtr + 4, canvas.width, "i32");
     mod.setValue(rendererDescPtr + 8, canvas.height, "i32");
     // bgfx's own HTML5 backend creates this canvas's WebGL2 context
@@ -707,6 +719,10 @@ export class GossEngine {
 
   destroy(): void {
     this.mod.ccall("goss_engine_destroy", null, ["number"], [this.handle]);
+    // The renderer is gone now, so bgfx no longer references the selector.
+    if (this.selectorPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [this.selectorPtr, this.selectorCapacity]);
+    this.selectorPtr = 0;
+    this.selectorCapacity = 0;
   }
 }
 
@@ -772,15 +788,15 @@ export class GossSession {
   /// Reused across frames, grown on resize rather than alloc/freed every
   /// tick - the frame descriptor is a fixed 32 bytes, the pixel buffer
   /// tracks the video's current resolution.
-  private readonly frameDescPtr: number;
+  private frameDescPtr: number;
   private framePixelsPtr = 0;
   private framePixelsCapacity = 0;
   /// Fixed capacity: GOSS_FACE_LANDMARK_COUNT never changes.
-  private readonly landmarksPtr: number;
+  private landmarksPtr: number;
   /// Fixed layout, reused every tick like the frame descriptor.
-  private readonly signalsPtr: number;
+  private signalsPtr: number;
   /// Fixed capacity: the segmentation mask is always mask_side squared.
-  private readonly segmentationMaskPtr: number;
+  private segmentationMaskPtr: number;
 
   private constructor(
     private readonly mod: EngineModule,
@@ -1746,7 +1762,29 @@ export class GossSession {
   }
 
   destroy(): void {
+    // frameDescPtr is allocated at construction and only ever nulled here,
+    // so it doubles as the guard that makes a second destroy() a no-op.
+    if (this.frameDescPtr === 0) return;
     this.mod.ccall("goss_session_destroy", null, ["number"], [this.handle]);
+    // goss_session_destroy owns only the native session; every scratch
+    // buffer the session allocated is our heap and freed here.
+    const free = (ptr: number, size: number) => {
+      if (ptr !== 0 && size !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [ptr, size]);
+    };
+    free(this.frameDescPtr, 32);
+    free(this.landmarksPtr, GOSS_FACE_LANDMARK_COUNT * 3 * 4);
+    free(this.signalsPtr, LENS_SIGNALS_BYTES);
+    free(this.segmentationMaskPtr, GOSS_SEGMENTATION_MASK_SIDE * GOSS_SEGMENTATION_MASK_SIDE * 4);
+    free(this.framePixelsPtr, this.framePixelsCapacity);
+    free(this.worldScratchPtr, this.worldScratchLen);
+    this.frameDescPtr = 0;
+    this.landmarksPtr = 0;
+    this.signalsPtr = 0;
+    this.segmentationMaskPtr = 0;
+    this.framePixelsPtr = 0;
+    this.framePixelsCapacity = 0;
+    this.worldScratchPtr = 0;
+    this.worldScratchLen = 0;
   }
 }
 
