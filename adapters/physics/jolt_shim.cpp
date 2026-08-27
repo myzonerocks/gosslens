@@ -115,9 +115,17 @@ struct World {
   std::vector<HairInstance> hairs;
   std::vector<TrackedBody> tracked_bodies;
   int total_substeps = 0;
+
+  // Hair objects are plain owned pointers (JPH::Hair is not refcounted);
+  // pairing their delete with world teardown keeps every remaining hair
+  // and its CPU-compute buffers off the floor when a session goes away.
+  ~World() {
+    for (auto& h : hairs) delete h.hair;
+  }
 };
 
 int world_count = 0;
+bool g_hair_registered = false;
 
 // Jolt leaves its trace and assert hooks null by default; a firing assert
 // would then call through null and crash. Route them to stderr instead so
@@ -179,6 +187,9 @@ extern "C" void goss_physics_world_destroy(void* handle) {
     JPH::UnregisterTypes();
     delete JPH::Factory::sInstance;
     JPH::Factory::sInstance = nullptr;
+    // The hair registration lived in that Factory; the next world must
+    // register hair again in the fresh one.
+    g_hair_registered = false;
   }
 }
 
@@ -617,8 +628,6 @@ extern "C" uint32_t goss_physics_cloth_read(void* handle, uint32_t body, float* 
   return count;
 }
 
-namespace { bool g_hair_registered = false; }
-
 // Adds a hanging clump of `strand_count` strands, each `verts` vertices
 // long and `length` metres, rooted near the origin. Returns a hair id
 // (index) for this world, or UINT32_MAX. Simulated on the CPU compute
@@ -670,12 +679,27 @@ extern "C" uint32_t goss_physics_add_hair(void* handle, uint32_t strand_count, u
   return id;
 }
 
+// Releases one hair before the world goes: deletes the simulation object
+// and drops the settings ref, leaving a tombstone slot so the other hair
+// ids stay valid. Returns 1 on removal, 0 for an unknown or removed id.
+extern "C" uint32_t goss_physics_remove_hair(void* handle, uint32_t hair_id) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr || hair_id >= world->hairs.size()) return 0;
+  HairInstance& instance = world->hairs[hair_id];
+  if (instance.hair == nullptr) return 0;
+  delete instance.hair;
+  instance.hair = nullptr;
+  instance.settings = nullptr;
+  return 1;
+}
+
 // Moves the hair with the head (a translation extracted from the 4x4
 // column-major head transform) and steps it; the free tips swing.
 extern "C" void goss_physics_hair_update(void* handle, uint32_t hair_id, const float* head_transform, float dt_seconds) {
   auto* world = static_cast<World*>(handle);
   if (world == nullptr || hair_id >= world->hairs.size() || dt_seconds <= 0) return;
   JPH::Hair* hair = world->hairs[hair_id].hair;
+  if (hair == nullptr) return;
   if (head_transform != nullptr) {
     hair->SetPosition(JPH::RVec3(head_transform[12], head_transform[13], head_transform[14]));
   }
@@ -688,6 +712,7 @@ extern "C" uint32_t goss_physics_hair_read(void* handle, uint32_t hair_id, float
   auto* world = static_cast<World*>(handle);
   if (world == nullptr || out == nullptr || hair_id >= world->hairs.size()) return 0;
   const JPH::Hair* hair = world->hairs[hair_id].hair;
+  if (hair == nullptr) return 0;
   const JPH::Float3* positions = hair->GetPositions();
   if (positions == nullptr) return 0;
   const uint32_t count = world->hairs[hair_id].settings->GetNumVerticesPadded() < max_vertices ? world->hairs[hair_id].settings->GetNumVerticesPadded() : max_vertices;

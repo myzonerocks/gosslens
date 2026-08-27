@@ -214,6 +214,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
     "void goss_session_deactivate_lens(goss_session *session)",
     "goss_status goss_session_tick_lens(goss_session *session, uint32_t dt_us, const goss_lens_signals *signals)",
+    "goss_status goss_physics_hair_remove(goss_session *session, uint32_t hair_id)",
+    "goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -398,6 +400,19 @@ pub const Engine = struct {
     /// The live surface the current frame renders into, once its wrap lands.
     live_output_target: ?render.Renderer.OffscreenTarget = null,
     live_output_requested: bool = false,
+    /// Monotonic use counter live-output slots stamp on every render, so
+    /// the eviction below always drops the stalest wrap.
+    live_output_seq: u64 = 0,
+    /// Every live session, registered at create and removed at destroy:
+    /// destroying the engine destroys these first, so a host that forgets
+    /// a session gets a clean teardown instead of a leak, and a session
+    /// can never outlive the engine state it dereferences.
+    sessions: std.ArrayListUnmanaged(*Session) = .empty,
+    /// The platform window reference behind the renderer surface, held
+    /// per engine so instances never alias. The binding that acquired it
+    /// (Android's JNI layer) owns storing and releasing it; the core only
+    /// carries the slot.
+    attached_window: ?*anyopaque = null,
 };
 
 const WorldStore = struct {
@@ -443,6 +458,8 @@ const tetra_indices = [12]u32{ 0, 1, 2, 0, 3, 1, 0, 2, 3, 1, 3, 2 };
 const RecordingSlot = struct {
     persistent: render.Renderer.PersistentTexture = .{},
     target: ?render.Renderer.OffscreenTarget = null,
+    /// Engine.live_output_seq at last use; only live-output slots read it.
+    last_used: u64 = 0,
 };
 
 /// Whether this target's recording backend vends sampleable textures
@@ -629,6 +646,11 @@ pub const Session = struct {
     beauty_input_target: ?render.Renderer.OffscreenTarget = null,
     beauty_input_native: ?*anyopaque = null,
     beauty_input_persistent: render.Renderer.PersistentTexture = .{},
+    /// The bgfx texture wrapping the Android hardware buffer behind
+    /// beauty_input_target - Vulkan-only, owned by the session (the Apple
+    /// path's texture belongs to beauty_input_persistent instead), so it
+    /// is destroyed on every replace and at teardown.
+    beauty_input_android_texture: ?render.TextureHandle = null,
     /// Apple's beauty output handle - rebind every frame like camera
     /// ingress does, not cached-and-overridden-once like Android's below.
     beauty_output_persistent: render.Renderer.PersistentTexture = .{},
@@ -1076,6 +1098,13 @@ pub fn createEngine(gpa: std.mem.Allocator, config: EngineConfig) error{OutOfMem
 }
 
 pub fn destroyEngine(engine: *Engine) void {
+    // Live sessions go first: every session teardown dereferences the
+    // engine (allocator, renderer, recording), so the reverse order is a
+    // use-after-free. destroySession unregisters itself from this list.
+    while (engine.sessions.items.len > 0) {
+        destroySession(engine.sessions.items[engine.sessions.items.len - 1]);
+    }
+    engine.sessions.deinit(engine.gpa);
     if (engine.recording != null) _ = finishRecording(engine);
     for (engine.chain_targets) |slot| {
         if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
@@ -1108,16 +1137,22 @@ pub fn destroyEngine(engine: *Engine) void {
 /// the render path itself allocates nothing.
 fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
     if (e.chain_width == width and e.chain_height == height and e.chain_targets[0] != null) return;
+    // Each slot is nulled between destroy and create, so a failed create
+    // leaves null in the slot rather than a destroyed handle a later
+    // render or teardown would use again.
     for (&e.chain_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = null;
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
     for (&e.bloom_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = null;
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
     for (&e.edge_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = null;
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
     e.chain_width = width;
@@ -1125,13 +1160,17 @@ fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
 }
 
 fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
-    if (e.capture_width == width and e.capture_height == height and e.capture_target != null) return;
+    if (e.capture_width == width and e.capture_height == height and e.capture_target != null and e.capture_staging != null) return;
     if (e.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    e.capture_target = null;
     if (e.capture_staging) |staging| {
         if (e.renderer) |*r| r.destroyTexture(staging);
     }
-    e.capture_target = try render.Renderer.createOffscreenTarget(width, height);
+    e.capture_staging = null;
+    const target = try render.Renderer.createOffscreenTarget(width, height);
+    errdefer render.Renderer.destroyOffscreenTarget(target);
     e.capture_staging = try render.Renderer.createReadbackTexture(width, height);
+    e.capture_target = target;
     e.capture_width = width;
     e.capture_height = height;
 }
@@ -1143,6 +1182,7 @@ fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
 fn ensureTrailPrev(s: *Session, width: u16, height: u16) !void {
     if (s.prev_frame_w == width and s.prev_frame_h == height and s.prev_frame_target != null) return;
     if (s.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.prev_frame_target = null;
     s.prev_frame_target = try render.Renderer.createOffscreenTarget(width, height);
     s.prev_frame_w = width;
     s.prev_frame_h = height;
@@ -1223,6 +1263,10 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
     if (!target_has_a_prior_write) {
         if (s.beauty_input_target) |old| render.Renderer.destroyOffscreenTarget(old);
         s.beauty_input_target = null;
+        // Every preview resize lands here on Android Vulkan; the wrap the
+        // replaced target sampled goes with it or one VkImage leaks per resize.
+        if (s.beauty_input_android_texture) |old_tex| r.destroyTexture(old_tex);
+        s.beauty_input_android_texture = null;
         // May legitimately fail the very first time a given native
         // surface is wrapped: the underlying bgfx texture's own
         // creation is queued, not immediate, and nothing has forced it
@@ -1240,6 +1284,7 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
             if (android_vulkan) r.destroyTexture(wrapped);
             return input_texture;
         };
+        if (android_vulkan) s.beauty_input_android_texture = wrapped;
         s.beauty_input_native = native_texture;
     }
 
@@ -1324,6 +1369,7 @@ fn ensureWebBeautyTargets(s: *Session, width: u16, height: u16) !void {
         &s.web_beauty_makeup_targets[1],
     }) |slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = null;
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
     s.web_beauty_targets_width = width;
@@ -2998,6 +3044,7 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
         .lens_graph = graph.Graph.init(engine.gpa),
         .camera_node = undefined,
     };
+    errdefer session.lens_graph.deinit();
     session.camera_node = session.lens_graph.addNode(.{
         .role = .source,
         .outputs = &.{.{ .kind = .texture }},
@@ -3005,10 +3052,18 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable, // a fresh graph's first node cannot violate any other EditError
     };
+    try engine.sessions.append(engine.gpa, session);
     return session;
 }
 
 pub fn destroySession(session: *Session) void {
+    // Unregister first so engine teardown never walks a dying session.
+    for (session.engine.sessions.items, 0..) |live, i| {
+        if (live == session) {
+            _ = session.engine.sessions.swapRemove(i);
+            break;
+        }
+    }
     if (session.engine.recording_session == session) _ = finishRecording(session.engine);
     teardownScript(session);
     destroySounds(session);
@@ -3124,8 +3179,10 @@ fn destroyBeautyCompositing(session: *Session) void {
     session.beauty_input_persistent.deinit();
     session.beauty_output_persistent.deinit();
     if (session.engine.renderer) |*r| {
+        if (session.beauty_input_android_texture) |tex| r.destroyTexture(tex);
         if (session.beauty_output_texture) |tex| r.destroyTexture(tex);
     }
+    session.beauty_input_android_texture = null;
     session.beauty_output_texture = null;
     session.beauty_output_native = null;
     if (session.beauty_input) |surface| beauty.inputSurfaceDestroy(session.engine.gpa, surface);
@@ -3615,6 +3672,30 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
 /// texture (an id<MTLTexture> over an IOSurface-backed CVPixelBuffer on Apple),
 /// zero-copy - the mechanism recording already uses, for a live source. Returns
 /// .again while a new handle or size warms up bgfx's override; re-submit next.
+/// Bounds live_output_slots for hosts that publish from churning buffers
+/// rather than a fixed pool: a fresh handle past this many wraps evicts
+/// the least recently rendered one instead of growing for the engine's
+/// lifetime. Encoder pools cycle a handful of buffers; eight is roomy.
+const max_live_output_slots = 8;
+
+fn evictStalestLiveSlot(e: *Engine) void {
+    var stalest_key: ?usize = null;
+    var stalest_used: u64 = std.math.maxInt(u64);
+    var it = e.live_output_slots.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.last_used <= stalest_used) {
+            stalest_used = entry.value_ptr.last_used;
+            stalest_key = entry.key_ptr.*;
+        }
+    }
+    const key = stalest_key orelse return;
+    if (e.live_output_slots.fetchRemove(key)) |removed| {
+        var slot = removed.value;
+        if (slot.target) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.persistent.deinit();
+    }
+}
+
 pub export fn goss_engine_render_to_live_texture(engine: ?*Engine, session: ?*Session, native_handle: u64, width: u32, height: u32) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
@@ -3624,8 +3705,13 @@ pub export fn goss_engine_render_to_live_texture(engine: ?*Engine, session: ?*Se
     const w: u16 = @intCast(width);
     const h: u16 = @intCast(height);
     const key: usize = @intCast(native_handle);
+    if (!e.live_output_slots.contains(key) and e.live_output_slots.count() >= max_live_output_slots) {
+        evictStalestLiveSlot(e);
+    }
     const slot = e.live_output_slots.getOrPut(e.gpa, key) catch return .out_of_memory;
     if (!slot.found_existing) slot.value_ptr.* = .{};
+    e.live_output_seq += 1;
+    slot.value_ptr.last_used = e.live_output_seq;
 
     const wrapped = r.wrapExternalRenderTarget(&slot.value_ptr.persistent, w, h, render.c.BGFX_TEXTURE_FORMAT_BGRA8, key) orelse return .again;
     if (slot.value_ptr.target == null) {
@@ -3639,6 +3725,19 @@ pub export fn goss_engine_render_to_live_texture(engine: ?*Engine, session: ?*Se
         e.live_output_target = null;
     }
     renderLiveComposite(e, r, s);
+    return .ok;
+}
+
+/// Releases the persistent wrap goss_engine_render_to_live_texture keeps
+/// for one native texture, for a host retiring a publish surface before
+/// the engine goes away. Unknown handles report invalid_argument.
+pub export fn goss_engine_release_live_texture(engine: ?*Engine, native_handle: u64) Status {
+    const e = engine orelse return .invalid_argument;
+    if (native_handle == 0) return .invalid_argument;
+    const key = std.math.cast(usize, native_handle) orelse return .invalid_argument;
+    var removed = e.live_output_slots.fetchRemove(key) orelse return .invalid_argument;
+    if (removed.value.target) |target| render.Renderer.destroyOffscreenTarget(target);
+    removed.value.persistent.deinit();
     return .ok;
 }
 
@@ -4782,7 +4881,10 @@ pub export fn goss_session_add_collider(session: ?*Session, x: f32, y: f32, z: f
     }
     if (s.physics_world) |world| {
         const id = world.addBody(.sphere, .{ x, y, z }, .{ 0.12, 0, 0 }, .static) catch return .ok;
-        s.live_colliders.append(s.engine.gpa, .{ .id = id, .pos = .{ x, y, z } }) catch {};
+        s.live_colliders.append(s.engine.gpa, .{ .id = id, .pos = .{ x, y, z } }) catch {
+            // Unregistered means unerasable; take the body back out.
+            world.removeBody(id);
+        };
     }
     return .ok;
 }
@@ -4812,6 +4914,32 @@ pub export fn goss_session_erase_collider(session: ?*Session, x: f32, y: f32, z:
         if (erased_any) {
             var it = s.physics_bodies.valueIterator();
             while (it.next()) |bid| world.wakeBody(bid.*);
+        }
+    }
+    return .ok;
+}
+
+/// Releases one solver hair by id, pairing the acquire a hair lens
+/// performs at activation, so a hair can retire without tearing the
+/// world down. The driving node's mesh and bookkeeping go with it.
+/// Reports again with no physics world, invalid_argument otherwise.
+pub export fn goss_physics_hair_remove(session: ?*Session, hair_id: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const world = s.physics_world orelse return .again;
+    if (!world.removeHair(hair_id)) return .invalid_argument;
+    var node: ?graph.NodeIndex = null;
+    var it = s.hair_ids.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* == hair_id) {
+            node = entry.key_ptr.*;
+            break;
+        }
+    }
+    if (node) |graph_index| {
+        _ = s.hair_ids.remove(graph_index);
+        _ = s.hair_vcount.remove(graph_index);
+        if (s.hair_meshes.fetchRemove(graph_index)) |kv| {
+            if (s.engine.renderer != null) render.Renderer.destroyHairMesh(kv.value);
         }
     }
     return .ok;
@@ -6196,12 +6324,14 @@ fn destroySpriteState(session: *Session) void {
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
         var mesh_it = session.text3d_meshes.valueIterator();
         while (mesh_it.next()) |t3d| render.Renderer.destroyModelMesh(t3d.mesh);
-        var video_it = session.video_textures.valueIterator();
-        while (video_it.next()) |vid| {
-            r.destroyTexture(vid.texture);
-            vid.decoder.close();
-            session.engine.gpa.free(vid.rgba);
-        }
+    }
+    // The platform decoder and its rgba buffer exist whether or not a
+    // renderer does; only the texture destroy is renderer-gated.
+    var video_it = session.video_textures.valueIterator();
+    while (video_it.next()) |vid| {
+        if (session.engine.renderer) |*r| r.destroyTexture(vid.texture);
+        vid.decoder.close();
+        session.engine.gpa.free(vid.rgba);
     }
     session.video_textures.clearRetainingCapacity();
     session.text3d_meshes.clearRetainingCapacity();
@@ -6315,9 +6445,14 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     defer diag_arena.deinit();
     var diags = manifest.Diagnostics{ .arena = diag_arena.allocator() };
     var parsed = try manifest.parse(gpa, &diags, manifest_json) orelse return error.InvalidManifest;
-    errdefer parsed.deinit();
+    // Once activate succeeds the lens owns the manifest arena and
+    // new_lens.deinit frees it; the disarm keeps a later failure from
+    // walking the same arena twice.
+    var parsed_owned = false;
+    errdefer if (!parsed_owned) parsed.deinit();
 
     var new_lens = try runtime.activate(gpa, &session.lens_graph, session.camera_node, parsed);
+    parsed_owned = true;
     errdefer new_lens.deinit(&session.lens_graph);
 
     const effects = try new_lens.currentEffects(gpa);
@@ -7048,6 +7183,9 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
 /// per node: a missing or undecodable clip just leaves the node blank.
 fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
     const lens = if (session.active_lens) |*l| l else return;
+    // No renderer, no entries: a decoder registered before the renderer
+    // exists could never draw, and its teardown path must stay uniform.
+    if (session.engine.renderer == null) return;
     const videos = try lens.videoNodes(gpa, &session.lens_graph);
     defer gpa.free(videos);
     for (videos) |v| {
@@ -7200,7 +7338,10 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
             defer gpa.free(mesh_geo.indices);
             if (r.createModelMesh(mesh_geo.positions, mesh_geo.indices)) |mesh| {
                 const col: [4]f32 = .{ @as(f32, @floatFromInt(txt.color[0])) / 255.0, @as(f32, @floatFromInt(txt.color[1])) / 255.0, @as(f32, @floatFromInt(txt.color[2])) / 255.0, 1.0 };
-                session.text3d_meshes.put(gpa, txt.graph_index, .{ .mesh = mesh, .color = col }) catch {};
+                session.text3d_meshes.put(gpa, txt.graph_index, .{ .mesh = mesh, .color = col }) catch {
+                    render.Renderer.destroyModelMesh(mesh);
+                    continue;
+                };
                 session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
             } else |_| {}
             continue;
@@ -7360,7 +7501,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                 var f = fluid;
                                 f.deinit();
                             };
-                            session.fluid_base_meshes.put(gpa, model.graph_index, base) catch {};
+                            session.fluid_base_meshes.put(gpa, model.graph_index, base) catch {
+                                render.Renderer.destroyModelMesh(base);
+                            };
                         } else |_| {
                             var f = fluid;
                             f.deinit();
@@ -7409,7 +7552,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                 var s2 = sys;
                                 s2.deinit();
                             };
-                            session.particle_ribbon_meshes.put(gpa, model.graph_index, mesh) catch {};
+                            session.particle_ribbon_meshes.put(gpa, model.graph_index, mesh) catch {
+                                render.Renderer.destroyParticleMesh(mesh);
+                            };
                         } else |_| {
                             var s2 = sys;
                             s2.deinit();
@@ -7423,7 +7568,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                 var s2 = sys;
                                 s2.deinit();
                             };
-                            session.particle_meshes.put(gpa, model.graph_index, mesh) catch {};
+                            session.particle_meshes.put(gpa, model.graph_index, mesh) catch {
+                                render.Renderer.destroyParticleMesh(mesh);
+                            };
                             if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
                         } else |_| {
                             var s2 = sys;
@@ -7444,13 +7591,24 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 if (session.physics_world) |world| {
                     const hid = world.addHair(hair.strands, hair.verts, hair.length) catch physics.invalid_body;
                     if (hid != physics.invalid_body) {
+                        // A solver hair that fails to register fully is removed
+                        // again; a half-registered one would strand its mesh.
+                        var registered = false;
                         if (session.engine.renderer) |*r| {
                             if (r.createHairMesh(hair.strands, hair.verts)) |mesh| {
-                                session.hair_ids.put(gpa, model.graph_index, hid) catch {};
-                                session.hair_meshes.put(gpa, model.graph_index, mesh) catch {};
-                                session.hair_vcount.put(gpa, model.graph_index, hair.strands * hair.verts) catch {};
+                                registered = register: {
+                                    session.hair_ids.put(gpa, model.graph_index, hid) catch break :register false;
+                                    session.hair_meshes.put(gpa, model.graph_index, mesh) catch {
+                                        _ = session.hair_ids.remove(model.graph_index);
+                                        break :register false;
+                                    };
+                                    session.hair_vcount.put(gpa, model.graph_index, hair.strands * hair.verts) catch {};
+                                    break :register true;
+                                };
+                                if (!registered) render.Renderer.destroyHairMesh(mesh);
                             } else |_| {}
                         }
+                        if (!registered) _ = world.removeHair(hid);
                     }
                 }
             }
@@ -7465,13 +7623,24 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 if (session.physics_world) |world| {
                     const body = world.addCloth(cloth.cols, cloth.rows, cloth.width, cloth.height, .{ 0, 0.4, 0 }) catch physics.invalid_body;
                     if (body != physics.invalid_body) {
+                        // Same unwind as hair: an unregistered solver body
+                        // comes back out rather than simulating unrendered.
+                        var registered = false;
                         if (session.engine.renderer) |*r| {
                             if (r.createClothMesh(cloth.cols, cloth.rows)) |mesh| {
-                                session.cloth_bodies.put(gpa, model.graph_index, body) catch {};
-                                session.cloth_meshes.put(gpa, model.graph_index, mesh) catch {};
-                                session.cloth_cols.put(gpa, model.graph_index, cloth.cols * cloth.rows) catch {};
+                                registered = register: {
+                                    session.cloth_bodies.put(gpa, model.graph_index, body) catch break :register false;
+                                    session.cloth_meshes.put(gpa, model.graph_index, mesh) catch {
+                                        _ = session.cloth_bodies.remove(model.graph_index);
+                                        break :register false;
+                                    };
+                                    session.cloth_cols.put(gpa, model.graph_index, cloth.cols * cloth.rows) catch {};
+                                    break :register true;
+                                };
+                                if (!registered) render.Renderer.destroyClothMesh(mesh);
                             } else |_| {}
                         }
+                        if (!registered) world.removeBody(body);
                     }
                 }
             }
@@ -7489,13 +7658,22 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                         defer sphere.deinit(gpa);
                         const body = world.addSoftBody(sphere.verts, sphere.indices, balloon.pressure, balloon.pinned, .{ 0, 0.4, 0 }) catch physics.invalid_body;
                         if (body != physics.invalid_body) {
+                            var registered = false;
                             if (session.engine.renderer) |*r| {
                                 if (r.createSoftMesh(@intCast(sphere.verts.len), sphere.indices)) |mesh| {
-                                    session.cloth_bodies.put(gpa, model.graph_index, body) catch {};
-                                    session.cloth_meshes.put(gpa, model.graph_index, mesh) catch {};
-                                    session.cloth_cols.put(gpa, model.graph_index, @intCast(sphere.verts.len)) catch {};
+                                    registered = register: {
+                                        session.cloth_bodies.put(gpa, model.graph_index, body) catch break :register false;
+                                        session.cloth_meshes.put(gpa, model.graph_index, mesh) catch {
+                                            _ = session.cloth_bodies.remove(model.graph_index);
+                                            break :register false;
+                                        };
+                                        session.cloth_cols.put(gpa, model.graph_index, @intCast(sphere.verts.len)) catch {};
+                                        break :register true;
+                                    };
+                                    if (!registered) render.Renderer.destroyClothMesh(mesh);
                                 } else |_| {}
                             }
+                            if (!registered) world.removeBody(body);
                         }
                     } else |_| {}
                 }

@@ -162,6 +162,15 @@ extension GossEngine {
         return goss_engine_render_to_live_texture(handle, session.handle, native, width, height) == GOSS_OK
     }
 
+    /// Releases the persistent wrap renderToLiveTexture keeps for one
+    /// external texture, when a publish surface retires before the engine
+    /// does. Unknown handles are a no-op reported as false.
+    @discardableResult
+    public func releaseLiveTexture(texture: UnsafeMutableRawPointer) -> Bool {
+        let native = UInt64(UInt(bitPattern: texture))
+        return goss_engine_release_live_texture(handle, native) == GOSS_OK
+    }
+
     /// The composited frame as packed bytes in a WebRTC format (BGRA by
     /// default; NV12 for a hardware encoder), the supported per-frame output
     /// for a live broadcast source - feed it to a custom video source.

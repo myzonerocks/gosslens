@@ -100,6 +100,15 @@ class SourceExternalTexture : public gpupixel::Source {
     return ok ? ret : nullptr;
   }
 
+  // CreateWithShaderString hands ownership to the caller; every vendor
+  // owner deletes its programs in its destructor and this class follows
+  // that contract, so a create/destroy cycle leaks no GL program. The
+  // shared_ptr in Create binds this concrete destructor at construction.
+  ~SourceExternalTexture() {
+    delete program_2d_;
+    delete program_rect_;
+  }
+
   bool Init() {
     program_2d_ = gpupixel::GPUPixelGLProgram::CreateWithShaderString(
         kExternalVertexShaderSource, kExternal2DFragmentShaderSource);
@@ -111,7 +120,14 @@ class SourceExternalTexture : public gpupixel::Source {
 #if defined(GPUPIXEL_MAC)
     program_rect_ = gpupixel::GPUPixelGLProgram::CreateWithShaderString(
         kExternalVertexShaderSource, kExternalRectFragmentShaderSource);
-    return program_rect_ != nullptr;
+    if (program_rect_ == nullptr) {
+      // Still on the GL thread here; the sibling that did build goes
+      // now rather than leaking behind a failed create.
+      delete program_2d_;
+      program_2d_ = nullptr;
+      return false;
+    }
+    return true;
 #else
     return true;
 #endif

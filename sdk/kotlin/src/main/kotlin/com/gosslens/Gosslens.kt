@@ -153,6 +153,8 @@ object Gosslens {
     internal external fun nativeCaptureFrame(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeCapturePhotoAs(engine: Long, session: Long, format: Int, quality: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRenderToLiveTexture(engine: Long, session: Long, nativeHandle: Long, width: Int, height: Int): Int
+    internal external fun nativeReleaseLiveTexture(engine: Long, nativeHandle: Long): Int
+    internal external fun nativePhysicsHairRemove(session: Long, hairId: Int): Int
 
     const val COLOR_BT601 = 0
     const val COLOR_BT709 = 1
@@ -456,6 +458,12 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * frame and retry) or the path is unavailable on this backend. */
     fun renderToLiveTexture(session: GossSession, nativeHandle: Long, width: Int, height: Int): Boolean =
         Gosslens.nativeRenderToLiveTexture(handle, session.handle, nativeHandle, width, height) == 0
+
+    /** Releases the persistent wrap renderToLiveTexture keeps for one
+     * external texture, when a publish surface retires before the engine
+     * does. False for a handle with no live wrap. */
+    fun releaseLiveTexture(nativeHandle: Long): Boolean =
+        Gosslens.nativeReleaseLiveTexture(handle, nativeHandle) == 0
 
     // Idempotent like destroy() everywhere else - a second close() must
     // not hand the native side an already-freed handle.
@@ -1158,6 +1166,11 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     fun release(): Boolean = Gosslens.nativeRelease(handle) == 0
     fun addCollider(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeAddCollider(handle, x, y, z) == 0
     fun eraseCollider(x: Float, y: Float, z: Float, radius: Float): Boolean = Gosslens.nativeEraseCollider(handle, x, y, z, radius) == 0
+
+    /** Releases one solver hair by the id the physics world assigned it,
+     * pairing the acquire a hair lens performs at activation, so a hair
+     * can retire mid-session without tearing the physics world down. */
+    fun physicsHairRemove(hairId: Int): Boolean = Gosslens.nativePhysicsHairRemove(handle, hairId) == 0
 
     /** Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the renderer. */
     fun brushVertices(): FloatArray {

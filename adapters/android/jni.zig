@@ -24,8 +24,6 @@ fn getDirectBufferAddress(env: *JniEnv, buffer: jobject) ?[*]u8 {
     return call(env, buffer);
 }
 
-var attached_window: ?*anyopaque = null;
-
 export fn Java_com_gosslens_Gosslens_nativeAbiVersion(env: *JniEnv, cls: jobject) i32 {
     _ = env;
     _ = cls;
@@ -51,11 +49,13 @@ export fn Java_com_gosslens_Gosslens_nativeEngineCreate(env: *JniEnv, cls: jobje
 export fn Java_com_gosslens_Gosslens_nativeEngineDestroy(env: *JniEnv, cls: jobject, engine: i64) void {
     _ = env;
     _ = cls;
-    abi.goss_engine_destroy(engineFromHandle(engine));
-    if (attached_window) |window| {
-        ANativeWindow_release(window);
-        attached_window = null;
-    }
+    const e = engineFromHandle(engine) orelse return;
+    // The window reference outlives the renderer teardown inside destroy,
+    // then this engine's own reference is dropped - never another's.
+    const window = e.attached_window;
+    e.attached_window = null;
+    abi.goss_engine_destroy(e);
+    if (window) |w| ANativeWindow_release(w);
 }
 
 fn engineFromHandle(handle: i64) ?*abi.Engine {
@@ -70,14 +70,29 @@ fn sessionFromHandle(handle: i64) ?*abi.Session {
 
 export fn Java_com_gosslens_Gosslens_nativeInitRenderer(env: *JniEnv, cls: jobject, engine: i64, surface: jobject, width: i32, height: i32) i32 {
     _ = cls;
+    const e = engineFromHandle(engine) orelse return @intFromEnum(abi.Status.invalid_argument);
+    // Mirror the core's re-init refusal before touching window references:
+    // a live renderer keeps using the window already attached, so that
+    // reference must not be released or replaced on a refused call.
+    if (e.renderer != null) return @intFromEnum(abi.Status.invalid_argument);
     const window = ANativeWindow_fromSurface(env, surface) orelse return @intFromEnum(abi.Status.invalid_argument);
-    attached_window = window;
+    // fromSurface takes a reference each call; the one held for a prior
+    // surface goes back before the new one lands in its slot.
+    if (e.attached_window) |previous| ANativeWindow_release(previous);
+    e.attached_window = window;
     var desc: abi.RendererDesc = .{
         .native_window_handle = window,
         .width = @intCast(width),
         .height = @intCast(height),
     };
-    return @intFromEnum(abi.goss_engine_init_renderer(engineFromHandle(engine), &desc));
+    const status = abi.goss_engine_init_renderer(e, &desc);
+    if (status != .ok) {
+        // A failed init leaves no renderer holding the window; the
+        // reference goes back rather than waiting for engine destroy.
+        e.attached_window = null;
+        ANativeWindow_release(window);
+    }
+    return @intFromEnum(status);
 }
 
 export fn Java_com_gosslens_Gosslens_nativeResize(env: *JniEnv, cls: jobject, engine: i64, width: i32, height: i32) void {
@@ -266,6 +281,19 @@ export fn Java_com_gosslens_Gosslens_nativeRenderToLiveTexture(env: *JniEnv, cls
     _ = env;
     _ = cls;
     return @intFromEnum(abi.goss_engine_render_to_live_texture(engineFromHandle(engine), sessionFromHandle(session), @bitCast(native_handle), @intCast(@max(width, 0)), @intCast(@max(height, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeReleaseLiveTexture(env: *JniEnv, cls: jobject, engine: i64, native_handle: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_engine_release_live_texture(engineFromHandle(engine), @bitCast(native_handle)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativePhysicsHairRemove(env: *JniEnv, cls: jobject, session: i64, hair_id: i32) i32 {
+    _ = env;
+    _ = cls;
+    if (hair_id < 0) return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_physics_hair_remove(sessionFromHandle(session), @intCast(hair_id)));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeSessionDestroy(env: *JniEnv, cls: jobject, session: i64) void {

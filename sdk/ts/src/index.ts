@@ -469,6 +469,14 @@ export class GossEngine {
     return this.mod.ccall("goss_engine_render_frame", "number", ["number", "number"], [this.handle, session?.handle ?? 0]);
   }
 
+  /// Releases the persistent wrap the engine keeps per external live
+  /// texture handle - the pair of the native SDKs' renderToLiveTexture,
+  /// for a host retiring a publish surface before the engine goes away.
+  /// False for a handle with no live wrap.
+  releaseLiveTexture(nativeHandle: bigint): boolean {
+    return this.mod.ccall("goss_engine_release_live_texture", "number", ["number", "number"], [this.handle, nativeHandle]) === 0;
+  }
+
   /// The two ways this SDK reads pixels back: bgfx's WebGL2 context
   /// never preserves its drawing buffer, so readPixels runs right after
   /// a fresh render; WebGPU has no sync equivalent, so
@@ -1238,6 +1246,14 @@ export class GossSession {
 
   eraseCollider(x: number, y: number, z: number, radius: number): void {
     this.mod.ccall("goss_session_erase_collider", "number", ["number", "number", "number", "number", "number"], [this.handle, x, y, z, radius]);
+  }
+
+  /// Releases one solver hair by the id the physics world assigned it,
+  /// pairing the acquire a hair lens performs at activation, so a hair
+  /// can retire mid-session without tearing the physics world down.
+  /// False with no physics world or for an unknown id.
+  physicsHairRemove(hairId: number): boolean {
+    return this.mod.ccall("goss_physics_hair_remove", "number", ["number", "number"], [this.handle, hairId]) === 0;
   }
 
   /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the

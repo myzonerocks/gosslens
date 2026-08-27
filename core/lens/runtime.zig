@@ -1076,6 +1076,10 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     var id_to_index = std.StringHashMap(graph.NodeIndex).init(gpa);
     defer id_to_index.deinit();
 
+    // First pass: splice every composite node and register its id, so an
+    // input can name a node declared later in the manifest. Connections
+    // and bindings follow in the second pass once every id is known; the
+    // errdefer owns the fresh node until the counted one takes over.
     for (lens_manifest.nodes) |node| {
         // A script node drives parameters each tick; it is not a composite
         // pass, so it never enters the graph. Its source is read separately.
@@ -1086,6 +1090,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .inputs = &.{.{ .kind = .texture }},
             .outputs = &.{.{ .kind = .texture }},
         });
+        errdefer g.removeNode(graph_index);
         nodes[spliced_count] = .{
             .graph_index = graph_index,
             .node_type = node_type,
@@ -1126,6 +1131,18 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .layout = if (node_type == .layout_composite) node.layout else null,
         };
 
+        try id_to_index.put(node.id, graph_index);
+        spliced_count += 1;
+    }
+
+    // Second pass: connect inputs and bind parameters. A failure here
+    // (unknown id, cycle-closing edge, unknown parameter) unwinds through
+    // the counted errdefer, which now covers every spliced node.
+    var node_at: usize = 0;
+    for (lens_manifest.nodes) |node| {
+        if (std.mem.eql(u8, node.type, "script")) continue;
+        const graph_index = nodes[node_at].graph_index;
+
         for (node.inputs) |input| {
             const source_index = if (std.mem.eql(u8, input.source, "camera"))
                 camera_node
@@ -1134,11 +1151,11 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             try g.connect(source_index, 0, graph_index, 0);
         }
 
-        const slots = paramSlotsFor(node_type);
+        const slots = paramSlotsFor(nodes[node_at].node_type);
         for (node.params) |p| {
             for (slots) |slot| {
                 if (!std.mem.eql(u8, p.name, slot.name)) continue;
-                nodes[spliced_count].bindings[@intFromEnum(slot.effect)] = switch (p.binding) {
+                nodes[node_at].bindings[@intFromEnum(slot.effect)] = switch (p.binding) {
                     .literal_float => |v| .{ .literal = v },
                     .literal_bool => |v| .{ .literal = if (v) 1 else 0 },
                     .literal_int => |v| .{ .literal = @floatFromInt(v) },
@@ -1151,9 +1168,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
                 };
             }
         }
-
-        try id_to_index.put(node.id, graph_index);
-        spliced_count += 1;
+        node_at += 1;
     }
 
     var timer_names: std.ArrayList([]u8) = .empty;
@@ -1559,6 +1574,38 @@ test "shaderPassNodes orders a multi-pass chain by real graph dependency, not de
     try t.expectEqualStrings("warm", passes[0].shader_stem);
     try t.expectEqualStrings("vignette", passes[1].shader_stem);
     try t.expectEqualStrings("grain", passes[2].shader_stem);
+}
+
+const forward_reference_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.forwardref", "version": "1.0.0", "display_name": "Forward Ref",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "vignette", "type": "shader.pass", "inputs": {"frame": "warm"}, "params": {}},
+    \\    {"id": "warm", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a node may reference one declared later in the manifest" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    // vignette reads warm, which the manifest declares after it. The
+    // two-pass activation registers every id before wiring inputs, so the
+    // forward reference resolves and the chain orders warm then vignette.
+    const lens_manifest = try parseTestManifest(t.allocator, forward_reference_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 2), passes.len);
+    try t.expectEqualStrings("warm", passes[0].shader_stem);
+    try t.expectEqualStrings("vignette", passes[1].shader_stem);
 }
 
 const lut_pass_manifest =

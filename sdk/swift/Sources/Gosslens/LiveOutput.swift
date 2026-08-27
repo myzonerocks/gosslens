@@ -11,6 +11,9 @@ public final class GossLiveOutput {
     private let height: Int
     private let pool: CVPixelBufferPool
     private let cache: CVMetalTextureCache
+    /// Every texture handle published through the engine, so deinit can
+    /// release the persistent wraps the engine keeps per handle.
+    private var published: Set<UInt> = []
 
     public init?(engine: GossEngine, device: MTLDevice, width: Int, height: Int) {
         self.engine = engine
@@ -59,10 +62,16 @@ public final class GossLiveOutput {
         guard engine.renderToLiveTexture(session: session, texture: handle, width: UInt32(width), height: UInt32(height)) else {
             return nil
         }
+        published.insert(UInt(bitPattern: handle))
         return pixelBuffer
     }
 
     deinit {
+        // The engine holds one persistent wrap per texture this broadcast
+        // published; retiring the broadcast retires those wraps with it.
+        for handle in published {
+            engine.releaseLiveTexture(texture: UnsafeMutableRawPointer(bitPattern: handle)!)
+        }
         CVMetalTextureCacheFlush(cache, 0)
     }
 }

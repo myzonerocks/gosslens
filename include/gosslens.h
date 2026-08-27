@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 51u
+#define GOSS_ABI_MINOR 53u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -857,6 +857,19 @@ goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_
  * silence) summed with the 48 kHz mono lens mixer resampled to that rate, into
  * out (frame_count*channels s16). Advances the mixer once, replacing pull_audio. */
 goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels);
+
+/* Graph thread. Releases one solver hair by the id the session's physics
+ * world assigned it, pairing the acquire a hair lens performs at activation,
+ * so a hair can retire mid-session without tearing the world down. Reports
+ * GOSS_AGAIN with no physics world and GOSS_INVALID_ARGUMENT for an id that
+ * is unknown or already removed. */
+goss_status goss_physics_hair_remove(goss_session *session, uint32_t hair_id);
+
+/* Render thread. Releases the persistent external-texture wrap
+ * goss_engine_render_to_live_texture keeps per native handle, for a host
+ * retiring a publish surface before the engine goes away. Reports
+ * GOSS_INVALID_ARGUMENT for a handle with no live wrap. */
+goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle);
 
 #if !defined(__cplusplus) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(goss_frame_desc) == 32, "goss_frame_desc layout is frozen");

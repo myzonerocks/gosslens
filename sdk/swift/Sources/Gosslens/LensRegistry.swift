@@ -322,4 +322,9 @@ extension GossSession {
     public func release() throws { try checked(goss_session_release(handle)) }
     public func addCollider(x: Float, y: Float, z: Float) throws { try checked(goss_session_add_collider(handle, x, y, z)) }
     public func eraseCollider(x: Float, y: Float, z: Float, radius: Float) throws { try checked(goss_session_erase_collider(handle, x, y, z, radius)) }
+
+    /// Releases one solver hair by the id the physics world assigned it,
+    /// pairing the acquire a hair lens performs at activation, so a hair
+    /// can retire mid-session without tearing the physics world down.
+    public func physicsHairRemove(hairId: UInt32) throws { try checked(goss_physics_hair_remove(handle, hairId)) }
 }

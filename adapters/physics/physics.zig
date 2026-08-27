@@ -47,6 +47,7 @@ extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width
 extern fn goss_physics_add_softbody(handle: *anyopaque, verts: [*]const f32, vert_count: u32, faces: [*]const u32, face_count: u32, pressure: f32, pin_top: u32, px: f32, py: f32, pz: f32) u32;
 extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
 extern fn goss_physics_add_hair(handle: *anyopaque, strand_count: u32, verts: u32, length: f32) u32;
+extern fn goss_physics_remove_hair(handle: *anyopaque, hair_id: u32) u32;
 extern fn goss_physics_hair_update(handle: *anyopaque, hair_id: u32, head_transform: [*]const f32, dt: f32) void;
 extern fn goss_physics_hair_read(handle: *anyopaque, hair_id: u32, out: [*]f32, max_vertices: u32) u32;
 
@@ -196,6 +197,13 @@ pub const World = struct {
         const id = goss_physics_add_hair(world.handle, strand_count, verts, length);
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
+    }
+
+    /// Releases one hair without waiting for world destroy; the id
+    /// becomes a tombstone and other hair ids stay valid. Reports
+    /// whether a live hair was actually removed.
+    pub fn removeHair(world: World, hair_id: u32) bool {
+        return goss_physics_remove_hair(world.handle, hair_id) != 0;
     }
 
     /// Moves the hair with the head (translation from the 16-float
@@ -626,4 +634,28 @@ test "a hair clump hangs and reads back strand vertices" {
     var min_y: f32 = 1e9;
     for (0..n) |v| min_y = @min(min_y, verts[v * 3 + 1]);
     try t.expect(min_y < 0.4);
+}
+
+test "hair survives a second world lifecycle and removal tombstones the id" {
+    const identity = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    var verts: [64 * 3]f32 = undefined;
+    // First lifecycle: destroying the last world tears the type registry
+    // down, so the second one proves hair re-registers in the fresh one.
+    var pass: usize = 0;
+    while (pass < 2) : (pass += 1) {
+        const world = try World.create(-9.81);
+        defer world.destroy();
+        const hair = try world.addHair(1, 8, 0.4);
+        world.hairUpdate(hair, identity, 1.0 / 60.0);
+        try t.expect(world.hairRead(hair, &verts) > 0);
+        try t.expect(world.removeHair(hair));
+        // A removed id is a tombstone: reads empty, a second remove is a no-op,
+        // and updating it must not crash.
+        try t.expectEqual(@as(u32, 0), world.hairRead(hair, &verts));
+        try t.expect(!world.removeHair(hair));
+        world.hairUpdate(hair, identity, 1.0 / 60.0);
+        // New hair after a removal still gets a fresh, working slot.
+        const again = try world.addHair(1, 8, 0.4);
+        try t.expect(world.hairRead(again, &verts) > 0);
+    }
 }

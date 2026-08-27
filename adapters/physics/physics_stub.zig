@@ -199,6 +199,12 @@ pub const World = struct {
         return error.BodyAddFailed;
     }
 
+    pub fn removeHair(world: World, hair_id: u32) bool {
+        _ = world;
+        _ = hair_id;
+        return false;
+    }
+
     pub fn hairUpdate(world: World, hair_id: u32, head_transform: [16]f32, dt_seconds: f32) void {
         _ = world;
         _ = hair_id;
