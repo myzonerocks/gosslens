@@ -55,3 +55,14 @@ pub const Decoder = struct {
         goss_video_close(self.handle);
     }
 };
+
+extern fn goss_media_boundary_probe(mode: u32) i32;
+
+// The boundary guard proof: a deliberate NSException (mode 0) and a
+// deliberate C++ throw (mode 1) behind the shim must both surface as
+// the failure status, never unwind into Zig; mode 2 throws nothing.
+test "a throw behind the media boundary surfaces as a status" {
+    try std.testing.expectEqual(@as(i32, -1), goss_media_boundary_probe(0));
+    try std.testing.expectEqual(@as(i32, -1), goss_media_boundary_probe(1));
+    try std.testing.expectEqual(@as(i32, 0), goss_media_boundary_probe(2));
+}

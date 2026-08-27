@@ -1,6 +1,7 @@
-// The rigid-body world for lens content, behind a C surface: create a
-// world, add boxes and spheres, step at a fixed rate, read poses back.
-// No Jolt type escapes; exceptions cannot cross (Jolt builds without).
+// Compiled -fno-exceptions (build.zig joltFlags sets the flag for this
+// shim and the Jolt library), so no unwind can reach the C boundary;
+// creation-path news use std::nothrow and report failure. The rigid-body
+// world for lens content behind a C surface; no Jolt type escapes.
 
 #include <Jolt/Jolt.h>
 
@@ -39,6 +40,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -135,18 +138,33 @@ bool assertFailedImpl(const char* expression, const char* message, const char* f
 }
 #endif
 
+// Jolt classes override operator new without a nothrow form, so OOM
+// there cannot come back as null. Allocates through the same Jolt
+// allocator branch the class operator delete will free, then
+// placement-constructs; null means the caller reports failure.
+template <typename T, typename... A>
+T* nothrowNew(A&&... args) {
+  void* memory = alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__
+                     ? JPH::AlignedAllocate(sizeof(T), alignof(T))
+                     : JPH::Allocate(sizeof(T));
+  if (memory == nullptr) return nullptr;
+  return new (memory) T(std::forward<A>(args)...);
+}
+
 }  // namespace
 
 extern "C" void* goss_physics_world_create(float gravity_y) {
-  if (world_count == 0) {
+  if (world_count == 0 && JPH::Factory::sInstance == nullptr) {
     JPH::RegisterDefaultAllocator();
     JPH::Trace = traceImpl;
     JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = assertFailedImpl;)
-    JPH::Factory::sInstance = new JPH::Factory();
+    JPH::Factory::sInstance = nothrowNew<JPH::Factory>();
+    if (JPH::Factory::sInstance == nullptr) return nullptr;
     JPH::RegisterTypes();
   }
+  auto* world = new (std::nothrow) World();
+  if (world == nullptr) return nullptr;
   world_count += 1;
-  auto* world = new World();
   world->system.Init(1024, 0, 1024, 1024, world->bp_layers, world->object_vs_bp, world->object_pairs);
   world->system.SetGravity(JPH::Vec3(0.0f, gravity_y, 0.0f));
   return world;
@@ -194,16 +212,17 @@ static uint32_t create_body(World* world, uint32_t shape, float px, float py, fl
   if (world == nullptr) return UINT32_MAX;
   JPH::Ref<JPH::Shape> body_shape;
   if (shape == 0) {
-    body_shape = new JPH::BoxShape(JPH::Vec3(sx, sy, sz));
+    body_shape = nothrowNew<JPH::BoxShape>(JPH::Vec3(sx, sy, sz));
   } else if (shape == 1) {
-    body_shape = new JPH::SphereShape(sx);
+    body_shape = nothrowNew<JPH::SphereShape>(sx);
   } else if (shape == 2) {
-    body_shape = new JPH::CylinderShape(sy, sx);
+    body_shape = nothrowNew<JPH::CylinderShape>(sy, sx);
   } else if (shape == 3) {
-    body_shape = new JPH::CapsuleShape(sy, sx);
+    body_shape = nothrowNew<JPH::CapsuleShape>(sy, sx);
   } else {
     return UINT32_MAX;
   }
+  if (body_shape == nullptr) return UINT32_MAX;
   return finalize_body(world, body_shape, px, py, pz, qx, qy, qz, qw, friction, restitution, motion, planar);
 }
 
@@ -515,7 +534,8 @@ extern "C" int32_t goss_physics_body_pose(void* handle, uint32_t body, float* ou
 extern "C" uint32_t goss_physics_add_cloth(void* handle, uint32_t cols, uint32_t rows, float width, float height, float px, float py, float pz) {
   auto* world = static_cast<World*>(handle);
   if (world == nullptr || cols < 2 || rows < 2) return UINT32_MAX;
-  JPH::Ref<JPH::SoftBodySharedSettings> shared = new JPH::SoftBodySharedSettings();
+  JPH::Ref<JPH::SoftBodySharedSettings> shared = nothrowNew<JPH::SoftBodySharedSettings>();
+  if (shared == nullptr) return UINT32_MAX;
   for (uint32_t y = 0; y < rows; y++) {
     for (uint32_t x = 0; x < cols; x++) {
       const float fx = width * ((float)x / (cols - 1) - 0.5f);
@@ -553,7 +573,8 @@ extern "C" uint32_t goss_physics_add_softbody(void* handle, const float* verts, 
     max_y = std::max(max_y, verts[i * 3 + 1]);
   }
   const float pin_below = max_y - 0.2f * (max_y - min_y);
-  JPH::Ref<JPH::SoftBodySharedSettings> shared = new JPH::SoftBodySharedSettings();
+  JPH::Ref<JPH::SoftBodySharedSettings> shared = nothrowNew<JPH::SoftBodySharedSettings>();
+  if (shared == nullptr) return UINT32_MAX;
   for (uint32_t i = 0; i < vert_count; ++i) {
     const float vy = verts[i * 3 + 1];
     const float inv_mass = (pin_top != 0 && vy >= pin_below) ? 0.0f : 1.0f;
@@ -627,7 +648,8 @@ extern "C" uint32_t goss_physics_add_hair(void* handle, uint32_t strand_count, u
     }
     sstrands.push_back(JPH::HairSettings::SStrand(start, start + verts, 0));
   }
-  JPH::Ref<JPH::HairSettings> settings = new JPH::HairSettings;
+  JPH::Ref<JPH::HairSettings> settings = nothrowNew<JPH::HairSettings>();
+  if (settings == nullptr) return UINT32_MAX;
   JPH::HairSettings::Material m;
   m.mEnableLRA = false;
   m.mBendCompliance = 1e-8f;
@@ -638,7 +660,8 @@ extern "C" uint32_t goss_physics_add_hair(void* handle, uint32_t strand_count, u
   float max_dist_sq = 0.0f;
   settings->Init(max_dist_sq);
   settings->InitCompute(world->compute);
-  JPH::Hair* hair = new JPH::Hair(settings, JPH::RVec3::sZero(), JPH::Quat::sIdentity(), layer_moving);
+  JPH::Hair* hair = new (std::nothrow) JPH::Hair(settings, JPH::RVec3::sZero(), JPH::Quat::sIdentity(), layer_moving);
+  if (hair == nullptr) return UINT32_MAX;
   hair->Init(world->compute);
   hair->Update(0.0f, JPH::Mat44::sIdentity(), nullptr, world->system, world->hair_shaders, world->compute, world->queue);
   hair->ReadBackGPUState(world->queue);

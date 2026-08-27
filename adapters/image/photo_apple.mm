@@ -7,7 +7,25 @@
 #import <Foundation/Foundation.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+
+// This TU keeps exceptions enabled: the Foundation bridging here can
+// raise NSException, and the modern ObjC runtime unwinds those as C++
+// exceptions regardless of the C++ flag. Every extern "C" entry is a
+// guard mapping any unwind to its failure value, never into Zig.
+#define GOSS_SHIM_GUARD(ret_type, failure_value, call)                        \
+  try {                                                                       \
+    @try {                                                                    \
+      return (call);                                                          \
+    } @catch (NSException* e) {                                               \
+      fprintf(stderr, "gosslens photo: %s: %s\n", e.name.UTF8String,          \
+              e.reason ? e.reason.UTF8String : "");                           \
+      return (failure_value);                                                 \
+    }                                                                         \
+  } catch (...) {                                                             \
+    return (failure_value);                                                   \
+  }
 
 namespace {
 
@@ -19,15 +37,9 @@ CFStringRef formatUti(uint32_t format) {
   }
 }
 
-}  // namespace
-
-// Encodes tightly packed RGBA8 into format (1 = JPEG, 2 = HEIC) at
-// quality percent (1..100). out_len always receives the encoded size,
-// so a too-small buffer (-2) tells the caller what to retry with; any
-// other failure is -1.
-extern "C" int32_t goss_photo_encode(const uint8_t* rgba, uint32_t width, uint32_t height,
-                                     uint32_t format, uint32_t quality, uint8_t* out_data,
-                                     size_t out_capacity, size_t* out_len) {
+int32_t photo_encode_impl(const uint8_t* rgba, uint32_t width, uint32_t height,
+                          uint32_t format, uint32_t quality, uint8_t* out_data,
+                          size_t out_capacity, size_t* out_len) {
   if (rgba == nullptr || width == 0 || height == 0 || out_len == nullptr) return -1;
   *out_len = 0;
   CFStringRef uti = formatUti(format);
@@ -96,11 +108,9 @@ extern "C" int32_t goss_photo_encode(const uint8_t* rgba, uint32_t width, uint32
   }
 }
 
-// Decodes encoded photo bytes back to RGBA8 - the harness's round-trip
-// proof surface, not a production decoder.
-extern "C" int32_t goss_photo_decode(const uint8_t* data, size_t data_len, uint8_t* out_rgba,
-                                     size_t out_capacity, uint32_t* out_width,
-                                     uint32_t* out_height) {
+int32_t photo_decode_impl(const uint8_t* data, size_t data_len, uint8_t* out_rgba,
+                          size_t out_capacity, uint32_t* out_width,
+                          uint32_t* out_height) {
   if (data == nullptr || data_len == 0) return -1;
   @autoreleasepool {
     CFDataRef bytes = CFDataCreate(kCFAllocatorDefault, data, (CFIndex)data_len);
@@ -134,11 +144,9 @@ extern "C" int32_t goss_photo_decode(const uint8_t* data, size_t data_len, uint8
   }
 }
 
-// Reads back the encoded photo's orientation and software tag - the
-// harness's metadata round-trip proof, not a production surface.
-extern "C" int32_t goss_photo_probe_metadata(const uint8_t* data, size_t data_len,
-                                             uint32_t* out_orientation, uint8_t* out_software,
-                                             size_t software_capacity, size_t* out_software_len) {
+int32_t photo_probe_metadata_impl(const uint8_t* data, size_t data_len,
+                                  uint32_t* out_orientation, uint8_t* out_software,
+                                  size_t software_capacity, size_t* out_software_len) {
   if (data == nullptr || data_len == 0) return -1;
   @autoreleasepool {
     CFDataRef bytes = CFDataCreate(kCFAllocatorDefault, data, (CFIndex)data_len);
@@ -168,4 +176,32 @@ extern "C" int32_t goss_photo_probe_metadata(const uint8_t* data, size_t data_le
     CFRelease(properties);
     return 0;
   }
+}
+
+}  // namespace
+
+// Encodes tightly packed RGBA8 into format (1 = JPEG, 2 = HEIC) at
+// quality percent (1..100). out_len always receives the encoded size,
+// so a too-small buffer (-2) tells the caller what to retry with; any
+// other failure is -1.
+extern "C" int32_t goss_photo_encode(const uint8_t* rgba, uint32_t width, uint32_t height,
+                                     uint32_t format, uint32_t quality, uint8_t* out_data,
+                                     size_t out_capacity, size_t* out_len) {
+  GOSS_SHIM_GUARD(int32_t, -1, photo_encode_impl(rgba, width, height, format, quality, out_data, out_capacity, out_len))
+}
+
+// Decodes encoded photo bytes back to RGBA8 - the harness's round-trip
+// proof surface, not a production decoder.
+extern "C" int32_t goss_photo_decode(const uint8_t* data, size_t data_len, uint8_t* out_rgba,
+                                     size_t out_capacity, uint32_t* out_width,
+                                     uint32_t* out_height) {
+  GOSS_SHIM_GUARD(int32_t, -1, photo_decode_impl(data, data_len, out_rgba, out_capacity, out_width, out_height))
+}
+
+// Reads back the encoded photo's orientation and software tag - the
+// harness's metadata round-trip proof, not a production surface.
+extern "C" int32_t goss_photo_probe_metadata(const uint8_t* data, size_t data_len,
+                                             uint32_t* out_orientation, uint8_t* out_software,
+                                             size_t software_capacity, size_t* out_software_len) {
+  GOSS_SHIM_GUARD(int32_t, -1, photo_probe_metadata_impl(data, data_len, out_orientation, out_software, software_capacity, out_software_len))
 }

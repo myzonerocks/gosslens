@@ -1,3 +1,7 @@
+// Compiled -fno-exceptions (build.zig buildGpupixelLib), so no unwind
+// crosses the C boundary; the EGL and AHardwareBuffer calls here all
+// report status instead of raising.
+//
 // The GPU-side bridge from the beauty chain's own output texture into a
 // shared AHardwareBuffer, on the write side: an EGLImage view of the
 // buffer becomes gpupixel's blit target, the same shape as the ios/macos

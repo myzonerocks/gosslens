@@ -52,6 +52,11 @@ pub const InitOptions = struct {
     vsync: bool = true,
 };
 
+/// The engine-owned diagnostics interface (adapters/bgfx/callbacks.c):
+/// fatal and trace route to stderr. Installed by init whenever the host
+/// passes no callback of its own, so every production SDK gets it.
+extern fn goss_bgfx_callbacks() [*c]c.bgfx_callback_interface_t;
+
 pub const Nv12Textures = struct {
     y: c.bgfx_texture_handle_t,
     uv: c.bgfx_texture_handle_t,
@@ -282,7 +287,7 @@ pub const Renderer = struct {
         bgfx_init.resolution.height = options.height;
         bgfx_init.resolution.reset = if (options.vsync) c.BGFX_RESET_VSYNC else c.BGFX_RESET_NONE;
         bgfx_init.platformData.nwh = options.native_window_handle;
-        bgfx_init.callback = options.callback;
+        bgfx_init.callback = options.callback orelse goss_bgfx_callbacks();
         // Calling bgfx_render_frame once on this thread before bgfx_init
         // is bgfx's own documented opt-in to single-threaded mode: this
         // thread becomes both the API thread and the render thread,
@@ -967,6 +972,10 @@ pub const Renderer = struct {
     }
 
     pub fn deinit(r: *Renderer) void {
+        // converter.deinit() wipes the converter to undefined, so the
+        // Vulkan context is copied out first and destroyed after bgfx
+        // shutdown from the saved copy, never read back from that memory.
+        var saved_vk_ctx: if (is_android) ?android_vk.Context else void = if (is_android) null else {};
         if (is_android) {
             if (r.zero_copy) |*zc| {
                 for (zc.textures) |texture| {
@@ -974,6 +983,7 @@ pub const Renderer = struct {
                 }
                 zc.beauty_render_target.deinit(zc.converter.ctx.device);
                 zc.beauty_import.deinit(zc.converter.ctx.device);
+                saved_vk_ctx = zc.converter.ctx;
                 zc.converter.deinit();
             }
         }
@@ -1076,10 +1086,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_dynamic_vertex_buffer(r.face_mesh_position_buffer);
         c.bgfx_shutdown();
         if (is_android) {
-            if (r.zero_copy) |*zc| {
-                var ctx = zc.converter.ctx;
-                ctx.deinit();
-            }
+            if (saved_vk_ctx) |*ctx| ctx.deinit();
         }
         r.* = undefined;
     }

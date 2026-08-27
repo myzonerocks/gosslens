@@ -1,12 +1,12 @@
-// The C boundary around the beauty engine: one context owning the chain
-// smooth and whiten, face reshape, lipstick, blusher, fed RGBA frames and
-// the tracked contour points, answering with the processed RGBA. The
-// engine runs its own offscreen gl context per platform; everything here
-// executes on the caller's thread, one frame at a time.
+// Compiled -fno-exceptions (build.zig buildGpupixelLib sets the flag for
+// gpupixel and every beauty shim TU), so no unwind can cross the C
+// boundary. One context owns the chain: smooth and whiten, face reshape,
+// lipstick, blusher; runs on the caller's thread, one frame at a time.
 
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <vector>
 
 #include "gpupixel/gpupixel.h"
@@ -92,7 +92,8 @@ const char* kExternalRectFragmentShaderSource = R"(
 class SourceExternalTexture : public gpupixel::Source {
  public:
   static std::shared_ptr<SourceExternalTexture> Create() {
-    auto ret = std::shared_ptr<SourceExternalTexture>(new SourceExternalTexture());
+    auto ret = std::shared_ptr<SourceExternalTexture>(new (std::nothrow) SourceExternalTexture());
+    if (ret == nullptr) return nullptr;
     bool ok = true;
     gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext(
         [&] { ok = ret->Init(); });

@@ -33,3 +33,11 @@ compiled them before tolerated the gap and supplied a default anyway.
 Fixed once in GPUPixelGLProgram::InitWithShaderString, which every
 filter's shader compiles through, rather than editing each of the
 ~40 filter source files individually.
+
+0003-dispatch-queue-no-exceptions.patch
+gpupixel compiles -fno-exceptions here like every other vendored C++
+library, and dispatch_queue.cc's runTask carried the tree's only
+literal try/catch (a promise-forwarding wrapper). The patch guards
+that wrapper behind __cpp_exceptions and, when exceptions are off,
+runs the task and sets the promise directly - the only behavior an
+exception-free build can take anyway.

@@ -1,3 +1,7 @@
+// Compiled -fno-exceptions (build.zig buildGpupixelLib), so no unwind
+// crosses the C boundary; the CoreVideo, IOSurface, and EGL calls here
+// all report status instead of raising.
+//
 // The GPU-side bridge from the beauty chain's own output texture into an
 // IOSurface-backed CVPixelBuffer bgfx's Metal backend can read zero-copy
 // from that point on (CVMetalTextureCache, the same primitive capture

@@ -2,9 +2,16 @@
 // unstable ABI across the Zig boundary) behind a plain interface, the same
 // pattern as the jolt and gpupixel shims. The script runs hardened (no
 // clock, no RNG) and fuel-bounded, so it can never hang or vary per run.
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "quickjs.h"
+
+// Fuel bounds CPU, not bytes: a hostile script could otherwise allocate
+// hundreds of megabytes in one tick. Bytes and native stack get their
+// own hard ceilings, generous for any real lens script.
+#define GOSS_SCRIPT_MEMORY_LIMIT (32u * 1024u * 1024u)
+#define GOSS_SCRIPT_STACK_LIMIT (512u * 1024u)
 
 typedef struct GossScript {
     JSRuntime *rt;
@@ -19,6 +26,16 @@ void goss_script_free(GossScript *s);
 int goss_script_tick(GossScript *s,
                      const char *const *signal_names, const double *signal_values, int signal_count,
                      const char *const *param_names, double *param_values, int param_count);
+
+// A script failure is drained to stderr so lens authors see the reason;
+// leaving it pending would also poison the next call into the context.
+static void goss_drain_exception(JSContext *ctx, const char *where) {
+    JSValue e = JS_GetException(ctx);
+    const char *msg = JS_ToCString(ctx, e);
+    fprintf(stderr, "gosslens script %s: %s\n", where, msg ? msg : "unknown exception");
+    if (msg) JS_FreeCString(ctx, msg);
+    JS_FreeValue(ctx, e);
+}
 
 // Non-zero return interrupts the running script; the budget is refilled
 // before each eval and each tick, so runaway code stops but normal code
@@ -42,11 +59,14 @@ GossScript *goss_script_new(const char *source, size_t source_len, long fuel_per
     s->ctx = JS_NewContext(s->rt);
     if (!s->ctx) { JS_FreeRuntime(s->rt); free(s); return NULL; }
     s->fuel_per_tick = fuel_per_tick > 0 ? fuel_per_tick : 1000000;
+    JS_SetMemoryLimit(s->rt, GOSS_SCRIPT_MEMORY_LIMIT);
+    JS_SetMaxStackSize(s->rt, GOSS_SCRIPT_STACK_LIMIT);
     JS_SetInterruptHandler(s->rt, goss_on_interrupt, s);
 
     s->budget = s->fuel_per_tick;
     const char *harden = "delete globalThis.Date; delete Math.random;";
     JSValue h = JS_Eval(s->ctx, harden, strlen(harden), "<harden>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(h)) goss_drain_exception(s->ctx, "harden");
     JS_FreeValue(s->ctx, h);
 
     // JS_Eval needs a null-terminated buffer even with an explicit length,
@@ -59,6 +79,7 @@ GossScript *goss_script_new(const char *source, size_t source_len, long fuel_per
     JSValue v = JS_Eval(s->ctx, buf, source_len, "<lens>", JS_EVAL_TYPE_GLOBAL);
     free(buf);
     int failed = JS_IsException(v);
+    if (failed) goss_drain_exception(s->ctx, "eval");
     JS_FreeValue(s->ctx, v);
     if (failed) { goss_script_free(s); return NULL; }
 
@@ -103,6 +124,7 @@ int goss_script_tick(GossScript *s,
     JSValue update = JS_GetPropertyStr(ctx, global, "update");
     JSValue ret = JS_Call(ctx, update, JS_UNDEFINED, 1, &lens);
     int rc = JS_IsException(ret) ? -1 : 0;
+    if (rc != 0) goss_drain_exception(ctx, "update");
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, update);
     JS_FreeValue(ctx, global);
@@ -112,7 +134,11 @@ int goss_script_tick(GossScript *s,
         for (int i = 0; i < param_count; i++) {
             JSValue val = JS_GetPropertyStr(ctx, p, param_names[i]);
             double d;
-            if (JS_ToFloat64(ctx, &d, val) == 0) param_values[i] = d;
+            if (JS_ToFloat64(ctx, &d, val) == 0) {
+                param_values[i] = d;
+            } else {
+                goss_drain_exception(ctx, "param readback");
+            }
             JS_FreeValue(ctx, val);
         }
         JS_FreeValue(ctx, p);

@@ -122,9 +122,20 @@ fn buildTexturedQuadGlb(gpa: std.mem.Allocator) ![]u8 {
 }
 
 const Callbacks = struct {
+    // Trace forwards through the engine-owned C emitter (callbacks.c),
+    // where va_list formatting is portable; install() fills it in before
+    // the interface is handed to bgfx, so the leak report and driver
+    // warnings land on stderr instead of being discarded.
+    extern fn goss_bgfx_callbacks() [*c]c.bgfx_callback_interface_t;
+
+    fn install(init: *c.bgfx_init_t) void {
+        vtbl.trace_vargs = goss_bgfx_callbacks().*.vtbl.*.trace_vargs;
+        init.callback = &iface;
+    }
+
     var vtbl: c.bgfx_callback_vtbl_t = .{
         .fatal = fatal,
-        .trace_vargs = traceVargs,
+        .trace_vargs = null,
         .profiler_begin = profilerBegin,
         .profiler_begin_literal = profilerBeginLiteral,
         .profiler_end = profilerEnd,
@@ -142,7 +153,6 @@ const Callbacks = struct {
         std.debug.print("harness: bgfx fatal {d} at {s}:{d}: {s}\n", .{ code, file, line, message });
         std.process.abort();
     }
-    fn traceVargs(_: [*c]c.bgfx_callback_interface_t, _: [*c]const u8, _: u16, _: [*c]const u8, _: [*c]u8) callconv(.c) void {}
     fn profilerBegin(_: [*c]c.bgfx_callback_interface_t, _: [*c]const u8, _: u32, _: [*c]const u8, _: u16) callconv(.c) void {}
     fn profilerBeginLiteral(_: [*c]c.bgfx_callback_interface_t, _: [*c]const u8, _: u32, _: [*c]const u8, _: u16) callconv(.c) void {}
     fn profilerEnd(_: [*c]c.bgfx_callback_interface_t) callconv(.c) void {}
@@ -267,7 +277,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     init.resolution.height = height;
     init.resolution.reset = c.BGFX_RESET_VSYNC;
     init.platformData.nwh = glfwGetCocoaWindow(window);
-    init.callback = &Callbacks.iface;
+    Callbacks.install(&init);
     if (!c.bgfx_init(&init)) return error.BgfxInit;
     defer c.bgfx_shutdown();
     std.debug.print("harness: renderer {s}\n", .{c.bgfx_get_renderer_name(c.bgfx_get_renderer_type())});

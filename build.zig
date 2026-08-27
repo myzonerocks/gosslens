@@ -453,6 +453,10 @@ pub fn build(b: *std.Build) void {
         const audio_playback_tests = b.addTest(.{ .root_module = audioPlaybackModule(b, target, optimize, true) });
         test_step.dependOn(&b.addRunArtifact(audio_playback_tests).step);
     }
+    // On apple hosts this runs the media shim's boundary-guard proof: a
+    // deliberate throw behind the C surface must land as a status.
+    const media_video_tests = b.addTest(.{ .root_module = mediaVideoModule(b, target, optimize) });
+    test_step.dependOn(&b.addRunArtifact(media_video_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
@@ -1084,6 +1088,7 @@ pub fn build(b: *std.Build) void {
         render_module.addIncludePath(b.path(".vendor/bgfx/include"));
         render_module.addIncludePath(b.path(".vendor/bx/include"));
         render_module.link_libc = true;
+        addBgfxCallbacks(b, render_module);
         if (shader_blobs_module) |sb| render_module.addImport("shader_blobs", sb);
 
         const harness_module = b.createModule(.{
@@ -1446,6 +1451,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     // translate-c rejects; neutralizing them costs only the annotations.
     render_android.addCMacro("_Nonnull", "");
     render_android.addCMacro("_Nullable", "");
+    addBgfxCallbacks(b, render_android);
     render_android.addImport("shader_blobs", addShaderBlobs(b, shaderc_tool, android_target, optimize));
     const abi_android = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
@@ -2179,10 +2185,7 @@ fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         }
     }.lessThan);
     var flags: std.ArrayList([]const u8) = .empty;
-    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
-    // Exception paths become traps on the web target; nothing catches in
-    // this module.
-    if (target.result.cpu.arch.isWasm()) flags.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     // The container internals include the bmi2 intrinsics header directly,
     // which this compiler only accepts by way of immintrin.
     if (target.result.cpu.arch == .x86_64) {
@@ -2286,8 +2289,7 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     module.addIncludePath(b.path(".vendor/ruy"));
     module.addIncludePath(b.path(".vendor/cpuinfo/include"));
     var ruy_flags: std.ArrayList([]const u8) = .empty;
-    ruy_flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
-    if (target.result.cpu.arch.isWasm()) ruy_flags.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    ruy_flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     const flags = ruy_flags.items;
     var sources: std.ArrayList([]const u8) = .empty;
     listFilesRecursive(b, ".vendor/ruy/ruy", ".cc", &.{
@@ -2341,7 +2343,7 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     module.addCMacro("ANGLE_UTIL_EXPORT", "");
     module.addCMacro("ANGLE_CAPTURE_ENABLED", "0");
 
-    const flags = [_][]const u8{ "-std=c++20", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" };
+    const flags = [_][]const u8{ "-std=c++20", "-fno-exceptions", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" };
 
     // Backends and features this scope has no use for: other GPU APIs
     // (D3D/Vulkan/WGPU/desktop-GL/null, plus the DXGI/SPIR-V/Vulkan
@@ -2453,7 +2455,7 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     module.addCMacro(platform_define, "1");
 
     var flags: std.ArrayList([]const u8) = .empty;
-    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     // The gl include header imports the apple ui frameworks, so every
     // translation unit on those targets is objective c++.
     if (os == .macos or os == .ios) {
@@ -2588,7 +2590,7 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // single-thread std threading stubs ahead of its headers.
 fn joltFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const u8 {
     var flags: std.ArrayList([]const u8) = .empty;
-    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE" }) catch @panic("OOM");
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE" }) catch @panic("OOM");
     if (target.result.os.tag == .emscripten) {
         flags.append(b.allocator, "-include") catch @panic("OOM");
         flags.append(b.allocator, b.pathFromRoot("adapters/physics/em_thread_stub.h")) catch @panic("OOM");
@@ -2646,7 +2648,7 @@ fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         }
     }.lessThan);
     const yuv_flags = [_][]const u8{
-        "-std=c++17",           "-fno-sanitize=undefined", "-w",
+        "-std=c++17",           "-fno-exceptions",         "-fno-sanitize=undefined", "-w",
         "-DLIBYUV_DISABLE_SVE", "-DLIBYUV_DISABLE_SME",
     };
     for (yuv_sources.items) |file| {
@@ -2666,10 +2668,7 @@ fn buildFlatbuffersLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     module.addIncludePath(b.path(".vendor/flatbuffers/include"));
     module.addCSourceFile(.{
         .file = b.path(".vendor/flatbuffers/src/util.cpp"),
-        .flags = if (target.result.cpu.arch.isWasm())
-            &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-fno-exceptions" }
-        else
-            &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" },
+        .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" },
     });
     const lib = b.addLibrary(.{ .name = "flatbuffers", .linkage = .static, .root_module = module });
     if (libc) |file| lib.setLibCFile(file);
@@ -2684,7 +2683,7 @@ fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     module.addIncludePath(b.path(".vendor/farmhash/src"));
     module.addCSourceFile(.{
         .file = b.path(".vendor/farmhash/src/farmhash.cc"),
-        .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" },
+        .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" },
     });
     const lib = b.addLibrary(.{ .name = "farmhash", .linkage = .static, .root_module = module });
     if (libc) |file| lib.setLibCFile(file);
@@ -2883,8 +2882,7 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     }
     const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
     var xnn_cxx: std.ArrayList([]const u8) = .empty;
-    xnn_cxx.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
-    if (is_wasm_arch(target)) xnn_cxx.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    xnn_cxx.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     const cxx_flags = xnn_cxx.items;
     var seen = std.StringHashMap(void).init(b.allocator);
     for (shared.items) |file| {
@@ -3170,8 +3168,7 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     }.lessThan);
     const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
     var cxx_flags: std.ArrayList([]const u8) = .empty;
-    cxx_flags.appendSlice(b.allocator, &.{ "-std=c++20", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
-    if (target.result.cpu.arch.isWasm()) cxx_flags.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    cxx_flags.appendSlice(b.allocator, &.{ "-std=c++20", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     cxx_flags.appendSlice(b.allocator, wasm_compat_flags) catch @panic("oom");
     if (target.result.cpu.arch == .x86_64) {
         cxx_flags.appendSlice(b.allocator, &.{ "-include", immintrinPath(b) }) catch @panic("oom");
@@ -3183,7 +3180,7 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     if (os == .ios) {
         module.addCSourceFile(.{
             .file = b.path(".vendor/litert/tflite/profiling/signpost_profiler.mm"),
-            .flags = &.{ "-std=c++20", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" },
+            .flags = &.{ "-std=c++20", "-fno-exceptions", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" },
         });
     }
     const lib = b.addLibrary(.{ .name = "tflite", .linkage = .static, .root_module = module });
@@ -3199,7 +3196,7 @@ fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
     module.addIncludePath(b.path(".vendor/flatbuffers/include"));
     module.addIncludePath(b.path(".vendor/flatbuffers"));
     module.addIncludePath(b.path(".vendor/flatbuffers/grpc"));
-    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    const flags = [_][]const u8{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" };
     const sources = [_][]const u8{
         "src/idl_parser.cpp",          "src/idl_gen_text.cpp",     "src/reflection.cpp",
         "src/util.cpp",                "src/idl_gen_binary.cpp",   "src/idl_gen_cpp.cpp",
@@ -3463,6 +3460,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     render_ios.addIncludePath(b.path(".vendor/bx/include"));
     render_ios.link_libc = true;
     addAppleSdkPaths(b, render_ios);
+    addBgfxCallbacks(b, render_ios);
     render_ios.addImport("shader_blobs", addShaderBlobs(b, shaderc_tool, ios_target, optimize));
     const abi_ios = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
@@ -3726,7 +3724,7 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     // build provides (shaderc_dxil.cpp then reaches for <unknwnbase.h>,
     // a Windows SDK header, and fails outright on Linux). We only ever
     // emit metal/spirv/essl, never DXIL/D3D12, so it's a straight cut.
-    const cxx17 = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-sanitize=undefined", "-w", "-DBX_CONFIG_DEBUG=0", "-D__STDC_FORMAT_MACROS", "-DSHADERC_CONFIG_HAS_DXC=0" };
+    const cxx17 = [_][]const u8{ "-std=c++20", "-fno-exceptions", "-fno-strict-aliasing", "-fno-sanitize=undefined", "-w", "-DBX_CONFIG_DEBUG=0", "-D__STDC_FORMAT_MACROS", "-DSHADERC_CONFIG_HAS_DXC=0" };
     const c_flags = [_][]const u8{ "-fno-sanitize=undefined", "-w" };
 
     const spirv_opt_module = b.createModule(.{ .target = target, .optimize = opt });
@@ -4038,6 +4036,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     render_em.addIncludePath(b.path(".vendor/bgfx/include"));
     render_em.addIncludePath(b.path(".vendor/bx/include"));
     render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+    addBgfxCallbacks(b, render_em);
 
     const abi_em = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
@@ -4292,6 +4291,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     // on the search path, not Zig's own (nonexistent, for this target)
     // libc linkage.
     render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+    addBgfxCallbacks(b, render_em);
 
     const driver_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/wasm_emscripten_core_smoke.zig"),
@@ -4492,6 +4492,15 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
     }
     const root = wf.add("shader_blobs.zig", source.items);
     return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize });
+}
+
+// The engine-owned bgfx diagnostics callbacks ride with every module that
+// compiles render.zig; plain C so va_list handling stays portable.
+fn addBgfxCallbacks(b: *std.Build, module: *std.Build.Module) void {
+    module.addCSourceFile(.{
+        .file = b.path("adapters/bgfx/callbacks.c"),
+        .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+    });
 }
 
 fn addCxxDir(b: *std.Build, module: *std.Build.Module, dir: []const u8, flags: []const []const u8, exclude: []const []const u8) void {

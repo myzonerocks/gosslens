@@ -10,6 +10,25 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <new>
+
+// This TU keeps exceptions enabled: AVFoundation raises NSException on
+// writer state violations, and the modern ObjC runtime unwinds those as
+// C++ exceptions regardless of the C++ flag. Every extern "C" entry is
+// a guard mapping any unwind to its failure value, never into Zig.
+#define GOSS_SHIM_GUARD(ret_type, failure_value, call)                        \
+  try {                                                                       \
+    @try {                                                                    \
+      return (call);                                                          \
+    } @catch (NSException* e) {                                               \
+      fprintf(stderr, "gosslens recording: %s: %s\n", e.name.UTF8String,      \
+              e.reason ? e.reason.UTF8String : "");                           \
+      return (failure_value);                                                 \
+    }                                                                         \
+  } catch (...) {                                                             \
+    return (failure_value);                                                   \
+  }
 
 namespace {
 
@@ -44,11 +63,9 @@ void releaseFrame(RecordingFrame* frame) {
   delete frame;
 }
 
-}  // namespace
-
-extern "C" void* goss_recording_open(const uint8_t* path, size_t path_len,
-                                     uint32_t width, uint32_t height,
-                                     uint32_t bitrate_bps, uint32_t codec) {
+void* recording_open_impl(const uint8_t* path, size_t path_len,
+                          uint32_t width, uint32_t height,
+                          uint32_t bitrate_bps, uint32_t codec) {
   if (path == nullptr || path_len == 0 || width == 0 || height == 0) return nullptr;
   @autoreleasepool {
     NSString* ns_path = [[NSString alloc] initWithBytes:path
@@ -117,7 +134,8 @@ extern "C" void* goss_recording_open(const uint8_t* path, size_t path_len,
     if (![writer startWriting]) return nullptr;
     [writer startSessionAtSourceTime:kCMTimeZero];
 
-    auto* recording = new Recording();
+    auto* recording = new (std::nothrow) Recording();
+    if (recording == nullptr) return nullptr;
     recording->writer = writer;
     recording->input = input;
     recording->adaptor = adaptor;
@@ -129,16 +147,14 @@ extern "C" void* goss_recording_open(const uint8_t* path, size_t path_len,
   }
 }
 
-// Vends the next pool buffer as an opaque frame token plus the Metal
-// texture bgfx renders into. The token stays owned by the caller until
-// commit or abort, and several may be in flight at once.
-extern "C" int32_t goss_recording_begin_frame(void* handle, void** out_frame, void** out_metal_texture) {
+int32_t recording_begin_frame_impl(void* handle, void** out_frame, void** out_metal_texture) {
   auto* r = static_cast<Recording*>(handle);
   if (r == nullptr || out_frame == nullptr || out_metal_texture == nullptr || r->failed) return -1;
   @autoreleasepool {
     CVPixelBufferPoolRef pool = r->adaptor.pixelBufferPool;
     if (pool == nullptr) return -1;
-    auto* frame = new RecordingFrame();
+    auto* frame = new (std::nothrow) RecordingFrame();
+    if (frame == nullptr) return -1;
     CVReturn created =
         CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &frame->pixel_buffer);
     if (created != kCVReturnSuccess || frame->pixel_buffer == nullptr) {
@@ -165,7 +181,7 @@ extern "C" int32_t goss_recording_begin_frame(void* handle, void** out_frame, vo
   }
 }
 
-extern "C" int32_t goss_recording_commit_frame(void* handle, void* frame_token, int64_t timestamp_us) {
+int32_t recording_commit_frame_impl(void* handle, void* frame_token, int64_t timestamp_us) {
   auto* r = static_cast<Recording*>(handle);
   auto* frame = static_cast<RecordingFrame*>(frame_token);
   if (r == nullptr || frame == nullptr || frame->pixel_buffer == nullptr || r->failed) {
@@ -196,18 +212,15 @@ extern "C" int32_t goss_recording_commit_frame(void* handle, void* frame_token, 
   }
 }
 
-extern "C" void goss_recording_abort_frame(void* handle, void* frame_token) {
+void recording_abort_frame_impl(void* handle, void* frame_token) {
   (void)handle;
   auto* frame = static_cast<RecordingFrame*>(frame_token);
   if (frame) releaseFrame(frame);
 }
 
-// Appends interleaved f32 PCM to the recording's audio track at the
-// same microsecond clock the video frames ride, so the muxer keeps the
-// two streams aligned.
-extern "C" int32_t goss_recording_submit_audio(void* handle, const float* samples,
-                                               uint32_t frame_count, uint32_t sample_rate,
-                                               uint32_t channels, int64_t timestamp_us) {
+int32_t recording_submit_audio_impl(void* handle, const float* samples,
+                                    uint32_t frame_count, uint32_t sample_rate,
+                                    uint32_t channels, int64_t timestamp_us) {
   auto* r = static_cast<Recording*>(handle);
   if (r == nullptr || samples == nullptr || frame_count == 0 || channels == 0 || r->failed) return -1;
   if (r->audio_input == nil) return -1;
@@ -264,7 +277,7 @@ extern "C" int32_t goss_recording_submit_audio(void* handle, const float* sample
   }
 }
 
-extern "C" int32_t goss_recording_finish(void* handle) {
+int32_t recording_finish_impl(void* handle) {
   auto* r = static_cast<Recording*>(handle);
   if (r == nullptr) return -1;
   int32_t status = 0;
@@ -289,12 +302,10 @@ extern "C" int32_t goss_recording_finish(void* handle) {
   return status;
 }
 
-// Decodes a finished file and copies one frame's BGRA pixels out -
-// the harness's by-eye artifact, not a production surface.
-extern "C" int32_t goss_recording_export_frame(const uint8_t* path, size_t path_len,
-                                               uint32_t frame_index, uint8_t* out_bgra,
-                                               size_t capacity, uint32_t* out_width,
-                                               uint32_t* out_height) {
+int32_t recording_export_frame_impl(const uint8_t* path, size_t path_len,
+                                    uint32_t frame_index, uint8_t* out_bgra,
+                                    size_t capacity, uint32_t* out_width,
+                                    uint32_t* out_height) {
   if (path == nullptr || path_len == 0 || out_bgra == nullptr) return -1;
   @autoreleasepool {
     NSString* ns_path = [[NSString alloc] initWithBytes:path
@@ -358,11 +369,9 @@ extern "C" int32_t goss_recording_export_frame(const uint8_t* path, size_t path_
   }
 }
 
-// Decodes a finished file back and reports its real shape - the
-// conformance harness's round-trip proof, not a production surface.
-extern "C" int32_t goss_recording_probe(const uint8_t* path, size_t path_len,
-                                        uint32_t* out_frames, uint32_t* out_width,
-                                        uint32_t* out_height, int64_t* out_duration_us) {
+int32_t recording_probe_impl(const uint8_t* path, size_t path_len,
+                             uint32_t* out_frames, uint32_t* out_width,
+                             uint32_t* out_height, int64_t* out_duration_us) {
   if (path == nullptr || path_len == 0) return -1;
   @autoreleasepool {
     NSString* ns_path = [[NSString alloc] initWithBytes:path
@@ -411,10 +420,8 @@ extern "C" int32_t goss_recording_probe(const uint8_t* path, size_t path_len,
   }
 }
 
-// Reports the audio track's duration, the harness's A/V alignment
-// proof surface.
-extern "C" int32_t goss_recording_probe_audio(const uint8_t* path, size_t path_len,
-                                              int64_t* out_duration_us) {
+int32_t recording_probe_audio_impl(const uint8_t* path, size_t path_len,
+                                   int64_t* out_duration_us) {
   if (path == nullptr || path_len == 0) return -1;
   @autoreleasepool {
     NSString* ns_path = [[NSString alloc] initWithBytes:path
@@ -437,4 +444,64 @@ extern "C" int32_t goss_recording_probe_audio(const uint8_t* path, size_t path_l
     }
     return 0;
   }
+}
+
+}  // namespace
+
+extern "C" void* goss_recording_open(const uint8_t* path, size_t path_len,
+                                     uint32_t width, uint32_t height,
+                                     uint32_t bitrate_bps, uint32_t codec) {
+  GOSS_SHIM_GUARD(void*, nullptr, recording_open_impl(path, path_len, width, height, bitrate_bps, codec))
+}
+
+// Vends the next pool buffer as an opaque frame token plus the Metal
+// texture bgfx renders into. The token stays owned by the caller until
+// commit or abort, and several may be in flight at once.
+extern "C" int32_t goss_recording_begin_frame(void* handle, void** out_frame, void** out_metal_texture) {
+  GOSS_SHIM_GUARD(int32_t, -1, recording_begin_frame_impl(handle, out_frame, out_metal_texture))
+}
+
+extern "C" int32_t goss_recording_commit_frame(void* handle, void* frame_token, int64_t timestamp_us) {
+  GOSS_SHIM_GUARD(int32_t, -1, recording_commit_frame_impl(handle, frame_token, timestamp_us))
+}
+
+extern "C" void goss_recording_abort_frame(void* handle, void* frame_token) {
+  GOSS_SHIM_GUARD(void, (void)0, recording_abort_frame_impl(handle, frame_token))
+}
+
+// Appends interleaved f32 PCM to the recording's audio track at the
+// same microsecond clock the video frames ride, so the muxer keeps the
+// two streams aligned.
+extern "C" int32_t goss_recording_submit_audio(void* handle, const float* samples,
+                                               uint32_t frame_count, uint32_t sample_rate,
+                                               uint32_t channels, int64_t timestamp_us) {
+  GOSS_SHIM_GUARD(int32_t, -1, recording_submit_audio_impl(handle, samples, frame_count, sample_rate, channels, timestamp_us))
+}
+
+extern "C" int32_t goss_recording_finish(void* handle) {
+  GOSS_SHIM_GUARD(int32_t, -1, recording_finish_impl(handle))
+}
+
+// Decodes a finished file and copies one frame's BGRA pixels out -
+// the harness's by-eye artifact, not a production surface.
+extern "C" int32_t goss_recording_export_frame(const uint8_t* path, size_t path_len,
+                                               uint32_t frame_index, uint8_t* out_bgra,
+                                               size_t capacity, uint32_t* out_width,
+                                               uint32_t* out_height) {
+  GOSS_SHIM_GUARD(int32_t, -1, recording_export_frame_impl(path, path_len, frame_index, out_bgra, capacity, out_width, out_height))
+}
+
+// Decodes a finished file back and reports its real shape - the
+// conformance harness's round-trip proof, not a production surface.
+extern "C" int32_t goss_recording_probe(const uint8_t* path, size_t path_len,
+                                        uint32_t* out_frames, uint32_t* out_width,
+                                        uint32_t* out_height, int64_t* out_duration_us) {
+  GOSS_SHIM_GUARD(int32_t, -1, recording_probe_impl(path, path_len, out_frames, out_width, out_height, out_duration_us))
+}
+
+// Reports the audio track's duration, the harness's A/V alignment
+// proof surface.
+extern "C" int32_t goss_recording_probe_audio(const uint8_t* path, size_t path_len,
+                                              int64_t* out_duration_us) {
+  GOSS_SHIM_GUARD(int32_t, -1, recording_probe_audio_impl(path, path_len, out_duration_us))
 }
