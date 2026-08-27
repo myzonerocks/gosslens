@@ -5443,6 +5443,126 @@ fn proveStylize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The fraction of pixels lit as an edge - luma above the midpoint. An edge
+/// map is mostly black, so this counts how much of the frame the detector
+/// marked, and the same measure lets canny be compared against raw sobel.
+fn litFraction(buf: []const u8) f32 {
+    var lit: usize = 0;
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i + 3 < buf.len) : (i += 4) {
+        if (lumaByte(buf[i], buf[i + 1], buf[i + 2]) > 128) lit += 1;
+        total += 1;
+    }
+    if (total == 0) return 0;
+    return @as(f32, @floatFromInt(lit)) / @as(f32, @floatFromInt(total));
+}
+
+/// Proves edge.pass on real content: sobel and canny each turn the frame into a
+/// near-monochrome edge map, deterministic across two captures, that lights up on
+/// a real portrait but goes almost black on a flat frame. Canny's suppression and
+/// hysteresis then leave strictly fewer lit pixels than raw sobel.
+fn proveEdge(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    // A flat mid-grey frame the same size: no gradients anywhere, so a faithful
+    // detector must return almost pure black. NV12 ignores alpha, so a uniform
+    // rgb fill is enough to make the control.
+    const flat_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(flat_rgba);
+    @memset(flat_rgba, 128);
+    const flat_frame: sampler.Frame = .{ .pixels = .{ .rgba8 = flat_rgba }, .width = corpus.frame.width, .height = corpus.frame.height };
+    const flat_planes = try rgbaToNv12(gpa, flat_frame);
+    defer flat_planes.deinit(gpa);
+
+    const control = try captureStylizeShot(gpa, engine, planes, null);
+    defer gpa.free(control);
+
+    var sobel_lit: f32 = 0;
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/sobel");
+        defer gpa.free(a);
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/sobel");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL sobel is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL sobel did not change the frame\n", .{});
+            return false;
+        }
+        const spread = maxChannelSpread(a);
+        if (spread > 2) {
+            std.debug.print("conformance: FAIL sobel is not monochrome (channel spread {d})\n", .{spread});
+            return false;
+        }
+        sobel_lit = litFraction(a);
+        if (sobel_lit < 0.03) {
+            std.debug.print("conformance: FAIL sobel found almost no edges on the corpus (lit {d:.3})\n", .{sobel_lit});
+            return false;
+        }
+        const flat = try captureStylizeShot(gpa, engine, flat_planes, ".lens-packages/sobel");
+        defer gpa.free(flat);
+        const flat_lit = litFraction(flat);
+        if (flat_lit > 0.02) {
+            std.debug.print("conformance: FAIL sobel lit a flat frame (lit {d:.3})\n", .{flat_lit});
+            return false;
+        }
+    }
+
+    var canny_shot: ?[]u8 = null;
+    defer if (canny_shot) |cs| gpa.free(cs);
+    var canny_lit: f32 = 0;
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/canny");
+        canny_shot = a;
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/canny");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL canny is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL canny did not change the frame\n", .{});
+            return false;
+        }
+        const spread = maxChannelSpread(a);
+        const binary = nearBinaryFraction(a);
+        if (spread > 2 or binary < 0.90) {
+            std.debug.print("conformance: FAIL canny is not a near-binary edge map (spread {d}, binary {d:.2})\n", .{ spread, binary });
+            return false;
+        }
+        canny_lit = litFraction(a);
+        if (canny_lit < 0.004) {
+            std.debug.print("conformance: FAIL canny found almost no edges on the corpus (lit {d:.3})\n", .{canny_lit});
+            return false;
+        }
+        const flat = try captureStylizeShot(gpa, engine, flat_planes, ".lens-packages/canny");
+        defer gpa.free(flat);
+        const flat_lit = litFraction(flat);
+        if (flat_lit > 0.02) {
+            std.debug.print("conformance: FAIL canny lit a flat frame (lit {d:.3})\n", .{flat_lit});
+            return false;
+        }
+    }
+
+    if (canny_lit >= sobel_lit) {
+        std.debug.print("conformance: FAIL canny is not thinner than sobel (canny {d:.3} vs sobel {d:.3})\n", .{ canny_lit, sobel_lit });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, canny_shot.?, 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-canny.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF edge.pass sobel and canny are deterministic near-binary edge maps, black on a flat frame, canny thinner than sobel ({d:.3} vs {d:.3})\n", .{ canny_lit, sobel_lit });
+    return true;
+}
+
 /// Proves a bloom.pass post-effect: the bright pass, separable blur and
 /// additive composite bleed a glow from the highlights, so a bloomed
 /// capture differs from the plain one and is bit-stable across runs (no
@@ -8590,6 +8710,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveColorAdjust(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "stylize")) {
             if (!try proveStylize(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "edge")) {
+            if (!try proveEdge(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -8794,6 +8916,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("stacked post effects");
     if (!try proveStylize(gpa, engine)) return 1;
     watchHold("stylize");
+    if (!try proveEdge(gpa, engine)) return 1;
+    watchHold("edge");
     if (!try proveExpressionScript(gpa, engine)) return 1;
     watchHold("expression script");
     if (!try proveEmber(gpa, engine)) return 1;

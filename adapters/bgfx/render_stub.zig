@@ -376,6 +376,30 @@ pub const Renderer = struct {
         _ = params;
     }
 
+    pub fn submitEdgeSobel(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32, texel: [2]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params;
+        _ = texel;
+    }
+
+    pub fn submitEdgeNms(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32, texel: [2]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params;
+        _ = texel;
+    }
+
+    pub fn submitEdgeHyst(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32, texel: [2]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params;
+        _ = texel;
+    }
+
     pub fn submitBloomExtract(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
@@ -825,6 +849,18 @@ pub const Renderer = struct {
     }
 
     pub fn loadStylizeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadEdgeSobelProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadEdgeNmsProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadEdgeHystProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

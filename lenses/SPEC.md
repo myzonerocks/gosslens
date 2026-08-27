@@ -358,6 +358,16 @@ quantized to `levels` with edges past `threshold` knocked to black), `emboss`
 `strength` scales the edge or emboss response. It reads no host input, ships
 no asset, and is always ready.
 
+An `"edge.pass"` node is an edge-detection post-effect over the whole frame. It
+carries an `"edge": {"mode", "low_threshold", "high_threshold", "blur_radius",
+"strength", "invert"}` block. `mode` is `sobel` (a single-pass 3x3 gradient
+magnitude, its brightness scaled by `strength`) or `canny` (a blur, a
+directional sobel, non-maximum suppression and weak-pixel hysteresis chained
+into thin binary edges). `low_threshold` and `high_threshold` are canny's
+hysteresis band and `blur_radius` its pre-blur width in texels; sobel ignores
+all three. `invert` draws dark edges on a light field instead of light on dark.
+It reads no host input, ships no asset, and is always ready.
+
 A `"trail.pass"` node is a motion-trail post-effect. It carries a `"trail":
 {"amount"}` block: `amount` (0..1) is how much of the previous frame the
 current one keeps, so moving subjects smear a fading echo behind them while a

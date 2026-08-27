@@ -346,6 +346,11 @@ pub const Engine = struct {
     /// leaving the chain's two ping-pong targets free to hold the frame
     /// being read and the composite being written.
     bloom_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
+    /// An edge.pass canny node's own scratch pair, sized alongside
+    /// chain_targets: the blur, directional sobel, non-maximum suppression
+    /// and hysteresis stages ping-pong through these two, leaving the chain's
+    /// own targets holding the frame being read and the result being written.
+    edge_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
     chain_width: u16 = 0,
     chain_height: u16 = 0,
     /// Dedicated target for goss_engine_capture_frame - separate from
@@ -723,6 +728,9 @@ pub const Session = struct {
     /// stylize.pass nodes by graph index: their artistic filter packed for
     /// u_stylize (mode, strength, threshold, levels), resolved at activation.
     stylize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// edge.pass nodes by graph index: their detector packed as (mode, low,
+    /// high, blur_radius, strength, invert), resolved at activation.
+    edge_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [6]f32) = .empty,
     /// ssr.pass nodes by graph index: their reflection strength and floor plane.
     ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
@@ -1050,6 +1058,9 @@ pub fn destroyEngine(engine: *Engine) void {
     for (engine.bloom_targets) |slot| {
         if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
     }
+    for (engine.edge_targets) |slot| {
+        if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
+    }
     if (engine.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (engine.capture_staging) |staging| {
         if (engine.renderer) |*r| r.destroyTexture(staging);
@@ -1077,6 +1088,10 @@ fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
     for (&e.bloom_targets) |*slot| {
+        if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+    }
+    for (&e.edge_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
@@ -1557,6 +1572,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // A stylize pass ships no asset; its packed params resolve at
             // activation, so it is ready the moment they are in place.
             .stylize => s.stylize_params.contains(entry.graph_index),
+            // An edge pass ships no asset either; its detector params resolve
+            // at activation, so it is ready as soon as they are in place.
+            .edge => s.edge_params.contains(entry.graph_index),
             // A motion trail owns the frame it echoes (a session target it
             // seeds from the current frame on the first pass), so it is ready
             // as soon as its echo amount is resolved - no host input to gate on.
@@ -1742,6 +1760,64 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
+                }
+            },
+            .edge => {
+                const edge = s.edge_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const is_final = drawn == ready_count;
+                const texel = [2]f32{ 1.0 / @as(f32, @floatFromInt(width)), 1.0 / @as(f32, @floatFromInt(height)) };
+                if (edge[0] < 0.5) {
+                    // Single-pass sobel: mode 0, gain in .y, invert in .z.
+                    const view_id = next_view_id;
+                    next_view_id += 1;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    r.tile = if (is_final) s.capture_tile else null;
+                    if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                    r.submitEdgeSobel(view_id, input_texture, .{ 0.0, edge[4], edge[5], 0.0 }, texel);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                } else {
+                    // Canny: blur, directional sobel, non-maximum suppression
+                    // and hysteresis ping-pong through the two edge scratch
+                    // targets, leaving the frame in input_texture intact.
+                    const scratch0 = e.edge_targets[0] orelse continue;
+                    const scratch1 = e.edge_targets[1] orelse continue;
+                    const base_texture = input_texture;
+                    const blur_step = edge[3] / 4.0;
+                    r.tile = null;
+                    var edge_view = next_view_id;
+                    next_view_id += 1;
+                    render.Renderer.setViewTarget(edge_view, scratch0, width, height);
+                    r.submitBlurPass(edge_view, base_texture, .{ blur_step * texel[0], 0.0 });
+
+                    edge_view = next_view_id;
+                    next_view_id += 1;
+                    render.Renderer.setViewTarget(edge_view, scratch1, width, height);
+                    r.submitBlurPass(edge_view, scratch0.texture, .{ 0.0, blur_step * texel[1] });
+
+                    edge_view = next_view_id;
+                    next_view_id += 1;
+                    render.Renderer.setViewTarget(edge_view, scratch0, width, height);
+                    r.submitEdgeSobel(edge_view, scratch1.texture, .{ 1.0, 0.0, 0.0, 0.0 }, texel);
+
+                    edge_view = next_view_id;
+                    next_view_id += 1;
+                    render.Renderer.setViewTarget(edge_view, scratch1, width, height);
+                    r.submitEdgeNms(edge_view, scratch0.texture, .{ edge[1], edge[2], 0.0, 0.0 }, texel);
+
+                    const view_id = next_view_id;
+                    next_view_id += 1;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    r.tile = if (is_final) s.capture_tile else null;
+                    if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                    r.submitEdgeHyst(view_id, scratch1.texture, .{ edge[5], 0.0, 0.0, 0.0 }, texel);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
                 }
             },
             .dof => {
@@ -2822,6 +2898,7 @@ pub fn destroySession(session: *Session) void {
     session.smooth_params.deinit(session.engine.gpa);
     session.smooth_masks.deinit(session.engine.gpa);
     session.stylize_params.deinit(session.engine.gpa);
+    session.edge_params.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
@@ -5901,6 +5978,7 @@ fn destroyBlendState(session: *Session) void {
     session.smooth_params.clearRetainingCapacity();
     session.smooth_masks.clearRetainingCapacity();
     session.stylize_params.clearRetainingCapacity();
+    session.edge_params.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
     session.ssr_params.clearRetainingCapacity();
     session.env_params.clearRetainingCapacity();
@@ -6301,6 +6379,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createTintParams(s, gpa) catch {};
     createSmoothParams(s, gpa) catch {};
     createStylizeParams(s, gpa) catch {};
+    createEdgeParams(s, gpa) catch {};
     createTrailParams(s, gpa) catch {};
     createSsrParams(s, gpa) catch {};
     createEnvParams(s, gpa) catch {};
@@ -6423,6 +6502,17 @@ fn createStylizeParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(stylizes);
     for (stylizes) |yp| {
         session.stylize_params.put(gpa, yp.graph_index, yp.params) catch {};
+    }
+}
+
+/// Resolves the active lens's edge.pass nodes into session.edge_params,
+/// once at activation - mirrors createStylizeParams, no asset or loader.
+fn createEdgeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const edges = try lens.edgePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(edges);
+    for (edges) |ep| {
+        session.edge_params.put(gpa, ep.graph_index, ep.params) catch {};
     }
 }
 
@@ -7397,6 +7487,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createTintParams(session, gpa);
     try createSmoothParams(session, gpa);
     try createStylizeParams(session, gpa);
+    try createEdgeParams(session, gpa);
     try createTrailParams(session, gpa);
     try createSsrParams(session, gpa);
     try createEnvParams(session, gpa);

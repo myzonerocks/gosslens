@@ -109,6 +109,9 @@ pub const Renderer = struct {
     tint_program: c.bgfx_program_handle_t,
     smooth_program: c.bgfx_program_handle_t,
     stylize_program: c.bgfx_program_handle_t,
+    edge_sobel_program: c.bgfx_program_handle_t,
+    edge_nms_program: c.bgfx_program_handle_t,
+    edge_hyst_program: c.bgfx_program_handle_t,
     trail_program: c.bgfx_program_handle_t,
     ssr_program: c.bgfx_program_handle_t,
     env_program: c.bgfx_program_handle_t,
@@ -173,6 +176,8 @@ pub const Renderer = struct {
     tint_uniform: c.bgfx_uniform_handle_t,
     smooth_uniform: c.bgfx_uniform_handle_t,
     stylize_uniform: c.bgfx_uniform_handle_t,
+    edge_uniform: c.bgfx_uniform_handle_t,
+    edge_texel_uniform: c.bgfx_uniform_handle_t,
     tex_prev: c.bgfx_uniform_handle_t,
     trail_uniform: c.bgfx_uniform_handle_t,
     ssr_uniform: c.bgfx_uniform_handle_t,
@@ -339,6 +344,9 @@ pub const Renderer = struct {
         const tint_program = try loadTintProgram();
         const smooth_program = try loadSmoothProgram();
         const stylize_program = try loadStylizeProgram();
+        const edge_sobel_program = try loadEdgeSobelProgram();
+        const edge_nms_program = try loadEdgeNmsProgram();
+        const edge_hyst_program = try loadEdgeHystProgram();
         const trail_program = try loadTrailProgram();
         const ssr_program = try loadSsrProgram();
         const env_program = try loadEnvProgram();
@@ -420,6 +428,9 @@ pub const Renderer = struct {
             .tint_program = tint_program,
             .smooth_program = smooth_program,
             .stylize_program = stylize_program,
+            .edge_sobel_program = edge_sobel_program,
+            .edge_nms_program = edge_nms_program,
+            .edge_hyst_program = edge_hyst_program,
             .trail_program = trail_program,
             .ssr_program = ssr_program,
             .env_program = env_program,
@@ -470,6 +481,8 @@ pub const Renderer = struct {
             .tint_uniform = c.bgfx_create_uniform("u_tint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .smooth_uniform = c.bgfx_create_uniform("u_smooth", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .stylize_uniform = c.bgfx_create_uniform("u_stylize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .edge_uniform = c.bgfx_create_uniform("u_edge", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .edge_texel_uniform = c.bgfx_create_uniform("u_edgeTexel", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tex_prev = c.bgfx_create_uniform("s_texPrev", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .trail_uniform = c.bgfx_create_uniform("u_trail", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .ssr_uniform = c.bgfx_create_uniform("u_ssr", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -703,6 +716,43 @@ pub const Renderer = struct {
         };
     }
 
+    /// edge.pass's grayscale-and-sobel program, shared by the single-pass
+    /// sobel node and canny's directional-sobel stage - its mode uniform picks
+    /// magnitude-only or magnitude-plus-direction output.
+    pub fn loadEdgeSobelProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_edge_sobel_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_edge_sobel_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_edge_sobel_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_edge_sobel_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// canny's non-maximum suppression program: thins the sobel magnitude to
+    /// its local maxima along the gradient, shared by every edge.pass node.
+    pub fn loadEdgeNmsProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_edge_nms_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_edge_nms_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_edge_nms_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_edge_nms_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// canny's weak-pixel hysteresis program: keeps a suppressed pixel only
+    /// where enough of its neighbours survived, shared by every edge.pass node.
+    pub fn loadEdgeHystProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_edge_hyst_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_edge_hyst_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_edge_hyst_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_edge_hyst_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// layout.composite's per-source blend program, shared by every source: the
     /// shared vertex contract plus the composite fragment shader.
     pub fn loadCompositeProgram() !c.bgfx_program_handle_t {
@@ -889,6 +939,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.fog_uniform);
         c.bgfx_destroy_uniform(r.outline_uniform);
         c.bgfx_destroy_uniform(r.stylize_uniform);
+        c.bgfx_destroy_uniform(r.edge_uniform);
+        c.bgfx_destroy_uniform(r.edge_texel_uniform);
         c.bgfx_destroy_uniform(r.tex_prev);
         c.bgfx_destroy_uniform(r.trail_uniform);
         c.bgfx_destroy_uniform(r.ssr_uniform);
@@ -921,6 +973,9 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.tint_program);
         c.bgfx_destroy_program(r.smooth_program);
         c.bgfx_destroy_program(r.stylize_program);
+        c.bgfx_destroy_program(r.edge_sobel_program);
+        c.bgfx_destroy_program(r.edge_nms_program);
+        c.bgfx_destroy_program(r.edge_hyst_program);
         c.bgfx_destroy_program(r.trail_program);
         c.bgfx_destroy_program(r.ssr_program);
         c.bgfx_destroy_program(r.env_program);
@@ -1548,6 +1603,45 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.stylize_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.stylize_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// edge.pass's sobel stage into view_id: the frame on unit 0, u_edge as
+    /// (mode, strength, invert, 0) - mode 0 outputs the edge magnitude,
+    /// mode 1 the magnitude plus gradient direction canny reads - and the
+    /// per-texel step in u_edgeTexel.
+    pub fn submitEdgeSobel(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32, texel: [2]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.edge_uniform, &params, 1);
+        const texel_vec4 = [4]f32{ texel[0], texel[1], 0.0, 0.0 };
+        c.bgfx_set_uniform(r.edge_texel_uniform, &texel_vec4, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.edge_sobel_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// canny's non-maximum suppression into view_id: the packed magnitude and
+    /// direction on unit 0, u_edge as (low, high, 0, 0) for the hysteresis
+    /// band and u_edgeTexel for the along-gradient sample step.
+    pub fn submitEdgeNms(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32, texel: [2]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.edge_uniform, &params, 1);
+        const texel_vec4 = [4]f32{ texel[0], texel[1], 0.0, 0.0 };
+        c.bgfx_set_uniform(r.edge_texel_uniform, &texel_vec4, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.edge_nms_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// canny's weak-pixel hysteresis into view_id: the suppressed edges on
+    /// unit 0, u_edge.x the invert flag, u_edgeTexel the 3x3 neighbour step.
+    pub fn submitEdgeHyst(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32, texel: [2]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.edge_uniform, &params, 1);
+        const texel_vec4 = [4]f32{ texel[0], texel[1], 0.0, 0.0 };
+        c.bgfx_set_uniform(r.edge_texel_uniform, &texel_vec4, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.edge_hyst_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// bloom.pass's bright-extract stage into view_id: the frame on unit 0,

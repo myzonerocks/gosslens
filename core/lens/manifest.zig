@@ -298,6 +298,23 @@ pub const StylizeField = struct {
     levels: f32 = 10.0,
 };
 
+pub const EdgeField = struct {
+    /// An edge.pass node's detector. sobel is a single-pass 3x3 gradient
+    /// magnitude; canny chains a blur, directional sobel, non-maximum
+    /// suppression and weak-pixel hysteresis into thin binary edges.
+    mode: enum { sobel, canny } = .sobel,
+    /// canny's hysteresis band: an edge fades in from low to high gradient
+    /// magnitude. sobel ignores both.
+    low_threshold: f32 = 0.1,
+    high_threshold: f32 = 0.5,
+    /// canny's pre-blur radius in texels; sobel ignores it.
+    blur_radius: f32 = 4.0,
+    /// sobel's edge-magnitude gain; canny ignores it.
+    strength: f32 = 1.0,
+    /// Draw dark edges on a light field instead of the default light on dark.
+    invert: bool = false,
+};
+
 pub const TrailField = struct {
     /// A trail.pass node's echo amount (0..1): how much of the previous
     /// frame blends into this one, so moving content leaves a motion trail.
@@ -510,6 +527,8 @@ pub const Node = struct {
     smooth: ?SmoothField = null,
     /// Set only on a stylize.pass node: its artistic mode and parameters.
     stylize: ?StylizeField = null,
+    /// Set only on an edge.pass node: its detector mode and parameters.
+    edge: ?EdgeField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -1512,6 +1531,33 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "stylize.pass")) {
             stylize_field = .{};
         }
+        var edge_field: ?EdgeField = null;
+        if (getField(object, "edge")) |ev| {
+            const emark = path.push("edge");
+            if (!std.mem.eql(u8, node_type, "edge.pass")) {
+                try diags.add(path.slice(), "edge is an edge.pass field, found it on '{s}'", .{node_type});
+            } else if (ev != .object) {
+                try diags.add(path.slice(), "edge must be an object", .{});
+            } else {
+                var field: EdgeField = .{};
+                if (getField(ev.object, "mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "edge mode names an unknown detector '{s}'", .{name});
+                    }
+                }
+                if (getField(ev.object, "low_threshold")) |v| field.low_threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.low_threshold)), 0.0, 1.0);
+                if (getField(ev.object, "high_threshold")) |v| field.high_threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.high_threshold)), 0.0, 1.0);
+                if (getField(ev.object, "blur_radius")) |v| field.blur_radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.blur_radius)), 1.0, 8.0);
+                if (getField(ev.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 8.0);
+                if (getField(ev.object, "invert")) |v| {
+                    if (v == .bool) field.invert = v.bool;
+                }
+                edge_field = field;
+            }
+            path.pop(emark);
+        } else if (std.mem.eql(u8, node_type, "edge.pass")) {
+            edge_field = .{};
+        }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
             const tmark = path.push("trail");
@@ -2129,6 +2175,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .tint = tint_field,
             .smooth = smooth_field,
             .stylize = stylize_field,
+            .edge = edge_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,

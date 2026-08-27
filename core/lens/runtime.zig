@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, tint_pass, smooth_pass, stylize_pass, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, tint_pass, smooth_pass, stylize_pass, edge_pass, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -56,6 +56,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "tint.pass")) return .tint_pass;
     if (std.mem.eql(u8, type_str, "smooth.pass")) return .smooth_pass;
     if (std.mem.eql(u8, type_str, "stylize.pass")) return .stylize_pass;
+    if (std.mem.eql(u8, type_str, "edge.pass")) return .edge_pass;
     if (std.mem.eql(u8, type_str, "trail.pass")) return .trail_pass;
     if (std.mem.eql(u8, type_str, "ssr.pass")) return .ssr_pass;
     if (std.mem.eql(u8, type_str, "env.pass")) return .env_pass;
@@ -88,7 +89,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .tint_pass, .smooth_pass, .stylize_pass, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .tint_pass, .smooth_pass, .stylize_pass, .edge_pass, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
     };
 }
 
@@ -147,6 +148,8 @@ const LensNode = struct {
     smooth: ?manifest.SmoothField = null,
     /// .stylize_pass only: the node's artistic mode and parameters.
     stylize: ?manifest.StylizeField = null,
+    /// .edge_pass only: the node's detector mode and parameters.
+    edge: ?manifest.EdgeField = null,
     /// .trail_pass only: the node's motion-trail echo amount.
     trail: ?manifest.TrailField = null,
     /// .ssr_pass only: the node's reflection strength and floor plane.
@@ -334,6 +337,14 @@ pub const StylizePassNode = struct {
     params: [4]f32,
 };
 
+/// One edge.pass node ready for the caller to draw - which graph node it is,
+/// and its detector packed as (mode, low, high, blur_radius, strength, invert):
+/// mode 0 draws a single-pass sobel, mode 1 the multi-pass canny chain.
+pub const EdgePassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [6]f32,
+};
+
 pub const TrailPassNode = struct {
     graph_index: graph.NodeIndex,
     amount: f32,
@@ -355,7 +366,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, tint, smooth, stylize, trail, ssr, env, model, mesh, draw_board, sprite };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, tint, smooth, stylize, edge, trail, ssr, env, model, mesh, draw_board, sprite };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -610,6 +621,22 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every edge.pass node this lens spliced, in execution order, each
+    /// carrying its detector packed as (mode, low, high, blur_radius,
+    /// strength, invert) - mode 0 sobel, mode 1 canny.
+    pub fn edgePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]EdgePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(EdgePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .edge_pass) continue;
+            const ef = node.edge orelse manifest.EdgeField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(ef.mode)), ef.low_threshold, ef.high_threshold, ef.blur_radius, ef.strength, if (ef.invert) 1 else 0 } });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every trail.pass node this lens spliced, in execution order, each
     /// carrying its motion-trail echo amount.
     pub fn trailPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]TrailPassNode {
@@ -759,6 +786,7 @@ pub const Lens = struct {
                 .tint_pass => .tint,
                 .smooth_pass => .smooth,
                 .stylize_pass => .stylize,
+                .edge_pass => .edge,
                 .trail_pass => .trail,
                 .ssr_pass => .ssr,
                 .env_pass => .env,
@@ -992,6 +1020,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .tint = if (node_type == .tint_pass) node.tint else null,
             .smooth = if (node_type == .smooth_pass) node.smooth else null,
             .stylize = if (node_type == .stylize_pass) node.stylize else null,
+            .edge = if (node_type == .edge_pass) node.edge else null,
             .trail = if (node_type == .trail_pass) node.trail else null,
             .ssr = if (node_type == .ssr_pass) node.ssr else null,
             .env = if (node_type == .env_pass) node.env else null,
