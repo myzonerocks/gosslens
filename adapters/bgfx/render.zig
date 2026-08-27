@@ -1046,6 +1046,15 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.particle_size_uniform);
         c.bgfx_destroy_uniform(r.particle_fx_uniform);
         c.bgfx_destroy_uniform(r.yuv_uniform);
+        c.bgfx_destroy_uniform(r.tint_uniform);
+        c.bgfx_destroy_uniform(r.smooth_uniform);
+        c.bgfx_destroy_uniform(r.sim_params_uniform);
+        c.bgfx_destroy_uniform(r.sim_params2_uniform);
+        c.bgfx_destroy_uniform(r.sim_params3_uniform);
+        c.bgfx_destroy_uniform(r.sim_params4_uniform);
+        c.bgfx_destroy_uniform(r.sim_params5_uniform);
+        c.bgfx_destroy_program(r.brush_program);
+        if (r.particle_compute_program) |compute_program| c.bgfx_destroy_program(compute_program);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
         c.bgfx_destroy_program(r.lut_program);
