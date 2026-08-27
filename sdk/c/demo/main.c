@@ -1,5 +1,5 @@
 /*
- * Minimal C consumer: links what `zig build c-sdk` stages and drives the ABI's
+ * A C consumer: links what `zig build c` stages and drives the ABI's
  * renderer-free slice end to end. The GPU path needs a real renderer the host
  * library does not carry, so it prints that status rather than asserting.
  */

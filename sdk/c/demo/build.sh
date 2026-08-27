@@ -6,7 +6,7 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
-sdk="$root/zig-out/c-sdk"
+sdk="$root/zig-out/c"
 
 if [ -n "${ZIG:-}" ]; then
     zig="$ZIG"
@@ -17,8 +17,8 @@ else
 fi
 cc="${CC:-cc}"
 
-# Stage libgosslens (static + shared) and the header under zig-out/c-sdk.
-( cd "$root" && "$zig" build c-sdk )
+# Stage libgosslens (static + shared) and the header under zig-out/c.
+( cd "$root" && "$zig" build c )
 
 # Compile and link. The binary goes next to the staged library under zig-out,
 # which is not part of the tracked tree. -rpath lets it find the shared library

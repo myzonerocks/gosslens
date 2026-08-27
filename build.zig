@@ -117,16 +117,16 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
         .root_module = abi_module,
     });
-    const c_sdk_step = b.step("c-sdk", "Stage the C SDK under zig-out/c-sdk: static + shared libgosslens and the C ABI header");
-    c_sdk_step.dependOn(&b.addInstallArtifact(gosslens_lib, .{
-        .dest_dir = .{ .override = .{ .custom = "c-sdk/lib" } },
+    const c_step = b.step("c", "Stage the C SDK under zig-out/c: static + shared libgosslens and the C ABI header");
+    c_step.dependOn(&b.addInstallArtifact(gosslens_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "c/lib" } },
     }).step);
-    c_sdk_step.dependOn(&b.addInstallArtifact(gosslens_shared, .{
-        .dest_dir = .{ .override = .{ .custom = "c-sdk/lib" } },
+    c_step.dependOn(&b.addInstallArtifact(gosslens_shared, .{
+        .dest_dir = .{ .override = .{ .custom = "c/lib" } },
     }).step);
-    c_sdk_step.dependOn(&b.addInstallFileWithDir(
+    c_step.dependOn(&b.addInstallFileWithDir(
         b.path("include/gosslens.h"),
-        .{ .custom = "c-sdk/include" },
+        .{ .custom = "c/include" },
         "gosslens.h",
     ).step);
 

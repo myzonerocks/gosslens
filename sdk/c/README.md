@@ -7,7 +7,7 @@ library any language with a C FFI can link. This is the direct surface: the
 functions, so a Python, Rust, Go, or C++ host reaches the engine through this
 header instead of a hand-written wrapper.
 
-There is no separate C header to drift from the ABI. `zig build c-sdk` stages
+There is no separate C header to drift from the ABI. `zig build c` stages
 the one in `include/` next to the library, and building the library is the same
 check a consumer runs: if the frozen ABI ever stopped linking, this step fails
 first.
@@ -15,10 +15,10 @@ first.
 ## Build
 
 ```
-zig build c-sdk
+zig build c
 ```
 
-stages, under `zig-out/c-sdk/`:
+stages, under `zig-out/c/`:
 
     include/gosslens.h        the frozen C ABI, copied from include/
     lib/libgosslens.dylib     the shared library (.so on Linux)
@@ -40,9 +40,9 @@ why most consumers link the shared library or build a platform archive set with
 
 ```
 cc app.c \
-    -I zig-out/c-sdk/include \
-    -L zig-out/c-sdk/lib -lgosslens \
-    -Wl,-rpath,zig-out/c-sdk/lib \
+    -I zig-out/c/include \
+    -L zig-out/c/lib -lgosslens \
+    -Wl,-rpath,zig-out/c/lib \
     -o app
 ```
 
@@ -54,7 +54,7 @@ any-thread.
 
 ## What the host library carries
 
-The library `c-sdk` stages is the host build, and it does not bring up a GPU
+The library `c` stages is the host build, and it does not bring up a GPU
 renderer or the in-engine inference stack. `goss_engine_init_renderer` reports
 `GOSS_ERROR_RENDERER_UNAVAILABLE`, so the calls that need a surface - frame
 submission, `goss_engine_render_frame`, and the capture paths - report the same;
@@ -79,7 +79,7 @@ the fastest way to confirm the library links and runs:
 sdk/c/demo/build.sh
 ```
 
-builds `c-sdk`, compiles the example against the shared library, and runs it.
+builds `c`, compiles the example against the shared library, and runs it.
 
 External projects that build with CMake can consume the staged library through
 [`CMakeLists.txt`](CMakeLists.txt), which imports it rather than rebuilding the
