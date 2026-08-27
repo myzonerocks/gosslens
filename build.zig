@@ -108,6 +108,28 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(gosslens_lib);
 
+    // The C SDK: the same abi_module packaged for a plain C consumer. The
+    // shared library folds every transitive backend into one self-contained
+    // object; the static archive rides alongside for zig cc callers. The
+    // staged header is the one in include/, so building this is the ABI check.
+    const gosslens_shared = b.addLibrary(.{
+        .name = "gosslens",
+        .linkage = .dynamic,
+        .root_module = abi_module,
+    });
+    const c_sdk_step = b.step("c-sdk", "Stage the C SDK under zig-out/c-sdk: static + shared libgosslens and the C ABI header");
+    c_sdk_step.dependOn(&b.addInstallArtifact(gosslens_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "c-sdk/lib" } },
+    }).step);
+    c_sdk_step.dependOn(&b.addInstallArtifact(gosslens_shared, .{
+        .dest_dir = .{ .override = .{ .custom = "c-sdk/lib" } },
+    }).step);
+    c_sdk_step.dependOn(&b.addInstallFileWithDir(
+        b.path("include/gosslens.h"),
+        .{ .custom = "c-sdk/include" },
+        "gosslens.h",
+    ).step);
+
     const abi_dump_module = b.createModule(.{
         .root_source_file = b.path("tools/abi_dump.zig"),
         .target = target,

@@ -189,7 +189,8 @@ red license gate is a failed change, not an exception request hidden in a PR.
 
 `include/gosslens.h` is the one C ABI. It uses opaque handles and plain data
 descriptors. Swift imports it, Kotlin reaches it through JNI, and the web uses
-the same core compiled to wasm.
+the same core compiled to wasm. `sdk/c` packages the same header and a linkable
+`libgosslens` for any other language with a C FFI.
 
 No C++ type crosses it. No vendor type crosses it. No platform object crosses
 it except as an opaque platform handle described by the ABI contract.

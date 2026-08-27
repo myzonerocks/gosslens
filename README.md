@@ -23,7 +23,7 @@ analytics. A camera frame never leaves the process.
     include/gosslens.h          the C ABI
     core/                       frame graph, lens runtime, tracking, media, math
     adapters/                   native/vendor backends behind engine boundaries
-    sdk/                        swift, kotlin, ts packages and demo apps
+    sdk/                        c, swift, kotlin, ts packages and demo apps
     lenses/                     the .glens format: spec, validator, reference lenses
     harness/                    headless conformance runner
     third_party/                pinned vendor dependencies
@@ -51,9 +51,13 @@ on-screen harness and the conformance proof to the per-device checks, is in
 
 ## SDKs
 
-Each SDK is a thin package over the same C ABI and holds one operation contract
-across all three ([docs/API.md](docs/API.md)).
+The C ABI in [include/gosslens.h](include/gosslens.h) is the surface every SDK
+wraps. [sdk/c](sdk/c) packages it as a linkable `libgosslens` for any language
+with a C FFI; the platform SDKs below are thin wrappers over the same `goss_*`
+functions and hold one operation contract across all three
+([docs/API.md](docs/API.md)).
 
+- C, for any language: [sdk/c](sdk/c), the ABI packaged as a shared and static library
 - Swift, for iOS: [sdk/swift](sdk/swift), integrated per [docs/INTEGRATION-iOS.md](docs/INTEGRATION-iOS.md)
 - Kotlin, for Android: [sdk/kotlin](sdk/kotlin), integrated per [docs/INTEGRATION-ANDROID.md](docs/INTEGRATION-ANDROID.md)
 - TypeScript, for the web: [sdk/ts](sdk/ts), integrated per [docs/INTEGRATION-WEB.md](docs/INTEGRATION-WEB.md)

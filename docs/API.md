@@ -4,6 +4,12 @@ Gosslens has one C ABI and three public SDKs: Swift, Kotlin, and TypeScript.
 The ABI is the engine contract. This file is the public SDK naming and shape
 contract built on top of it.
 
+The ABI is also consumable directly. [sdk/c](../sdk/c) packages
+[include/gosslens.h](../include/gosslens.h) as a linkable library, so any
+language with a C FFI reaches the engine through the `goss_*` functions as they
+are spelled here. The C surface uses those names unchanged; the naming rules
+below govern the wrappers that rename them for a host language.
+
 A developer who learns one Gosslens SDK should not have to relearn the same
 operation on another platform.
 
