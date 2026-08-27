@@ -258,6 +258,42 @@ extension GossSession {
         }
     }
 
+    /// Feeds a segmentation mask the host tracking module computed as the
+    /// subject texture the blend and mask channels sample: mask_side squared
+    /// floats, row major. An empty array clears it. The web analysis-producer
+    /// path; throws .unsupported off the web, where the in-engine worker runs.
+    public func setSegmentationMask(_ mask: [Float]) throws {
+        if mask.isEmpty {
+            try checked(goss_session_set_segmentation_mask(handle, nil, 0))
+            return
+        }
+        try mask.withUnsafeBufferPointer { buf in
+            try checked(goss_session_set_segmentation_mask(handle, buf.baseAddress, UInt32(mask.count)))
+        }
+    }
+
+    /// The class channels the active lens samples, as a bitmask over the mask
+    /// channels (bit 0 person, bit 1 background, and so on). The host uploads
+    /// exactly these class masks each frame with setSegmentationClassMask;
+    /// zero means only the subject mask is wanted.
+    public func segmentationChannels() -> UInt32 {
+        goss_session_segmentation_channels(handle)
+    }
+
+    /// Uploads one class channel's mask (mask_side squared floats) as the
+    /// texture that channel's passes sample. channel indexes the mask
+    /// channels; channel 0 (person) rides setSegmentationMask, which clears
+    /// the classes, so upload the classes after it. An empty array clears one.
+    public func setSegmentationClassMask(channel: UInt32, mask: [Float]) throws {
+        if mask.isEmpty {
+            try checked(goss_session_set_segmentation_class_mask(handle, channel, nil, 0))
+            return
+        }
+        try mask.withUnsafeBufferPointer { buf in
+            try checked(goss_session_set_segmentation_class_mask(handle, channel, buf.baseAddress, UInt32(mask.count)))
+        }
+    }
+
     /// Samples a reference photo's makeup color per face part, so a tint.pass
     /// with a reference source paints the live face in that color. rgba is
     /// width by height RGBA8; landmarks is the reference face's 478 x, y, z

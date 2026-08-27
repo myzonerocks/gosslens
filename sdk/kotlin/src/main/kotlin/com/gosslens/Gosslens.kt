@@ -143,12 +143,27 @@ object Gosslens {
     internal external fun nativeYuvToRgb(standard: Int, range: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeSolveTwoBoneIk(inBuffer: ByteBuffer, upperLen: Float, lowerLen: Float, outBuffer: ByteBuffer): Int
     internal external fun nativeActivateLensFromDirectory(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
+    internal external fun nativeSubmitFrame(session: Long, plane0: Long, plane1: Long, plane2: Long, planeCount: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, colorStandard: Int, colorRange: Int, timestampUs: Long): Int
+    internal external fun nativeSubmitFrameRgbaCopy(session: Long, rgba: ByteBuffer, stride: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, timestampUs: Long): Int
+    internal external fun nativeEnableSegmentation(session: Long, modelBuffer: ByteBuffer, modelLen: Int, threads: Int): Int
+    internal external fun nativeDisableSegmentation(session: Long)
+    internal external fun nativeSetFaceLandmarks(session: Long, pointsBuffer: ByteBuffer, pointCount: Int): Int
+    internal external fun nativeSetBeautyLut(session: Long, slot: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
+    internal external fun nativeSetBeautyMakeupTexture(session: Long, effect: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
+    internal external fun nativeCaptureFrame(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
+    internal external fun nativeCapturePhotoAs(engine: Long, session: Long, format: Int, quality: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
+    internal external fun nativeRenderToLiveTexture(engine: Long, session: Long, nativeHandle: Long, width: Int, height: Int): Int
 
     const val COLOR_BT601 = 0
     const val COLOR_BT709 = 1
     const val COLOR_BT2020 = 2
     const val RANGE_VIDEO = 0
     const val RANGE_FULL = 1
+    const val PIXEL_NV12 = 0
+    const val PIXEL_NV21 = 1
+    const val PIXEL_I420 = 2
+    const val PIXEL_BGRA8 = 3
+    const val PIXEL_RGBA8 = 4
     const val FLAG_MIRROR = 1
     const val ROTATION_SHIFT = 8
     const val FACE_LANDMARK_COUNT = 478
@@ -402,6 +417,46 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         return encoded
     }
 
+    /** Captures the composited frame as a platform photo (1 JPEG, 2 HEIC)
+     * at [quality] percent, sized by a probe call first. Lossy and not
+     * bit-stable across runs - the PNG [capturePhoto] stays the
+     * deterministic surface. Null when the photo backend is away. */
+    fun capturePhotoAs(session: GossSession?, format: Int, quality: Int = 0): ByteArray? {
+        val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        val probeStatus = Gosslens.nativeCapturePhotoAs(handle, session?.handle ?: 0L, format, quality, probe, 0L, info)
+        val needed = info.getLong(0)
+        if (probeStatus == 0 && needed == 0L) return ByteArray(0)
+        if (needed <= 0L) return null
+        val data = ByteBuffer.allocateDirect(needed.toInt())
+        if (Gosslens.nativeCapturePhotoAs(handle, session?.handle ?: 0L, format, quality, data, needed, info) != 0) return null
+        val encoded = ByteArray(info.getLong(0).toInt())
+        data.get(encoded)
+        return encoded
+    }
+
+    /** Debug/test tooling only. Renders like renderFrame and reads the
+     * composited output back as RGBA8, row 0 first, at the render size;
+     * [width] and [height] must be at least the render surface. Null when
+     * the renderer is unavailable. */
+    fun captureFrame(session: GossSession?, width: Int, height: Int): ByteArray? {
+        if (width <= 0 || height <= 0) return null
+        val info = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val capacity = width * height * 4
+        val data = ByteBuffer.allocateDirect(capacity)
+        if (Gosslens.nativeCaptureFrame(handle, session?.handle ?: 0L, data, capacity.toLong(), info) != 0) return null
+        val frame = ByteArray(capacity)
+        data.get(frame)
+        return frame
+    }
+
+    /** Renders the composited frame straight into a caller-supplied external
+     * texture ([nativeHandle], a platform texture object) instead of reading
+     * it back, zero-copy. False means the override is warming up (skip this
+     * frame and retry) or the path is unavailable on this backend. */
+    fun renderToLiveTexture(session: GossSession, nativeHandle: Long, width: Int, height: Int): Boolean =
+        Gosslens.nativeRenderToLiveTexture(handle, session.handle, nativeHandle, width, height) == 0
+
     // Idempotent like destroy() everywhere else - a second close() must
     // not hand the native side an already-freed handle.
     override fun close() {
@@ -567,6 +622,47 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         colorStandard, colorRange, timestampUs,
     ) == 0
 
+    /** Zero-copy submission: up to three platform texture handles (an
+     * AHardwareBuffer-backed image or a GL texture) as opaque pointer-sized
+     * values in [planes]. The platform objects must outlive the next rendered
+     * frame; [pixelFormat] is a PIXEL_* value. Prefer this over the copy paths. */
+    fun submitFrame(
+        planes: LongArray,
+        width: Int,
+        height: Int,
+        rotationDegrees: Int,
+        mirrored: Boolean,
+        pixelFormat: Int = Gosslens.PIXEL_NV12,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
+        timestampUs: Long,
+    ): Boolean = Gosslens.nativeSubmitFrame(
+        handle,
+        if (planes.isNotEmpty()) planes[0] else 0L,
+        if (planes.size > 1) planes[1] else 0L,
+        if (planes.size > 2) planes[2] else 0L,
+        planes.size, width, height, pixelFormat,
+        Gosslens.flagsFor(rotationDegrees, mirrored),
+        colorStandard, colorRange, timestampUs,
+    ) == 0
+
+    /** The CPU-copy path for a single interleaved BGRA8/RGBA8 plane - a
+     * Bitmap or decoded video frame's own byte buffer, with no native GPU
+     * handle behind it. [pixelFormat] is PIXEL_BGRA8 or PIXEL_RGBA8. */
+    fun submitFrameRgbaCopy(
+        rgba: ByteBuffer,
+        stride: Int,
+        width: Int,
+        height: Int,
+        pixelFormat: Int = Gosslens.PIXEL_RGBA8,
+        rotationDegrees: Int = 0,
+        mirrored: Boolean = false,
+        timestampUs: Long = 0,
+    ): Boolean = Gosslens.nativeSubmitFrameRgbaCopy(
+        handle, rgba, stride, width, height, pixelFormat,
+        Gosslens.flagsFor(rotationDegrees, mirrored), timestampUs,
+    ) == 0
+
     fun reportFrame(frameTimeUs: Int, thermal: Int): Int =
         Gosslens.nativeReportFrame(handle, frameTimeUs, thermal)
 
@@ -675,6 +771,26 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
     ) == 0
 
+    /** Stands the segmentation worker up from a raw model - a selfie or hair
+     * segmenter .tflite; [model] is a direct buffer of the model bytes. Once
+     * enabled, trackFrame feeds it the same frame it feeds the trackers. */
+    fun enableSegmentation(model: ByteBuffer, threads: Int): Boolean =
+        Gosslens.nativeEnableSegmentation(handle, model, model.remaining(), threads) == 0
+
+    fun disableSegmentation() = Gosslens.nativeDisableSegmentation(handle)
+
+    /** Feeds one frame's tracked face landmarks in directly (x, y in frame
+     * pixels, z in the same scale, three floats per point); an empty array
+     * clears them. The web-only path for the landmark-driven beauty effects;
+     * UNSUPPORTED off web, where trackFrame feeds the same effects instead. */
+    fun setFaceLandmarks(points: FloatArray): Boolean {
+        if (points.isEmpty()) return Gosslens.nativeSetFaceLandmarks(handle, ByteBuffer.allocateDirect(4), 0) == 0
+        val buf = ByteBuffer.allocateDirect(points.size * 4).order(ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(points)
+        buf.rewind()
+        return Gosslens.nativeSetFaceLandmarks(handle, buf, points.size / 3) == 0
+    }
+
     /** Stands the beauty chain up; [resourceDir] holds the effect engine's
      * shader and image assets on disk. */
     fun enableBeauty(resourceDir: String): Boolean {
@@ -699,6 +815,26 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     fun setBigEye(amount: Float) = setBeauty(3, amount)
     fun setLipstick(amount: Float) = setBeauty(4, amount)
     fun setBlush(amount: Float) = setBeauty(5, amount)
+
+    /** Web only; UNSUPPORTED on every other target, where whiten runs through
+     * the native beauty engine. Uploads one of whiten's four lookup textures
+     * (slot 0 gray, 1 origin, 2 skin, 3 custom); [rgba] is width by height
+     * RGBA8. Whiten stays inert until all four slots are loaded. */
+    fun setBeautyLut(slot: Int, rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSetBeautyLut(handle, slot, buf, width, height) == 0
+    }
+
+    /** Web only; UNSUPPORTED on every other target. Uploads lipstick's (4) or
+     * blush's (5) own source image; [rgba] is width by height RGBA8. */
+    fun setBeautyMakeupTexture(effect: Int, rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSetBeautyMakeupTexture(handle, effect, buf, width, height) == 0
+    }
 
     fun beautifyFrame(rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Boolean =
         Gosslens.nativeBeautifyFrame(handle, rgbaIn, rgbaOut, width, height) == 0

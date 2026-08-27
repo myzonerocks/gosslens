@@ -70,6 +70,15 @@ public final class GossSession: @unchecked Sendable {
         try checked(goss_session_submit_frame_rgba_copy(handle, &raw, rgba, stride))
     }
 
+    /// Zero-copy submission of a platform hardware buffer (an AHardwareBuffer
+    /// on Android); hardwareBuffer is the opaque platform handle. False means
+    /// the buffer could not be imported, the signal to fall back to
+    /// submitFrameCopy for this stream.
+    public func submitHardwareBuffer(desc: GossFrameDesc, hardwareBuffer: UnsafeMutableRawPointer) -> Bool {
+        var raw = desc.raw
+        return goss_session_submit_hardware_buffer(handle, &raw, hardwareBuffer) == GOSS_OK
+    }
+
     // MARK: - Telemetry
 
     /// Reports one finished frame: measured whole-pipeline time plus
@@ -122,6 +131,20 @@ public final class GossSession: @unchecked Sendable {
     /// upper body; the lower-body joints (knees down) read absent.
     public func setPoseUpperBody(_ enabled: Bool) throws {
         try checked(goss_session_set_pose_upper_body(handle, enabled ? 1 : 0))
+    }
+
+    /// Stands the segmentation worker up from a raw selfie or hair segmenter
+    /// .tflite model (not bundled the way a face_landmarker.task is). The
+    /// bytes are copied; the caller may release them on return. Throws
+    /// .unsupported on builds without the inference stack.
+    public func enableSegmentation(model: Data, threads: Int32) throws {
+        try model.withUnsafeBytes { buffer in
+            try checked(goss_session_enable_segmentation(handle, buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count, threads))
+        }
+    }
+
+    public func disableSegmentation() {
+        goss_session_disable_segmentation(handle)
     }
 
     public func trackFrame(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, colorStandard: GossColorStandard = .bt709, colorRange: GossColorRange = .video, timestampUs: Int64) throws {

@@ -616,6 +616,70 @@ export class GossEngine {
     }
   }
 
+  /// The composited frame encoded as a deterministic PNG - the same
+  /// pixels, the same bytes - at the submitted frame's own resolution.
+  /// captureStill is the configurable superset (a chosen size, JPEG, or a
+  /// wider gamut); this is the plain PNG surface. Wasm core only.
+  async capturePhoto(session: GossSession | null): Promise<Uint8Array> {
+    return this.captureEncoded(
+      "goss_engine_capture_photo",
+      ["number", "number", "number", "number", "number", "number", "number"],
+      (dataPtr, capacity, lenPtr, widthPtr, heightPtr) => [this.handle, session?.handle ?? 0, dataPtr, capacity, lenPtr, widthPtr, heightPtr],
+    );
+  }
+
+  /// The composited frame as a platform photo: format 1 is JPEG at quality
+  /// 1..100 (the engine's own encoder, present on web too), format 2 is HEIC
+  /// (the native photo backend, GOSS_UNSUPPORTED on web). Lossy and not
+  /// bit-stable across runs, so capturePhoto stays the deterministic path.
+  async capturePhotoAs(session: GossSession | null, format: number, quality = 90): Promise<Uint8Array> {
+    return this.captureEncoded(
+      "goss_engine_capture_photo_as",
+      ["number", "number", "number", "number", "number", "number", "number", "number", "number"],
+      (dataPtr, capacity, lenPtr, widthPtr, heightPtr) => [this.handle, session?.handle ?? 0, format, quality, dataPtr, capacity, lenPtr, widthPtr, heightPtr],
+    );
+  }
+
+  /// The probe-then-capture the encoded-photo ABI ops share: render and encode
+  /// once into a one-byte buffer to learn the exact size (the encoders write
+  /// out_len before rejecting a too-small capacity), then capture into a buffer
+  /// of that size. Wasm core only, like captureStill; WebGL2 renders in JS.
+  private async captureEncoded(
+    callName: string,
+    argTypes: string[],
+    buildArgs: (dataPtr: number, capacity: number, lenPtr: number, widthPtr: number, heightPtr: number) => unknown[],
+  ): Promise<Uint8Array> {
+    if (this.gl) throw new Error(`${callName} needs the wasm renderer`);
+    const mod = this.mod;
+    const lenPtr = mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const widthPtr = mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const heightPtr = mod.ccall("goss_alloc", "number", ["number"], [4]);
+    // A one-byte buffer keeps the probe past the ABI's null-pointer guard so
+    // the encoder runs and reports the real size through lenPtr.
+    const probePtr = mod.ccall("goss_alloc", "number", ["number"], [1]);
+    let dataPtr = 0;
+    let capacity = 0;
+    this.captureInFlight = true;
+    try {
+      const probeStatus = await mod.ccall(callName, "number", argTypes, buildArgs(probePtr, 0, lenPtr, widthPtr, heightPtr), { async: true });
+      capacity = mod.getValue(lenPtr, "i32");
+      if (capacity === 0) return new Uint8Array(0);
+      if (capacity < 0) throw new Error(`${callName} probe failed: status ${probeStatus}`);
+      dataPtr = mod.ccall("goss_alloc", "number", ["number"], [capacity]);
+      const status = await mod.ccall(callName, "number", argTypes, buildArgs(dataPtr, capacity, lenPtr, widthPtr, heightPtr), { async: true });
+      if (status !== GOSS_OK) throw new Error(`${callName} failed: status ${status}`);
+      const encoded = mod.getValue(lenPtr, "i32");
+      return mod.HEAPU8.slice(dataPtr, dataPtr + encoded);
+    } finally {
+      this.captureInFlight = false;
+      mod.ccall("goss_free", null, ["number", "number"], [probePtr, 1]);
+      mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+      mod.ccall("goss_free", null, ["number", "number"], [widthPtr, 4]);
+      mod.ccall("goss_free", null, ["number", "number"], [heightPtr, 4]);
+      if (dataPtr !== 0) mod.ccall("goss_free", null, ["number", "number"], [dataPtr, capacity]);
+    }
+  }
+
   async readCenterPixel(session: GossSession | null): Promise<Uint8Array> {
     const { pixels, width, height } = await this.capturePixels(session);
     const offset = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
@@ -818,6 +882,23 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [namePtr, bytes.length]);
     this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 4]);
     return value;
+  }
+
+  /// Feeds interleaved f32 PCM into the session's own level and beat
+  /// analysis, which drives the audio.level and audio.beat lens triggers.
+  /// samples holds frameCount * channels floats; timestampUs is carried for a
+  /// muxed recording track, unused by the web preview path.
+  submitAudio(samples: Float32Array, frameCount: number, sampleRate: number, channels: number, timestampUs: bigint = 0n): void {
+    const bytes = samples.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    this.mod.HEAPF32.set(samples, ptr >> 2);
+    this.mod.ccall(
+      "goss_session_submit_audio",
+      "number",
+      ["number", "number", "number", "number", "number", "number"],
+      [this.handle, ptr, frameCount, sampleRate, channels, timestampUs],
+    );
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
   /// Pulls the next block of mixed lens audio (frames interleaved s16) that

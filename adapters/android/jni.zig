@@ -142,6 +142,132 @@ export fn Java_com_gosslens_Gosslens_nativeActivateLensFromDirectory(env: *JniEn
     return @intFromEnum(abi.goss_session_activate_lens_from_directory(sessionFromHandle(session), bytes, @intCast(path_len)));
 }
 
+/// Zero-copy submission: up to three platform texture handles arrive as plain
+/// i64 values, packed into goss_frame_planes; the platform objects behind them
+/// must outlive the next rendered frame.
+export fn Java_com_gosslens_Gosslens_nativeSubmitFrame(
+    env: *JniEnv,
+    cls: jobject,
+    session: i64,
+    plane0: i64,
+    plane1: i64,
+    plane2: i64,
+    plane_count: i32,
+    width: i32,
+    height: i32,
+    pixel_format: i32,
+    flags: i32,
+    color_standard: i32,
+    color_range: i32,
+    timestamp_us: i64,
+) i32 {
+    _ = env;
+    _ = cls;
+    var desc: abi.FrameDesc = .{
+        .width = @intCast(@max(width, 0)),
+        .height = @intCast(@max(height, 0)),
+        .pixel_format = @intCast(@max(pixel_format, 0)),
+        .color_standard = @intCast(@max(color_standard, 0)),
+        .color_range = @intCast(@max(color_range, 0)),
+        .flags = @bitCast(flags),
+        .timestamp_us = timestamp_us,
+    };
+    var planes: abi.FramePlanes = .{
+        .plane_count = @intCast(@max(plane_count, 0)),
+        .reserved = 0,
+        .planes = .{ @bitCast(plane0), @bitCast(plane1), @bitCast(plane2) },
+    };
+    return @intFromEnum(abi.goss_session_submit_frame(sessionFromHandle(session), &desc, &planes));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSubmitFrameRgbaCopy(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, stride: i32, width: i32, height: i32, pixel_format: i32, flags: i32, timestamp_us: i64) i32 {
+    _ = cls;
+    const rgba = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var desc: abi.FrameDesc = .{
+        .width = @intCast(@max(width, 0)),
+        .height = @intCast(@max(height, 0)),
+        .pixel_format = @intCast(@max(pixel_format, 0)),
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = @bitCast(flags),
+        .timestamp_us = timestamp_us,
+    };
+    return @intFromEnum(abi.goss_session_submit_frame_rgba_copy(sessionFromHandle(session), &desc, rgba, @intCast(@max(stride, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeEnableSegmentation(env: *JniEnv, cls: jobject, session: i64, model_buffer: jobject, model_len: i32, threads: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, model_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_enable_segmentation(sessionFromHandle(session), bytes, @intCast(@max(model_len, 0)), threads));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeDisableSegmentation(env: *JniEnv, cls: jobject, session: i64) void {
+    _ = env;
+    _ = cls;
+    abi.goss_session_disable_segmentation(sessionFromHandle(session));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSetFaceLandmarks(env: *JniEnv, cls: jobject, session: i64, points_buffer: jobject, point_count: i32) i32 {
+    _ = cls;
+    if (point_count == 0) return @intFromEnum(abi.goss_session_set_face_landmarks(sessionFromHandle(session), null, 0));
+    const bytes = getDirectBufferAddress(env, points_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const points: [*]const f32 = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_set_face_landmarks(sessionFromHandle(session), points, @intCast(@max(point_count, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSetBeautyLut(env: *JniEnv, cls: jobject, session: i64, slot: i32, rgba_buffer: jobject, width: i32, height: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const rgba: [*]const u8 = @ptrCast(bytes);
+    return @intFromEnum(abi.goss_session_set_beauty_lut(sessionFromHandle(session), slot, rgba, @intCast(@max(width, 0)), @intCast(@max(height, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSetBeautyMakeupTexture(env: *JniEnv, cls: jobject, session: i64, effect: i32, rgba_buffer: jobject, width: i32, height: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const rgba: [*]const u8 = @ptrCast(bytes);
+    return @intFromEnum(abi.goss_session_set_beauty_makeup_texture(sessionFromHandle(session), effect, rgba, @intCast(@max(width, 0)), @intCast(@max(height, 0))));
+}
+
+/// data_buffer receives width*height*4 RGBA8 (row 0 first); info_buffer
+/// receives {width: u32, height: u32}, the renderer's real size. Debug/test.
+export fn Java_com_gosslens_Gosslens_nativeCaptureFrame(env: *JniEnv, cls: jobject, engine: i64, session: i64, data_buffer: jobject, data_capacity: i64, info_buffer: jobject) i32 {
+    _ = cls;
+    const info_bytes = getDirectBufferAddress(env, info_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const info: *extern struct { width: u32, height: u32 } = @ptrCast(@alignCast(info_bytes));
+    const data = getDirectBufferAddress(env, data_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var width: u32 = 0;
+    var height: u32 = 0;
+    const status = abi.goss_engine_capture_frame(engineFromHandle(engine), sessionFromHandle(session), @ptrCast(data), @intCast(data_capacity), &width, &height);
+    info.width = width;
+    info.height = height;
+    return @intFromEnum(status);
+}
+
+/// info_buffer receives {encoded_len: u64, width: u32, height: u32}; a
+/// too-small data buffer still fills it for the caller to retry with the
+/// exact size, the same probe contract nativeCapturePhoto follows.
+export fn Java_com_gosslens_Gosslens_nativeCapturePhotoAs(env: *JniEnv, cls: jobject, engine: i64, session: i64, format: i32, quality: i32, data_buffer: jobject, data_capacity: i64, info_buffer: jobject) i32 {
+    _ = cls;
+    const info_bytes = getDirectBufferAddress(env, info_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const info: *extern struct { encoded_len: u64, width: u32, height: u32 } = @ptrCast(@alignCast(info_bytes));
+    const data = getDirectBufferAddress(env, data_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var encoded_len: usize = 0;
+    var width: u32 = 0;
+    var height: u32 = 0;
+    const status = abi.goss_engine_capture_photo_as(engineFromHandle(engine), sessionFromHandle(session), @intCast(@max(format, 0)), @intCast(@max(quality, 0)), @ptrCast(data), @intCast(data_capacity), &encoded_len, &width, &height);
+    info.encoded_len = encoded_len;
+    info.width = width;
+    info.height = height;
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeRenderToLiveTexture(env: *JniEnv, cls: jobject, engine: i64, session: i64, native_handle: i64, width: i32, height: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_engine_render_to_live_texture(engineFromHandle(engine), sessionFromHandle(session), @bitCast(native_handle), @intCast(@max(width, 0)), @intCast(@max(height, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSessionDestroy(env: *JniEnv, cls: jobject, session: i64) void {
     _ = env;
     _ = cls;
