@@ -212,13 +212,20 @@ pub fn particlePreset(name: []const u8) ?ParticleField {
 }
 
 pub const GradeField = struct {
-    /// A grade.pass node's parametric color grade. Defaults are the
-    /// identity (nothing changes): exposure in stops, contrast and
-    /// saturation as multipliers around 1, temperature a warm/cool shift.
+    /// A grade.pass node's color adjustment. Defaults are the identity:
+    /// exposure in stops, brightness an additive lift, contrast and
+    /// saturation multipliers around 1, temperature and tint the white
+    /// balance axes, hue in degrees, grayscale/invert 0..1, posterize a level count.
     exposure: f32 = 0,
     contrast: f32 = 1,
     saturation: f32 = 1,
     temperature: f32 = 0,
+    brightness: f32 = 0,
+    hue: f32 = 0,
+    tint: f32 = 0,
+    grayscale: f32 = 0,
+    invert: f32 = 0,
+    posterize: f32 = 0,
 };
 
 pub const BloomField = struct {
@@ -1293,6 +1300,12 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(gv.object, "contrast")) |v| field.contrast = @floatCast(numberOf(v) orelse field.contrast);
                 if (getField(gv.object, "saturation")) |v| field.saturation = @floatCast(numberOf(v) orelse field.saturation);
                 if (getField(gv.object, "temperature")) |v| field.temperature = @floatCast(numberOf(v) orelse field.temperature);
+                if (getField(gv.object, "brightness")) |v| field.brightness = @floatCast(numberOf(v) orelse field.brightness);
+                if (getField(gv.object, "hue")) |v| field.hue = @floatCast(numberOf(v) orelse field.hue);
+                if (getField(gv.object, "tint")) |v| field.tint = @floatCast(numberOf(v) orelse field.tint);
+                if (getField(gv.object, "grayscale")) |v| field.grayscale = @floatCast(numberOf(v) orelse field.grayscale);
+                if (getField(gv.object, "invert")) |v| field.invert = @floatCast(numberOf(v) orelse field.invert);
+                if (getField(gv.object, "posterize")) |v| field.posterize = @floatCast(numberOf(v) orelse field.posterize);
                 grade_field = field;
             }
             path.pop(gmark);

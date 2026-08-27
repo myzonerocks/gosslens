@@ -290,14 +290,18 @@ program is kit-authored and fixed - so it is always ready and never
 degrades. Place it anywhere in the chain; it blurs its input and hands the
 softened frame to the next node.
 
-A `"grade.pass"` node is a parametric color grade post-effect. It carries a
-`"grade": {"exposure", "contrast", "saturation", "temperature"}` block and
-shifts whatever frame reaches it - exposure in stops, contrast and
-saturation as multipliers around 1, temperature a warm/cool push - then
-hands the graded frame down the chain. Every field is optional and defaults
-to the identity, so a `grade.pass` with an empty block leaves the frame
-untouched. Like `blur.pass` it ships no asset and is always ready; it lets a
-lens warm, cool, brighten or push contrast without authoring a LUT.
+A `"grade.pass"` node is a parametric color adjustment post-effect. It
+carries a `"grade"` block and shifts whatever frame reaches it, then hands
+the graded frame down the chain. The fields are `exposure` (stops),
+`brightness` (additive lift), `contrast` and `saturation` (multipliers
+around 1), `temperature` and `tint` (the warm/cool and green/magenta white
+balance axes), `hue` (degrees of rotation), `grayscale` and `invert` (a
+0..1 amount toward black and white or toward the complement), and
+`posterize` (a level count, 0 to disable). They apply in that order. Every
+field is optional and defaults to the identity, so a `grade.pass` with an
+empty block leaves the frame untouched. Like `blur.pass` it ships no asset
+and is always ready; it lets a lens warm, cool, brighten, desaturate,
+posterize or invert without authoring a LUT.
 
 A `"bloom.pass"` node is a glow post-effect. It carries a `"bloom":
 {"threshold", "intensity"}` block: it extracts the frame's highlights - what

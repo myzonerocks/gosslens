@@ -5136,6 +5136,114 @@ fn proveGrade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the grade.pass color adjustments: a grayscale grade collapses
+/// every pixel's chroma so its channels read equal, and an invert grade
+/// flips the frame so each channel reads its complement against the
+/// identity grade. Both are deterministic and bit-stable across runs.
+fn proveColorAdjust(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const lenses = [_][]const u8{
+        ".lens-packages/plain-grade",
+        ".lens-packages/plain-grade",
+        ".lens-packages/mono-grade",
+        ".lens-packages/negative-grade",
+    };
+    var shots: [4][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (lenses) |pkg| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+            std.debug.print("conformance: FAIL color adjust lens activation\n", .{});
+            return false;
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+
+    if (!std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL grade color adjust is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    // Grayscale collapses chroma: every pixel's channels read one gray.
+    var mono_spread: u8 = 0;
+    var i: usize = 0;
+    while (i < shots[2].len) : (i += 4) {
+        const r = shots[2][i];
+        const g = shots[2][i + 1];
+        const b = shots[2][i + 2];
+        const rg = if (r > g) r - g else g - r;
+        const gb = if (g > b) g - b else b - g;
+        if (rg > mono_spread) mono_spread = rg;
+        if (gb > mono_spread) mono_spread = gb;
+    }
+    if (mono_spread > 1) {
+        std.debug.print("conformance: FAIL grayscale grade left chroma (max channel spread {d})\n", .{mono_spread});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[2], shots[0])) {
+        std.debug.print("conformance: FAIL grayscale grade did not change the frame\n", .{});
+        return false;
+    }
+
+    // Invert reads each channel as its complement against the identity grade,
+    // so an inverted byte plus the identity byte sums to 255.
+    var max_flip_err: u32 = 0;
+    i = 0;
+    while (i < shots[3].len) : (i += 4) {
+        for ([_]usize{ 0, 1, 2 }) |ch| {
+            const sum = @as(u32, shots[3][i + ch]) + @as(u32, shots[0][i + ch]);
+            const err = if (sum > 255) sum - 255 else 255 - sum;
+            if (err > max_flip_err) max_flip_err = err;
+        }
+    }
+    if (max_flip_err > 2) {
+        std.debug.print("conformance: FAIL invert grade is not the frame's complement (max error {d})\n", .{max_flip_err});
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[2], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-mono-grade.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF grade.pass color adjustments collapse chroma to gray and invert to the frame's complement deterministically\n", .{});
+    return true;
+}
+
 /// Proves a bloom.pass post-effect: the bright pass, separable blur and
 /// additive composite bleed a glow from the highlights, so a bloomed
 /// capture differs from the plain one and is bit-stable across runs (no
@@ -8279,6 +8387,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveUserMediaSeg(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "makeup-transfer")) {
             if (!try proveMakeupTransfer(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "color-adjust")) {
+            if (!try proveColorAdjust(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -8475,6 +8585,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("blur");
     if (!try proveGrade(gpa, engine)) return 1;
     watchHold("grade");
+    if (!try proveColorAdjust(gpa, engine)) return 1;
+    watchHold("color adjust");
     if (!try proveBloom(gpa, engine)) return 1;
     watchHold("bloom");
     if (!try proveStackedPostEffects(gpa, engine)) return 1;

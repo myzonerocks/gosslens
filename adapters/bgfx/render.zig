@@ -472,7 +472,7 @@ pub const Renderer = struct {
             .env_top_uniform = c.bgfx_create_uniform("u_envTop", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .env_bottom_uniform = c.bgfx_create_uniform("u_envBottom", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .env_rot_uniform = c.bgfx_create_uniform("u_envRot", c.BGFX_UNIFORM_TYPE_VEC4, 3),
-            .grade_params_uniform = c.bgfx_create_uniform("u_grade", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .grade_params_uniform = c.bgfx_create_uniform("u_grade", c.BGFX_UNIFORM_TYPE_VEC4, 3),
             .composite_params_uniform = c.bgfx_create_uniform("u_composite", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .composite_chroma_uniform = c.bgfx_create_uniform("u_chroma", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .bloom_params_uniform = c.bgfx_create_uniform("u_bloom", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -1509,13 +1509,13 @@ pub const Renderer = struct {
     }
 
     /// Draws one lens grade.pass node as a full-screen pass into view_id:
-    /// the frame on unit 0, its four grade params (exposure, contrast,
-    /// saturation, temperature) in u_grade, the one fixed grade_program
-    /// every grade.pass node shares.
-    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [4]f32) void {
+    /// the frame on unit 0 and its color adjustment in u_grade (three vec4:
+    /// tone, white balance with hue, then posterize and invert), the one
+    /// fixed grade_program every grade.pass node shares.
+    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [12]f32) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
-        c.bgfx_set_uniform(r.grade_params_uniform, &grade, 1);
+        c.bgfx_set_uniform(r.grade_params_uniform, &grade, 3);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.grade_program, 0, c.BGFX_DISCARD_ALL);
     }

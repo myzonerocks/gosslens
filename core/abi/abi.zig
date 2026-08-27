@@ -877,10 +877,11 @@ pub const Session = struct {
     /// One bgfx texture per env.pass node whose equirect image finished
     /// loading, sampled by the camera pose instead of the gradient.
     env_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
-    /// The parametric color grade of each spliced grade.pass node, packed
-    /// as (exposure, contrast, saturation, temperature) - resolved once at
-    /// activation since grade.pass ships no asset and needs no loader.
-    grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// The color adjustment of each spliced grade.pass node, packed as
+    /// three vec4 (tone, white balance with hue, then posterize and
+    /// invert) - resolved once at activation since grade.pass ships no
+    /// asset and needs no loader.
+    grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [12]f32) = .empty,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,

@@ -272,11 +272,11 @@ pub const VideoNode = struct {
 };
 
 /// One grade.pass node ready for the caller to draw - which graph node
-/// it is, and its parametric color grade packed as (exposure, contrast,
-/// saturation, temperature) for the renderer's u_grade uniform.
+/// it is, and its color adjustment packed as three vec4 for u_grade: tone,
+/// then white balance with hue, then posterize and invert.
 pub const GradePassNode = struct {
     graph_index: graph.NodeIndex,
-    grade: [4]f32,
+    grade: [12]f32,
 };
 
 /// One bloom.pass node ready for the caller to draw - which graph node it
@@ -483,7 +483,12 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .grade_pass) continue;
             const gr = node.grade orelse manifest.GradeField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .grade = .{ gr.exposure, gr.contrast, gr.saturation, gr.temperature } });
+            const hue_rad: f32 = gr.hue * (std.math.pi / 180.0);
+            try out.append(gpa, .{ .graph_index = node.graph_index, .grade = .{
+                gr.exposure, gr.contrast, gr.saturation, gr.temperature,
+                gr.brightness, hue_rad,   gr.tint,       gr.grayscale,
+                gr.invert,    gr.posterize, 0,           0,
+            } });
         }
         return out.toOwnedSlice(gpa);
     }
