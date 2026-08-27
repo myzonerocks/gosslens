@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 50u
+#define GOSS_ABI_MINOR 51u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -570,6 +570,12 @@ goss_status goss_session_submit_depth(goss_session *session, const float *depth,
  * picks up the mask the way a camera frame would. Returns goss_status_again
  * when no segmenter is enabled on the session. */
 goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height);
+
+/* Samples a reference photo's makeup color per face part and stores it, so a
+ * tint.pass with "source": "reference" paints the live face in that photo's
+ * color. rgba is width*height*4 row-major; landmarks is the reference face's
+ * 478 x,y,z points in reference-pixel space. A zero landmark_count clears it. */
+goss_status goss_session_set_makeup_reference(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height, const float *landmarks, uint32_t landmark_count);
 
 /* Graph thread. Reads the newest hand tracking result into caller
  * memory. Reports GOSS_AGAIN until the worker has published its first

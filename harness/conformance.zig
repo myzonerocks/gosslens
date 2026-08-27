@@ -6616,6 +6616,103 @@ fn proveUserMediaSeg(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn fillSolid(buf: []u8, r: u8, g: u8, b: u8) void {
+    var i: usize = 0;
+    while (i + 4 <= buf.len) : (i += 4) {
+        buf[i] = r;
+        buf[i + 1] = g;
+        buf[i + 2] = b;
+        buf[i + 3] = 255;
+    }
+}
+
+fn renderCapture(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, half_w: u32, buf: []u8, ow: *u32, oh: *u32) !void {
+    for (0..5) |_| {
+        _ = abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, buf.ptr, buf.len, ow, oh) != .ok) return error.CaptureFailed;
+}
+
+fn proveMakeupTransfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A reference-sourced tint.pass paints the lips in the makeup reference's
+    // sampled color, so two references of different colors drive different
+    // results and the transfer is deterministic.
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL makeup-transfer face tracking enable\n", .{});
+        return false;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/makeup-transfer", ".lens-packages/makeup-transfer".len) != .ok) {
+        std.debug.print("conformance: FAIL makeup-transfer lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+    var result: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &result) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+    const rw = corpus.frame.width;
+    const rh = corpus.frame.height;
+    const count: u32 = @intCast(result.landmarks.len / 3);
+    const ref = try gpa.alloc(u8, @as(usize, rw) * rh * 4);
+    defer gpa.free(ref);
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const red_a = try gpa.alloc(u8, cap);
+    defer gpa.free(red_a);
+    const red_b = try gpa.alloc(u8, cap);
+    defer gpa.free(red_b);
+    const blue = try gpa.alloc(u8, cap);
+    defer gpa.free(blue);
+    var wra: u32 = 0;
+    var hra: u32 = 0;
+    var wrb: u32 = 0;
+    var hrb: u32 = 0;
+    var wb: u32 = 0;
+    var hb: u32 = 0;
+
+    fillSolid(ref, 230, 30, 60);
+    if (abi.goss_session_set_makeup_reference(session, ref.ptr, rw, rh, &result.landmarks, count) != .ok) {
+        std.debug.print("conformance: FAIL set_makeup_reference rejected the red reference\n", .{});
+        return false;
+    }
+    try renderCapture(engine, session, &desc, planes, half_w, red_a, &wra, &hra);
+    try renderCapture(engine, session, &desc, planes, half_w, red_b, &wrb, &hrb);
+    fillSolid(ref, 40, 60, 220);
+    if (abi.goss_session_set_makeup_reference(session, ref.ptr, rw, rh, &result.landmarks, count) != .ok) return error.SetMakeupReferenceFailed;
+    try renderCapture(engine, session, &desc, planes, half_w, blue, &wb, &hb);
+
+    if (wra == 0 or wra != wb or hra != hb or wra != wrb or hra != hrb) {
+        std.debug.print("conformance: FAIL makeup-transfer capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, red_a[0 .. wra * hra * 4], red_b[0 .. wrb * hrb * 4])) {
+        std.debug.print("conformance: FAIL makeup transfer is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, red_a[0 .. wra * hra * 4], blue[0 .. wb * hb * 4])) {
+        std.debug.print("conformance: FAIL the reference color did not drive the tint - red and blue match\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a reference-sourced tint paints the lips in the makeup reference's color, red and blue references differing, deterministically\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -8180,6 +8277,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveSharpen(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "user-media-seg")) {
             if (!try proveUserMediaSeg(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "makeup-transfer")) {
+            if (!try proveMakeupTransfer(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -8260,6 +8359,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("detail sharpen");
     if (!try proveUserMediaSeg(gpa, engine)) return 1;
     watchHold("user-media segmentation");
+    if (!try proveMakeupTransfer(gpa, engine)) return 1;
+    watchHold("makeup transfer");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;

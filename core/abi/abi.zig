@@ -196,6 +196,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
     "goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
+    "goss_status goss_session_set_makeup_reference(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height, const float *landmarks, uint32_t landmark_count)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
     "void goss_session_disable_beauty(goss_session *session)",
     "goss_status goss_session_set_beauty(goss_session *session, int32_t effect, float value)",
@@ -708,6 +709,13 @@ pub const Session = struct {
     tint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     /// tint.pass nodes' mask channel by graph index (0 person, else a class).
     tint_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// tint.pass nodes whose color comes from the makeup reference, not the
+    /// static field, by graph index.
+    tint_reference: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    /// Per-face-part color sampled from a reference photo by
+    /// goss_session_set_makeup_reference; a reference-sourced tint.pass reads
+    /// its channel's entry instead of a static color. null until set.
+    makeup_reference: [manifest.mask_channels.len]?[3]f32 = @splat(null),
     /// smooth.pass nodes by graph index: their retouch amount.
     smooth_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
     /// smooth.pass nodes' mask channel by graph index (0 person, else a class).
@@ -1774,6 +1782,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // The named channel's mask keys the color layer; an absent
                 // class serves the zero mask, so the tint fades to nothing.
                 const mask_tex = if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture;
+                // A reference-sourced tint paints the channel in the makeup
+                // reference's sampled color, falling back to the static color
+                // when no reference is set.
+                const tint_color: [3]f32 = if (s.tint_reference.contains(entry.graph_index))
+                    (s.makeup_reference[channel] orelse [3]f32{ params[0], params[1], params[2] })
+                else
+                    [3]f32{ params[0], params[1], params[2] };
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -1781,7 +1796,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitTintPass(view_id, input_texture, mask_tex, .{ params[0], params[1], params[2] }, params[3]);
+                r.submitTintPass(view_id, input_texture, mask_tex, tint_color, params[3]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2781,6 +2796,7 @@ pub fn destroySession(session: *Session) void {
     session.outline_masks.deinit(session.engine.gpa);
     session.tint_params.deinit(session.engine.gpa);
     session.tint_masks.deinit(session.engine.gpa);
+    session.tint_reference.deinit(session.engine.gpa);
     session.smooth_params.deinit(session.engine.gpa);
     session.smooth_masks.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
@@ -5095,6 +5111,48 @@ pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?
     return .ok;
 }
 
+/// The mean RGB (0..1) of a reference image sampled at a landmark loop's
+/// points by nearest pixel, standing in for that face part's makeup color.
+fn averageLoopColor(rgba: []const u8, width: u32, height: u32, lm: [*]const f32, loop: []const u16) [3]f32 {
+    var sum: [3]f32 = .{ 0, 0, 0 };
+    var n: f32 = 0;
+    const max_x: f32 = @floatFromInt(width - 1);
+    const max_y: f32 = @floatFromInt(height - 1);
+    for (loop) |idx| {
+        const x: u32 = @intFromFloat(std.math.clamp(lm[@as(usize, idx) * 3], 0, max_x));
+        const y: u32 = @intFromFloat(std.math.clamp(lm[@as(usize, idx) * 3 + 1], 0, max_y));
+        const o = (@as(usize, y) * width + x) * 4;
+        sum[0] += @as(f32, @floatFromInt(rgba[o])) / 255.0;
+        sum[1] += @as(f32, @floatFromInt(rgba[o + 1])) / 255.0;
+        sum[2] += @as(f32, @floatFromInt(rgba[o + 2])) / 255.0;
+        n += 1;
+    }
+    if (n == 0) return .{ 0, 0, 0 };
+    return .{ sum[0] / n, sum[1] / n, sum[2] / n };
+}
+
+/// Samples a reference photo's makeup color per face part: each face-part loop
+/// averages the reference RGBA at its points, so a reference-sourced tint.pass
+/// paints the live face in the photo's color. The caller passes the reference
+/// face landmarks (478, reference-pixel space); a zero count clears it.
+pub export fn goss_session_set_makeup_reference(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32, landmarks: ?[*]const f32, landmark_count: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (landmark_count == 0) {
+        s.makeup_reference = @splat(null);
+        return .ok;
+    }
+    if (landmark_count != face.landmark_count) return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    const pixels = rgba orelse return .invalid_argument;
+    const lm = landmarks orelse return .invalid_argument;
+    const rgba_slice = pixels[0 .. @as(usize, width) * height * 4];
+    s.makeup_reference = @splat(null);
+    s.makeup_reference[manifest.lips_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.outer_lip_loop);
+    s.makeup_reference[manifest.eyes_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.left_eye_loop);
+    s.makeup_reference[manifest.brows_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.left_brow_loop);
+    return .ok;
+}
+
 /// Normalizes the submitted depth (near..far metres) into an R8 texture the
 /// dof.pass samples, replacing the previous frame's. A best-effort upload:
 /// on allocation failure the old texture stays, so the pass just holds.
@@ -5816,6 +5874,7 @@ fn destroyBlendState(session: *Session) void {
     session.outline_masks.clearRetainingCapacity();
     session.tint_params.clearRetainingCapacity();
     session.tint_masks.clearRetainingCapacity();
+    session.tint_reference.clearRetainingCapacity();
     session.smooth_params.clearRetainingCapacity();
     session.smooth_masks.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
@@ -6315,6 +6374,7 @@ fn createTintParams(session: *Session, gpa: std.mem.Allocator) !void {
     for (tints) |tp| {
         session.tint_params.put(gpa, tp.graph_index, .{ tp.color[0], tp.color[1], tp.color[2], tp.opacity }) catch {};
         if (tp.mask_channel) |channel| session.tint_masks.put(gpa, tp.graph_index, channel) catch {};
+        if (tp.from_reference) session.tint_reference.put(gpa, tp.graph_index, {}) catch {};
     }
 }
 

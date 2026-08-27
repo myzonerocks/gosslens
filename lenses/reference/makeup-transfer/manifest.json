@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.makeup-transfer",
+  "version": "1.0.0",
+  "display_name": "Makeup Transfer",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "tint", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"opacity": 0.6, "mask": "lips", "source": "reference"}}
+  ],
+  "triggers": []
+}

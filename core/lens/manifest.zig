@@ -266,6 +266,9 @@ pub const TintField = struct {
     opacity: f32 = 0.5,
     /// The mask channel the tint fills; a tint naming none is inert.
     mask_channel: ?u8 = null,
+    /// When set by "source": "reference", the color comes from the makeup
+    /// reference sampled for this channel, not the static rgb above.
+    from_reference: bool = false,
 };
 
 pub const SmoothField = struct {
@@ -1422,6 +1425,15 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(tv.object, "mask")) |v| {
                     if (try expectString(diags, path, v)) |name| {
                         if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "tint mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                if (getField(tv.object, "source")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.mem.eql(u8, name, "reference")) {
+                            field.from_reference = true;
+                        } else if (!std.mem.eql(u8, name, "static")) {
+                            try diags.add(path.slice(), "tint source must be reference or static", .{});
+                        }
                     }
                 }
                 tint_field = field;
