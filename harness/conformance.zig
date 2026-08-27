@@ -7080,6 +7080,177 @@ fn proveSmooth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The refined matte alpha (0..1) the matte.refine pass wrote, read from a
+/// captured RGBA frame's red channel (the pass writes the matte as grayscale).
+fn matteBandMean(shot: []const u8, col_lo: usize, col_hi: usize) f32 {
+    var sum: f64 = 0;
+    var count: f64 = 0;
+    var row: usize = 110;
+    while (row < 190) : (row += 1) {
+        var col = col_lo;
+        while (col < col_hi) : (col += 1) {
+            sum += @floatFromInt(shot[(row * @as(usize, width) + col) * 4]);
+            count += 1;
+        }
+    }
+    if (count == 0) return 0;
+    return @floatCast(sum / count / 255.0);
+}
+
+/// The sub-pixel column where the refined matte first crosses `mid`, scanning
+/// left to right over a mid-height row average - the location of the matte's
+/// refined edge, which the proof compares against the frame's luma edge.
+fn matteCrossing(shot: []const u8, mid: f32, from: usize, to: usize) f32 {
+    var prev_col: usize = from;
+    var prev_val = matteBandMean(shot, from, from + 1);
+    var col = from + 1;
+    while (col < to) : (col += 1) {
+        const val = matteBandMean(shot, col, col + 1);
+        if (prev_val < mid and val >= mid) {
+            const t = (mid - prev_val) / (val - prev_val);
+            return @as(f32, @floatFromInt(prev_col)) + t * @as(f32, @floatFromInt(col - prev_col));
+        }
+        prev_col = col;
+        prev_val = val;
+    }
+    return @floatFromInt(to);
+}
+
+/// Renders matte-refine over a synthetic frame plus an injected depth matte,
+/// capturing the refined matte as an RGBA frame. The frame carries the luma
+/// edge guide; the depth is the deliberately-misaligned soft matte.
+fn captureRefinedMatte(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, depth: []const f32) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const pkg = ".lens-packages/matte-refine";
+    if (abi.goss_session_activate_lens_from_directory(session, pkg, pkg.len) != .ok) {
+        std.debug.print("conformance: FAIL matte-refine lens activation\n", .{});
+        return error.ActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    if (abi.goss_session_submit_depth(session, depth.ptr, planes.width, planes.height, 0.0, 1.0) != .ok) {
+        return error.SubmitDepthFailed;
+    }
+    for (0..4) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+        return error.CaptureFailed;
+    }
+    return shot;
+}
+
+fn proveMatteRefine(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A synthetic frame with one hard vertical luma edge at column `edge`: dark
+    // to the left, bright to the right. This is the guide the refinement keys
+    // its matte to.
+    const edge: usize = 200;
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    // A deliberately-misaligned soft matte: flat 0.1 on the dark side and past
+    // the true edge, ramping to 0.9 only over [edge+ramp_start, +span], so its
+    // 50% crossing sits well right of the true luma edge with almost no step
+    // there. A good refinement pulls that crossing back and builds a step.
+    const ramp_start: f32 = 6.0;
+    const span: f32 = 20.0;
+    const input_cross: f32 = @as(f32, @floatFromInt(edge)) + ramp_start + span / 2.0;
+    const depth = try gpa.alloc(f32, @as(usize, width) * height);
+    defer gpa.free(depth);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const bright = col >= edge;
+            const luma: u8 = if (bright) 245 else 10;
+            const i = (row * @as(usize, width) + col) * 4;
+            frame_rgba[i + 0] = luma;
+            frame_rgba[i + 1] = luma;
+            frame_rgba[i + 2] = luma;
+            frame_rgba[i + 3] = 255;
+            const x: f32 = @floatFromInt(col);
+            const ramp = (x - (@as(f32, @floatFromInt(edge)) + ramp_start)) / span;
+            depth[row * @as(usize, width) + col] = std.math.clamp(0.1 + 0.8 * ramp, 0.1, 0.9);
+        }
+    }
+
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const a = try captureRefinedMatte(gpa, engine, planes, depth);
+    defer gpa.free(a);
+    const b = try captureRefinedMatte(gpa, engine, planes, depth);
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL matte refinement is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // Far from the edge the matte's own plateaus must survive: low on the dark
+    // side, high on the bright side (polarity preserved, no inversion).
+    const far_left = matteBandMean(a, edge - 45, edge - 25);
+    const far_right = matteBandMean(a, edge + 25, edge + 45);
+    // The matte alpha measured on both sides of the true (luma) edge. The input
+    // matte is ~0.1 on both narrow bands here (its ramp only reaches high well
+    // to the right), so the input has almost no step at the true edge.
+    const near_left = matteBandMean(a, edge - 12, edge - 2);
+    const near_right = matteBandMean(a, edge + 2, edge + 12);
+    const input_near_left: f32 = 0.1;
+    // The input matte averaged over the same near-right band [edge+2, edge+12],
+    // centered near edge+7: with the ramp starting at edge+ramp_start it is
+    // still close to the 0.1 plateau, so the input barely steps at the edge.
+    const input_near_right: f32 = std.math.clamp(0.1 + 0.8 * @max(0.0, (7.0 - ramp_start)) / span, 0.1, 0.9);
+    const refined_step = near_right - near_left;
+    const input_step = input_near_right - input_near_left;
+
+    // Where the refined matte's edge landed, versus where the input matte's
+    // edge was. The mid level is halfway between the two refined plateaus.
+    const mid = (far_left + far_right) * 0.5;
+    const refined_cross = matteCrossing(a, mid, edge - 45, edge + 45);
+
+    std.debug.print(
+        "conformance: matte-refine far_left {d:.3} far_right {d:.3} near_left {d:.3} near_right {d:.3} refined_step {d:.3} input_step {d:.3} refined_cross {d:.1} input_cross {d:.1}\n",
+        .{ far_left, far_right, near_left, near_right, refined_step, input_step, refined_cross, input_cross },
+    );
+
+    if (far_left > 0.35) {
+        std.debug.print("conformance: FAIL refined matte not low on the dark side (far_left {d:.3})\n", .{far_left});
+        return false;
+    }
+    if (far_right < 0.65) {
+        std.debug.print("conformance: FAIL refined matte not high on the bright side (far_right {d:.3})\n", .{far_right});
+        return false;
+    }
+    // The refinement builds a real step exactly at the true luma edge, far
+    // stronger than the input matte's near-flat crossing there.
+    if (!(refined_step > input_step + 0.12) or refined_step < 0.20) {
+        std.debug.print("conformance: FAIL refinement did not sharpen the matte at the luma edge (refined_step {d:.3} input_step {d:.3})\n", .{ refined_step, input_step });
+        return false;
+    }
+    // The refined edge moved toward the luma edge: strictly left of the input
+    // crossing, and strictly closer to the true edge than the input was.
+    if (!(refined_cross < input_cross - 2.0)) {
+        std.debug.print("conformance: FAIL refined edge did not move toward the luma edge (refined_cross {d:.1} input_cross {d:.1})\n", .{ refined_cross, input_cross });
+        return false;
+    }
+    const refined_err = @abs(refined_cross - @as(f32, @floatFromInt(edge)));
+    const input_err = @abs(input_cross - @as(f32, @floatFromInt(edge)));
+    if (!(refined_err < input_err)) {
+        std.debug.print("conformance: FAIL refined edge not closer to the luma edge than the input (refined_err {d:.1} input_err {d:.1})\n", .{ refined_err, input_err });
+        return false;
+    }
+    std.debug.print("conformance: PROOF matte.refine snaps a misaligned soft matte to the frame's luma edge (crossing {d:.1}->{d:.1} toward {d}), sharpens the boundary, bit-stable across runs\n", .{ input_cross, refined_cross, edge });
+    return true;
+}
+
 fn proveTeeth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // The teeth matte fills the inner-lip loop, the mouth aperture inside the
     // outer lip. First prove the loop is the inner mouth: its centroid sits
@@ -8946,6 +9117,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveDepthMatting(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "smooth")) {
             if (!try proveSmooth(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "matte-refine")) {
+            if (!try proveMatteRefine(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "teeth")) {
             if (!try proveTeeth(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "sharpen")) {
@@ -9040,6 +9213,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("depth matting");
     if (!try proveSmooth(gpa, engine)) return 1;
     watchHold("face smooth");
+    if (!try proveMatteRefine(gpa, engine)) return 1;
+    watchHold("matte refine");
     if (!try proveTeeth(gpa, engine)) return 1;
     watchHold("teeth whiten");
     if (!try proveSharpen(gpa, engine)) return 1;

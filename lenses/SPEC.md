@@ -350,6 +350,18 @@ average by `amount`, so a positive amount blurs (skin smoothing) and a
 negative one (down to -1) sharpens. It keys the same mask channels as
 `tint.pass`; a smooth naming none is inert.
 
+A `"matte.refine"` node refines a segmentation matte's edges against the
+frame. It carries a `"matte": {"radius", "sensitivity", "strength", "mask"}`
+block and runs a guided (joint-bilateral) filter: the frame luminance is the
+edge guide, so where the frame has a strong luma edge the matte's alpha snaps
+to it, and in flat regions the matte is smoothed. `radius` (0.5..6) sets the
+neighborhood reach, `sensitivity` how hard a guide difference rejects a
+neighbor across an edge, and `strength` (0..1) how far the output moves from
+the input matte toward the refined one. `mask` picks the channel it refines -
+`hair` lifts a coarse hair matte toward the crisp strand boundary the frame
+carries; a node naming no channel refines the submitted depth instead. The
+output is the refined matte as grayscale.
+
 A `"stylize.pass"` node is a single-pass artistic filter over the whole
 frame. It carries a `"stylize": {"mode", "strength", "threshold", "levels"}`
 block: `mode` is `sketch` (a pencil edge over pale paper), `toon` (color

@@ -287,6 +287,19 @@ pub const SmoothField = struct {
     mask_channel: ?u8 = null,
 };
 
+pub const MatteField = struct {
+    /// A matte.refine node's guided edge refinement: frame luminance guides where
+    /// the matte alpha snaps to a real image edge versus where it smooths, lifting
+    /// a coarse matte toward the crisp hair and fur boundary the frame carries.
+    /// radius is reach in texels, sensitivity the edge rejection, strength the mix.
+    radius: f32 = 2.0,
+    sensitivity: f32 = 8.0,
+    strength: f32 = 1.0,
+    /// The mask channel this refines (hair by default use); null refines the
+    /// submitted depth instead, so the pass has a source with no segmenter.
+    mask_channel: ?u8 = null,
+};
+
 pub const StylizeField = struct {
     /// A stylize.pass node's artistic mode and its parameters: strength drives
     /// the sketch edge and emboss depth, threshold and levels the toon edge
@@ -547,6 +560,9 @@ pub const Node = struct {
     tint: ?TintField = null,
     /// Set only on a smooth.pass node: its amount and mask channel.
     smooth: ?SmoothField = null,
+    /// Set only on a matte.refine node: its guided edge-refinement parameters
+    /// and the mask channel (or depth) it refines.
+    matte: ?MatteField = null,
     /// Set only on a stylize.pass node: its artistic mode and parameters.
     stylize: ?StylizeField = null,
     /// Set only on an edge.pass node: its detector mode and parameters.
@@ -1532,6 +1548,29 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "smooth.pass")) {
             smooth_field = .{};
         }
+        var matte_field: ?MatteField = null;
+        if (getField(object, "matte")) |mv| {
+            const mattemark = path.push("matte");
+            if (!std.mem.eql(u8, node_type, "matte.refine")) {
+                try diags.add(path.slice(), "matte is a matte.refine field, found it on '{s}'", .{node_type});
+            } else if (mv != .object) {
+                try diags.add(path.slice(), "matte must be an object", .{});
+            } else {
+                var field: MatteField = .{};
+                if (getField(mv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0.5, 6.0);
+                if (getField(mv.object, "sensitivity")) |v| field.sensitivity = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.sensitivity)));
+                if (getField(mv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 1.0);
+                if (getField(mv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "matte mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                matte_field = field;
+            }
+            path.pop(mattemark);
+        } else if (std.mem.eql(u8, node_type, "matte.refine")) {
+            matte_field = .{};
+        }
         var stylize_field: ?StylizeField = null;
         if (getField(object, "stylize")) |yv| {
             const ymark = path.push("stylize");
@@ -2226,6 +2265,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .outline = outline_field,
             .tint = tint_field,
             .smooth = smooth_field,
+            .matte = matte_field,
             .stylize = stylize_field,
             .edge = edge_field,
             .warp = warp_field,

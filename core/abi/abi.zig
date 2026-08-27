@@ -725,6 +725,12 @@ pub const Session = struct {
     smooth_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
     /// smooth.pass nodes' mask channel by graph index (0 person, else a class).
     smooth_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// matte.refine nodes by graph index: their guided-filter parameters
+    /// (radius, sensitivity, strength).
+    matte_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    /// matte.refine nodes that refine a mask channel's matte instead of the
+    /// submitted depth, by graph index (0 person, else a class).
+    matte_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     /// stylize.pass nodes by graph index: their artistic filter packed for
     /// u_stylize (mode, strength, threshold, levels), resolved at activation.
     stylize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1573,6 +1579,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .tint => s.tint_params.contains(entry.graph_index) and s.tint_masks.contains(entry.graph_index),
             // A smooth is masked too: it needs its amount and a mask channel.
             .smooth => s.smooth_params.contains(entry.graph_index) and s.smooth_masks.contains(entry.graph_index),
+            // A matte refine needs its params and a source: either a named
+            // mask channel to refine or the submitted depth, like the outline.
+            .matte => s.matte_params.contains(entry.graph_index) and (s.matte_masks.contains(entry.graph_index) or s.depth_texture != null),
             // A stylize pass ships no asset; its packed params resolve at
             // activation, so it is ready the moment they are in place.
             .stylize => s.stylize_params.contains(entry.graph_index),
@@ -1938,6 +1947,28 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitSmoothPass(view_id, input_texture, mask_tex, amount);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .matte => {
+                const params = s.matte_params.get(entry.graph_index) orelse continue;
+                // Refine a named channel's matte when the node has one, else
+                // the submitted depth; an absent class serves the zero mask, so
+                // the refinement degrades to an empty matte rather than wrong.
+                const matte_tex = if (s.matte_masks.get(entry.graph_index)) |channel|
+                    (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
+                else
+                    s.depth_texture orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitMatteRefinePass(view_id, input_texture, matte_tex, params);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2923,6 +2954,8 @@ pub fn destroySession(session: *Session) void {
     session.tint_reference.deinit(session.engine.gpa);
     session.smooth_params.deinit(session.engine.gpa);
     session.smooth_masks.deinit(session.engine.gpa);
+    session.matte_params.deinit(session.engine.gpa);
+    session.matte_masks.deinit(session.engine.gpa);
     session.stylize_params.deinit(session.engine.gpa);
     session.edge_params.deinit(session.engine.gpa);
     session.warp_params.deinit(session.engine.gpa);
@@ -5762,6 +5795,8 @@ fn maskChannelNeeded(session: *Session, channel: u8) bool {
     while (tint_it.next()) |c| if (c.* == channel) return true;
     var smooth_it = session.smooth_masks.valueIterator();
     while (smooth_it.next()) |c| if (c.* == channel) return true;
+    var matte_it = session.matte_masks.valueIterator();
+    while (matte_it.next()) |c| if (c.* == channel) return true;
     return false;
 }
 
@@ -6004,6 +6039,8 @@ fn destroyBlendState(session: *Session) void {
     session.tint_reference.clearRetainingCapacity();
     session.smooth_params.clearRetainingCapacity();
     session.smooth_masks.clearRetainingCapacity();
+    session.matte_params.clearRetainingCapacity();
+    session.matte_masks.clearRetainingCapacity();
     session.stylize_params.clearRetainingCapacity();
     session.edge_params.clearRetainingCapacity();
     session.warp_params.clearRetainingCapacity();
@@ -6406,6 +6443,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createOutlineParams(s, gpa) catch {};
     createTintParams(s, gpa) catch {};
     createSmoothParams(s, gpa) catch {};
+    createMatteParams(s, gpa) catch {};
     createStylizeParams(s, gpa) catch {};
     createEdgeParams(s, gpa) catch {};
     createWarpParams(s, gpa) catch {};
@@ -6520,6 +6558,19 @@ fn createSmoothParams(session: *Session, gpa: std.mem.Allocator) !void {
     for (smooths) |sp| {
         session.smooth_params.put(gpa, sp.graph_index, sp.amount) catch {};
         if (sp.mask_channel) |channel| session.smooth_masks.put(gpa, sp.graph_index, channel) catch {};
+    }
+}
+
+/// Resolves the active lens's matte.refine nodes into session.matte_params and
+/// matte_masks, once at activation - mirrors createSmoothParams. A node with
+/// no named channel refines the submitted depth instead.
+fn createMatteParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const mattes = try lens.matteRefinePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(mattes);
+    for (mattes) |mp| {
+        session.matte_params.put(gpa, mp.graph_index, mp.params) catch {};
+        if (mp.mask_channel) |channel| session.matte_masks.put(gpa, mp.graph_index, channel) catch {};
     }
 }
 
@@ -7526,6 +7577,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createOutlineParams(session, gpa);
     try createTintParams(session, gpa);
     try createSmoothParams(session, gpa);
+    try createMatteParams(session, gpa);
     try createStylizeParams(session, gpa);
     try createEdgeParams(session, gpa);
     try createWarpParams(session, gpa);

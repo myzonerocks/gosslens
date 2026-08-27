@@ -4356,6 +4356,9 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         .{ .name = "fs_outline_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_tint_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_smooth_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // matte.refine's own fixed guided-filter fragment shader, same
+        // kit-authored reasoning as fs_smooth_pass above.
+        .{ .name = "fs_matte_refine", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_stylize_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // edge.pass's three fixed fragment shaders: a grayscale-and-sobel
         // stage (single-pass magnitude or canny's directional variant), then
