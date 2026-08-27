@@ -2592,6 +2592,7 @@ fn settledPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []
     defer planes.deinit(gpa);
     const half_w = (planes.width + 1) / 2;
     var settled: []u8 = &.{};
+    errdefer if (settled.len > 0) gpa.free(settled);
     for (0..90) |i| {
         const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
         if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
@@ -2599,7 +2600,6 @@ fn settledPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []
         c.glfwPollEvents();
         if (i == 85) {
             settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
-            errdefer gpa.free(settled);
             var w: u32 = 0;
             var h: u32 = 0;
             if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
@@ -2624,6 +2624,7 @@ fn settledWorldPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundl
     const half_w = (planes.width + 1) / 2;
     const anchor = abi.WorldAnchor{ .id = 7, .pose = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 } };
     var settled: []u8 = &.{};
+    errdefer if (settled.len > 0) gpa.free(settled);
     for (0..90) |i| {
         const replay = world_replay.stateAt(@intCast(i), 33_333, 4.0 / 3.0);
         const state = abi.WorldState{
@@ -2639,7 +2640,6 @@ fn settledWorldPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundl
         c.glfwPollEvents();
         if (i == 85) {
             settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
-            errdefer gpa.free(settled);
             var w: u32 = 0;
             var h: u32 = 0;
             if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
@@ -2905,6 +2905,7 @@ fn settledGlbPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle:
     if (abi.goss_session_submit_frame_copy(session, &warm, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
     pumpUntilLoaded(engine, session);
     var settled: []u8 = &.{};
+    errdefer if (settled.len > 0) gpa.free(settled);
     for (0..90) |i| {
         const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
         if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
@@ -2912,7 +2913,6 @@ fn settledGlbPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle:
         c.glfwPollEvents();
         if (i == 85) {
             settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
-            errdefer gpa.free(settled);
             var w: u32 = 0;
             var h: u32 = 0;
             if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
@@ -2972,6 +2972,7 @@ fn settledGrabCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []con
     defer planes.deinit(gpa);
     const half_w = (planes.width + 1) / 2;
     var settled: []u8 = &.{};
+    errdefer if (settled.len > 0) gpa.free(settled);
     for (0..90) |i| {
         if (do_grab) {
             if (i == 12) _ = abi.goss_session_grab(session, 0.0, -0.13, 0.0);
@@ -2987,7 +2988,6 @@ fn settledGrabCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []con
         c.glfwPollEvents();
         if (i == 85) {
             settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
-            errdefer gpa.free(settled);
             var w: u32 = 0;
             var h: u32 = 0;
             if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
@@ -3096,6 +3096,7 @@ fn settledHeadPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle
         if (abi.goss_session_face_result(session, &fr) == .ok) break;
     }
     var settled: []u8 = &.{};
+    errdefer if (settled.len > 0) gpa.free(settled);
     for (0..90) |i| {
         const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
         if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
@@ -3103,7 +3104,6 @@ fn settledHeadPhysicsCapture(gpa: std.mem.Allocator, engine: *abi.Engine, bundle
         c.glfwPollEvents();
         if (i == 85) {
             settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
-            errdefer gpa.free(settled);
             var w: u32 = 0;
             var h: u32 = 0;
             if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
@@ -3163,6 +3163,7 @@ fn settledLiveColliderCapture(gpa: std.mem.Allocator, engine: *abi.Engine, erase
     const half_w = (planes.width + 1) / 2;
     _ = abi.goss_session_add_collider(session, 0.0, -0.15, 0.0);
     var settled: []u8 = &.{};
+    errdefer if (settled.len > 0) gpa.free(settled);
     for (0..90) |i| {
         if (erase and i == 45) _ = abi.goss_session_erase_collider(session, 0.0, -0.15, 0.0, 0.3);
         const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
@@ -3171,7 +3172,6 @@ fn settledLiveColliderCapture(gpa: std.mem.Allocator, engine: *abi.Engine, erase
         c.glfwPollEvents();
         if (i == 85) {
             settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
-            errdefer gpa.free(settled);
             var w: u32 = 0;
             var h: u32 = 0;
             if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
@@ -4321,6 +4321,7 @@ fn captureFountainAtFrame(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []co
     defer planes.deinit(gpa);
     const half_w = (planes.width + 1) / 2;
     var settled: []u8 = &.{};
+    errdefer if (settled.len > 0) gpa.free(settled);
     for (0..90) |i| {
         const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
         if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
@@ -4328,7 +4329,6 @@ fn captureFountainAtFrame(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []co
         c.glfwPollEvents();
         if (i == capture_frame) {
             settled = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
-            errdefer gpa.free(settled);
             var w: u32 = 0;
             var h: u32 = 0;
             if (abi.goss_engine_capture_frame(engine, session, settled.ptr, settled.len, &w, &h) != .ok) return error.CaptureFailed;
@@ -4952,6 +4952,7 @@ fn proveFullStack(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
             }
         }
         var shot: []u8 = &.{};
+        errdefer if (shot.len > 0) gpa.free(shot);
         for (0..90) |i| {
             const desc: abi.FrameDesc = .{
                 .width = planes.width,
@@ -4971,10 +4972,8 @@ fn proveFullStack(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
                 var shot_width: u32 = 0;
                 var shot_height: u32 = 0;
                 shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
-                errdefer gpa.free(shot);
                 if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
-                    gpa.free(shot);
-                    return false;
+                    return error.CaptureFailed;
                 }
             }
         }
@@ -6187,6 +6186,69 @@ fn proveNoLeaks(gpa: std.mem.Allocator) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF repeated lens activate/tick/destroy cycles leak no memory (blur, grade, bloom, audio, script)\n", .{});
+    return true;
+}
+
+/// Proves each major subsystem survives a second full lifecycle with no heap
+/// growth: session, hair physics, and recording are each created, used, and
+/// destroyed, then the whole round runs again while the counting allocator
+/// watches the footprint. A leak that only shows on re-creation fails here.
+fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *CountingAllocator) !bool {
+    const round = struct {
+        fn submitFrames(g: std.mem.Allocator, e: *abi.Engine, session: *abi.Session, frames: u32) !void {
+            const corpus = try loadCorpusFrame(g, corpus_path);
+            defer corpus.deinit();
+            const planes = try rgbaToNv12(g, corpus.frame);
+            defer planes.deinit(g);
+            const half_w = (planes.width + 1) / 2;
+            for (0..frames) |i| {
+                const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+                if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(e, session);
+                c.glfwPollEvents();
+            }
+        }
+        fn lensLifecycle(g: std.mem.Allocator, e: *abi.Engine, bundle: []const u8) !void {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+            try submitFrames(g, e, session, 8);
+        }
+        fn recordingLifecycle(g: std.mem.Allocator, e: *abi.Engine) !void {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) return error.ActivationFailed;
+            const path = "zig-out/conformance-second-lifecycle.mp4";
+            if (abi.goss_engine_recording_start(e, session, path.ptr, path.len, null) != .ok) return error.RecordStartFailed;
+            try submitFrames(g, e, session, 40);
+            if (abi.goss_engine_recording_stop(e) != .ok) return error.RecordStopFailed;
+        }
+        fn all(g: std.mem.Allocator, e: *abi.Engine) !void {
+            try lensLifecycle(g, e, ".lens-packages/soft-blur");
+            try lensLifecycle(g, e, ".lens-packages/hair-sim");
+            if (abi.recording_supported) try recordingLifecycle(g, e);
+        }
+    };
+
+    // Warm-up round: the first creation allocates the one-time caches every
+    // subsystem keeps for the engine's life, so the footprint it settles to
+    // is the honest baseline the repeat must not exceed.
+    try round.all(gpa, engine);
+    settle(engine);
+    const base = counter.in_use;
+
+    // Second round: the same work again, no lasting growth allowed.
+    try round.all(gpa, engine);
+    settle(engine);
+    const after = counter.in_use;
+
+    if (after > base) {
+        std.debug.print("conformance: FAIL a subsystem grew the heap {d} -> {d} bytes across a second lifecycle\n", .{ base, after });
+        return false;
+    }
+    std.debug.print("conformance: PROOF session, hair, and recording survive a second create/use/destroy with no heap growth\n", .{});
     return true;
 }
 
@@ -9828,6 +9890,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveReshapeBank(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "material-ops")) {
             if (!try proveMaterialOps(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "second-lifecycle")) {
+            if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -10090,5 +10154,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("per frame budget");
     if (!try provePeakBoundedCapture(gpa, engine, &frame_counter)) return 1;
     watchHold("peak bounded capture");
+    if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) return 1;
+    watchHold("second lifecycle");
     return 0;
 }

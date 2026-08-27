@@ -8,6 +8,7 @@ const c = @cImport({
     @cInclude("media/NdkMediaCodec.h");
     @cInclude("media/NdkMediaMuxer.h");
     @cInclude("media/NdkMediaFormat.h");
+    @cInclude("android/native_window.h");
 });
 
 /// How the vended native handle binds: a sampleable texture, or a
@@ -98,9 +99,13 @@ pub const Recording = struct {
         if (c.AMediaCodec_createInputSurface(codec, &window) != c.AMEDIA_OK or window == null) {
             return error.OpenFailed;
         }
+        // createInputSurface returns a reference the caller owns; it is
+        // released on every later failure here and in finish's teardown.
+        errdefer c.ANativeWindow_release(window);
         if (c.AMediaCodec_start(codec) != c.AMEDIA_OK) return error.OpenFailed;
 
         const muxer = c.AMediaMuxer_new(fd, c.AMEDIAMUXER_OUTPUT_FORMAT_MPEG_4) orelse return error.OpenFailed;
+        errdefer _ = c.AMediaMuxer_delete(muxer);
 
         const gpa = std.heap.c_allocator;
         const state = gpa.create(State) catch return error.OpenFailed;
@@ -148,6 +153,7 @@ pub const Recording = struct {
             _ = c.AMediaCodec_stop(state.codec);
             _ = c.AMediaCodec_delete(state.codec);
             _ = c.AMediaMuxer_delete(state.muxer);
+            c.ANativeWindow_release(@ptrCast(state.window));
             _ = std.os.linux.close(state.fd);
             std.heap.c_allocator.destroy(state);
         }
@@ -161,6 +167,11 @@ pub const Recording = struct {
 
     fn drain(state: *State, until_eos: bool) Error!void {
         var info: c.AMediaCodecBufferInfo = undefined;
+        // Bound the end-of-stream wait so a codec that goes quiet after the
+        // EOS signal cannot hang finish and engine destroy forever; each
+        // miss costs a 10ms timeout, so the cap is a few seconds of wait.
+        var eos_waits: u32 = 0;
+        const max_eos_waits: u32 = 500;
         while (true) {
             const index = c.AMediaCodec_dequeueOutputBuffer(state.codec, &info, if (until_eos) 10_000 else 0);
             if (index == c.AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
@@ -178,9 +189,24 @@ pub const Recording = struct {
                 continue;
             }
             if (index < 0) {
-                if (until_eos) continue;
-                return;
+                // Only "try again later" and the deprecated buffers-changed
+                // status are transient; any other negative is a real codec
+                // error that must fail rather than spin.
+                if (index != c.AMEDIACODEC_INFO_TRY_AGAIN_LATER and
+                    index != c.AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED)
+                {
+                    state.failed = true;
+                    return error.FrameFailed;
+                }
+                if (!until_eos) return;
+                eos_waits += 1;
+                if (eos_waits > max_eos_waits) {
+                    state.failed = true;
+                    return error.FrameFailed;
+                }
+                continue;
             }
+            eos_waits = 0;
             defer _ = c.AMediaCodec_releaseOutputBuffer(state.codec, @intCast(index), false);
             if (info.size > 0 and state.muxing) {
                 var buffer_size: usize = 0;

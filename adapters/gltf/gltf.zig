@@ -637,7 +637,13 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         try morph_targets.append(gpa, deltas);
     }
 
-    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animations = try animations.toOwnedSlice(gpa), .skin = decoded_skin, .morph_targets = try morph_targets.toOwnedSlice(gpa) };
+    const owned_animations = try animations.toOwnedSlice(gpa);
+    errdefer {
+        for (owned_animations) |*anim| freeAnimation(gpa, anim);
+        gpa.free(owned_animations);
+    }
+    const owned_morph_targets = try morph_targets.toOwnedSlice(gpa);
+    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animations = owned_animations, .skin = decoded_skin, .morph_targets = owned_morph_targets };
 }
 
 /// Reads a glTF skin into owned arrays. A vertex joint index past the

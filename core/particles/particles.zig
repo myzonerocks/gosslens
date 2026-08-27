@@ -169,6 +169,7 @@ pub const System = struct {
         if (field.trail > 1) {
             sys.history = try gpa.alloc(f32, @as(usize, field.count) * field.trail * 3);
         }
+        errdefer if (sys.history.len > 0) gpa.free(sys.history);
         if (field.sub_count > 0) {
             sys.children = try gpa.alloc(Particle, @as(usize, field.count) * field.sub_count);
             for (sys.children) |*ch| ch.* = .{ .pos = .{ 0, 0, 0 }, .vel = .{ 0, 0, 0 }, .life = -1, .max_life = field.sub_lifetime, .seed = 0 };

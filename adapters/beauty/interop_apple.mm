@@ -25,7 +25,10 @@
 // CVOpenGLESTextureCache has no real EAGLContext to bind to anymore.
 
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <new>
+#include <vector>
 
 #include <TargetConditionals.h>
 
@@ -228,14 +231,17 @@ struct AppleInterop {
       pixel_buffer = nullptr;
     }
 
-    NSDictionary* attributes = @{
-      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
-      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
-    };
-    CVReturn buffer_status = CVPixelBufferCreate(
-        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
-        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    CVReturn buffer_status;
+    @autoreleasepool {
+      NSDictionary* attributes = @{
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
+        (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+      };
+      buffer_status = CVPixelBufferCreate(
+          kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+          (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    }
     if (buffer_status != kCVReturnSuccess) return false;
 
     CVReturn texture_status = CVOpenGLTextureCacheCreateTextureFromImage(
@@ -342,13 +348,16 @@ struct AppleInterop {
     auto* ctx = gpupixel::GPUPixelContext::GetInstance();
     EGLDisplay display = ctx->GetEglDisplay();
 
-    NSDictionary* attributes = @{
-      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
-    };
-    CVReturn buffer_status = CVPixelBufferCreate(
-        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
-        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    CVReturn buffer_status;
+    @autoreleasepool {
+      NSDictionary* attributes = @{
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+      };
+      buffer_status = CVPixelBufferCreate(
+          kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+          (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    }
     if (buffer_status != kCVReturnSuccess) return false;
 
     IOSurfaceRef io_surface = CVPixelBufferGetIOSurface(pixel_buffer);
@@ -471,14 +480,17 @@ struct AppleInputSurface {
     if (metal_texture) { CFRelease(metal_texture); metal_texture = nullptr; }
     if (pixel_buffer) { CFRelease(pixel_buffer); pixel_buffer = nullptr; }
 
-    NSDictionary* attributes = @{
-      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
-      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
-    };
-    CVReturn buffer_status = CVPixelBufferCreate(
-        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
-        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    CVReturn buffer_status;
+    @autoreleasepool {
+      NSDictionary* attributes = @{
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
+        (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+      };
+      buffer_status = CVPixelBufferCreate(
+          kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+          (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    }
     if (buffer_status != kCVReturnSuccess) return false;
 
     if (metal_cache == nullptr) {
@@ -596,18 +608,29 @@ struct AppleInputSurface {
     if (device == nil) return false;
 
     if (HasGlImport()) {
-      gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { ReleaseGLImport(); });
+      bool released = false;
+      gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+        released = true;
+        ReleaseGLImport();
+      });
+      // Backgrounded: the old import stays valid, so keep it and let the
+      // caller retry the resize when active rather than orphan the surface
+      // or leave a stale texture EnsureGLImport would later trust.
+      if (!released) return false;
     }
     if (metal_texture) { CFRelease(metal_texture); metal_texture = nullptr; }
     if (pixel_buffer) { CFRelease(pixel_buffer); pixel_buffer = nullptr; }
 
-    NSDictionary* attributes = @{
-      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
-    };
-    CVReturn buffer_status = CVPixelBufferCreate(
-        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
-        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    CVReturn buffer_status;
+    @autoreleasepool {
+      NSDictionary* attributes = @{
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+      };
+      buffer_status = CVPixelBufferCreate(
+          kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+          (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    }
     if (buffer_status != kCVReturnSuccess) return false;
 
     if (metal_cache == nullptr) {
@@ -691,21 +714,60 @@ struct AppleInputSurface {
 
 #endif
 
+// Runs task on gpupixel's GL thread and reports whether it actually ran.
+// SyncRunWithContext silently skips while the app is backgrounded, so a
+// teardown that must not touch a context no thread has current here checks
+// the result and retries later instead of forcing the delete onto nothing.
+template <typename F>
+bool RunOnGlThread(F&& task) {
+  bool ran = false;
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+    ran = true;
+    task();
+  });
+  return ran;
+}
+
+// Teardowns skipped because the app was backgrounded park here rather than
+// leak; each entry releases its GL objects on a live context and frees its
+// host, and stays parked while the app is still inactive so nothing tears
+// down on a context that is not current.
+std::mutex g_deferred_teardown_mutex;
+std::vector<std::function<bool()>> g_deferred_teardown;
+
+void DrainDeferredTeardown() {
+  std::lock_guard<std::mutex> lock(g_deferred_teardown_mutex);
+  size_t kept = 0;
+  for (auto& entry : g_deferred_teardown) {
+    if (!entry()) g_deferred_teardown[kept++] = std::move(entry);
+  }
+  g_deferred_teardown.resize(kept);
+}
+
 }  // namespace
 
 extern "C" {
 
 void* goss_beauty_interop_create(void) {
+  DrainDeferredTeardown();
   return new (std::nothrow) AppleInterop();
 }
 
 void goss_beauty_interop_destroy(void* handle) {
   auto* interop = static_cast<AppleInterop*>(handle);
   if (interop == nullptr) return;
-  // GL objects die on gpupixel's own GL thread - deleted anywhere else
-  // they silently leak; the CF objects release in the destructor.
-  if (interop->HasGl()) {
-    gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { interop->ReleaseGl(); });
+  DrainDeferredTeardown();
+  // GL objects die on gpupixel's own GL thread. If the dispatch is skipped
+  // because the app is backgrounded, park the object and retry when active
+  // rather than strand its EGL surface or delete it on a dead context.
+  if (interop->HasGl() && !RunOnGlThread([&] { interop->ReleaseGl(); })) {
+    std::lock_guard<std::mutex> lock(g_deferred_teardown_mutex);
+    g_deferred_teardown.push_back([interop]() -> bool {
+      if (!RunOnGlThread([&] { interop->ReleaseGl(); })) return false;
+      delete interop;
+      return true;
+    });
+    return;
   }
   delete interop;
 }
@@ -762,14 +824,25 @@ void* goss_beauty_interop_native_texture(void* handle, void* device) {
 }
 
 void* goss_beauty_input_create(void) {
+  DrainDeferredTeardown();
   return new (std::nothrow) AppleInputSurface();
 }
 
 void goss_beauty_input_destroy(void* handle) {
   auto* input = static_cast<AppleInputSurface*>(handle);
   if (input == nullptr) return;
-  if (input->HasGlImport()) {
-    gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { input->ReleaseGLImport(); });
+  DrainDeferredTeardown();
+  // Same backgrounded-skip handling as goss_beauty_interop_destroy: a
+  // skipped release parks the object for a live retry so the EGL surface
+  // is never stranded nor torn on a context no thread has current.
+  if (input->HasGlImport() && !RunOnGlThread([&] { input->ReleaseGLImport(); })) {
+    std::lock_guard<std::mutex> lock(g_deferred_teardown_mutex);
+    g_deferred_teardown.push_back([input]() -> bool {
+      if (!RunOnGlThread([&] { input->ReleaseGLImport(); })) return false;
+      delete input;
+      return true;
+    });
+    return;
   }
   delete input;
 }

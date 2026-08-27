@@ -81,47 +81,50 @@ pub export fn goss_tracking_result_size() usize {
     return @sizeOf(face.Result);
 }
 
-pub export fn goss_tracking_create(task_ptr: ?[*]const u8, task_len: usize) ?*Instance {
-    const task_source = task_ptr orelse return null;
-    if (task_len == 0) return null;
+// A pub export fn cannot return an error, so its errdefers would be dead;
+// the build-and-own body lives here where every errdefer is live, and the
+// export below wraps it as `catch null`.
+fn createFaceInstance(task_ptr: ?[*]const u8, task_len: usize) !*Instance {
+    const task_source = task_ptr orelse return error.CreateFailed;
+    if (task_len == 0) return error.CreateFailed;
 
-    const instance = gpa.create(Instance) catch return null;
+    const instance = try gpa.create(Instance);
     errdefer gpa.destroy(instance);
 
-    const owned = gpa.dupe(u8, task_source[0..task_len]) catch return null;
+    const owned = try gpa.dupe(u8, task_source[0..task_len]);
     errdefer gpa.free(owned);
 
-    const task = bundle.Bundle.open(owned) catch return null;
-    const detector_entry = task.find("face_detector.tflite") catch return null;
-    const landmarks_entry = task.find("face_landmarks_detector.tflite") catch return null;
-    const blendshapes_entry = task.find("face_blendshapes.tflite") catch return null;
+    const task = try bundle.Bundle.open(owned);
+    const detector_entry = try task.find("face_detector.tflite");
+    const landmarks_entry = try task.find("face_landmarks_detector.tflite");
+    const blendshapes_entry = try task.find("face_blendshapes.tflite");
 
-    const detector_payload = task.payload(gpa, detector_entry) catch return null;
+    const detector_payload = try task.payload(gpa, detector_entry);
     errdefer detector_payload.deinit(gpa);
-    const landmarks_payload = task.payload(gpa, landmarks_entry) catch return null;
+    const landmarks_payload = try task.payload(gpa, landmarks_entry);
     errdefer landmarks_payload.deinit(gpa);
-    const blendshapes_payload = task.payload(gpa, blendshapes_entry) catch return null;
+    const blendshapes_payload = try task.payload(gpa, blendshapes_entry);
     errdefer blendshapes_payload.deinit(gpa);
 
-    var detector_engine = runtime.Engine.init(detector_payload.bytes, 1) catch return null;
+    var detector_engine = try runtime.Engine.init(detector_payload.bytes, 1);
     errdefer detector_engine.deinit();
-    var landmarks_engine = runtime.Engine.init(landmarks_payload.bytes, 1) catch return null;
+    var landmarks_engine = try runtime.Engine.init(landmarks_payload.bytes, 1);
     errdefer landmarks_engine.deinit();
-    var blendshapes_engine = runtime.Engine.init(blendshapes_payload.bytes, 1) catch return null;
+    var blendshapes_engine = try runtime.Engine.init(blendshapes_payload.bytes, 1);
     errdefer blendshapes_engine.deinit();
 
-    const detector_side = engineInputSide(&detector_engine) orelse return null;
-    const landmark_side = engineInputSide(&landmarks_engine) orelse return null;
-    const total = anchorTotal(&detector_engine) orelse return null;
-    const plan = detector.planForModel(detector_side, total) orelse return null;
+    const detector_side = engineInputSide(&detector_engine) orelse return error.CreateFailed;
+    const landmark_side = engineInputSide(&landmarks_engine) orelse return error.CreateFailed;
+    const total = anchorTotal(&detector_engine) orelse return error.CreateFailed;
+    const plan = detector.planForModel(detector_side, total) orelse return error.CreateFailed;
 
-    const anchors = gpa.alloc(detector.Anchor, total) catch return null;
+    const anchors = try gpa.alloc(detector.Anchor, total);
     errdefer gpa.free(anchors);
     detector.generateAnchors(detector_side, plan, anchors);
 
-    const detector_tensor = gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3) catch return null;
+    const detector_tensor = try gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3);
     errdefer gpa.free(detector_tensor);
-    const landmark_tensor = gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3) catch return null;
+    const landmark_tensor = try gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3);
     errdefer gpa.free(landmark_tensor);
 
     instance.* = .{
@@ -139,6 +142,10 @@ pub export fn goss_tracking_create(task_ptr: ?[*]const u8, task_len: usize) ?*In
         .landmark_tensor = landmark_tensor,
     };
     return instance;
+}
+
+pub export fn goss_tracking_create(task_ptr: ?[*]const u8, task_len: usize) ?*Instance {
+    return createFaceInstance(task_ptr, task_len) catch null;
 }
 
 pub export fn goss_tracking_destroy(instance: ?*Instance) void {
@@ -326,39 +333,39 @@ pub export fn goss_pose_result_size() usize {
     return @sizeOf(pose.Result);
 }
 
-pub export fn goss_pose_create(task_ptr: ?[*]const u8, task_len: usize) ?*PoseInstance {
-    const task_source = task_ptr orelse return null;
-    if (task_len == 0) return null;
+fn createPoseInstance(task_ptr: ?[*]const u8, task_len: usize) !*PoseInstance {
+    const task_source = task_ptr orelse return error.CreateFailed;
+    if (task_len == 0) return error.CreateFailed;
 
-    const instance = gpa.create(PoseInstance) catch return null;
+    const instance = try gpa.create(PoseInstance);
     errdefer gpa.destroy(instance);
-    const owned = gpa.dupe(u8, task_source[0..task_len]) catch return null;
+    const owned = try gpa.dupe(u8, task_source[0..task_len]);
     errdefer gpa.free(owned);
 
-    const task = bundle.Bundle.open(owned) catch return null;
-    const detector_entry = task.find("pose_detector.tflite") catch return null;
-    const landmarks_entry = task.find("pose_landmarks_detector.tflite") catch return null;
-    const detector_payload = task.payload(gpa, detector_entry) catch return null;
+    const task = try bundle.Bundle.open(owned);
+    const detector_entry = try task.find("pose_detector.tflite");
+    const landmarks_entry = try task.find("pose_landmarks_detector.tflite");
+    const detector_payload = try task.payload(gpa, detector_entry);
     errdefer detector_payload.deinit(gpa);
-    const landmarks_payload = task.payload(gpa, landmarks_entry) catch return null;
+    const landmarks_payload = try task.payload(gpa, landmarks_entry);
     errdefer landmarks_payload.deinit(gpa);
 
-    var detector_engine = runtime.Engine.init(detector_payload.bytes, 1) catch return null;
+    var detector_engine = try runtime.Engine.init(detector_payload.bytes, 1);
     errdefer detector_engine.deinit();
-    var landmarks_engine = runtime.Engine.init(landmarks_payload.bytes, 1) catch return null;
+    var landmarks_engine = try runtime.Engine.init(landmarks_payload.bytes, 1);
     errdefer landmarks_engine.deinit();
 
-    const detector_side = engineInputSide(&detector_engine) orelse return null;
-    const landmark_side = engineInputSide(&landmarks_engine) orelse return null;
-    const total = anchorTotal(&detector_engine) orelse return null;
-    const plan = detector.planForModel(detector_side, total) orelse return null;
+    const detector_side = engineInputSide(&detector_engine) orelse return error.CreateFailed;
+    const landmark_side = engineInputSide(&landmarks_engine) orelse return error.CreateFailed;
+    const total = anchorTotal(&detector_engine) orelse return error.CreateFailed;
+    const plan = detector.planForModel(detector_side, total) orelse return error.CreateFailed;
 
-    const anchors = gpa.alloc(detector.Anchor, total) catch return null;
+    const anchors = try gpa.alloc(detector.Anchor, total);
     errdefer gpa.free(anchors);
     detector.generateAnchors(detector_side, plan, anchors);
-    const detector_tensor = gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3) catch return null;
+    const detector_tensor = try gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3);
     errdefer gpa.free(detector_tensor);
-    const landmark_tensor = gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3) catch return null;
+    const landmark_tensor = try gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3);
     errdefer gpa.free(landmark_tensor);
 
     instance.* = .{
@@ -374,6 +381,10 @@ pub export fn goss_pose_create(task_ptr: ?[*]const u8, task_len: usize) ?*PoseIn
         .landmark_tensor = landmark_tensor,
     };
     return instance;
+}
+
+pub export fn goss_pose_create(task_ptr: ?[*]const u8, task_len: usize) ?*PoseInstance {
+    return createPoseInstance(task_ptr, task_len) catch null;
 }
 
 pub export fn goss_pose_destroy(instance: ?*PoseInstance) void {
@@ -511,16 +522,16 @@ pub export fn goss_hand_result_size() usize {
     return @sizeOf(hand.Result);
 }
 
-pub export fn goss_hand_create(task_ptr: ?[*]const u8, task_len: usize) ?*HandInstance {
-    const task_source = task_ptr orelse return null;
-    if (task_len == 0) return null;
+fn createHandInstance(task_ptr: ?[*]const u8, task_len: usize) !*HandInstance {
+    const task_source = task_ptr orelse return error.CreateFailed;
+    if (task_len == 0) return error.CreateFailed;
 
-    const p = gpa.create(HandInstance) catch return null;
+    const p = try gpa.create(HandInstance);
     errdefer gpa.destroy(p);
-    const owned = gpa.dupe(u8, task_source[0..task_len]) catch return null;
+    const owned = try gpa.dupe(u8, task_source[0..task_len]);
     errdefer gpa.free(owned);
 
-    const task = bundle.Bundle.open(owned) catch return null;
+    const task = try bundle.Bundle.open(owned);
     var landmarker_container: ?bundle.Payload = null;
     errdefer if (landmarker_container) |payload| payload.deinit(gpa);
     var gesture_container: ?bundle.Payload = null;
@@ -528,28 +539,28 @@ pub export fn goss_hand_create(task_ptr: ?[*]const u8, task_len: usize) ?*HandIn
 
     const landmarker = blk: {
         if (task.find("hand_detector.tflite")) |_| break :blk task else |_| {}
-        const nested = task.find("hand_landmarker.task") catch return null;
-        landmarker_container = task.payload(gpa, nested) catch return null;
-        break :blk bundle.Bundle.open(landmarker_container.?.bytes) catch return null;
+        const nested = try task.find("hand_landmarker.task");
+        landmarker_container = try task.payload(gpa, nested);
+        break :blk try bundle.Bundle.open(landmarker_container.?.bytes);
     };
 
-    const detector_entry = landmarker.find("hand_detector.tflite") catch return null;
-    const landmarks_entry = landmarker.find("hand_landmarks_detector.tflite") catch return null;
-    const detector_payload = landmarker.payload(gpa, detector_entry) catch return null;
+    const detector_entry = try landmarker.find("hand_detector.tflite");
+    const landmarks_entry = try landmarker.find("hand_landmarks_detector.tflite");
+    const detector_payload = try landmarker.payload(gpa, detector_entry);
     errdefer detector_payload.deinit(gpa);
-    const landmarks_payload = landmarker.payload(gpa, landmarks_entry) catch return null;
+    const landmarks_payload = try landmarker.payload(gpa, landmarks_entry);
     errdefer landmarks_payload.deinit(gpa);
 
-    var detector_engine = runtime.Engine.init(detector_payload.bytes, 1) catch return null;
+    var detector_engine = try runtime.Engine.init(detector_payload.bytes, 1);
     errdefer detector_engine.deinit();
-    var landmarks_engine = runtime.Engine.init(landmarks_payload.bytes, 1) catch return null;
+    var landmarks_engine = try runtime.Engine.init(landmarks_payload.bytes, 1);
     errdefer landmarks_engine.deinit();
 
-    const detector_side = engineInputSide(&detector_engine) orelse return null;
-    const landmark_side = engineInputSide(&landmarks_engine) orelse return null;
-    const total = anchorTotal(&detector_engine) orelse return null;
-    const plan = detector.planForModel(detector_side, total) orelse return null;
-    if (floatCount(&landmarks_engine, 0, false) != hand.landmark_count * 3) return null;
+    const detector_side = engineInputSide(&detector_engine) orelse return error.CreateFailed;
+    const landmark_side = engineInputSide(&landmarks_engine) orelse return error.CreateFailed;
+    const total = anchorTotal(&detector_engine) orelse return error.CreateFailed;
+    const plan = detector.planForModel(detector_side, total) orelse return error.CreateFailed;
+    if (floatCount(&landmarks_engine, 0, false) != hand.landmark_count * 3) return error.CreateFailed;
 
     var embedder_payload: ?bundle.Payload = null;
     errdefer if (embedder_payload) |payload| payload.deinit(gpa);
@@ -561,22 +572,22 @@ pub export fn goss_hand_create(task_ptr: ?[*]const u8, task_len: usize) ?*HandIn
     errdefer if (classifier_engine) |*engine| engine.deinit();
 
     if (task.find("hand_gesture_recognizer.task")) |gesture_entry| {
-        gesture_container = task.payload(gpa, gesture_entry) catch return null;
-        const gesture = bundle.Bundle.open(gesture_container.?.bytes) catch return null;
-        const embedder_entry = gesture.find("gesture_embedder.tflite") catch return null;
-        const classifier_entry = gesture.find("canned_gesture_classifier.tflite") catch return null;
-        embedder_payload = gesture.payload(gpa, embedder_entry) catch return null;
-        classifier_payload = gesture.payload(gpa, classifier_entry) catch return null;
-        embedder_engine = runtime.Engine.init(embedder_payload.?.bytes, 1) catch return null;
-        classifier_engine = runtime.Engine.init(classifier_payload.?.bytes, 1) catch return null;
+        gesture_container = try task.payload(gpa, gesture_entry);
+        const gesture = try bundle.Bundle.open(gesture_container.?.bytes);
+        const embedder_entry = try gesture.find("gesture_embedder.tflite");
+        const classifier_entry = try gesture.find("canned_gesture_classifier.tflite");
+        embedder_payload = try gesture.payload(gpa, embedder_entry);
+        classifier_payload = try gesture.payload(gpa, classifier_entry);
+        embedder_engine = try runtime.Engine.init(embedder_payload.?.bytes, 1);
+        classifier_engine = try runtime.Engine.init(classifier_payload.?.bytes, 1);
     } else |_| {}
 
-    const anchors = gpa.alloc(detector.Anchor, total) catch return null;
+    const anchors = try gpa.alloc(detector.Anchor, total);
     errdefer gpa.free(anchors);
     detector.generateAnchors(detector_side, plan, anchors);
-    const detector_tensor = gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3) catch return null;
+    const detector_tensor = try gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3);
     errdefer gpa.free(detector_tensor);
-    const landmark_tensor = gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3) catch return null;
+    const landmark_tensor = try gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3);
     errdefer gpa.free(landmark_tensor);
 
     p.* = .{
@@ -598,6 +609,10 @@ pub export fn goss_hand_create(task_ptr: ?[*]const u8, task_len: usize) ?*HandIn
         .landmark_tensor = landmark_tensor,
     };
     return p;
+}
+
+pub export fn goss_hand_create(task_ptr: ?[*]const u8, task_len: usize) ?*HandInstance {
+    return createHandInstance(task_ptr, task_len) catch null;
 }
 
 pub export fn goss_hand_destroy(instance: ?*HandInstance) void {

@@ -169,6 +169,7 @@ pub const StreamEncoder = struct {
         self.prev = try gpa.alloc(u8, row_bytes);
         errdefer gpa.free(self.prev);
         self.wide = if (opts.bit_depth == 16) try gpa.alloc(u8, row_bytes) else &.{};
+        errdefer if (self.wide.len > 0) gpa.free(self.wide);
         self.compress = try std.compress.flate.Compress.init(&self.compressed.writer, self.window, .zlib, .level_6);
     }
 

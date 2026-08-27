@@ -54,6 +54,9 @@ pub fn create(gpa: std.mem.Allocator, model_bytes: []const u8, threads: i32) Cre
         .io_state = std.Io.Threaded.init(gpa, .{}),
     };
 
+    // io_state is live from the struct assignment above; a failed spawn
+    // must tear it down rather than leak its worker-pool state.
+    errdefer segmentation.io_state.deinit();
     segmentation.thread = std.Thread.spawn(.{}, workerMain, .{segmentation}) catch return error.OutOfMemory;
     return segmentation;
 }

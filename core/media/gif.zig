@@ -298,8 +298,11 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8) !Decoded {
         composite(canvas, width, fx, fy, fw, fh, interlaced, indices, table, transparent);
 
         const frame = try gpa.alloc(u8, pixels * 4);
+        var frame_owned = false;
+        errdefer if (!frame_owned) gpa.free(frame);
         @memcpy(frame, canvas);
         try frames.append(gpa, frame);
+        frame_owned = true;
         try delays.append(gpa, pending_delay);
 
         switch (disposal) {
@@ -313,11 +316,17 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8) !Decoded {
     }
 
     if (frames.items.len == 0) return Error.BadImage;
+    const owned_frames = try frames.toOwnedSlice(gpa);
+    errdefer {
+        for (owned_frames) |f| gpa.free(f);
+        gpa.free(owned_frames);
+    }
+    const owned_delays = try delays.toOwnedSlice(gpa);
     return .{
         .width = width,
         .height = height,
-        .frames = try frames.toOwnedSlice(gpa),
-        .delays_cs = try delays.toOwnedSlice(gpa),
+        .frames = owned_frames,
+        .delays_cs = owned_delays,
     };
 }
 
