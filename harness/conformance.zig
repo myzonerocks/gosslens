@@ -6327,6 +6327,102 @@ fn proveMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The mean r, g, b over a 40x40 centre block of a 400x300 RGBA capture -
+/// a low-noise read of a solid frame's one colour.
+fn centreMean(shot: []const u8) [3]f32 {
+    var sum = [3]u64{ 0, 0, 0 };
+    var count: u64 = 0;
+    var row: usize = 130;
+    while (row < 170) : (row += 1) {
+        var col: usize = 180;
+        while (col < 220) : (col += 1) {
+            const i = (row * @as(usize, width) + col) * 4;
+            sum[0] += shot[i + 0];
+            sum[1] += shot[i + 1];
+            sum[2] += shot[i + 2];
+            count += 1;
+        }
+    }
+    const n: f32 = @floatFromInt(count);
+    return .{
+        @as(f32, @floatFromInt(sum[0])) / n,
+        @as(f32, @floatFromInt(sum[1])) / n,
+        @as(f32, @floatFromInt(sum[2])) / n,
+    };
+}
+
+/// Proves the material colormatrix op computes an exact 3x3 colour transform,
+/// the primitive behind a generic colour matrix, an rgb gain, or a luminance
+/// compress in a shader.pass lens. A solid frame through material-color-matrix
+/// must equal its sepia matrix times the plain input to a byte, and be stable.
+fn proveMaterialOps(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const solid = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(solid);
+    // Three distinct channels, so every output channel mixing all three
+    // inputs tests the off-diagonal matrix terms, not just the row sums a
+    // grey would.
+    var p: usize = 0;
+    while (p < solid.len) : (p += 4) {
+        solid[p + 0] = 200;
+        solid[p + 1] = 120;
+        solid[p + 2] = 60;
+        solid[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = solid }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const plain = try captureStylizeShot(gpa, engine, planes, null);
+    defer gpa.free(plain);
+    const sepia_a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/material-color-matrix");
+    defer gpa.free(sepia_a);
+    const sepia_b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/material-color-matrix");
+    defer gpa.free(sepia_b);
+
+    if (!std.mem.eql(u8, sepia_a, sepia_b)) {
+        std.debug.print("conformance: FAIL colormatrix material is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    const in = centreMean(plain);
+    const got = centreMean(sepia_a);
+    // The sepia rows the lens authors, applied to the plain input the shader
+    // samples. Byte in, byte out, clamped exactly as saturate does on device.
+    const mat = [3][3]f32{
+        .{ 0.393, 0.769, 0.189 },
+        .{ 0.349, 0.686, 0.168 },
+        .{ 0.272, 0.534, 0.131 },
+    };
+    var want: [3]f32 = undefined;
+    var max_shift: f32 = 0;
+    for (0..3) |row| {
+        const acc = mat[row][0] * in[0] + mat[row][1] * in[1] + mat[row][2] * in[2];
+        want[row] = std.math.clamp(acc, 0.0, 255.0);
+        const shift = @abs(want[row] - in[row]);
+        if (shift > max_shift) max_shift = shift;
+    }
+    // The chosen input must actually move under the matrix, so the match
+    // below is a real constraint, never trivially met by an identity.
+    if (max_shift < 20.0) {
+        std.debug.print("conformance: FAIL colormatrix proof input does not exercise the transform\n", .{});
+        return false;
+    }
+    var max_err: f32 = 0;
+    for (0..3) |ch| {
+        const err = @abs(got[ch] - want[ch]);
+        if (err > max_err) max_err = err;
+    }
+    if (max_err > 3.0) {
+        std.debug.print(
+            "conformance: FAIL colormatrix is not the exact sepia transform: in ({d:.1},{d:.1},{d:.1}) got ({d:.1},{d:.1},{d:.1}) want ({d:.1},{d:.1},{d:.1}) err {d:.2}\n",
+            .{ in[0], in[1], in[2], got[0], got[1], got[2], want[0], want[1], want[2], max_err },
+        );
+        return false;
+    }
+    std.debug.print("conformance: PROOF a material colormatrix op applies an exact 3x3 colour transform (sepia) deterministically (err {d:.2})\n", .{max_err});
+    return true;
+}
+
 fn proveSceneSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // The deeplab scene segmenter infers 21 classes at 257 x 257 - both
     // past the portrait segmenters' shape. It must load, resample onto
@@ -8866,6 +8962,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveEdge(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "warp")) {
             if (!try proveWarp(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "material-ops")) {
+            if (!try proveMaterialOps(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -8912,6 +9010,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("mask degradation");
     if (!try proveMaterialGraph(gpa, engine)) return 1;
     watchHold("material graph");
+    if (!try proveMaterialOps(gpa, engine)) return 1;
+    watchHold("material ops");
     if (!try proveSceneSegmentation(gpa, engine)) return 1;
     watchHold("scene segmentation");
     if (!try proveClassOutline(gpa, engine)) return 1;

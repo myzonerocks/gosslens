@@ -650,13 +650,18 @@ The graph is a typed DAG. Sources take no inputs: `uv` (the frame
 coordinate), `time`, `constant`, `uniform` (host-set by name), and
 `texture` (a sampler bound by name, `texColor` being the frame itself).
 `sample` reads a texture at a coordinate. Arithmetic (`add`, `subtract`,
-`multiply`, `divide`, `power`, `min`, `max`, `mod`) and the vector and
-scalar functions (`dot`, `normalize`, `length`, `saturate`, `abs`,
-`floor`, `fract`, `sin`, `cos`, `clamp`, `step`, `smoothstep`, `mix`)
-carry their operands' types through. `split` takes one channel out of a
-vector, `combine3`/`combine4` build a vector from floats, and `lambert`
-and `fresnel` shade from a normal, light, or view. The single `output`
-node takes a `vec4` and is the graph's root.
+`multiply`, `divide`, `power`, `min`, `max`, `mod`, `atan2`) and the vector
+and scalar functions (`dot`, `distance`, `normalize`, `length`, `saturate`,
+`abs`, `floor`, `fract`, `sin`, `cos`, `sqrt`, `clamp`, `step`, `smoothstep`,
+`mix`) carry their operands' types through. `split` takes one channel out of
+a vector, `combine3`/`combine4` build a vector from floats, and `lambert`
+and `fresnel` shade from a normal, light, or view. `refract` bends an
+incident vector about a normal by an index ratio (the sphere-warp math), and
+`colormatrix` multiplies a `vec3` by three `vec3` rows to apply a general 3x3
+colour transform: a channel swap, a sepia or saturation matrix, or an rgb
+per-channel gain as its diagonal. `atan2` with a radius from `distance` gives
+the polar remap a hue rotation or swirl needs. The single `output` node takes
+a `vec4` and is the graph's root.
 
 Validation rejects a graph with a cycle, a dangling input, a wrong
 argument count, or a type mismatch, naming the offending node. A valid
@@ -665,7 +670,10 @@ compiles to every profile the same way, so a material a lens authors is
 a real compiled shader on the device, not an interpreter. A vignette,
 posterize, pixelate, or edge effect is a material graph with no dedicated
 shader; see the `material-tint`, `material-vignette`, `material-posterize`,
-`material-pixelate`, and `material-edge` reference lenses. Neighbour
+`material-pixelate`, `material-edge`, `material-color-matrix` (a sepia
+colour transform through `colormatrix`), and `material-sphere` (a sphere
+refraction through `refract`, `distance`, and `atan2`) reference lenses.
+Neighbour
 sampling (an edge detector reads offset `uv` and compares) works too, so
 a material graph is not limited to per-pixel math.
 
