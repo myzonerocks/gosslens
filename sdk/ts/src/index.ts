@@ -1327,6 +1327,16 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
+  /// Segments a host-provided still image through the running segmenter: rgba
+  /// is width by height RGBA8 pixels, row major. The mask reaches the active
+  /// lens the way a camera frame's would.
+  submitSegmentationImage(rgba: Uint8Array, width: number, height: number): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    this.mod.HEAPU8.set(rgba, ptr);
+    this.mod.ccall("goss_session_submit_segmentation_image", "number", ["number", "number", "number", "number"], [this.handle, ptr, width, height]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, rgba.length]);
+  }
+
   /// The number of bodies the last submitBodies kept, zero to GOSS_BODY_MAX.
   bodyCount(): number {
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;

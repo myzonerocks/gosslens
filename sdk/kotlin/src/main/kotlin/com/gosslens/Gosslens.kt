@@ -73,6 +73,7 @@ object Gosslens {
     internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
+    internal external fun nativeSubmitSegmentationImage(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeBodyCount(session: Long): Int
     internal external fun nativeBodyResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeEnableBeauty(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
@@ -760,6 +761,16 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         buf.asFloatBuffer().put(depth)
         buf.rewind()
         return Gosslens.nativeSubmitDepth(handle, buf, width, height, near, far) == 0
+    }
+
+    /** Segments a host-provided still image through the running segmenter:
+     * rgba is width by height RGBA8 pixels, row major. The mask reaches the
+     * active lens the way a camera frame's would. */
+    fun submitSegmentationImage(rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSubmitSegmentationImage(handle, buf, width, height) == 0
     }
 
     /** The number of bodies the last submitBodies kept, zero to BODY_MAX. */
