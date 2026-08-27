@@ -374,6 +374,16 @@ Every finish scales with the mask, so it fades to nothing where the region does,
 and `matte` leaves the flat layer untouched. `none` is accepted as a synonym for
 `matte`.
 
+The eye makeup keyed to `eyes` is eyeshadow, filling the whole lid. Eyeliner,
+mascara, and false lashes instead key `lash_line`, the thin band each eye's
+upper lid arc rises into just above the lash line, derived from the eye contour
+landmarks. One band serves all three: they are the same masked tint at
+increasing weight, an eyeliner a light dark line, mascara a heavier darkening,
+false lashes the densest, so the band shape stays fixed and the tint color and
+opacity set the look. The `eyeliner`, `mascara`, and `false-lashes` reference
+lenses each multiply a near-black into that band. A denser 3D lash mesh pinned
+to the eye landmarks is a separate mesh form, not this masked tint.
+
 A `"smooth.pass"` node is a masked detail pass. It carries a `"smooth":
 {"amount", "mask"}` block: it mixes the masked region toward a small neighbor
 average by `amount`, so a positive amount blurs (skin smoothing) and a
@@ -646,12 +656,13 @@ A `shader.pass` node may also name a mask channel with a `mask` field. The
 valid channel names are the same set every mask-keyed node draws from
 (`tint.pass`, `smooth.pass`, `matte.refine`, `outline.pass`). Seven come from
 the segmentation model: `person`, `background`, `hair`, `body_skin`,
-`face_skin`, `clothes`, `others`. Nine more ride the face and hand landmarks
+`face_skin`, `clothes`, `others`. Ten more ride the face and hand landmarks
 rather than a segmentation model: `head` and `hand` follow the tracked head
-and hand, `lips`, `eyes`, `brows`, `iris`, and `teeth` are the face parts, and
+and hand, `lips`, `eyes`, `brows`, `iris`, and `teeth` are the face parts,
 `contour` and `highlight` are clustered face regions (contour the cheekbone
 hollows, nose sides, and jaw; highlight the cheekbone tops, brow bones, nose
-bridge, cupid's bow, and chin), so a makeup lens keys those two directly. The
+bridge, cupid's bow, and chin), and `lash_line` is the upper lash-line band
+each eye's upper lid arc rises into, so a makeup lens keys those directly. The
 shader reads the channel through `SAMPLER2D(s_texMask, 2)` beside the frame's
 own `s_texColor`. When a named channel has no live data (segmentation
 disabled, a single-class model without it, or no face or hand tracked for a
@@ -761,7 +772,7 @@ never through code.**
 
 ## 9. Conformance
 
-The reference set (`lenses/reference/`) has 151 lens bundles, at least one
+The reference set (`lenses/reference/`) has 154 lens bundles, at least one
 per node type and capability class the format defines: shader passes, the
 beauty nodes and the masked makeup passes, `mesh.face`, glTF models and the
 face, body, skeleton, and world anchors, physics bodies with joints and

@@ -6630,6 +6630,19 @@ fn ringCentroid(lm: []const f32, loop: []const u16) [2]f32 {
     return .{ cx / n, cy / n };
 }
 
+/// The centroid (x, y) of a lash-line band ring, so a proof can place the band
+/// against the eye it rides.
+fn bandCentroid(ring: []const [2]f32) [2]f32 {
+    var cx: f32 = 0;
+    var cy: f32 = 0;
+    for (ring) |p| {
+        cx += p[0];
+        cy += p[1];
+    }
+    const n: f32 = @floatFromInt(ring.len);
+    return .{ cx / n, cy / n };
+}
+
 fn proveEyesMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // First prove the eye loops are anatomically the eyes: on a real tracked
     // face each eye centroid sits above the lips and the two flank the nose,
@@ -7108,6 +7121,102 @@ fn proveContourHighlight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF contour darkens its cheekbone-hollow matte and highlight brightens its raised-plane matte, both keyed off the face, gone without one, bit-stable\n", .{});
+    return true;
+}
+
+fn proveEyeMakeup(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First prove the lash-line band is anatomically placed: on a real tracked
+    // face each eye's band centroid sits above that eye's own centre and the
+    // two bands flank the nose, so a wrong upper-lid arc would fail here.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL eye-makeup face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        var points: [abi.face_landmark_count][2]f32 = undefined;
+        for (0..abi.face_landmark_count) |i| points[i] = .{ lm[i * 3], lm[i * 3 + 1] };
+        var band: [18][2]f32 = undefined;
+        const left_band = bandCentroid(abi.lashLineBand(&points, &abi.left_eye_loop, &band));
+        const right_band = bandCentroid(abi.lashLineBand(&points, &abi.right_eye_loop, &band));
+        const left_eye = ringCentroid(lm, &abi.left_eye_loop);
+        const right_eye = ringCentroid(lm, &abi.right_eye_loop);
+        if (!(left_band[1] < left_eye[1] and right_band[1] < right_eye[1])) {
+            std.debug.print("conformance: FAIL a lash band not above its eye centre (y bandL {d:.1} eyeL {d:.1} bandR {d:.1} eyeR {d:.1})\n", .{ left_band[1], left_eye[1], right_band[1], right_eye[1] });
+            return false;
+        }
+        const nose_x = lm[1 * 3];
+        if ((left_band[0] > nose_x) == (right_band[0] > nose_x)) {
+            std.debug.print("conformance: FAIL the lash bands not on opposite sides of the nose (x L {d:.1} R {d:.1} nose {d:.1})\n", .{ left_band[0], right_band[0], nose_x });
+            return false;
+        }
+    }
+
+    // Then prove the render: eyeliner, mascara, and false lashes each darken the
+    // lash-line band off the same channel, heavier as the tint weight climbs,
+    // all keyed off the face and gone without one, bit-stable across two runs.
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeliner", "zig-out/conformance-eyeliner-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeliner", "zig-out/conformance-eyeliner-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeliner", "zig-out/conformance-eyeliner-noface", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/mascara", "zig-out/conformance-mascara", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/false-lashes", "zig-out/conformance-false-lashes", .{});
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyeliner-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyeliner-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyeliner-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    const mascara = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-mascara.tga", gpa, .limited(8 << 20));
+    defer gpa.free(mascara);
+    const lashes = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-false-lashes.tga", gpa, .limited(8 << 20));
+    defer gpa.free(lashes);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the eyeliner is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the eyeliner drew nothing - the lash-line band never keyed\n", .{});
+        return false;
+    }
+    const base = pixelByteSum(noface);
+    if (!(pixelByteSum(a) < base and pixelByteSum(mascara) < base and pixelByteSum(lashes) < base)) {
+        std.debug.print("conformance: FAIL a lash-line tint did not darken the band (liner {d} mascara {d} lashes {d} base {d})\n", .{ pixelByteSum(a), pixelByteSum(mascara), pixelByteSum(lashes), base });
+        return false;
+    }
+    if (!(pixelByteSum(lashes) < pixelByteSum(a))) {
+        std.debug.print("conformance: FAIL the false lashes did not read heavier than the eyeliner (lashes {d} liner {d})\n", .{ pixelByteSum(lashes), pixelByteSum(a) });
+        return false;
+    }
+    if (std.mem.eql(u8, a, mascara) or std.mem.eql(u8, mascara, lashes) or std.mem.eql(u8, a, lashes)) {
+        std.debug.print("conformance: FAIL two lash-line looks produced the same pixels\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF eyeliner, mascara, and false lashes darken the upper lash-line band above each eye and flanking the nose, heavier by tint weight, gone with no face, bit-stable\n", .{});
     return true;
 }
 
@@ -9512,6 +9621,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveGlam(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "contour-highlight")) {
             if (!try proveContourHighlight(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "eye-makeup")) {
+            if (!try proveEyeMakeup(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "makeup-finish")) {
             if (!try proveMakeupFinish(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "depth-matting")) {
@@ -9614,6 +9725,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("glam look");
     if (!try proveContourHighlight(gpa, engine)) return 1;
     watchHold("contour highlight");
+    if (!try proveEyeMakeup(gpa, engine)) return 1;
+    watchHold("eye makeup");
     if (!try proveMakeupFinish(gpa, engine)) return 1;
     watchHold("makeup finish");
     if (!try proveDepthMatting(gpa, engine)) return 1;

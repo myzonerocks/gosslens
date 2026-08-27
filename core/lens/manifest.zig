@@ -58,7 +58,7 @@ pub const mask_channels = [_][]const u8{
     "person",  "background", "hair",    "body_skin", "face_skin",
     "clothes", "others",     "head",    "hand",      "lips",
     "eyes",    "brows",      "iris",    "teeth",     "contour",
-    "highlight",
+    "highlight", "lash_line",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -81,6 +81,10 @@ pub const teeth_channel = 13;
 /// lightens the cheekbone tops, brow bones, nose bridge, cupid's bow and chin.
 pub const contour_channel = 14;
 pub const highlight_channel = 15;
+/// The upper lash line rides the eye landmarks: each eye's upper lid arc rises
+/// into a thin band an eyeliner, mascara, or false-lash tint paints. One band
+/// serves all three, which differ by tint color and opacity, not by shape.
+pub const lash_line_channel = 16;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {

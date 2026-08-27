@@ -91,6 +91,8 @@ pub const inner_lip_loop = face.inner_lip_loop;
 pub const contour_regions = face.contour_regions;
 pub const highlight_regions = face.highlight_regions;
 pub const skin_patch = face.skin_patch;
+pub const lashLineBand = face.lashLineBand;
+pub const face_landmark_count = face.landmark_count;
 
 pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
@@ -5932,6 +5934,24 @@ fn pollLandmarkMattes(session: *Session) void {
     pollFacePartMatte(session, manifest.teeth_channel, &.{&face.inner_lip_loop});
     pollFaceHullMatte(session, manifest.contour_channel, &face.contour_regions);
     pollFaceHullMatte(session, manifest.highlight_channel, &face.highlight_regions);
+    pollLashLineMatte(session, manifest.lash_line_channel);
+}
+
+/// Builds the upper lash-line band matte from both eyes' upper lid arcs: each
+/// eye's arc rises off its centroid into a thin ribbon hugging the lash line,
+/// unioned across the two, so an eyeliner, mascara, or false-lash tint paints
+/// it. No face this frame leaves the channel on the zero mask.
+fn pollLashLineMatte(session: *Session, channel: u8) void {
+    if (!maskChannelNeeded(session, channel)) return;
+    var points: [face.landmark_count][2]f32 = undefined;
+    if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
+    var mask: [segmentation.mask_len]f32 = undefined;
+    @memset(&mask, 0);
+    var band: [18][2]f32 = undefined;
+    fillPolygon(face.lashLineBand(&points, &face.left_eye_loop, &band), &mask);
+    fillPolygon(face.lashLineBand(&points, &face.right_eye_loop, &band), &mask);
+    clearClassTexture(session, channel);
+    session.segmentation_class_textures[channel] = maskToTexture(&mask);
 }
 
 /// Builds a contour or highlight matte from clustered face landmarks: each

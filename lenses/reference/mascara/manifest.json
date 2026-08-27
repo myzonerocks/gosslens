@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.mascara",
+  "version": "1.0.0",
+  "display_name": "Mascara",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "mascara", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [0.03, 0.03, 0.04], "opacity": 0.8, "mask": "lash_line", "blend": "multiply"}}
+  ],
+  "triggers": []
+}
