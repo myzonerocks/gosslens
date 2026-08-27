@@ -627,6 +627,13 @@ pub const Session = struct {
     /// copying the mask through it. Recreated (not reused) each time a
     /// fresh mask is ready, since bgfx's static textures are immutable.
     segmentation_texture: ?render.TextureHandle = null,
+    /// The reused GPU mask textures behind the subject and per-class mattes
+    /// and the depth mask: each poll updates its store in place rather than
+    /// destroying and recreating a texture, freed once at session teardown.
+    /// The handles above alias these stores, null only when a channel clears.
+    seg_tex: render.Renderer.DynamicMask = .{},
+    class_tex: [manifest.mask_channels.len]render.Renderer.DynamicMask = @splat(.{}),
+    depth_tex: render.Renderer.DynamicMask = .{},
     beauty_chain: ?*beauty.Beauty = null,
     /// The GPU beauty compositing bridge: beauty_input writes the live
     /// preview into a platform-shared surface gpupixel reads zero-copy,
@@ -728,6 +735,13 @@ pub const Session = struct {
     /// The submitted depth normalized into an R8 texture the dof.pass
     /// samples, refreshed each submit_depth. Null until depth arrives.
     depth_texture: ?render.TextureHandle = null,
+    /// Reused scratch for normalizing depth into R8 bytes, sized alongside
+    /// depth_data, freed at destroy - submit_depth never allocates it.
+    depth_scratch: []u8 = &.{},
+    /// Per-frame vertex staging for the composite chain's dynamic meshes
+    /// (particles, ribbons, fluid, hair, cloth). Grown to the largest mesh
+    /// at lens activation, sliced fresh each frame, freed at destroy.
+    frame_stage: []f32 = &.{},
     /// dof.pass nodes by graph index: their focus plane and blur strength.
     dof_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// fog.pass nodes by graph index: their fog color (rgb) and density.
@@ -1657,6 +1671,22 @@ fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirro
     return true;
 }
 
+/// Grows the per-frame vertex staging to hold `floats`, called once per
+/// dynamic mesh at lens activation. Never runs on the frame path.
+fn reserveFrameStage(s: *Session, floats: usize) void {
+    if (floats <= s.frame_stage.len) return;
+    const grown = s.engine.gpa.alloc(f32, floats) catch return;
+    if (s.frame_stage.len != 0) s.engine.gpa.free(s.frame_stage);
+    s.frame_stage = grown;
+}
+
+/// The reserved staging sliced to `floats`, or null if activation could not
+/// grow it - the caller then skips the draw, the same as an old alloc failure.
+fn frameStage(s: *Session, floats: usize) ?[]f32 {
+    if (floats > s.frame_stage.len) return null;
+    return s.frame_stage[0..floats];
+}
+
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
     // The tile is set per final full-screen pass below; every source-res
     // intermediate draw and every non-capture frame renders untiled.
@@ -2407,12 +2437,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         const width_w: f32 = sz * 0.003;
                         const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
                         r.tile = if (is_final) s.capture_tile else null;
-                        if (s.engine.gpa.alloc(f32, sys.ribbonVertexCount() * 3)) |verts| {
-                            defer s.engine.gpa.free(verts);
+                        if (frameStage(s, sys.ribbonVertexCount() * 3)) |verts| {
                             sys.writeRibbons(verts, width_w);
                             r.updateParticleMesh(ribbon_mesh, verts);
                             r.submitRibbons(blit_view, mesh_view, input_texture, ribbon_mesh, base_color, aspect_ratio);
-                        } else |_| {}
+                        }
                     }
                     if (output) |target| {
                         input_texture = target.texture;
@@ -2440,13 +2469,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (!s.capture_requested) fluid.step(1.0 / 60.0);
                     if (s.fluid_base_meshes.get(entry.graph_index)) |base_mesh| {
                         const count: usize = fluid.particles.len;
-                        if (s.engine.gpa.alloc(f32, count * 3)) |verts| {
-                            defer s.engine.gpa.free(verts);
+                        if (frameStage(s, count * 3)) |verts| {
                             fluid.writePositions(verts);
                             const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
                             r.tile = if (is_final) s.capture_tile else null;
                             r.submitParticleMeshes(blit_view, mesh_view, input_texture, base_mesh, verts, 0.03, .{ 0.3, 0.6, 0.95, 1.0 }, aspect_ratio);
-                        } else |_| {}
+                        }
                     }
                     if (output) |target| {
                         input_texture = target.texture;
@@ -2482,15 +2510,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
                         r.tile = if (is_final) s.capture_tile else null;
                         const count = sys.field.count;
-                        if (s.engine.gpa.alloc(f32, count * 3)) |verts| {
-                            defer s.engine.gpa.free(verts);
+                        if (frameStage(s, count * 3)) |verts| {
                             sys.writePositions(verts);
                             if (sys.field.instanced) {
                                 r.submitParticleMeshesInstanced(blit_view, mesh_view, input_texture, base_mesh, verts, scale, base_color, aspect_ratio);
                             } else {
                                 r.submitParticleMeshes(blit_view, mesh_view, input_texture, base_mesh, verts, scale, base_color, aspect_ratio);
                             }
-                        } else |_| {}
+                        }
                     }
                     if (output) |target| {
                         input_texture = target.texture;
@@ -2547,22 +2574,19 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             const sheet_dim: f32 = @ceil(@sqrt(frames));
                             particle_fx = .{ frames, sheet_dim, sys.field.stretch, 0 };
                             if (has_trail) {
-                                if (s.engine.gpa.alloc(f32, sys.trailVertexCount() * 8)) |verts| {
-                                    defer s.engine.gpa.free(verts);
+                                if (frameStage(s, sys.trailVertexCount() * 8)) |verts| {
                                     sys.writeTrailBillboards(verts);
                                     render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
-                                } else |_| {}
-                            } else if (s.engine.gpa.alloc(f32, count * 6 * 8)) |verts| {
-                                defer s.engine.gpa.free(verts);
+                                }
+                            } else if (frameStage(s, count * 6 * 8)) |verts| {
                                 sys.writeBillboards(verts);
                                 render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
-                            } else |_| {}
+                            }
                         } else {
-                            if (s.engine.gpa.alloc(f32, count * 3)) |verts| {
-                                defer s.engine.gpa.free(verts);
+                            if (frameStage(s, count * 3)) |verts| {
                                 sys.writePositions(verts);
                                 r.updateParticleMesh(particle_mesh, verts);
-                            } else |_| {}
+                            }
                         }
                     }
                     const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
@@ -2665,11 +2689,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             world.hairUpdate(hid, @bitCast(head.cols), dt);
                             const vcount = s.hair_vcount.get(entry.graph_index) orelse 0;
                             if (vcount > 0) {
-                                if (s.engine.gpa.alloc(f32, vcount * 3)) |positions| {
-                                    defer s.engine.gpa.free(positions);
+                                if (frameStage(s, vcount * 3)) |positions| {
                                     _ = world.hairRead(hid, positions);
                                     r.updateHairMesh(hair_mesh, positions);
-                                } else |_| {}
+                                }
                             }
                         }
                     }
@@ -2703,11 +2726,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         if (s.physics_world) |world| {
                             const vcount = s.cloth_cols.get(entry.graph_index) orelse 0;
                             if (vcount > 0) {
-                                if (s.engine.gpa.alloc(f32, vcount * 3)) |positions| {
-                                    defer s.engine.gpa.free(positions);
+                                if (frameStage(s, vcount * 3)) |positions| {
                                     _ = world.clothRead(body, positions);
                                     r.updateClothMesh(cloth_mesh, positions);
-                                } else |_| {}
+                                }
                             }
                         }
                     }
@@ -3109,9 +3131,6 @@ pub fn destroySession(session: *Session) void {
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
-    if (session.depth_texture) |tex| {
-        if (session.engine.renderer) |*r| r.destroyTexture(tex);
-    }
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
@@ -3142,6 +3161,8 @@ pub fn destroySession(session: *Session) void {
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
     if (session.depth_data.len != 0) session.engine.gpa.free(session.depth_data);
+    if (session.depth_scratch.len != 0) session.engine.gpa.free(session.depth_scratch);
+    if (session.frame_stage.len != 0) session.engine.gpa.free(session.frame_stage);
     destroyChainOrder(session);
     if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
     session.active_lens = null;
@@ -3158,7 +3179,8 @@ pub fn destroySession(session: *Session) void {
     session.pose_tracking = null;
     if (session.segmentation_worker) |worker| segmentation.destroy(worker);
     session.segmentation_worker = null;
-    destroySegmentationTexture(session);
+    clearSegmentationTextures(session);
+    destroySegmentationStores(session);
     releaseCurrentFrame(session);
     if (session.engine.renderer != null) {
         session.preview_bgra.deinit();
@@ -5289,7 +5311,7 @@ pub export fn goss_session_disable_segmentation(session: ?*Session) void {
     const s = session orelse return;
     if (s.segmentation_worker) |worker| segmentation.destroy(worker);
     s.segmentation_worker = null;
-    destroySegmentationTexture(s);
+    clearSegmentationTextures(s);
 }
 
 /// Feeds one NV12 frame to the tracking worker. The planes are CPU
@@ -5454,10 +5476,9 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
         s.depth_data = &.{};
         s.depth_width = 0;
         s.depth_height = 0;
-        if (s.depth_texture) |old| {
-            if (s.engine.renderer) |*r| r.destroyTexture(old);
-            s.depth_texture = null;
-        }
+        // The alias clears so nothing samples a stale depth mask; the store's
+        // texture is kept for reuse and freed once at session teardown.
+        s.depth_texture = null;
         return .ok;
     }
     const src = depth orelse return .invalid_argument;
@@ -5470,6 +5491,10 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
             s.depth_height = 0;
             return .out_of_memory;
         };
+        // The R8 normalization scratch tracks the depth plane's size, so
+        // updateDepthTexture reuses it instead of allocating each submit.
+        if (s.depth_scratch.len != 0) gpa.free(s.depth_scratch);
+        s.depth_scratch = gpa.alloc(u8, count) catch &.{};
     }
     @memcpy(s.depth_data, src[0..count]);
     s.depth_width = width;
@@ -5551,17 +5576,18 @@ pub export fn goss_session_set_makeup_reference(session: ?*Session, rgba: ?[*]co
 /// dof.pass samples, replacing the previous frame's. A best-effort upload:
 /// on allocation failure the old texture stays, so the pass just holds.
 fn updateDepthTexture(s: *Session, gpa: std.mem.Allocator) void {
-    const r = if (s.engine.renderer) |*rr| rr else return;
-    if (s.depth_data.len == 0) return;
-    const bytes = gpa.alloc(u8, s.depth_data.len) catch return;
-    defer gpa.free(bytes);
+    _ = gpa;
+    if (s.engine.renderer == null) return;
+    if (s.depth_data.len == 0 or s.depth_scratch.len < s.depth_data.len) return;
+    const bytes = s.depth_scratch[0..s.depth_data.len];
     const span = if (s.depth_far > s.depth_near) s.depth_far - s.depth_near else 1.0;
     for (s.depth_data, bytes) |d, *b| {
         const n = std.math.clamp((d - s.depth_near) / span, 0.0, 1.0);
         b.* = @intFromFloat(n * 255.0);
     }
-    if (s.depth_texture) |old| r.destroyTexture(old);
-    s.depth_texture = render.Renderer.createMaskTexture(@intCast(s.depth_width), @intCast(s.depth_height), bytes);
+    // A dynamic R8 texture updated in place, so a per-frame depth submit
+    // never destroys and recreates a GPU texture; recreated on a size change.
+    s.depth_texture = s.depth_tex.upload(@intCast(s.depth_width), @intCast(s.depth_height), bytes);
 }
 
 /// The depth (metres) at a normalized frame coordinate, nearest sample,
@@ -5844,11 +5870,11 @@ pub export fn goss_session_set_face_landmarks(session: ?*Session, points: ?[*]co
 pub export fn goss_session_set_segmentation_mask(session: ?*Session, mask: ?[*]const f32, mask_len: u32) Status {
     if (!is_web) return .unsupported;
     const s = session orelse return .invalid_argument;
-    destroySegmentationTexture(s);
+    clearSegmentationTextures(s);
     if (mask_len == 0) return .ok;
     if (mask_len != segmentation.mask_len) return .invalid_argument;
     const m = mask orelse return .invalid_argument;
-    s.segmentation_texture = maskToTexture(@ptrCast(m));
+    s.segmentation_texture = uploadMaskFromF32(&s.seg_tex, @ptrCast(m));
     return .ok;
 }
 
@@ -5872,14 +5898,11 @@ pub export fn goss_session_set_segmentation_class_mask(session: ?*Session, chann
     if (!is_web) return .unsupported;
     const s = session orelse return .invalid_argument;
     if (channel == 0 or channel >= manifest.mask_channels.len) return .invalid_argument;
-    if (s.engine.renderer) |*r| {
-        if (s.segmentation_class_textures[channel]) |texture| r.destroyTexture(texture);
-    }
     s.segmentation_class_textures[channel] = null;
     if (mask_len == 0) return .ok;
     if (mask_len != segmentation.mask_len) return .invalid_argument;
     const m = mask orelse return .invalid_argument;
-    s.segmentation_class_textures[channel] = maskToTexture(@ptrCast(m));
+    s.segmentation_class_textures[channel] = uploadMaskFromF32(&s.class_tex[channel], @ptrCast(m));
     return .ok;
 }
 
@@ -5940,19 +5963,20 @@ fn destroyChainOrder(session: *Session) void {
     session.chain_order = &.{};
 }
 
-/// Tears down every in-flight LUT load and every already-created LUT
-/// texture for the session's current lens - a load still running when
-/// its lens deactivates is not a leak, just a loader whose result
-/// nobody will ever collect.
-fn destroySegmentationTexture(session: *Session) void {
-    if (session.engine.renderer) |*r| {
-        if (session.segmentation_texture) |texture| r.destroyTexture(texture);
-        for (&session.segmentation_class_textures) |*maybe_texture| {
-            if (maybe_texture.*) |texture| r.destroyTexture(texture);
-            maybe_texture.* = null;
-        }
-    }
+/// Clears the subject and class matte aliases so a consumer reads the zero
+/// mask until the next poll refills them. The GPU textures behind them live
+/// on their stores, reused across polls and freed once at session teardown.
+fn clearSegmentationTextures(session: *Session) void {
     session.segmentation_texture = null;
+    for (&session.segmentation_class_textures) |*slot| slot.* = null;
+}
+
+/// Frees the reused matte and depth mask textures at session teardown.
+fn destroySegmentationStores(session: *Session) void {
+    if (session.engine.renderer == null) return;
+    session.seg_tex.deinit();
+    for (&session.class_tex) |*store| store.deinit();
+    session.depth_tex.deinit();
 }
 
 /// Turns the newest published mask into a real GPU texture - runs every
@@ -5961,12 +5985,12 @@ fn destroySegmentationTexture(session: *Session) void {
 /// texture outright since bgfx's static textures are immutable; nothing
 /// consumes segmentation_texture yet (background-swap compositing is
 /// future work), so this only ever does the upload.
-fn maskToTexture(mask: *const [segmentation.mask_len]f32) ?render.TextureHandle {
+fn uploadMaskFromF32(store: *render.Renderer.DynamicMask, mask: *const [segmentation.mask_len]f32) render.TextureHandle {
     var bytes: [segmentation.mask_len]u8 = undefined;
     for (mask, 0..) |value, i| {
         bytes[i] = @intFromFloat(std.math.clamp(value, 0.0, 1.0) * 255.0);
     }
-    return render.Renderer.createMaskTexture(segmentation.mask_side, segmentation.mask_side, &bytes);
+    return store.upload(segmentation.mask_side, segmentation.mask_side, &bytes);
 }
 
 /// Which model output class feeds a named mask channel. selfie_multiclass
@@ -6002,8 +6026,8 @@ fn pollSegmentationMask(session: *Session) void {
     if (!segmentation.readMask(worker, &mask)) return;
     fuseDepthIntoMask(session, &mask);
 
-    destroySegmentationTexture(session);
-    session.segmentation_texture = maskToTexture(&mask);
+    clearSegmentationTextures(session);
+    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, &mask);
 
     // Class channels upload only when a consumer of the active lens names
     // them, shader or outline or tint, and the active model's label order
@@ -6014,7 +6038,7 @@ fn pollSegmentationMask(session: *Session) void {
         if (!maskChannelNeeded(session, @intCast(channel))) continue;
         const source = classChannelSource(class_count, channel) orelse continue;
         if (!segmentation.readClassMask(worker, source, &mask)) continue;
-        session.segmentation_class_textures[channel] = maskToTexture(&mask);
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
     }
 }
 
@@ -6035,9 +6059,7 @@ fn maskChannelNeeded(session: *Session, channel: u8) bool {
 }
 
 fn clearClassTexture(session: *Session, channel: u8) void {
-    if (session.engine.renderer) |*r| {
-        if (session.segmentation_class_textures[channel]) |texture| r.destroyTexture(texture);
-    }
+    // The alias clears; the store keeps its texture for the next fill.
     session.segmentation_class_textures[channel] = null;
 }
 
@@ -6169,7 +6191,7 @@ fn pollLashLineMatte(session: *Session, channel: u8) void {
     fillPolygon(face.lashLineBand(&points, &face.left_eye_loop, &band), &mask);
     fillPolygon(face.lashLineBand(&points, &face.right_eye_loop, &band), &mask);
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = maskToTexture(&mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
 }
 
 /// Builds a contour or highlight matte from clustered face landmarks: each
@@ -6188,7 +6210,7 @@ fn pollFaceHullMatte(session: *Session, channel: u8, regions: []const []const u1
         fillLandmarkHull(cluster[0..region.len], &mask);
     }
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = maskToTexture(&mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
 }
 
 /// Builds a face-part matte channel from one or more landmark loops, unioned,
@@ -6207,7 +6229,7 @@ fn pollFacePartMatte(session: *Session, channel: u8, loops: []const []const u16)
         fillPolygon(ring[0..loop.len], &mask);
     }
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = maskToTexture(&mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
 }
 
 fn pollHeadMatte(session: *Session) void {
@@ -6219,7 +6241,7 @@ fn pollHeadMatte(session: *Session) void {
     @memset(&mask, 0);
     fillLandmarkHull(points[0..], &mask);
     clearClassTexture(session, head);
-    session.segmentation_class_textures[head] = maskToTexture(&mask);
+    session.segmentation_class_textures[head] = uploadMaskFromF32(&session.class_tex[head], &mask);
 }
 
 fn pollHandMatte(session: *Session) void {
@@ -6244,7 +6266,7 @@ fn pollHandMatte(session: *Session) void {
         any = true;
     }
     clearClassTexture(session, chan);
-    if (any) session.segmentation_class_textures[chan] = maskToTexture(&mask);
+    if (any) session.segmentation_class_textures[chan] = uploadMaskFromF32(&session.class_tex[chan], &mask);
 }
 
 /// When the host submits depth and no in-engine segmenter runs, the depth
@@ -6266,8 +6288,8 @@ fn pollDepthOcclusion(session: *Session) void {
             mask[y * side + x] = if (scene > 0 and scene < plane - bias) 1 else 0;
         }
     }
-    destroySegmentationTexture(session);
-    session.segmentation_texture = maskToTexture(&mask);
+    clearSegmentationTextures(session);
+    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, &mask);
 }
 
 fn destroyLutState(session: *Session) void {
@@ -7518,6 +7540,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.fluid_base_meshes.put(gpa, model.graph_index, base) catch {
                                 render.Renderer.destroyModelMesh(base);
                             };
+                            reserveFrameStage(session, fluid.particles.len * 3);
                         } else |_| {
                             var f = fluid;
                             f.deinit();
@@ -7554,6 +7577,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.particle_base_meshes.put(gpa, model.graph_index, base) catch {
                                 render.Renderer.destroyModelMesh(base);
                             };
+                            reserveFrameStage(session, sys.renderCount() * 3);
                         } else |_| {
                             var s2 = sys;
                             s2.deinit();
@@ -7569,6 +7593,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.particle_ribbon_meshes.put(gpa, model.graph_index, mesh) catch {
                                 render.Renderer.destroyParticleMesh(mesh);
                             };
+                            reserveFrameStage(session, sys.ribbonVertexCount() * 3);
                         } else |_| {
                             var s2 = sys;
                             s2.deinit();
@@ -7585,6 +7610,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.particle_meshes.put(gpa, model.graph_index, mesh) catch {
                                 render.Renderer.destroyParticleMesh(mesh);
                             };
+                            reserveFrameStage(session, if (faded) @as(usize, vertex_count) * 8 else @as(usize, vertex_count) * 3);
                             if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
                         } else |_| {
                             var s2 = sys;
@@ -7617,6 +7643,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                         break :register false;
                                     };
                                     session.hair_vcount.put(gpa, model.graph_index, hair.strands * hair.verts) catch {};
+                                    reserveFrameStage(session, @as(usize, hair.strands) * hair.verts * 3);
                                     break :register true;
                                 };
                                 if (!registered) render.Renderer.destroyHairMesh(mesh);
@@ -7649,6 +7676,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                         break :register false;
                                     };
                                     session.cloth_cols.put(gpa, model.graph_index, cloth.cols * cloth.rows) catch {};
+                                    reserveFrameStage(session, @as(usize, cloth.cols) * cloth.rows * 3);
                                     break :register true;
                                 };
                                 if (!registered) render.Renderer.destroyClothMesh(mesh);
@@ -7682,6 +7710,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                                             break :register false;
                                         };
                                         session.cloth_cols.put(gpa, model.graph_index, @intCast(sphere.verts.len)) catch {};
+                                        reserveFrameStage(session, sphere.verts.len * 3);
                                         break :register true;
                                     };
                                     if (!registered) render.Renderer.destroyClothMesh(mesh);

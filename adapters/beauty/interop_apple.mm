@@ -780,37 +780,43 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
   if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
   auto* interop = static_cast<AppleInterop*>(handle);
 
-  // ran tracks whether the lambda actually executed - SyncRunWithContext
-  // silently skips it while the app isn't foreground-active, and ok alone
-  // defaults to true, which would otherwise read as a successful composite
-  // of a pixel_buffer that was never touched this call.
-  bool ran = false;
-  bool ok = true;
-  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
-    ran = true;
-    if (!interop->EnsureSurface(width, height)) {
-      ok = false;
+  // ran tracks whether the lambda actually executed - a skipped dispatch
+  // must not read as a real composite, since ok defaults true. The call
+  // state packs into one struct so the task captures a single pointer that
+  // fits std::function's inline storage, no per-frame heap allocation.
+  struct CompositeCall {
+    AppleInterop* interop;
+    uint32_t source_texture;
+    int32_t width;
+    int32_t height;
+    bool ran;
+    bool ok;
+  } call{interop, source_texture, width, height, false, true};
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&call] {
+    call.ran = true;
+    if (!call.interop->EnsureSurface(call.width, call.height)) {
+      call.ok = false;
       return;
     }
-    if (interop->blit_program == 0) {
-      interop->blit_program = LinkProgram(kBlitVertexShader, kBlitFragmentShader);
-      if (interop->blit_program == 0) {
-        ok = false;
+    if (call.interop->blit_program == 0) {
+      call.interop->blit_program = LinkProgram(kBlitVertexShader, kBlitFragmentShader);
+      if (call.interop->blit_program == 0) {
+        call.ok = false;
         return;
       }
     }
-    if (interop->fbo == 0) {
-      glGenFramebuffers(1, &interop->fbo);
+    if (call.interop->fbo == 0) {
+      glGenFramebuffers(1, &call.interop->fbo);
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, interop->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, call.interop->fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           interop->Target(), interop->Name(), 0);
+                           call.interop->Target(), call.interop->Name(), 0);
 
-    ok = DrawBlit(interop->fbo, interop->blit_program, source_texture, width, height);
+    call.ok = DrawBlit(call.interop->fbo, call.interop->blit_program, call.source_texture, call.width, call.height);
   });
 
-  return (ran && ok) ? interop->pixel_buffer : nullptr;
+  return (call.ran && call.ok) ? interop->pixel_buffer : nullptr;
 }
 
 // bgfx's Metal-side view of what goss_beauty_interop_composite just
@@ -874,20 +880,28 @@ int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
 
   // Same ran tracking as goss_beauty_interop_composite: a dispatch
   // skipped while the app isn't foreground-active must not report a
-  // frame the chain never processed as success.
-  bool ran = false;
-  bool ok = true;
-  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
-    ran = true;
-    if (!input->EnsureGLImport()) {
-      ok = false;
+  // frame the chain never processed as success. The state packs into one
+  // struct so the task captures a single pointer, no per-frame heap.
+  struct InputCall {
+    AppleInputSurface* input;
+    void* beauty_handle;
+    int32_t width;
+    int32_t height;
+    const float* landmarks106;
+    bool ran;
+    bool ok;
+  } call{input, beauty_handle, width, height, landmarks106, false, true};
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&call] {
+    call.ran = true;
+    if (!call.input->EnsureGLImport()) {
+      call.ok = false;
       return;
     }
-    ok = goss_beauty_process_external_texture(
-             beauty_handle, input->GLName(), input->SamplerKind(),
-             width, height, landmarks106) == 0;
+    call.ok = goss_beauty_process_external_texture(
+                  call.beauty_handle, call.input->GLName(), call.input->SamplerKind(),
+                  call.width, call.height, call.landmarks106) == 0;
   });
-  return (ran && ok) ? 0 : 1;
+  return (call.ran && call.ok) ? 0 : 1;
 }
 
 }  // extern "C"

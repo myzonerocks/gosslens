@@ -305,6 +305,24 @@ extension GossSession {
         return out
     }
 
+    /// The float count the finished brush ribbon needs, so a caller can size a
+    /// buffer once for the allocation-free brushVertices(into:).
+    public func brushVertexCount() throws -> Int {
+        var count = 0
+        try checked(goss_session_brush_vertices(handle, nil, 0, &count))
+        return count
+    }
+
+    /// The allocation-free sibling of brushVertices: fills a caller-owned
+    /// buffer with the ribbon (x, y, r, g, b, a per vertex) and returns the
+    /// float count written, so a renderer reuses one buffer every frame.
+    @discardableResult
+    public func brushVertices(into buffer: UnsafeMutableBufferPointer<Float>) throws -> Int {
+        var written = 0
+        try checked(goss_session_brush_vertices(handle, buffer.baseAddress, buffer.count, &written))
+        return written
+    }
+
     /// The world-anchored brush. Points are pushed in the world frame the
     /// platform world tracking reports; the engine projects and draws them, so a
     /// stroke stays fixed in the scene.

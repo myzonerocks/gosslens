@@ -152,6 +152,23 @@ pub const Renderer = struct {
         return .{};
     }
 
+    pub const DynamicMask = struct {
+        handle: TextureHandle = .{},
+        width: u16 = 0,
+        height: u16 = 0,
+
+        pub fn upload(self: *DynamicMask, width: u16, height: u16, mask: []const u8) TextureHandle {
+            _ = mask;
+            self.width = width;
+            self.height = height;
+            return self.handle;
+        }
+
+        pub fn deinit(self: *DynamicMask) void {
+            self.* = .{};
+        }
+    };
+
     pub fn createDynamicBgraTexture(width: u16, height: u16) TextureHandle {
         _ = width;
         _ = height;

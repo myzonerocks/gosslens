@@ -797,6 +797,11 @@ export class GossSession {
   private signalsPtr: number;
   /// Fixed capacity: the segmentation mask is always mask_side squared.
   private segmentationMaskPtr: number;
+  /// A reusable wasm scratch the per-frame submit and readback paths slice
+  /// instead of goss_alloc/goss_free each call; grown to the largest frame,
+  /// freed in destroy() - no per-call wasm heap churn.
+  private scratchPtr = 0;
+  private scratchCapacity = 0;
 
   private constructor(
     private readonly mod: EngineModule,
@@ -806,6 +811,18 @@ export class GossSession {
     this.landmarksPtr = mod.ccall("goss_alloc", "number", ["number"], [GOSS_FACE_LANDMARK_COUNT * 3 * 4]);
     this.signalsPtr = mod.ccall("goss_alloc", "number", ["number"], [LENS_SIGNALS_BYTES]);
     this.segmentationMaskPtr = mod.ccall("goss_alloc", "number", ["number"], [GOSS_SEGMENTATION_MASK_SIDE * GOSS_SEGMENTATION_MASK_SIDE * 4]);
+  }
+
+  /// The reusable scratch grown to at least `bytes`, returning its wasm
+  /// pointer. Grows only when a larger frame arrives, so the steady path
+  /// never touches the wasm allocator.
+  private scratch(bytes: number): number {
+    if (bytes > this.scratchCapacity) {
+      if (this.scratchPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [this.scratchPtr, this.scratchCapacity]);
+      this.scratchPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+      this.scratchCapacity = bytes;
+    }
+    return this.scratchPtr;
   }
 
   static create(engine: GossEngine, config?: GossSessionConfig): GossSession {
@@ -1341,7 +1358,7 @@ export class GossSession {
       return;
     }
     const bytes = faces.length * FACE_RESULT_BYTES;
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const ptr = this.scratch(bytes);
     const dv = new DataView(this.mod.HEAPU8.buffer, ptr, bytes);
     for (let i = 0; i < faces.length; i += 1) {
       const off = i * FACE_RESULT_BYTES;
@@ -1358,27 +1375,21 @@ export class GossSession {
       if (f.blendshapes) this.mod.HEAPF32.set(f.blendshapes, bsStart);
     }
     this.mod.ccall("goss_session_submit_faces", "number", ["number", "number", "number"], [this.handle, ptr, faces.length]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
   /// The number of faces the last submitFaces kept, zero to GOSS_FACE_MAX.
   faceCount(): number {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const ptr = this.scratch(4);
     this.mod.ccall("goss_session_face_count", "number", ["number", "number"], [this.handle, ptr]);
-    const count = this.mod.HEAP32[ptr >> 2]!;
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 4]);
-    return count;
+    return this.mod.HEAP32[ptr >> 2]!;
   }
 
   /// Reads the index-th submitted face, or null once index reaches faceCount,
   /// so a caller loops zero to faceCount to visit every face.
   faceResultAt(index: number): GossFaceOut | null {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [FACE_RESULT_BYTES]) as number;
+    const ptr = this.scratch(FACE_RESULT_BYTES);
     const status = this.mod.ccall("goss_session_face_result_at", "number", ["number", "number", "number"], [this.handle, index, ptr]) as number;
-    if (status !== 0) {
-      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, FACE_RESULT_BYTES]);
-      return null;
-    }
+    if (status !== 0) return null;
     const dv = new DataView(this.mod.HEAPU8.buffer, ptr, FACE_RESULT_BYTES);
     const lmStart = (ptr + 24) >> 2;
     const bsStart = lmStart + GOSS_FACE_LANDMARK_COUNT * 3;
@@ -1390,7 +1401,6 @@ export class GossSession {
       landmarks: this.mod.HEAPF32.slice(lmStart, bsStart),
       blendshapes: this.mod.HEAPF32.slice(bsStart, bsStart + GOSS_FACE_BLENDSHAPE_COUNT),
     };
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, FACE_RESULT_BYTES]);
     return out;
   }
 
@@ -1403,7 +1413,7 @@ export class GossSession {
       return;
     }
     const bytes = bodies.length * POSE_RESULT_BYTES;
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const ptr = this.scratch(bytes);
     const dv = new DataView(this.mod.HEAPU8.buffer, ptr, bytes);
     for (let i = 0; i < bodies.length; i += 1) {
       const off = i * POSE_RESULT_BYTES;
@@ -1421,7 +1431,6 @@ export class GossSession {
       if (b.presences) this.mod.HEAPF32.set(b.presences, visStart + GOSS_POSE_LANDMARK_COUNT);
     }
     this.mod.ccall("goss_session_submit_bodies", "number", ["number", "number", "number"], [this.handle, ptr, bodies.length]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
   /// Submits one frame's depth map from the host AR backend (WebXR depth-
@@ -1434,20 +1443,18 @@ export class GossSession {
       return;
     }
     const bytes = depth.length * 4;
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const ptr = this.scratch(bytes);
     this.mod.HEAPF32.set(depth, ptr >> 2);
     this.mod.ccall("goss_session_submit_depth", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, width, height, near, far]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
   /// Segments a host-provided still image through the running segmenter: rgba
   /// is width by height RGBA8 pixels, row major. The mask reaches the active
   /// lens the way a camera frame's would.
   submitSegmentationImage(rgba: Uint8Array, width: number, height: number): void {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    const ptr = this.scratch(rgba.length);
     this.mod.HEAPU8.set(rgba, ptr);
     this.mod.ccall("goss_session_submit_segmentation_image", "number", ["number", "number", "number", "number"], [this.handle, ptr, width, height]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, rgba.length]);
   }
 
   /// Samples a reference photo's makeup color per face part, so a tint.pass
@@ -1471,22 +1478,17 @@ export class GossSession {
 
   /// The number of bodies the last submitBodies kept, zero to GOSS_BODY_MAX.
   bodyCount(): number {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const ptr = this.scratch(4);
     this.mod.ccall("goss_session_body_count", "number", ["number", "number"], [this.handle, ptr]);
-    const count = this.mod.HEAP32[ptr >> 2]!;
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 4]);
-    return count;
+    return this.mod.HEAP32[ptr >> 2]!;
   }
 
   /// Reads the index-th submitted body, or null once index reaches bodyCount,
   /// so a caller loops zero to bodyCount to visit every body.
   bodyResultAt(index: number): GossPoseOut | null {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [POSE_RESULT_BYTES]) as number;
+    const ptr = this.scratch(POSE_RESULT_BYTES);
     const status = this.mod.ccall("goss_session_body_result_at", "number", ["number", "number", "number"], [this.handle, index, ptr]) as number;
-    if (status !== 0) {
-      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, POSE_RESULT_BYTES]);
-      return null;
-    }
+    if (status !== 0) return null;
     const dv = new DataView(this.mod.HEAPU8.buffer, ptr, POSE_RESULT_BYTES);
     const lmStart = (ptr + 24) >> 2;
     const visStart = lmStart + GOSS_POSE_LANDMARK_COUNT * 3;
@@ -1777,6 +1779,7 @@ export class GossSession {
     free(this.segmentationMaskPtr, GOSS_SEGMENTATION_MASK_SIDE * GOSS_SEGMENTATION_MASK_SIDE * 4);
     free(this.framePixelsPtr, this.framePixelsCapacity);
     free(this.worldScratchPtr, this.worldScratchLen);
+    free(this.scratchPtr, this.scratchCapacity);
     this.frameDescPtr = 0;
     this.landmarksPtr = 0;
     this.signalsPtr = 0;
@@ -1785,6 +1788,8 @@ export class GossSession {
     this.framePixelsCapacity = 0;
     this.worldScratchPtr = 0;
     this.worldScratchLen = 0;
+    this.scratchPtr = 0;
+    this.scratchCapacity = 0;
   }
 }
 

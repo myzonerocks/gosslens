@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <new>
+#include <vector>
 
 // This TU keeps exceptions enabled: AVFoundation raises NSException on
 // writer state violations, and the modern ObjC runtime unwinds those as
@@ -32,6 +33,8 @@
 
 namespace {
 
+struct RecordingFrame;
+
 struct Recording {
   AVAssetWriter* writer = nil;
   AVAssetWriterInput* input = nil;
@@ -46,6 +49,11 @@ struct Recording {
   uint32_t height = 0;
   int64_t first_timestamp_us = -1;
   bool failed = false;
+  // Retired frame tokens, reused instead of a new/delete per recorded
+  // frame; drained at finish. The pixel buffer and its Metal texture ride
+  // the CVPixelBufferPool and CVMetalTextureCache, both keyed by IOSurface,
+  // so a recycled pool buffer reuses its cached texture with no new alloc.
+  std::vector<RecordingFrame*> frame_pool;
 };
 
 // One vended frame in flight between begin and commit/abort. The
@@ -57,10 +65,14 @@ struct RecordingFrame {
   CVMetalTextureRef metal_texture = nullptr;
 };
 
-void releaseFrame(RecordingFrame* frame) {
+// Releases a frame's CoreVideo objects and returns the token to the
+// recording's freelist rather than deleting it, so begin can reuse it.
+void recycleFrame(Recording* r, RecordingFrame* frame) {
   if (frame->metal_texture) CFRelease(frame->metal_texture);
   if (frame->pixel_buffer) CVPixelBufferRelease(frame->pixel_buffer);
-  delete frame;
+  frame->metal_texture = nullptr;
+  frame->pixel_buffer = nullptr;
+  if (r) r->frame_pool.push_back(frame); else delete frame;
 }
 
 void* recording_open_impl(const uint8_t* path, size_t path_len,
@@ -153,18 +165,24 @@ int32_t recording_begin_frame_impl(void* handle, void** out_frame, void** out_me
   @autoreleasepool {
     CVPixelBufferPoolRef pool = r->adaptor.pixelBufferPool;
     if (pool == nullptr) return -1;
-    auto* frame = new (std::nothrow) RecordingFrame();
-    if (frame == nullptr) return -1;
+    RecordingFrame* frame = nullptr;
+    if (!r->frame_pool.empty()) {
+      frame = r->frame_pool.back();
+      r->frame_pool.pop_back();
+    } else {
+      frame = new (std::nothrow) RecordingFrame();
+      if (frame == nullptr) return -1;
+    }
     CVReturn created =
         CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &frame->pixel_buffer);
     if (created != kCVReturnSuccess || frame->pixel_buffer == nullptr) {
-      releaseFrame(frame);
+      recycleFrame(r, frame);
       return -1;
     }
     if (r->metal_cache == nullptr) {
       if (CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, r->device, nullptr,
                                     &r->metal_cache) != kCVReturnSuccess) {
-        releaseFrame(frame);
+        recycleFrame(r, frame);
         return -1;
       }
     }
@@ -172,7 +190,7 @@ int32_t recording_begin_frame_impl(void* handle, void** out_frame, void** out_me
         kCFAllocatorDefault, r->metal_cache, frame->pixel_buffer, nullptr,
         MTLPixelFormatBGRA8Unorm, r->width, r->height, 0, &frame->metal_texture);
     if (texture_status != kCVReturnSuccess) {
-      releaseFrame(frame);
+      recycleFrame(r, frame);
       return -1;
     }
     *out_frame = frame;
@@ -185,7 +203,7 @@ int32_t recording_commit_frame_impl(void* handle, void* frame_token, int64_t tim
   auto* r = static_cast<Recording*>(handle);
   auto* frame = static_cast<RecordingFrame*>(frame_token);
   if (r == nullptr || frame == nullptr || frame->pixel_buffer == nullptr || r->failed) {
-    if (frame) releaseFrame(frame);
+    if (frame) recycleFrame(r, frame);
     return -1;
   }
   @autoreleasepool {
@@ -197,13 +215,13 @@ int32_t recording_commit_frame_impl(void* handle, void* frame_token, int64_t tim
     while (!r->input.readyForMoreMediaData) {
       if (++spins > 10'000) {
         r->failed = true;
-        releaseFrame(frame);
+        recycleFrame(r, frame);
         return -1;
       }
       [NSThread sleepForTimeInterval:0.001];
     }
     const BOOL appended = [r->adaptor appendPixelBuffer:frame->pixel_buffer withPresentationTime:time];
-    releaseFrame(frame);
+    recycleFrame(r, frame);
     if (!appended) {
       r->failed = true;
       return -1;
@@ -213,9 +231,9 @@ int32_t recording_commit_frame_impl(void* handle, void* frame_token, int64_t tim
 }
 
 void recording_abort_frame_impl(void* handle, void* frame_token) {
-  (void)handle;
+  auto* r = static_cast<Recording*>(handle);
   auto* frame = static_cast<RecordingFrame*>(frame_token);
-  if (frame) releaseFrame(frame);
+  if (frame) recycleFrame(r, frame);
 }
 
 int32_t recording_submit_audio_impl(void* handle, const float* samples,
@@ -298,6 +316,7 @@ int32_t recording_finish_impl(void* handle) {
     if (r->metal_cache) CFRelease(r->metal_cache);
     if (r->audio_format) CFRelease(r->audio_format);
   }
+  for (auto* frame : r->frame_pool) delete frame;
   delete r;
   return status;
 }

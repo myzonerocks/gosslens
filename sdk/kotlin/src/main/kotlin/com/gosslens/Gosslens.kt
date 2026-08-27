@@ -340,6 +340,19 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         override fun run() = Gosslens.nativeEngineDestroy(handle)
     }
 
+    /** The per-frame live-broadcast readback reuses one info and one data
+     * direct buffer instead of allocating both each published frame; grown
+     * to the largest frame, dropped with the engine. */
+    private val liveInfo: ByteBuffer = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+    private var liveScratch: ByteBuffer = ByteBuffer.allocateDirect(0)
+
+    private fun liveStage(bytes: Int): ByteBuffer {
+        if (liveScratch.capacity() < bytes) liveScratch = ByteBuffer.allocateDirect(bytes)
+        liveScratch.clear()
+        liveScratch.limit(bytes)
+        return liveScratch
+    }
+
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
         fun create(config: GossEngineConfig? = null): GossEngine {
@@ -419,12 +432,12 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * packed frame bytes, or null when the renderer is away. */
     fun captureLiveFrame(session: GossSession?, width: Int, height: Int, format: Int = 3): ByteArray? {
         if (width <= 0 || height <= 0) return null
-        val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
         val pixels = width.toLong() * height
         val capacity = if (format == 0) pixels + pixels / 2 else pixels * 4
-        val data = ByteBuffer.allocateDirect(capacity.toInt())
-        if (Gosslens.nativeCaptureLiveFrame(handle, session?.handle ?: 0L, format, data, capacity, info) != 0) return null
+        val data = liveStage(capacity.toInt())
+        if (Gosslens.nativeCaptureLiveFrame(handle, session?.handle ?: 0L, format, data, capacity, liveInfo) != 0) return null
         val frame = ByteArray(capacity.toInt())
+        data.rewind()
         data.get(frame)
         return frame
     }
@@ -648,6 +661,21 @@ class GossSession private constructor(
         override fun run() = Gosslens.nativeSessionDestroy(handle)
     }
 
+    /** A per-session direct staging buffer the per-frame submit and readback
+     * paths reuse instead of allocating a fresh direct buffer each call -
+     * direct buffers are finalizer-reclaimed, the worst churn class on
+     * Android. Grown to the largest frame, dropped with the session. */
+    private var scratch: ByteBuffer = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder())
+
+    private fun stage(bytes: Int): ByteBuffer {
+        if (scratch.capacity() < bytes) {
+            scratch = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
+        }
+        scratch.clear()
+        scratch.limit(bytes)
+        return scratch
+    }
+
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
         fun create(engine: GossEngine, config: GossSessionConfig? = null): GossSession {
@@ -837,8 +865,8 @@ class GossSession private constructor(
      * clears them. The web-only path for the landmark-driven beauty effects;
      * UNSUPPORTED off web, where trackFrame feeds the same effects instead. */
     fun setFaceLandmarks(points: FloatArray): Boolean {
-        if (points.isEmpty()) return Gosslens.nativeSetFaceLandmarks(handle, ByteBuffer.allocateDirect(4), 0) == 0
-        val buf = ByteBuffer.allocateDirect(points.size * 4).order(ByteOrder.nativeOrder())
+        if (points.isEmpty()) return Gosslens.nativeSetFaceLandmarks(handle, stage(4), 0) == 0
+        val buf = stage(points.size * 4)
         buf.asFloatBuffer().put(points)
         buf.rewind()
         return Gosslens.nativeSetFaceLandmarks(handle, buf, points.size / 3) == 0
@@ -906,8 +934,8 @@ class GossSession private constructor(
      * fans out. An empty list clears the path back to the single internal
      * tracker; faces past FACE_MAX are ignored. */
     fun submitFaces(faces: List<GossFaceResult>): Boolean {
-        if (faces.isEmpty()) return Gosslens.nativeSubmitFaces(handle, ByteBuffer.allocateDirect(1), 0) == 0
-        val packed = ByteBuffer.allocateDirect(faces.size * Gosslens.FACE_RESULT_BYTES).order(ByteOrder.nativeOrder())
+        if (faces.isEmpty()) return Gosslens.nativeSubmitFaces(handle, stage(1), 0) == 0
+        val packed = stage(faces.size * Gosslens.FACE_RESULT_BYTES)
         for (f in faces) {
             f.buffer.rewind()
             packed.put(f.buffer)
@@ -931,8 +959,8 @@ class GossSession private constructor(
      * lens can instance effects across every body. An empty list clears the
      * path; bodies past BODY_MAX are ignored. */
     fun submitBodies(bodies: List<GossPoseResult>): Boolean {
-        if (bodies.isEmpty()) return Gosslens.nativeSubmitBodies(handle, ByteBuffer.allocateDirect(1), 0) == 0
-        val packed = ByteBuffer.allocateDirect(bodies.size * Gosslens.POSE_RESULT_BYTES).order(ByteOrder.nativeOrder())
+        if (bodies.isEmpty()) return Gosslens.nativeSubmitBodies(handle, stage(1), 0) == 0
+        val packed = stage(bodies.size * Gosslens.POSE_RESULT_BYTES)
         for (b in bodies) {
             b.buffer.rewind()
             packed.put(b.buffer)
@@ -946,8 +974,8 @@ class GossSession private constructor(
      * far metres that bound it. An empty array clears it. Kept for depth
      * occlusion against the rendered content. */
     fun submitDepth(depth: FloatArray, width: Int, height: Int, near: Float, far: Float): Boolean {
-        if (depth.isEmpty()) return Gosslens.nativeSubmitDepth(handle, ByteBuffer.allocateDirect(4), 0, 0, 0f, 0f) == 0
-        val buf = ByteBuffer.allocateDirect(depth.size * 4).order(ByteOrder.nativeOrder())
+        if (depth.isEmpty()) return Gosslens.nativeSubmitDepth(handle, stage(4), 0, 0, 0f, 0f) == 0
+        val buf = stage(depth.size * 4)
         buf.asFloatBuffer().put(depth)
         buf.rewind()
         return Gosslens.nativeSubmitDepth(handle, buf, width, height, near, far) == 0
@@ -957,7 +985,7 @@ class GossSession private constructor(
      * rgba is width by height RGBA8 pixels, row major. The mask reaches the
      * active lens the way a camera frame's would. */
     fun submitSegmentationImage(rgba: ByteArray, width: Int, height: Int): Boolean {
-        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        val buf = stage(rgba.size)
         buf.put(rgba)
         buf.rewind()
         return Gosslens.nativeSubmitSegmentationImage(handle, buf, width, height) == 0
@@ -1221,7 +1249,7 @@ class GossSession private constructor(
     fun brushVertices(): FloatArray {
         val count = Gosslens.nativeBrushVertexCount(handle)
         if (count <= 0) return FloatArray(0)
-        val buffer = ByteBuffer.allocateDirect(count * 4).order(ByteOrder.nativeOrder())
+        val buffer = stage(count * 4)
         val written = Gosslens.nativeBrushVertices(handle, buffer, count)
         if (written <= 0) return FloatArray(0)
         val out = FloatArray(written)

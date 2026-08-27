@@ -6409,6 +6409,9 @@ const CountingAllocator = struct {
     backing: std.mem.Allocator,
     in_use_atomic: std.atomic.Value(usize) = .init(0),
     peak_atomic: std.atomic.Value(usize) = .init(0),
+    // Every heap-acquiring vtable call, counted so the per-frame proof can
+    // fail on churn (alloc+free that nets to zero bytes) the byte gate misses.
+    calls_atomic: std.atomic.Value(usize) = .init(0),
 
     fn allocator(self: *CountingAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
@@ -6418,6 +6421,9 @@ const CountingAllocator = struct {
     }
     fn peakBytes(self: *const CountingAllocator) usize {
         return self.peak_atomic.load(.monotonic);
+    }
+    fn calls(self: *const CountingAllocator) usize {
+        return self.calls_atomic.load(.monotonic);
     }
     fn resetPeakToInUse(self: *CountingAllocator) void {
         self.peak_atomic.store(self.in_use_atomic.load(.monotonic), .monotonic);
@@ -6433,18 +6439,21 @@ const CountingAllocator = struct {
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const p = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        _ = self.calls_atomic.fetchAdd(1, .monotonic);
         self.bump(self.in_use_atomic.fetchAdd(len, .monotonic) + len);
         return p;
     }
     fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         if (!self.backing.rawResize(buf, alignment, new_len, ra)) return false;
+        _ = self.calls_atomic.fetchAdd(1, .monotonic);
         self.bump(self.applyDelta(buf.len, new_len));
         return true;
     }
     fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const p = self.backing.rawRemap(buf, alignment, new_len, ra) orelse return null;
+        _ = self.calls_atomic.fetchAdd(1, .monotonic);
         self.bump(self.applyDelta(buf.len, new_len));
         return p;
     }
@@ -6512,6 +6521,92 @@ fn provePerFrameBudget(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *Co
         return false;
     }
     std.debug.print("conformance: PROOF the full stack holds a flat {d}-byte per-frame footprint over {d} frames (no accumulation)\n", .{ steady_min, total_frames - warmup });
+    return true;
+}
+
+const AllocCallScenario = struct { name: []const u8, dir: []const u8, depth: bool };
+
+/// Every per-frame path Branch 5 moved onto persistent staging, each named so
+/// a regression points at the exact conversion that leaked back an allocation.
+const alloc_call_scenarios = [_]AllocCallScenario{
+    .{ .name = "full stack staging", .dir = ".lens-packages/studio-full", .depth = false },
+    .{ .name = "ribbon staging", .dir = ".lens-packages/ribbon-comet", .depth = false },
+    .{ .name = "trail billboards", .dir = ".lens-packages/comet-trail", .depth = false },
+    .{ .name = "fade billboards", .dir = ".lens-packages/smoke-plume", .depth = false },
+    .{ .name = "plain points", .dir = ".lens-packages/sparkles", .depth = false },
+    .{ .name = "mesh cloud", .dir = ".lens-packages/mesh-orbs", .depth = false },
+    .{ .name = "sph fluid", .dir = ".lens-packages/sph-pool", .depth = false },
+    .{ .name = "cloth solver", .dir = ".lens-packages/cloth-flag", .depth = false },
+    .{ .name = "hair solver", .dir = ".lens-packages/hair-sim", .depth = false },
+    .{ .name = "morph mesh", .dir = ".lens-packages/morph-blend", .depth = false },
+    .{ .name = "depth submit", .dir = ".lens-packages/dof-blur", .depth = true },
+};
+
+/// The steady-window allocation-CALL gate: renders each converted per-frame
+/// path through a warm-up and then a steady window, failing if the engine
+/// makes ANY allocation call in that window. That is churn (an alloc paired
+/// with a free) the flat-byte gate above cannot see, since it nets to zero.
+fn provePerFrameAllocCalls(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *CountingAllocator) !bool {
+    for (alloc_call_scenarios) |sc| {
+        if (!try proveScenarioAllocFree(gpa, engine, counter, sc)) return false;
+    }
+    return true;
+}
+
+fn proveScenarioAllocFree(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *CountingAllocator, sc: AllocCallScenario) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, sc.dir.ptr, sc.dir.len) != .ok) {
+        std.debug.print("conformance: FAIL alloc-call scenario {s} lens activation\n", .{sc.name});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    // A stable-size depth plane the occlusion and dof paths normalize each
+    // frame, so submit_depth's scratch and dynamic texture are exercised.
+    const depth_w: u32 = 64;
+    const depth_h: u32 = 64;
+    var depth_plane: []f32 = &.{};
+    defer if (depth_plane.len > 0) gpa.free(depth_plane);
+    if (sc.depth) {
+        depth_plane = try gpa.alloc(f32, depth_w * depth_h);
+        for (depth_plane, 0..) |*d, i| d.* = 0.5 + 0.3 * @sin(@as(f32, @floatFromInt(i)) * 0.1);
+    }
+
+    // Warm-up lets every persistent buffer grow to its largest frame; the
+    // steady window past it must touch the allocator zero times.
+    const total_frames: usize = 90;
+    const warmup: usize = 45;
+    var start_calls: usize = 0;
+    for (0..total_frames) |frame| {
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = @as(i64, @intCast(frame + 1)) * 33_333,
+        };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        if (sc.depth) {
+            if (abi.goss_session_submit_depth(session, depth_plane.ptr, depth_w, depth_h, 0.2, 3.0) != .ok) return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (frame == warmup) start_calls = counter.calls();
+    }
+    const steady = counter.calls() - start_calls;
+    if (steady != 0) {
+        std.debug.print("conformance: FAIL {s} made {d} allocation calls over {d} steady frames - per-frame churn\n", .{ sc.name, steady, total_frames - warmup });
+        return false;
+    }
+    std.debug.print("conformance: PROOF {s} holds zero allocation calls over {d} steady frames\n", .{ sc.name, total_frames - warmup });
     return true;
 }
 
@@ -10059,6 +10154,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveMaterialOps(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "second-lifecycle")) {
             if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) return 1;
+        } else if (std.mem.eql(u8, only, "per-frame-alloc")) {
+            if (!try provePerFrameAllocCalls(gpa, engine, &frame_counter)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -10323,6 +10420,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("no leaks");
     if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;
     watchHold("per frame budget");
+    if (!try provePerFrameAllocCalls(gpa, engine, &frame_counter)) return 1;
+    watchHold("per frame alloc calls");
     if (!try provePeakBoundedCapture(gpa, engine, &frame_counter)) return 1;
     watchHold("peak bounded capture");
     if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) return 1;

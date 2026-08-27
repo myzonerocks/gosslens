@@ -18,6 +18,9 @@ public struct GossEngineConfig {
 public final class GossEngine: @unchecked Sendable {
     let handle: OpaquePointer
     private var destroyed = false
+    /// Reused scratch for the row-padded live-frame readback fallback, grown
+    /// to the frame then reused, so a padded publish never allocates per frame.
+    var liveRowScratch: [UInt8] = []
 
     public static func create(config: GossEngineConfig = GossEngineConfig()) throws -> GossEngine {
         var raw = goss_engine_config(

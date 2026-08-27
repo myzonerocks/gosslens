@@ -84,6 +84,19 @@ typedef struct GossScript {
     long budget;
     long fuel_per_tick;
     int has_update;
+    // The lens object, its signals and params children, and the update
+    // function are built once and reused; each tick updates the cached
+    // property values in place through cached atoms rather than allocating
+    // three objects and re-interning every name every frame.
+    JSValue lens;
+    JSValue signals;
+    JSValue params;
+    JSValue update_fn;
+    JSAtom *signal_atoms;
+    JSAtom *param_atoms;
+    int signal_atom_count;
+    int param_atom_count;
+    int cache_built;
 } GossScript;
 
 GossScript *goss_script_new(const char *source, size_t source_len, long fuel_per_tick);
@@ -157,8 +170,65 @@ GossScript *goss_script_new(const char *source, size_t source_len, long fuel_per
     return s;
 }
 
+// Releases the cached tick objects and atoms; safe before the context is
+// freed, and a no-op when the cache was never built.
+static void goss_free_cache(GossScript *s) {
+    if (!s->cache_built) return;
+    JSContext *ctx = s->ctx;
+    for (int i = 0; i < s->signal_atom_count; i++) JS_FreeAtom(ctx, s->signal_atoms[i]);
+    for (int i = 0; i < s->param_atom_count; i++) JS_FreeAtom(ctx, s->param_atoms[i]);
+    free(s->signal_atoms);
+    free(s->param_atoms);
+    s->signal_atoms = NULL;
+    s->param_atoms = NULL;
+    s->signal_atom_count = 0;
+    s->param_atom_count = 0;
+    JS_FreeValue(ctx, s->signals);
+    JS_FreeValue(ctx, s->params);
+    JS_FreeValue(ctx, s->lens);
+    JS_FreeValue(ctx, s->update_fn);
+    s->cache_built = 0;
+}
+
+// Builds the lens/signals/params objects, interns each name to a reusable
+// atom, and caches the update function - once per name set, not per tick.
+static int goss_build_cache(GossScript *s,
+                            const char *const *signal_names, int signal_count,
+                            const char *const *param_names, int param_count) {
+    JSContext *ctx = s->ctx;
+    goss_free_cache(s);
+    s->signal_atoms = signal_count > 0 ? (JSAtom *)calloc((size_t)signal_count, sizeof(JSAtom)) : NULL;
+    s->param_atoms = param_count > 0 ? (JSAtom *)calloc((size_t)param_count, sizeof(JSAtom)) : NULL;
+    if ((signal_count > 0 && !s->signal_atoms) || (param_count > 0 && !s->param_atoms)) {
+        free(s->signal_atoms);
+        free(s->param_atoms);
+        s->signal_atoms = NULL;
+        s->param_atoms = NULL;
+        return -1;
+    }
+    s->lens = JS_NewObject(ctx);
+    s->signals = JS_NewObject(ctx);
+    s->params = JS_NewObject(ctx);
+    for (int i = 0; i < signal_count; i++) {
+        s->signal_atoms[i] = JS_NewAtom(ctx, signal_names[i]);
+        JS_SetProperty(ctx, s->signals, s->signal_atoms[i], JS_NewFloat64(ctx, 0.0));
+    }
+    for (int i = 0; i < param_count; i++) {
+        s->param_atoms[i] = JS_NewAtom(ctx, param_names[i]);
+        JS_SetProperty(ctx, s->params, s->param_atoms[i], JS_NewFloat64(ctx, 0.0));
+    }
+    s->signal_atom_count = signal_count;
+    s->param_atom_count = param_count;
+    JSValue global = JS_GetGlobalObject(ctx);
+    s->update_fn = JS_GetPropertyStr(ctx, global, "update");
+    JS_FreeValue(ctx, global);
+    s->cache_built = 1;
+    return 0;
+}
+
 void goss_script_free(GossScript *s) {
     if (!s) return;
+    if (s->ctx) goss_free_cache(s);
     if (s->ctx) JS_FreeContext(s->ctx);
     if (s->rt) JS_FreeRuntime(s->rt);
     free(s);
@@ -175,29 +245,29 @@ int goss_script_tick(GossScript *s,
     JSContext *ctx = s->ctx;
     s->budget = s->fuel_per_tick;
 
-    JSValue lens = JS_NewObject(ctx);
-    JSValue signals = JS_NewObject(ctx);
-    for (int i = 0; i < signal_count; i++)
-        JS_SetPropertyStr(ctx, signals, signal_names[i], JS_NewFloat64(ctx, signal_values[i]));
-    JS_SetPropertyStr(ctx, lens, "signals", signals);
-    JSValue params = JS_NewObject(ctx);
-    for (int i = 0; i < param_count; i++)
-        JS_SetPropertyStr(ctx, params, param_names[i], JS_NewFloat64(ctx, param_values[i]));
-    JS_SetPropertyStr(ctx, lens, "params", params);
+    if (!s->cache_built || s->signal_atom_count != signal_count || s->param_atom_count != param_count) {
+        if (goss_build_cache(s, signal_names, signal_count, param_names, param_count) != 0) return -1;
+    }
 
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue update = JS_GetPropertyStr(ctx, global, "update");
-    JSValue ret = JS_Call(ctx, update, JS_UNDEFINED, 1, &lens);
+    // Rebind the children each tick so a script that reassigned lens.signals
+    // or lens.params sees the engine's own objects again, then write this
+    // frame's values in place through the cached atoms.
+    JS_SetPropertyStr(ctx, s->lens, "signals", JS_DupValue(ctx, s->signals));
+    JS_SetPropertyStr(ctx, s->lens, "params", JS_DupValue(ctx, s->params));
+    for (int i = 0; i < signal_count; i++)
+        JS_SetProperty(ctx, s->signals, s->signal_atoms[i], JS_NewFloat64(ctx, signal_values[i]));
+    for (int i = 0; i < param_count; i++)
+        JS_SetProperty(ctx, s->params, s->param_atoms[i], JS_NewFloat64(ctx, param_values[i]));
+
+    JSValue ret = JS_Call(ctx, s->update_fn, JS_UNDEFINED, 1, &s->lens);
     int rc = JS_IsException(ret) ? -1 : 0;
     if (rc != 0) goss_drain_exception(ctx, "update");
     JS_FreeValue(ctx, ret);
-    JS_FreeValue(ctx, update);
-    JS_FreeValue(ctx, global);
 
     if (rc == 0) {
-        JSValue p = JS_GetPropertyStr(ctx, lens, "params");
+        JSValue p = JS_GetPropertyStr(ctx, s->lens, "params");
         for (int i = 0; i < param_count; i++) {
-            JSValue val = JS_GetPropertyStr(ctx, p, param_names[i]);
+            JSValue val = JS_GetProperty(ctx, p, s->param_atoms[i]);
             double d;
             if (JS_ToFloat64(ctx, &d, val) == 0) {
                 param_values[i] = d;
@@ -208,6 +278,5 @@ int goss_script_tick(GossScript *s,
         }
         JS_FreeValue(ctx, p);
     }
-    JS_FreeValue(ctx, lens);
     return rc;
 }

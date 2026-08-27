@@ -186,6 +186,19 @@ extension GossEngine {
         return data
     }
 
+    /// The allocation-free sibling of the returning captureLiveFrame: reads the
+    /// composited frame into a caller-owned buffer (width*height*4 for
+    /// bgra/rgba, *3/2 for nv12), so a broadcast loop reuses one buffer instead
+    /// of allocating each frame. Returns the byte count actually written.
+    @discardableResult
+    public func captureLiveFrame(session: GossSession?, format: GossPixelFormat = .bgra8, into buffer: UnsafeMutableBufferPointer<UInt8>) throws -> Int {
+        var outWidth: UInt32 = 0
+        var outHeight: UInt32 = 0
+        try checked(goss_engine_capture_live_frame(handle, session?.handle, format.rawValue, buffer.baseAddress, buffer.count, &outWidth, &outHeight))
+        let pixels = Int(outWidth) * Int(outHeight)
+        return format == .nv12 ? pixels + pixels / 2 : pixels * 4
+    }
+
     /// Writes the composited frame straight into a BGRA CVPixelBuffer - the
     /// pixel buffer a LiveKit BufferCapturer publishes. The buffer must be
     /// kCVPixelFormatType_32BGRA at the render size; an IOSurface-backed one
@@ -207,11 +220,12 @@ extension GossEngine {
             try checked(goss_engine_capture_live_frame(handle, session?.handle, GossPixelFormat.bgra8.rawValue, dst, stride * height, &outWidth, &outHeight))
             return
         }
-        var scratch = [UInt8](repeating: 0, count: tight * height)
-        try scratch.withUnsafeMutableBufferPointer { buffer in
-            try checked(goss_engine_capture_live_frame(handle, session?.handle, GossPixelFormat.bgra8.rawValue, buffer.baseAddress, buffer.count, &outWidth, &outHeight))
+        let needed = tight * height
+        if liveRowScratch.count < needed { liveRowScratch = [UInt8](repeating: 0, count: needed) }
+        try liveRowScratch.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_engine_capture_live_frame(handle, session?.handle, GossPixelFormat.bgra8.rawValue, buffer.baseAddress, needed, &outWidth, &outHeight))
         }
-        scratch.withUnsafeBufferPointer { buffer in
+        liveRowScratch.withUnsafeBufferPointer { buffer in
             for row in 0..<height {
                 dst.advanced(by: row * stride).update(from: buffer.baseAddress! + row * tight, count: tight)
             }

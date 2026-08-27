@@ -385,26 +385,33 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
   if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
   auto* interop = static_cast<AndroidInterop*>(handle);
 
-  // ran tracks whether the lambda actually executed - a dispatch that
-  // skips it would otherwise read as a successful composite of a
-  // buffer that was never touched this call, since ok defaults true.
-  bool ran = false;
-  bool ok = true;
-  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
-    ran = true;
-    if (!interop->EnsureSurface(width, height)) {
-      ok = false;
+  // ran tracks whether the lambda actually executed - a skipped dispatch
+  // must not read as a real composite, since ok defaults true. The call
+  // state packs into one struct so the task captures a single pointer that
+  // fits std::function's inline storage, no per-frame heap allocation.
+  struct CompositeCall {
+    AndroidInterop* interop;
+    uint32_t source_texture;
+    int32_t width;
+    int32_t height;
+    bool ran;
+    bool ok;
+  } call{interop, source_texture, width, height, false, true};
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&call] {
+    call.ran = true;
+    if (!call.interop->EnsureSurface(call.width, call.height)) {
+      call.ok = false;
       return;
     }
-    if (interop->blit_program == 0) {
-      interop->blit_program = LinkProgram(kBlitVertexShader, kBlitFragmentShader);
-      if (interop->blit_program == 0) {
-        ok = false;
+    if (call.interop->blit_program == 0) {
+      call.interop->blit_program = LinkProgram(kBlitVertexShader, kBlitFragmentShader);
+      if (call.interop->blit_program == 0) {
+        call.ok = false;
         return;
       }
     }
-    if (interop->fbo == 0) {
-      glGenFramebuffers(1, &interop->fbo);
+    if (call.interop->fbo == 0) {
+      glGenFramebuffers(1, &call.interop->fbo);
     }
 
     GLint previous_fbo = 0;
@@ -414,19 +421,19 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
     GLuint previous_program = 0;
     glGetIntegerv(GL_CURRENT_PROGRAM, reinterpret_cast<GLint*>(&previous_program));
 
-    glBindFramebuffer(GL_FRAMEBUFFER, interop->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, call.interop->fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                           interop->gl_texture, 0);
+                           call.interop->gl_texture, 0);
 
     const GLenum fbo_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (fbo_status != GL_FRAMEBUFFER_COMPLETE) {
       glBindFramebuffer(GL_FRAMEBUFFER, previous_fbo);
-      ok = false;
+      call.ok = false;
       return;
     }
 
-    glViewport(0, 0, width, height);
-    glUseProgram(interop->blit_program);
+    glViewport(0, 0, call.width, call.height);
+    glUseProgram(call.interop->blit_program);
 
     static const GLfloat position[] = {-1, -1, 1, -1, -1, 1, 1, 1};
     // Y-flipped to match the chain's own ingest blit (beauty_shim.cc's
@@ -439,8 +446,8 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, tex_coords);
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, source_texture);
-    glUniform1i(glGetUniformLocation(interop->blit_program, "inputTexture"), 0);
+    glBindTexture(GL_TEXTURE_2D, call.source_texture);
+    glUniform1i(glGetUniformLocation(call.interop->blit_program, "inputTexture"), 0);
 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glDisableVertexAttribArray(0);
@@ -457,7 +464,7 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
     glUseProgram(previous_program);
   });
 
-  return (ran && ok) ? interop->buffer : nullptr;
+  return (call.ran && call.ok) ? interop->buffer : nullptr;
 }
 
 void* goss_beauty_input_create(void) {
@@ -514,22 +521,31 @@ int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
   if (input_handle == nullptr || beauty_handle == nullptr) return 1;
   auto* input = static_cast<AndroidInputSurface*>(input_handle);
 
-  bool ran = false;
-  bool ok = true;
-  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
-    ran = true;
-    if (!input->EnsureReadSurface()) {
-      ok = false;
+  // The call state packs into one struct so the task captures a single
+  // pointer that fits std::function's inline storage, no per-frame heap.
+  struct InputCall {
+    AndroidInputSurface* input;
+    void* beauty_handle;
+    int32_t width;
+    int32_t height;
+    const float* landmarks106;
+    bool ran;
+    bool ok;
+  } call{input, beauty_handle, width, height, landmarks106, false, true};
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&call] {
+    call.ran = true;
+    if (!call.input->EnsureReadSurface()) {
+      call.ok = false;
       return;
     }
     // Imported as GL_TEXTURE_2D (sampler_kind 0), the same target
     // AndroidInterop's own EGLImage import already uses successfully -
     // GL_OES_EGL_image_external's samplerExternalOES is a different,
     // unrelated extension this bridge never needs.
-    ok = goss_beauty_process_external_texture(beauty_handle, input->read_texture, 0,
-                                            width, height, landmarks106) == 0;
+    call.ok = goss_beauty_process_external_texture(call.beauty_handle, call.input->read_texture, 0,
+                                            call.width, call.height, call.landmarks106) == 0;
   });
-  return (ran && ok) ? 0 : 1;
+  return (call.ran && call.ok) ? 0 : 1;
 }
 
 }  // extern "C"

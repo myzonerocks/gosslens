@@ -100,8 +100,46 @@ const VkZeroCopy = if (is_android) struct {
     beauty_import: android_vk.BeautyImport = .{},
 } else struct {};
 
+/// A small ring of persistent CPU buffers a per-frame upload references
+/// through bgfx_make_ref: a slot is not reused until the ring cycles past
+/// it, by which point bgfx has consumed the reference. Grown on a size
+/// change; the growth lands in warm-up, never on the steady frame path.
+const UploadRing = struct {
+    slots: [3][]u8 = .{ &.{}, &.{}, &.{} },
+    capacity: usize = 0,
+    cursor: usize = 0,
+
+    fn next(self: *UploadRing, gpa: std.mem.Allocator, bytes: usize) ?[]u8 {
+        if (bytes > self.capacity) {
+            for (&self.slots) |*slot| {
+                const grown = gpa.alloc(u8, bytes) catch return null;
+                if (slot.len != 0) gpa.free(slot.*);
+                slot.* = grown;
+            }
+            self.capacity = bytes;
+        }
+        const slot = self.slots[self.cursor][0..bytes];
+        self.cursor = (self.cursor + 1) % self.slots.len;
+        return slot;
+    }
+
+    fn deinit(self: *UploadRing, gpa: std.mem.Allocator) void {
+        for (&self.slots) |*slot| if (slot.len != 0) gpa.free(slot.*);
+        self.* = .{};
+    }
+};
+
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
+    /// Reused CPU staging for dynamic-mesh uploads: positions padded to the
+    /// shared vertex layout. Grown to the largest mesh then reused every
+    /// frame, freed in deinit - the update path never allocates after warmup.
+    interleave_scratch: []f32 = &.{},
+    /// Persistent CPU rings the camera-upload paths reference through
+    /// bgfx_make_ref rather than a per-frame bgfx_alloc; each slot outlives
+    /// the frames bgfx needs it, grown on a size change, freed in deinit.
+    nv12_ring: UploadRing = .{},
+    rgba_ring: UploadRing = .{},
     zero_copy: ?VkZeroCopy = null,
     width: u32,
     height: u32,
@@ -1094,6 +1132,9 @@ pub const Renderer = struct {
         c.bgfx_destroy_vertex_buffer(r.face_mesh_uv_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.face_mesh_position_buffer);
         c.bgfx_shutdown();
+        if (r.interleave_scratch.len != 0) r.gpa.free(r.interleave_scratch);
+        r.nv12_ring.deinit(r.gpa);
+        r.rgba_ring.deinit(r.gpa);
         if (is_android) {
             if (saved_vk_ctx) |*ctx| ctx.deinit();
         }
@@ -1259,6 +1300,34 @@ pub const Renderer = struct {
     pub fn createMaskTexture(width: u16, height: u16, mask: []const u8) TextureHandle {
         return c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_R8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, c.bgfx_copy(mask.ptr, @intCast(mask.len)), 0);
     }
+
+    /// A single-channel R8 mask texture reused across frames: created on the
+    /// first upload and on any size change, updated in place otherwise, so a
+    /// per-frame mask never churns a GPU texture. Destroyed once at teardown.
+    pub const DynamicMask = struct {
+        handle: c.bgfx_texture_handle_t = .{ .idx = invalid_handle },
+        width: u16 = 0,
+        height: u16 = 0,
+
+        /// Replaces the mask's pixels, recreating the texture only when the
+        /// size changes; bgfx copies the bytes, so the caller may reuse them.
+        pub fn upload(self: *DynamicMask, width: u16, height: u16, mask: []const u8) TextureHandle {
+            if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
+                if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+                const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+                self.handle = c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_R8, flags, null, 0);
+                self.width = width;
+                self.height = height;
+            }
+            c.bgfx_update_texture_2d(self.handle, 0, 0, 0, 0, width, height, c.bgfx_copy(mask.ptr, @intCast(mask.len)), std.math.maxInt(u16));
+            return self.handle;
+        }
+
+        pub fn deinit(self: *DynamicMask) void {
+            if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+            self.* = .{};
+        }
+    };
 
     /// A mutable BGRA texture whose pixels are replaced each frame - a
     /// video clip's decoded frame lands here. BGRA8 matches the byte order
@@ -1967,13 +2036,24 @@ pub const Renderer = struct {
         return mesh;
     }
 
+    /// The reused interleave staging sized for `floats`, grown on the first
+    /// larger mesh and reused thereafter. Null only if a grow ever fails, in
+    /// which case the caller skips this update rather than allocating.
+    fn interleaveStage(r: *Renderer, floats: usize) ?[]f32 {
+        if (floats > r.interleave_scratch.len) {
+            const grown = r.gpa.alloc(f32, floats) catch return null;
+            if (r.interleave_scratch.len != 0) r.gpa.free(r.interleave_scratch);
+            r.interleave_scratch = grown;
+        }
+        return r.interleave_scratch[0..floats];
+    }
+
     /// Re-uploads deformed positions into a dynamic model mesh, padding
     /// the texcoord to zero to match r.layout. A no-op on a static mesh.
     pub fn updateModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32) void {
         if (!mesh.dynamic) return;
         const count = @min(positions.len, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
         }
@@ -2008,8 +2088,7 @@ pub const Renderer = struct {
     /// dynamic buffer, padding the texcoord to zero to match r.layout.
     pub fn updateSkinnedMesh(r: *Renderer, mesh: SkinnedMesh, positions: []const [3]f32) void {
         const count = @min(positions.len, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
         }
@@ -2057,8 +2136,7 @@ pub const Renderer = struct {
     /// into the cloth's dynamic buffer, padding the texcoord to zero.
     pub fn updateClothMesh(r: *Renderer, mesh: ClothMesh, positions: []const f32) void {
         const count = @min(positions.len / 3, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
         }
@@ -2092,8 +2170,7 @@ pub const Renderer = struct {
 
     pub fn updateHairMesh(r: *Renderer, mesh: HairMesh, positions: []const f32) void {
         const count = @min(positions.len / 3, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
         }
@@ -2156,8 +2233,7 @@ pub const Renderer = struct {
 
     pub fn updateParticleMesh(r: *Renderer, mesh: ParticleMesh, positions: []const f32) void {
         const count = @min(positions.len / 3, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
         }
@@ -2441,21 +2517,26 @@ pub const Renderer = struct {
         }
         const cache = r.upload_cache.?;
 
-        const y_mem = c.bgfx_alloc(@as(u32, width) * height) orelse return error.OutOfMemory;
-        const y_dst: [*]u8 = y_mem.*.data;
+        // One ring slot carries both planes so both references stay live
+        // until bgfx consumes them; the tightly packed copies match the old
+        // bgfx_alloc path byte for byte.
+        const uv_width: usize = width;
+        const uv_rows: usize = height / 2;
+        const y_size: usize = @as(usize, width) * height;
+        const uv_size: usize = uv_width * uv_rows;
+        const slot = r.nv12_ring.next(r.gpa, y_size + uv_size) orelse return error.OutOfMemory;
+
+        const y_dst = slot[0..y_size];
         for (0..height) |row| {
             @memcpy(y_dst[row * width ..][0..width], y[row * y_stride ..][0..width]);
         }
-        c.bgfx_update_texture_2d(cache.y, 0, 0, 0, 0, width, height, y_mem, std.math.maxInt(u16));
+        c.bgfx_update_texture_2d(cache.y, 0, 0, 0, 0, width, height, c.bgfx_make_ref(y_dst.ptr, @intCast(y_size)), std.math.maxInt(u16));
 
-        const uv_width: u32 = width;
-        const uv_rows: u32 = height / 2;
-        const uv_mem = c.bgfx_alloc(uv_width * uv_rows) orelse return error.OutOfMemory;
-        const uv_dst: [*]u8 = uv_mem.*.data;
+        const uv_dst = slot[y_size..][0..uv_size];
         for (0..uv_rows) |row| {
             @memcpy(uv_dst[row * uv_width ..][0..uv_width], uv[row * uv_stride ..][0..uv_width]);
         }
-        c.bgfx_update_texture_2d(cache.uv, 0, 0, 0, 0, width / 2, height / 2, uv_mem, std.math.maxInt(u16));
+        c.bgfx_update_texture_2d(cache.uv, 0, 0, 0, 0, width / 2, height / 2, c.bgfx_make_ref(uv_dst.ptr, @intCast(uv_size)), std.math.maxInt(u16));
 
         return .{ .y = cache.y, .uv = cache.uv };
     }
@@ -2486,9 +2567,11 @@ pub const Renderer = struct {
         const cache = r.rgba_upload_cache.?;
 
         // Both axes reversed: bgfx's HTML5/WebGL2 backend samples (0,0)
-        // as the last pixel of an uploaded 2D texture, not the first.
-        const mem = c.bgfx_alloc(@as(u32, width) * height * 4) orelse return error.OutOfMemory;
-        const dst: [*]u8 = mem.*.data;
+        // as the last pixel of an uploaded 2D texture, not the first. The
+        // reversed copy lands in a ring slot referenced through make_ref,
+        // matching the old bgfx_alloc path byte for byte.
+        const size: usize = @as(usize, width) * height * 4;
+        const dst = r.rgba_ring.next(r.gpa, size) orelse return error.OutOfMemory;
         for (0..height) |row| {
             const src_row = rgba[(height - 1 - row) * stride ..];
             const dst_row = dst[row * width * 4 ..];
@@ -2497,7 +2580,7 @@ pub const Renderer = struct {
                 @memcpy(dst_row[col * 4 ..][0..4], src_row[src_col * 4 ..][0..4]);
             }
         }
-        c.bgfx_update_texture_2d(cache.texture, 0, 0, 0, 0, width, height, mem, std.math.maxInt(u16));
+        c.bgfx_update_texture_2d(cache.texture, 0, 0, 0, 0, width, height, c.bgfx_make_ref(dst.ptr, @intCast(size)), std.math.maxInt(u16));
 
         return cache.texture;
     }
