@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.bulge",
+  "version": "1.0.0",
+  "display_name": "Bulge",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "bulge", "type": "warp.pass", "inputs": {"frame": "camera"}, "params": {}, "warp": {"mode": "bulge", "center_x": 0.5, "center_y": 0.5, "radius": 0.28, "strength": 2.0}}
+  ],
+  "triggers": []
+}

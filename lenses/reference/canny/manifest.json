@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.canny",
+  "version": "1.0.0",
+  "display_name": "Canny Edges",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "canny", "type": "edge.pass", "inputs": {"frame": "camera"}, "params": {}, "edge": {"mode": "canny", "low_threshold": 0.1, "high_threshold": 0.5, "blur_radius": 4.0}}
+  ],
+  "triggers": []
+}

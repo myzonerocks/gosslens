@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.face-smooth",
+  "version": "1.0.0",
+  "display_name": "Face Smooth",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "smooth", "type": "smooth.pass", "inputs": {"frame": "camera"}, "params": {},
+     "smooth": {"amount": 1.0, "mask": "head"}}
+  ],
+  "triggers": []
+}

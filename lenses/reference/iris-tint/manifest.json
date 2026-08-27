@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.iris-tint",
+  "version": "1.0.0",
+  "display_name": "Iris Tint",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "tint", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [0.15, 0.5, 0.7], "opacity": 0.7, "mask": "iris"}}
+  ],
+  "triggers": []
+}

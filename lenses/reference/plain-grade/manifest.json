@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.plain-grade",
+  "version": "1.0.0",
+  "display_name": "Plain Grade",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "grade", "type": "grade.pass", "inputs": {"frame": "camera"}, "params": {}, "grade": {}}
+  ],
+  "triggers": []
+}

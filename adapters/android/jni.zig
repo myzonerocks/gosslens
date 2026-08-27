@@ -293,6 +293,24 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitDepth(env: *JniEnv, cls: jobjec
     return @intFromEnum(abi.goss_session_submit_depth(sessionFromHandle(session), depth, @intCast(width), @intCast(height), near, far));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitSegmentationImage(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, width: i32, height: i32) i32 {
+    _ = cls;
+    if (width == 0 or height == 0) return @intFromEnum(abi.Status.invalid_argument);
+    const bytes = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const rgba: [*]const u8 = @ptrCast(bytes);
+    return @intFromEnum(abi.goss_session_submit_segmentation_image(sessionFromHandle(session), rgba, @intCast(width), @intCast(height)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSetMakeupReference(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, width: i32, height: i32, landmarks_buffer: jobject, count: i32) i32 {
+    _ = cls;
+    if (count == 0) return @intFromEnum(abi.goss_session_set_makeup_reference(sessionFromHandle(session), null, 0, 0, null, 0));
+    const rbytes = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const lbytes = getDirectBufferAddress(env, landmarks_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const rgba: [*]const u8 = @ptrCast(rbytes);
+    const landmarks: [*]const f32 = @ptrCast(@alignCast(lbytes));
+    return @intFromEnum(abi.goss_session_set_makeup_reference(sessionFromHandle(session), rgba, @intCast(width), @intCast(height), landmarks, @intCast(count)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeBodyCount(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;

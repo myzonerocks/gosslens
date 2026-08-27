@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 49u
+#define GOSS_ABI_MINOR 51u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -564,6 +564,18 @@ goss_status goss_session_body_result_at(goss_session *session, uint32_t index, g
  * metres per pixel, row major, with the near and far metres that bound it.
  * A zero size clears it. Kept for depth occlusion against the content. */
 goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far);
+
+/* Segments a host-provided still RGBA image (width*height*4 bytes, row-major):
+ * converts it to NV12 and feeds the running segmenter, so the next render
+ * picks up the mask the way a camera frame would. Returns goss_status_again
+ * when no segmenter is enabled on the session. */
+goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height);
+
+/* Samples a reference photo's makeup color per face part and stores it, so a
+ * tint.pass with "source": "reference" paints the live face in that photo's
+ * color. rgba is width*height*4 row-major; landmarks is the reference face's
+ * 478 x,y,z points in reference-pixel space. A zero landmark_count clears it. */
+goss_status goss_session_set_makeup_reference(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height, const float *landmarks, uint32_t landmark_count);
 
 /* Graph thread. Reads the newest hand tracking result into caller
  * memory. Reports GOSS_AGAIN until the worker has published its first

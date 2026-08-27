@@ -119,6 +119,45 @@ pub fn regionLandmark(region: Region) u16 {
     return region_landmark[@intFromEnum(region)];
 }
 
+/// The outer-lip contour as a closed ring of mesh landmarks, the two corners
+/// at 61 and 291 and the rest in order around the lip, so a face-part matte
+/// fills this polygon straight from tracking.
+pub const outer_lip_loop = [_]u16{
+    61, 146, 91,  181, 84,  17,  314, 405, 321, 375,
+    291, 409, 270, 269, 267, 0,   37,  39,  40,  185,
+};
+
+/// The inner-lip contour as a closed ring, the mouth aperture inside the
+/// outer lip, so a face-part matte fills the teeth when the mouth opens.
+pub const inner_lip_loop = [_]u16{
+    78,  95,  88,  178, 87,  14,  317, 402, 318, 324,
+    308, 415, 310, 311, 312, 13,  82,  81,  80,  191,
+};
+
+/// Each eye's lid contour as a closed ring, the outer corner first (263 and
+/// 33), lower lid then upper, so a face-part matte fills each eye straight
+/// from tracking.
+pub const left_eye_loop = [_]u16{
+    263, 249, 390, 373, 374, 380, 381, 382,
+    362, 398, 384, 385, 386, 387, 388, 466,
+};
+pub const right_eye_loop = [_]u16{
+    33,  7,   163, 144, 145, 153, 154, 155,
+    133, 173, 157, 158, 159, 160, 161, 246,
+};
+
+/// Each eyebrow as a closed ring: the lower edge lateral to medial, then the
+/// upper edge medial back to lateral, so the ring traces the brow perimeter
+/// without self-intersecting when it fills.
+pub const left_brow_loop = [_]u16{ 276, 283, 282, 295, 285, 336, 296, 334, 293, 300 };
+pub const right_brow_loop = [_]u16{ 46, 53, 52, 65, 55, 107, 66, 105, 63, 70 };
+
+/// Each iris as the four refined iris landmarks ringing its center, so a
+/// face-part matte fills just the iris (a subset of the eye) for a colored
+/// contact. Present only when the model refines iris landmarks.
+pub const left_iris_loop = [_]u16{ 474, 475, 476, 477 };
+pub const right_iris_loop = [_]u16{ 469, 470, 471, 472 };
+
 /// The tracked point for a region: x, y in frame pixels and z in the same
 /// scale, read straight from the mesh. landmarks is a result's flat array.
 pub fn regionPoint(landmarks: *const [landmark_count * 3]f32, region: Region) [3]f32 {

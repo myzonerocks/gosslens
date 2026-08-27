@@ -24,7 +24,9 @@ pub const NodeKind = enum {
     power, // (T, T) -> T
     min, // (T, T) -> T
     max, // (T, T) -> T
+    atan2, // (T y, T x) -> T, the atan2(y, x) angle
     dot, // (vecN, vecN) -> float
+    distance, // (vecN, vecN) -> float
     normalize, // (vecN) -> vecN
     length, // (vecN) -> float
     saturate, // (T) -> T
@@ -33,10 +35,13 @@ pub const NodeKind = enum {
     fract, // (T) -> T
     sin, // (T) -> T
     cos, // (T) -> T
+    sqrt, // (T) -> T
     clamp, // (T, T, T) -> T
+    refract, // (vecN incident, vecN normal, float eta) -> vecN
     split, // (vecN) -> float, channel in params[0] (0..3)
     combine3, // (float, float, float) -> vec3
     combine4, // (float, float, float, float) -> vec4
+    colormatrix, // (vec3 row0, vec3 row1, vec3 row2, vec3 v) -> vec3, matrix rows times v
     lambert, // (vecN normal, vecN light) -> float, clamped n dot l
     fresnel, // (vecN normal, vecN view, float f0) -> float, Schlick
     step, // (T edge, T x) -> T
@@ -86,10 +91,10 @@ const ResolveState = enum { unseen, on_stack, done };
 fn arity(kind: NodeKind) usize {
     return switch (kind) {
         .uv, .time, .constant, .uniform, .texture => 0,
-        .saturate, .normalize, .length, .abs, .floor, .fract, .sin, .cos, .split, .output => 1,
-        .sample, .add, .subtract, .multiply, .divide, .power, .min, .max, .dot, .lambert, .step, .mod => 2,
-        .mix, .combine3, .clamp, .fresnel, .smoothstep => 3,
-        .combine4 => 4,
+        .saturate, .normalize, .length, .abs, .floor, .fract, .sin, .cos, .sqrt, .split, .output => 1,
+        .sample, .add, .subtract, .multiply, .divide, .power, .min, .max, .atan2, .dot, .distance, .lambert, .step, .mod => 2,
+        .mix, .combine3, .clamp, .fresnel, .smoothstep, .refract => 3,
+        .combine4, .colormatrix => 4,
     };
 }
 
@@ -151,7 +156,7 @@ fn outputType(node: Node, out_types: []const ValueType) Error!ValueType {
     switch (node.kind) {
         .uv, .time, .texture, .sample => return fixedOutput(node.kind).?,
         .constant, .uniform => return node.value_type,
-        .saturate, .normalize, .abs, .floor, .fract, .sin, .cos => {
+        .saturate, .normalize, .abs, .floor, .fract, .sin, .cos, .sqrt => {
             const a = out_types[in[0]];
             if (a == .sampler) return error.TypeMismatch;
             if (node.kind == .normalize and !isVector(a)) return error.TypeMismatch;
@@ -166,7 +171,7 @@ fn outputType(node: Node, out_types: []const ValueType) Error!ValueType {
             if (a == .sampler or a != out_types[in[1]] or a != out_types[in[2]]) return error.TypeMismatch;
             return a;
         },
-        .add, .subtract, .multiply, .divide, .power, .min, .max, .step, .mod => {
+        .add, .subtract, .multiply, .divide, .power, .min, .max, .atan2, .step, .mod => {
             const a = out_types[in[0]];
             if (a == .sampler or a != out_types[in[1]]) return error.TypeMismatch;
             return a;
@@ -177,10 +182,19 @@ fn outputType(node: Node, out_types: []const ValueType) Error!ValueType {
             if (x == .sampler) return error.TypeMismatch;
             return x;
         },
-        .dot => {
+        .dot, .distance => {
             const a = out_types[in[0]];
             if (!isVector(a) or a != out_types[in[1]]) return error.TypeMismatch;
             return .float;
+        },
+        .refract => {
+            const a = out_types[in[0]];
+            if (!isVector(a) or a != out_types[in[1]] or out_types[in[2]] != .float) return error.TypeMismatch;
+            return a;
+        },
+        .colormatrix => {
+            for (in) |i| if (out_types[i] != .vec3) return error.TypeMismatch;
+            return .vec3;
         },
         .lambert => {
             const a = out_types[in[0]];
@@ -285,10 +299,14 @@ fn emitStatement(graph: Graph, types: []const ValueType, index: u32, writer: *st
         .power => try writer.print("pow(n{d}, n{d})", .{ in[0], in[1] }),
         .min => try writer.print("min(n{d}, n{d})", .{ in[0], in[1] }),
         .max => try writer.print("max(n{d}, n{d})", .{ in[0], in[1] }),
+        .atan2 => try writer.print("atan2(n{d}, n{d})", .{ in[0], in[1] }),
         .step => try writer.print("step(n{d}, n{d})", .{ in[0], in[1] }),
         .smoothstep => try writer.print("smoothstep(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
         .mod => try writer.print("mod(n{d}, n{d})", .{ in[0], in[1] }),
         .dot => try writer.print("dot(n{d}, n{d})", .{ in[0], in[1] }),
+        .distance => try writer.print("distance(n{d}, n{d})", .{ in[0], in[1] }),
+        .refract => try writer.print("refract(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
+        .colormatrix => try writer.print("vec3(dot(n{d}, n{d}), dot(n{d}, n{d}), dot(n{d}, n{d}))", .{ in[0], in[3], in[1], in[3], in[2], in[3] }),
         .lambert => try writer.print("max(dot(normalize(n{d}), normalize(n{d})), 0.0)", .{ in[0], in[1] }),
         .fresnel => try writer.print("(n{d} + (1.0 - n{d}) * pow(1.0 - max(dot(normalize(n{d}), normalize(n{d})), 0.0), 5.0))", .{ in[2], in[2], in[0], in[1] }),
         .normalize => try writer.print("normalize(n{d})", .{in[0]}),
@@ -298,6 +316,7 @@ fn emitStatement(graph: Graph, types: []const ValueType, index: u32, writer: *st
         .fract => try writer.print("fract(n{d})", .{in[0]}),
         .sin => try writer.print("sin(n{d})", .{in[0]}),
         .cos => try writer.print("cos(n{d})", .{in[0]}),
+        .sqrt => try writer.print("sqrt(n{d})", .{in[0]}),
         .clamp => try writer.print("clamp(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
         .split => try writer.print("n{d}.{c}", .{ in[0], "xyzw"[@min(3, @as(usize, @intFromFloat(node.params[0])))] }),
         .combine3 => try writer.print("vec3(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
@@ -633,6 +652,112 @@ test "post-fx primitives validate and lower" {
     try t.expect(std.mem.indexOf(u8, src, "smoothstep(n2, n3, n1)") != null);
     try t.expect(std.mem.indexOf(u8, src, "step(n5, n4)") != null);
     try t.expect(std.mem.indexOf(u8, src, "mod(n4, n5)") != null);
+}
+
+test "sqrt, distance, and atan2 validate and lower" {
+    // A polar remap of the centred uv: its radius and angle are the swirl
+    // and hue primitives a material lens needs without a dedicated node.
+    const nodes = [_]Node{
+        .{ .kind = .uv }, // 0 vec2
+        .{ .kind = .constant, .value_type = .vec2, .params = .{ 0.5, 0.5, 0, 0 } }, // 1 centre
+        .{ .kind = .subtract, .inputs = &.{ 0, 1 } }, // 2 vec2, uv - centre
+        .{ .kind = .distance, .inputs = &.{ 0, 1 } }, // 3 float, radius
+        .{ .kind = .sqrt, .inputs = &.{3} }, // 4 float
+        .{ .kind = .split, .inputs = &.{2}, .params = .{ 0, 0, 0, 0 } }, // 5 x
+        .{ .kind = .split, .inputs = &.{2}, .params = .{ 1, 0, 0, 0 } }, // 6 y
+        .{ .kind = .atan2, .inputs = &.{ 6, 5 } }, // 7 float, atan(y, x)
+        .{ .kind = .combine4, .inputs = &.{ 4, 7, 3, 4 } }, // 8 vec4
+        .{ .kind = .output, .inputs = &.{8} }, // 9
+    };
+    const graph: Graph = .{ .nodes = &nodes, .root = 9 };
+    var types: [nodes.len]ValueType = undefined;
+    try validate(t.allocator, graph, &types);
+    try t.expectEqual(ValueType.float, types[3]); // distance collapses to a scalar
+    try t.expectEqual(ValueType.float, types[4]); // sqrt keeps the scalar
+    try t.expectEqual(ValueType.float, types[7]); // atan2 keeps the scalar
+
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try emitFragment(t.allocator, graph, &types, &out.writer);
+    const src = out.writer.buffered();
+    try t.expect(std.mem.indexOf(u8, src, "distance(n0, n1)") != null);
+    try t.expect(std.mem.indexOf(u8, src, "sqrt(n3)") != null);
+    // atan2 lowers to bgfx's portable atan2 macro (native on metal and
+    // hlsl, GLSL's two-argument atan on essl), y then x.
+    try t.expect(std.mem.indexOf(u8, src, "atan2(n6, n5)") != null);
+}
+
+test "a colormatrix lowers to three row dot products" {
+    // A sepia transform: three vec3 rows times the sampled rgb, exactly a
+    // 3x3 colour matrix expressed in the graph's float/vec value model.
+    const nodes = [_]Node{
+        .{ .kind = .uniform, .value_type = .vec3, .name = "rgb" }, // 0
+        .{ .kind = .constant, .value_type = .vec3, .params = .{ 0.393, 0.769, 0.189, 0 } }, // 1 row0
+        .{ .kind = .constant, .value_type = .vec3, .params = .{ 0.349, 0.686, 0.168, 0 } }, // 2 row1
+        .{ .kind = .constant, .value_type = .vec3, .params = .{ 0.272, 0.534, 0.131, 0 } }, // 3 row2
+        .{ .kind = .colormatrix, .inputs = &.{ 1, 2, 3, 0 } }, // 4 vec3
+        .{ .kind = .split, .inputs = &.{4}, .params = .{ 0, 0, 0, 0 } }, // 5
+        .{ .kind = .split, .inputs = &.{4}, .params = .{ 1, 0, 0, 0 } }, // 6
+        .{ .kind = .split, .inputs = &.{4}, .params = .{ 2, 0, 0, 0 } }, // 7
+        .{ .kind = .constant, .value_type = .float, .params = .{ 1, 0, 0, 0 } }, // 8 alpha
+        .{ .kind = .combine4, .inputs = &.{ 5, 6, 7, 8 } }, // 9 vec4
+        .{ .kind = .output, .inputs = &.{9} }, // 10
+    };
+    const graph: Graph = .{ .nodes = &nodes, .root = 10 };
+    var types: [nodes.len]ValueType = undefined;
+    try validate(t.allocator, graph, &types);
+    try t.expectEqual(ValueType.vec3, types[4]); // the matrix product is a vec3
+
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try emitFragment(t.allocator, graph, &types, &out.writer);
+    const src = out.writer.buffered();
+    try t.expect(std.mem.indexOf(u8, src, "vec3(dot(n1, n0), dot(n2, n0), dot(n3, n0))") != null);
+}
+
+test "refract validates and lowers for the sphere-warp math" {
+    const nodes = [_]Node{
+        .{ .kind = .uniform, .value_type = .vec3, .name = "incident" }, // 0
+        .{ .kind = .uniform, .value_type = .vec3, .name = "normal" }, // 1
+        .{ .kind = .constant, .value_type = .float, .params = .{ 1.5, 0, 0, 0 } }, // 2 eta
+        .{ .kind = .refract, .inputs = &.{ 0, 1, 2 } }, // 3 vec3
+        .{ .kind = .split, .inputs = &.{3}, .params = .{ 0, 0, 0, 0 } }, // 4
+        .{ .kind = .split, .inputs = &.{3}, .params = .{ 1, 0, 0, 0 } }, // 5
+        .{ .kind = .split, .inputs = &.{3}, .params = .{ 2, 0, 0, 0 } }, // 6
+        .{ .kind = .constant, .value_type = .float, .params = .{ 1, 0, 0, 0 } }, // 7 alpha
+        .{ .kind = .combine4, .inputs = &.{ 4, 5, 6, 7 } }, // 8 vec4
+        .{ .kind = .output, .inputs = &.{8} }, // 9
+    };
+    const graph: Graph = .{ .nodes = &nodes, .root = 9 };
+    var types: [nodes.len]ValueType = undefined;
+    try validate(t.allocator, graph, &types);
+    try t.expectEqual(ValueType.vec3, types[3]); // refract keeps the vector
+
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    try emitFragment(t.allocator, graph, &types, &out.writer);
+    const src = out.writer.buffered();
+    try t.expect(std.mem.indexOf(u8, src, "refract(n0, n1, n2)") != null);
+}
+
+test "colormatrix rejects a non-vec3 input and refract a non-float eta" {
+    const bad_matrix = [_]Node{
+        .{ .kind = .uniform, .value_type = .vec2, .name = "rgb" }, // 0 vec2, not vec3
+        .{ .kind = .constant, .value_type = .vec3, .params = .{ 1, 0, 0, 0 } }, // 1
+        .{ .kind = .colormatrix, .inputs = &.{ 1, 1, 1, 0 } }, // 2 v is vec2
+        .{ .kind = .combine4, .inputs = &.{ 0, 0, 0, 0 } }, // 3 unreachable filler
+        .{ .kind = .output, .inputs = &.{2} }, // 4 wants vec4, but colormatrix fails first
+    };
+    try expectError(&bad_matrix, 4, error.TypeMismatch);
+
+    const bad_eta = [_]Node{
+        .{ .kind = .uniform, .value_type = .vec3, .name = "incident" }, // 0
+        .{ .kind = .uniform, .value_type = .vec3, .name = "normal" }, // 1
+        .{ .kind = .uniform, .value_type = .vec3, .name = "eta" }, // 2 vec3, not float
+        .{ .kind = .refract, .inputs = &.{ 0, 1, 2 } }, // 3
+        .{ .kind = .output, .inputs = &.{3} }, // 4
+    };
+    try expectError(&bad_eta, 4, error.TypeMismatch);
 }
 
 test "a material block parses into a graph and validates" {

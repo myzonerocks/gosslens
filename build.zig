@@ -108,6 +108,28 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(gosslens_lib);
 
+    // The C SDK: the same abi_module packaged for a plain C consumer. The
+    // shared library folds every transitive backend into one self-contained
+    // object; the static archive rides alongside for zig cc callers. The
+    // staged header is the one in include/, so building this is the ABI check.
+    const gosslens_shared = b.addLibrary(.{
+        .name = "gosslens",
+        .linkage = .dynamic,
+        .root_module = abi_module,
+    });
+    const c_step = b.step("c", "Stage the C SDK under zig-out/c: static + shared libgosslens and the C ABI header");
+    c_step.dependOn(&b.addInstallArtifact(gosslens_lib, .{
+        .dest_dir = .{ .override = .{ .custom = "c/lib" } },
+    }).step);
+    c_step.dependOn(&b.addInstallArtifact(gosslens_shared, .{
+        .dest_dir = .{ .override = .{ .custom = "c/lib" } },
+    }).step);
+    c_step.dependOn(&b.addInstallFileWithDir(
+        b.path("include/gosslens.h"),
+        .{ .custom = "c/include" },
+        "gosslens.h",
+    ).step);
+
     const abi_dump_module = b.createModule(.{
         .root_source_file = b.path("tools/abi_dump.zig"),
         .target = target,
@@ -4332,6 +4354,20 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         .{ .name = "fs_dof_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_fog_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_outline_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_tint_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_smooth_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_stylize_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // edge.pass's three fixed fragment shaders: a grayscale-and-sobel
+        // stage (single-pass magnitude or canny's directional variant), then
+        // canny's non-maximum suppression and weak-pixel hysteresis, run
+        // either side of the shared separable blur.
+        .{ .name = "fs_edge_sobel", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_edge_nms", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_edge_hyst", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // warp.pass's own fixed fragment shader: one geometric distortion
+        // that branches on its mode uniform (glass sphere, sphere refraction,
+        // bulge, pinch, swirl), resampling the frame at a displaced UV.
+        .{ .name = "fs_warp_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_trail_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_ssr_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_env_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },

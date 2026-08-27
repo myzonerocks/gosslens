@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.sphere-refraction",
+  "version": "1.0.0",
+  "display_name": "Sphere Refraction",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "sphere", "type": "warp.pass", "inputs": {"frame": "camera"}, "params": {}, "warp": {"mode": "sphere_refraction", "center_x": 0.5, "center_y": 0.5, "radius": 0.28, "strength": 1.0, "refractive_index": 0.71}}
+  ],
+  "triggers": []
+}

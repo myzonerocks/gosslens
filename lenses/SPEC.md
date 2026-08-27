@@ -290,14 +290,18 @@ program is kit-authored and fixed - so it is always ready and never
 degrades. Place it anywhere in the chain; it blurs its input and hands the
 softened frame to the next node.
 
-A `"grade.pass"` node is a parametric color grade post-effect. It carries a
-`"grade": {"exposure", "contrast", "saturation", "temperature"}` block and
-shifts whatever frame reaches it - exposure in stops, contrast and
-saturation as multipliers around 1, temperature a warm/cool push - then
-hands the graded frame down the chain. Every field is optional and defaults
-to the identity, so a `grade.pass` with an empty block leaves the frame
-untouched. Like `blur.pass` it ships no asset and is always ready; it lets a
-lens warm, cool, brighten or push contrast without authoring a LUT.
+A `"grade.pass"` node is a parametric color adjustment post-effect. It
+carries a `"grade"` block and shifts whatever frame reaches it, then hands
+the graded frame down the chain. The fields are `exposure` (stops),
+`brightness` (additive lift), `contrast` and `saturation` (multipliers
+around 1), `temperature` and `tint` (the warm/cool and green/magenta white
+balance axes), `hue` (degrees of rotation), `grayscale` and `invert` (a
+0..1 amount toward black and white or toward the complement), and
+`posterize` (a level count, 0 to disable). They apply in that order. Every
+field is optional and defaults to the identity, so a `grade.pass` with an
+empty block leaves the frame untouched. Like `blur.pass` it ships no asset
+and is always ready; it lets a lens warm, cool, brighten, desaturate,
+posterize or invert without authoring a LUT.
 
 A `"bloom.pass"` node is a glow post-effect. It carries a `"bloom":
 {"threshold", "intensity"}` block: it extracts the frame's highlights - what
@@ -322,13 +326,60 @@ so distant geometry sinks into haze while near content stays clear. Like
 `dof.pass` it reads the host's depth and holds the frame through when none
 is submitted, ships no asset, and defaults its fields.
 
-An `"outline.pass"` node is a depth-edge outline post-effect. It carries an
-`"outline": {"color", "threshold"}` block: where the submitted depth jumps
-between neighboring pixels by more than `threshold` it draws `color` (three
-0..1 numbers) over the frame, so silhouettes and creases get a toon outline
-while flat depth stays untouched. Like `dof.pass` and `fog.pass` it reads the
-host's depth, holds the frame through with none submitted, ships no asset,
+An `"outline.pass"` node is an edge outline post-effect. It carries an
+`"outline": {"color", "threshold", "mask"}` block: where the submitted depth,
+or a named `mask` channel's edge, jumps between neighboring pixels by more
+than `threshold` it draws `color` (three 0..1 numbers) over the frame, so a
+silhouette, crease, segmentation class, or face-part matte gets a toon
+outline while flat regions stay untouched. With no `mask` it reads the host's
+depth and holds the frame through when none is submitted. It ships no asset
 and defaults its fields.
+
+A `"tint.pass"` node is a masked color layer. It carries a `"tint": {"color",
+"opacity", "mask", "source"}` block: it blends `color` (three 0..1 numbers)
+into the region a named `mask` channel marks, scaled by the mask and
+`opacity` (0..1), so a face-part matte or a segmentation class reads as soft
+makeup. With `"source": "reference"` the color comes from the makeup
+reference set through the ABI for that channel instead of the static rgb. A
+tint naming no mask, or a channel the running lens never fills, serves the
+zero mask and draws nothing.
+
+A `"smooth.pass"` node is a masked detail pass. It carries a `"smooth":
+{"amount", "mask"}` block: it mixes the masked region toward a small neighbor
+average by `amount`, so a positive amount blurs (skin smoothing) and a
+negative one (down to -1) sharpens. It keys the same mask channels as
+`tint.pass`; a smooth naming none is inert.
+
+A `"stylize.pass"` node is a single-pass artistic filter over the whole
+frame. It carries a `"stylize": {"mode", "strength", "threshold", "levels"}`
+block: `mode` is `sketch` (a pencil edge over pale paper), `toon` (color
+quantized to `levels` with edges past `threshold` knocked to black), `emboss`
+(a mid-gray relief), or `crosshatch` (ink hatching keyed by luminance).
+`strength` scales the edge or emboss response. It reads no host input, ships
+no asset, and is always ready.
+
+An `"edge.pass"` node is an edge-detection post-effect over the whole frame. It
+carries an `"edge": {"mode", "low_threshold", "high_threshold", "blur_radius",
+"strength", "invert"}` block. `mode` is `sobel` (a single-pass 3x3 gradient
+magnitude, its brightness scaled by `strength`) or `canny` (a blur, a
+directional sobel, non-maximum suppression and weak-pixel hysteresis chained
+into thin binary edges). `low_threshold` and `high_threshold` are canny's
+hysteresis band and `blur_radius` its pre-blur width in texels; sobel ignores
+all three. `invert` draws dark edges on a light field instead of light on dark.
+It reads no host input, ships no asset, and is always ready.
+
+A `"warp.pass"` node is a geometric distortion over the whole frame, radial
+around a center within a radius. It carries a `"warp": {"mode", "center_x",
+"center_y", "radius", "strength", "refractive_index", "aspect_auto"}` block.
+`mode` is `glass_sphere` (a glass lens that refracts the frame through a sphere
+and lets the surround through), `sphere_refraction` (the same refraction but the
+classic crystal ball, black outside the sphere), `bulge` (magnify toward the
+center), `pinch` (pull the image inward) or `swirl` (twist about the center).
+`center_x` and `center_y` place the distortion, `radius` sizes it, and
+`strength` scales how hard it pushes, with zero an identity. `refractive_index`
+is the glass index the two sphere modes bend the view ray by; the three UV warps
+ignore it. `aspect_auto` keeps the region circular on screen by correcting for
+the frame's aspect. It reads no host input, ships no asset, and is always ready.
 
 A `"trail.pass"` node is a motion-trail post-effect. It carries a `"trail":
 {"amount"}` block: `amount` (0..1) is how much of the previous frame the
@@ -601,13 +652,18 @@ The graph is a typed DAG. Sources take no inputs: `uv` (the frame
 coordinate), `time`, `constant`, `uniform` (host-set by name), and
 `texture` (a sampler bound by name, `texColor` being the frame itself).
 `sample` reads a texture at a coordinate. Arithmetic (`add`, `subtract`,
-`multiply`, `divide`, `power`, `min`, `max`, `mod`) and the vector and
-scalar functions (`dot`, `normalize`, `length`, `saturate`, `abs`,
-`floor`, `fract`, `sin`, `cos`, `clamp`, `step`, `smoothstep`, `mix`)
-carry their operands' types through. `split` takes one channel out of a
-vector, `combine3`/`combine4` build a vector from floats, and `lambert`
-and `fresnel` shade from a normal, light, or view. The single `output`
-node takes a `vec4` and is the graph's root.
+`multiply`, `divide`, `power`, `min`, `max`, `mod`, `atan2`) and the vector
+and scalar functions (`dot`, `distance`, `normalize`, `length`, `saturate`,
+`abs`, `floor`, `fract`, `sin`, `cos`, `sqrt`, `clamp`, `step`, `smoothstep`,
+`mix`) carry their operands' types through. `split` takes one channel out of
+a vector, `combine3`/`combine4` build a vector from floats, and `lambert`
+and `fresnel` shade from a normal, light, or view. `refract` bends an
+incident vector about a normal by an index ratio (the sphere-warp math), and
+`colormatrix` multiplies a `vec3` by three `vec3` rows to apply a general 3x3
+colour transform: a channel swap, a sepia or saturation matrix, or an rgb
+per-channel gain as its diagonal. `atan2` with a radius from `distance` gives
+the polar remap a hue rotation or swirl needs. The single `output` node takes
+a `vec4` and is the graph's root.
 
 Validation rejects a graph with a cycle, a dangling input, a wrong
 argument count, or a type mismatch, naming the offending node. A valid
@@ -616,7 +672,10 @@ compiles to every profile the same way, so a material a lens authors is
 a real compiled shader on the device, not an interpreter. A vignette,
 posterize, pixelate, or edge effect is a material graph with no dedicated
 shader; see the `material-tint`, `material-vignette`, `material-posterize`,
-`material-pixelate`, and `material-edge` reference lenses. Neighbour
+`material-pixelate`, `material-edge`, `material-color-matrix` (a sepia
+colour transform through `colormatrix`), and `material-sphere` (a sphere
+refraction through `refract`, `distance`, and `atan2`) reference lenses.
+Neighbour
 sampling (an edge detector reads offset `uv` and compares) works too, so
 a material graph is not limited to per-pixel math.
 

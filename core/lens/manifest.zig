@@ -55,8 +55,23 @@ pub const NodeParam = struct { name: []const u8, binding: ParamBinding };
 /// lens-format vocabulary; a running session without the class serves
 /// the zero mask, so the effect draws nothing rather than everywhere.
 pub const mask_channels = [_][]const u8{
-    "person", "background", "hair", "body_skin", "face_skin", "clothes", "others",
+    "person",  "background", "hair", "body_skin", "face_skin",
+    "clothes", "others",     "head", "hand",      "lips",
+    "eyes",    "brows",      "iris", "teeth",
 };
+
+/// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
+/// in label order; channels from model_class_end on derive another way, so
+/// the model-class mapping must not reach them. head, hand and the face parts
+/// ride the face and hand landmarks, not a segmentation model.
+pub const model_class_end = 7;
+pub const head_channel = 7;
+pub const hand_channel = 8;
+pub const lips_channel = 9;
+pub const eyes_channel = 10;
+pub const brows_channel = 11;
+pub const iris_channel = 12;
+pub const teeth_channel = 13;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {
@@ -197,13 +212,20 @@ pub fn particlePreset(name: []const u8) ?ParticleField {
 }
 
 pub const GradeField = struct {
-    /// A grade.pass node's parametric color grade. Defaults are the
-    /// identity (nothing changes): exposure in stops, contrast and
-    /// saturation as multipliers around 1, temperature a warm/cool shift.
+    /// A grade.pass node's color adjustment. Defaults are the identity:
+    /// exposure in stops, brightness an additive lift, contrast and
+    /// saturation multipliers around 1, temperature and tint the white
+    /// balance axes, hue in degrees, grayscale/invert 0..1, posterize a level count.
     exposure: f32 = 0,
     contrast: f32 = 1,
     saturation: f32 = 1,
     temperature: f32 = 0,
+    brightness: f32 = 0,
+    hue: f32 = 0,
+    tint: f32 = 0,
+    grayscale: f32 = 0,
+    invert: f32 = 0,
+    posterize: f32 = 0,
 };
 
 pub const BloomField = struct {
@@ -231,12 +253,88 @@ pub const FogField = struct {
 };
 
 pub const OutlineField = struct {
-    /// An outline.pass node's line color (rgb, 0..1) and the depth jump
-    /// between neighbors above which an outline draws. Default a black line.
+    /// An outline.pass node's line color (rgb, 0..1) and the jump between
+    /// neighbors above which an outline draws. Default a black line.
     r: f32 = 0.0,
     g: f32 = 0.0,
     b: f32 = 0.0,
     threshold: f32 = 0.08,
+    /// The mask channel whose edge is outlined; null traces the submitted
+    /// depth instead, so an outline can rim a segmentation class or the depth.
+    mask_channel: ?u8 = null,
+};
+
+pub const TintField = struct {
+    /// A tint.pass node's color (rgb, 0..1) and the opacity it blends into
+    /// the masked region, so a face-part matte reads as a soft makeup layer.
+    r: f32 = 0.0,
+    g: f32 = 0.0,
+    b: f32 = 0.0,
+    opacity: f32 = 0.5,
+    /// The mask channel the tint fills; a tint naming none is inert.
+    mask_channel: ?u8 = null,
+    /// When set by "source": "reference", the color comes from the makeup
+    /// reference sampled for this channel, not the static rgb above.
+    from_reference: bool = false,
+};
+
+pub const SmoothField = struct {
+    /// A smooth.pass node's retouch amount (-1..1): positive blends the masked
+    /// region toward a local average (smooth), negative pushes away from it
+    /// (sharpen). mask_channel is the region it acts on.
+    amount: f32 = 0.5,
+    /// The mask channel the smooth acts on; a smooth naming none is inert.
+    mask_channel: ?u8 = null,
+};
+
+pub const StylizeField = struct {
+    /// A stylize.pass node's artistic mode and its parameters: strength drives
+    /// the sketch edge and emboss depth, threshold and levels the toon edge
+    /// cutoff and colour quantization, and a crosshatch reads strength as its
+    /// stroke weight. Defaults match the source filters GPUPixel ships.
+    mode: enum { sketch, toon, emboss, crosshatch } = .sketch,
+    strength: f32 = 1.0,
+    threshold: f32 = 0.2,
+    levels: f32 = 10.0,
+};
+
+pub const EdgeField = struct {
+    /// An edge.pass node's detector. sobel is a single-pass 3x3 gradient
+    /// magnitude; canny chains a blur, directional sobel, non-maximum
+    /// suppression and weak-pixel hysteresis into thin binary edges.
+    mode: enum { sobel, canny } = .sobel,
+    /// canny's hysteresis band: an edge fades in from low to high gradient
+    /// magnitude. sobel ignores both.
+    low_threshold: f32 = 0.1,
+    high_threshold: f32 = 0.5,
+    /// canny's pre-blur radius in texels; sobel ignores it.
+    blur_radius: f32 = 4.0,
+    /// sobel's edge-magnitude gain; canny ignores it.
+    strength: f32 = 1.0,
+    /// Draw dark edges on a light field instead of the default light on dark.
+    invert: bool = false,
+};
+
+pub const WarpField = struct {
+    /// A warp.pass node's geometric distortion, all radial around a center
+    /// within a radius. glass_sphere and sphere_refraction bend the frame
+    /// through a glass ball - one keeps the surround, the other blackens it -
+    /// while bulge magnifies, pinch shrinks, and swirl twists.
+    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl } = .glass_sphere,
+    /// The distortion center in normalized frame coordinates.
+    center_x: f32 = 0.5,
+    center_y: f32 = 0.5,
+    /// The distortion radius (0..1). A pixel beyond it passes through, or for
+    /// sphere_refraction goes black.
+    radius: f32 = 0.25,
+    /// How hard the warp pushes: the displacement scale for bulge, pinch and
+    /// swirl and the refraction blend for the two sphere modes. Zero is identity.
+    strength: f32 = 1.0,
+    /// The glass index of refraction the two sphere modes bend the view ray by.
+    refractive_index: f32 = 0.71,
+    /// Correct the radius for the frame's own aspect so the region stays a
+    /// circle on screen; off treats the frame as square.
+    aspect_auto: bool = true,
 };
 
 pub const TrailField = struct {
@@ -445,6 +543,16 @@ pub const Node = struct {
     fog: ?FogField = null,
     /// Set only on an outline.pass node: its line color and depth threshold.
     outline: ?OutlineField = null,
+    /// Set only on a tint.pass node: its color, opacity, and mask channel.
+    tint: ?TintField = null,
+    /// Set only on a smooth.pass node: its amount and mask channel.
+    smooth: ?SmoothField = null,
+    /// Set only on a stylize.pass node: its artistic mode and parameters.
+    stylize: ?StylizeField = null,
+    /// Set only on an edge.pass node: its detector mode and parameters.
+    edge: ?EdgeField = null,
+    /// Set only on a warp.pass node: its distortion mode and parameters.
+    warp: ?WarpField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -1248,6 +1356,12 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(gv.object, "contrast")) |v| field.contrast = @floatCast(numberOf(v) orelse field.contrast);
                 if (getField(gv.object, "saturation")) |v| field.saturation = @floatCast(numberOf(v) orelse field.saturation);
                 if (getField(gv.object, "temperature")) |v| field.temperature = @floatCast(numberOf(v) orelse field.temperature);
+                if (getField(gv.object, "brightness")) |v| field.brightness = @floatCast(numberOf(v) orelse field.brightness);
+                if (getField(gv.object, "hue")) |v| field.hue = @floatCast(numberOf(v) orelse field.hue);
+                if (getField(gv.object, "tint")) |v| field.tint = @floatCast(numberOf(v) orelse field.tint);
+                if (getField(gv.object, "grayscale")) |v| field.grayscale = @floatCast(numberOf(v) orelse field.grayscale);
+                if (getField(gv.object, "invert")) |v| field.invert = @floatCast(numberOf(v) orelse field.invert);
+                if (getField(gv.object, "posterize")) |v| field.posterize = @floatCast(numberOf(v) orelse field.posterize);
                 grade_field = field;
             }
             path.pop(gmark);
@@ -1348,11 +1462,153 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     } else try diags.add(path.slice(), "outline color must be three numbers", .{});
                 }
                 if (getField(ov.object, "threshold")) |v| field.threshold = @floatCast(numberOf(v) orelse field.threshold);
+                if (getField(ov.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "outline mask names an unknown channel '{s}'", .{name});
+                    }
+                }
                 outline_field = field;
             }
             path.pop(omark);
         } else if (std.mem.eql(u8, node_type, "outline.pass")) {
             outline_field = .{};
+        }
+        var tint_field: ?TintField = null;
+        if (getField(object, "tint")) |tv| {
+            const tintmark = path.push("tint");
+            if (!std.mem.eql(u8, node_type, "tint.pass")) {
+                try diags.add(path.slice(), "tint is a tint.pass field, found it on '{s}'", .{node_type});
+            } else if (tv != .object) {
+                try diags.add(path.slice(), "tint must be an object", .{});
+            } else {
+                var field: TintField = .{};
+                if (getField(tv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "tint color must be three numbers", .{});
+                }
+                if (getField(tv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(tv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "tint mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                if (getField(tv.object, "source")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.mem.eql(u8, name, "reference")) {
+                            field.from_reference = true;
+                        } else if (!std.mem.eql(u8, name, "static")) {
+                            try diags.add(path.slice(), "tint source must be reference or static", .{});
+                        }
+                    }
+                }
+                tint_field = field;
+            }
+            path.pop(tintmark);
+        } else if (std.mem.eql(u8, node_type, "tint.pass")) {
+            tint_field = .{};
+        }
+        var smooth_field: ?SmoothField = null;
+        if (getField(object, "smooth")) |sv| {
+            const smoothmark = path.push("smooth");
+            if (!std.mem.eql(u8, node_type, "smooth.pass")) {
+                try diags.add(path.slice(), "smooth is a smooth.pass field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "smooth must be an object", .{});
+            } else {
+                var field: SmoothField = .{};
+                if (getField(sv.object, "amount")) |v| field.amount = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.amount)), -1.0, 1.0);
+                if (getField(sv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "smooth mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                smooth_field = field;
+            }
+            path.pop(smoothmark);
+        } else if (std.mem.eql(u8, node_type, "smooth.pass")) {
+            smooth_field = .{};
+        }
+        var stylize_field: ?StylizeField = null;
+        if (getField(object, "stylize")) |yv| {
+            const ymark = path.push("stylize");
+            if (!std.mem.eql(u8, node_type, "stylize.pass")) {
+                try diags.add(path.slice(), "stylize is a stylize.pass field, found it on '{s}'", .{node_type});
+            } else if (yv != .object) {
+                try diags.add(path.slice(), "stylize must be an object", .{});
+            } else {
+                var field: StylizeField = .{};
+                if (getField(yv.object, "mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "stylize mode names an unknown filter '{s}'", .{name});
+                    }
+                }
+                if (getField(yv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 4.0);
+                if (getField(yv.object, "threshold")) |v| field.threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.threshold)), 0.0, 1.0);
+                if (getField(yv.object, "levels")) |v| field.levels = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.levels)), 1.0, 256.0);
+                stylize_field = field;
+            }
+            path.pop(ymark);
+        } else if (std.mem.eql(u8, node_type, "stylize.pass")) {
+            stylize_field = .{};
+        }
+        var edge_field: ?EdgeField = null;
+        if (getField(object, "edge")) |ev| {
+            const emark = path.push("edge");
+            if (!std.mem.eql(u8, node_type, "edge.pass")) {
+                try diags.add(path.slice(), "edge is an edge.pass field, found it on '{s}'", .{node_type});
+            } else if (ev != .object) {
+                try diags.add(path.slice(), "edge must be an object", .{});
+            } else {
+                var field: EdgeField = .{};
+                if (getField(ev.object, "mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "edge mode names an unknown detector '{s}'", .{name});
+                    }
+                }
+                if (getField(ev.object, "low_threshold")) |v| field.low_threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.low_threshold)), 0.0, 1.0);
+                if (getField(ev.object, "high_threshold")) |v| field.high_threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.high_threshold)), 0.0, 1.0);
+                if (getField(ev.object, "blur_radius")) |v| field.blur_radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.blur_radius)), 1.0, 8.0);
+                if (getField(ev.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 8.0);
+                if (getField(ev.object, "invert")) |v| {
+                    if (v == .bool) field.invert = v.bool;
+                }
+                edge_field = field;
+            }
+            path.pop(emark);
+        } else if (std.mem.eql(u8, node_type, "edge.pass")) {
+            edge_field = .{};
+        }
+        var warp_field: ?WarpField = null;
+        if (getField(object, "warp")) |wv| {
+            const wmark = path.push("warp");
+            if (!std.mem.eql(u8, node_type, "warp.pass")) {
+                try diags.add(path.slice(), "warp is a warp.pass field, found it on '{s}'", .{node_type});
+            } else if (wv != .object) {
+                try diags.add(path.slice(), "warp must be an object", .{});
+            } else {
+                var field: WarpField = .{};
+                if (getField(wv.object, "mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "warp mode names an unknown distortion '{s}'", .{name});
+                    }
+                }
+                if (getField(wv.object, "center_x")) |v| field.center_x = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.center_x)), 0.0, 1.0);
+                if (getField(wv.object, "center_y")) |v| field.center_y = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.center_y)), 0.0, 1.0);
+                if (getField(wv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0.01, 1.0);
+                if (getField(wv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 4.0);
+                if (getField(wv.object, "refractive_index")) |v| field.refractive_index = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.refractive_index)), 0.1, 1.0);
+                if (getField(wv.object, "aspect_auto")) |v| {
+                    if (v == .bool) field.aspect_auto = v.bool;
+                }
+                warp_field = field;
+            }
+            path.pop(wmark);
+        } else if (std.mem.eql(u8, node_type, "warp.pass")) {
+            warp_field = .{};
         }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
@@ -1968,6 +2224,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .dof = dof_field,
             .fog = fog_field,
             .outline = outline_field,
+            .tint = tint_field,
+            .smooth = smooth_field,
+            .stylize = stylize_field,
+            .edge = edge_field,
+            .warp = warp_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,

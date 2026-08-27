@@ -106,6 +106,13 @@ pub const Renderer = struct {
     dof_program: c.bgfx_program_handle_t,
     fog_program: c.bgfx_program_handle_t,
     outline_program: c.bgfx_program_handle_t,
+    tint_program: c.bgfx_program_handle_t,
+    smooth_program: c.bgfx_program_handle_t,
+    stylize_program: c.bgfx_program_handle_t,
+    edge_sobel_program: c.bgfx_program_handle_t,
+    edge_nms_program: c.bgfx_program_handle_t,
+    edge_hyst_program: c.bgfx_program_handle_t,
+    warp_program: c.bgfx_program_handle_t,
     trail_program: c.bgfx_program_handle_t,
     ssr_program: c.bgfx_program_handle_t,
     env_program: c.bgfx_program_handle_t,
@@ -167,6 +174,13 @@ pub const Renderer = struct {
     dof_uniform: c.bgfx_uniform_handle_t,
     fog_uniform: c.bgfx_uniform_handle_t,
     outline_uniform: c.bgfx_uniform_handle_t,
+    tint_uniform: c.bgfx_uniform_handle_t,
+    smooth_uniform: c.bgfx_uniform_handle_t,
+    stylize_uniform: c.bgfx_uniform_handle_t,
+    edge_uniform: c.bgfx_uniform_handle_t,
+    edge_texel_uniform: c.bgfx_uniform_handle_t,
+    warp_uniform: c.bgfx_uniform_handle_t,
+    warp_params_uniform: c.bgfx_uniform_handle_t,
     tex_prev: c.bgfx_uniform_handle_t,
     trail_uniform: c.bgfx_uniform_handle_t,
     ssr_uniform: c.bgfx_uniform_handle_t,
@@ -330,6 +344,13 @@ pub const Renderer = struct {
         const dof_program = try loadDofProgram();
         const fog_program = try loadFogProgram();
         const outline_program = try loadOutlineProgram();
+        const tint_program = try loadTintProgram();
+        const smooth_program = try loadSmoothProgram();
+        const stylize_program = try loadStylizeProgram();
+        const edge_sobel_program = try loadEdgeSobelProgram();
+        const edge_nms_program = try loadEdgeNmsProgram();
+        const edge_hyst_program = try loadEdgeHystProgram();
+        const warp_program = try loadWarpProgram();
         const trail_program = try loadTrailProgram();
         const ssr_program = try loadSsrProgram();
         const env_program = try loadEnvProgram();
@@ -408,6 +429,13 @@ pub const Renderer = struct {
             .dof_program = dof_program,
             .fog_program = fog_program,
             .outline_program = outline_program,
+            .tint_program = tint_program,
+            .smooth_program = smooth_program,
+            .stylize_program = stylize_program,
+            .edge_sobel_program = edge_sobel_program,
+            .edge_nms_program = edge_nms_program,
+            .edge_hyst_program = edge_hyst_program,
+            .warp_program = warp_program,
             .trail_program = trail_program,
             .ssr_program = ssr_program,
             .env_program = env_program,
@@ -455,6 +483,13 @@ pub const Renderer = struct {
             .dof_uniform = c.bgfx_create_uniform("u_dof", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .fog_uniform = c.bgfx_create_uniform("u_fog", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .outline_uniform = c.bgfx_create_uniform("u_outline", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .tint_uniform = c.bgfx_create_uniform("u_tint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .smooth_uniform = c.bgfx_create_uniform("u_smooth", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .stylize_uniform = c.bgfx_create_uniform("u_stylize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .edge_uniform = c.bgfx_create_uniform("u_edge", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .edge_texel_uniform = c.bgfx_create_uniform("u_edgeTexel", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .warp_uniform = c.bgfx_create_uniform("u_warp", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .warp_params_uniform = c.bgfx_create_uniform("u_warpParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tex_prev = c.bgfx_create_uniform("s_texPrev", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .trail_uniform = c.bgfx_create_uniform("u_trail", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .ssr_uniform = c.bgfx_create_uniform("u_ssr", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -462,7 +497,7 @@ pub const Renderer = struct {
             .env_top_uniform = c.bgfx_create_uniform("u_envTop", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .env_bottom_uniform = c.bgfx_create_uniform("u_envBottom", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .env_rot_uniform = c.bgfx_create_uniform("u_envRot", c.BGFX_UNIFORM_TYPE_VEC4, 3),
-            .grade_params_uniform = c.bgfx_create_uniform("u_grade", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .grade_params_uniform = c.bgfx_create_uniform("u_grade", c.BGFX_UNIFORM_TYPE_VEC4, 3),
             .composite_params_uniform = c.bgfx_create_uniform("u_composite", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .composite_chroma_uniform = c.bgfx_create_uniform("u_chroma", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .bloom_params_uniform = c.bgfx_create_uniform("u_bloom", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -596,6 +631,26 @@ pub const Renderer = struct {
         };
     }
 
+    pub fn loadTintProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_tint_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_tint_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_tint_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_tint_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    pub fn loadSmoothProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_smooth_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_smooth_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_smooth_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_smooth_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// trail.pass's own fixed motion-trail program: the current frame on
     /// unit 0 and the previous frame on unit 1, blended into an echo.
     pub fn loadTrailProgram() !c.bgfx_program_handle_t {
@@ -652,6 +707,67 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_grade_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_grade_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_grade_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// stylize.pass's own fixed program: one artistic filter that branches on
+    /// its mode uniform, shared by every stylize.pass node like grade_program.
+    pub fn loadStylizeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_stylize_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_stylize_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_stylize_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_stylize_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// edge.pass's grayscale-and-sobel program, shared by the single-pass
+    /// sobel node and canny's directional-sobel stage - its mode uniform picks
+    /// magnitude-only or magnitude-plus-direction output.
+    pub fn loadEdgeSobelProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_edge_sobel_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_edge_sobel_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_edge_sobel_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_edge_sobel_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// canny's non-maximum suppression program: thins the sobel magnitude to
+    /// its local maxima along the gradient, shared by every edge.pass node.
+    pub fn loadEdgeNmsProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_edge_nms_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_edge_nms_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_edge_nms_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_edge_nms_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// canny's weak-pixel hysteresis program: keeps a suppressed pixel only
+    /// where enough of its neighbours survived, shared by every edge.pass node.
+    pub fn loadEdgeHystProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_edge_hyst_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_edge_hyst_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_edge_hyst_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_edge_hyst_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// warp.pass's own fixed program: one geometric distortion that branches
+    /// on its mode uniform, shared by every warp.pass node like stylize_program.
+    pub fn loadWarpProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_warp_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_warp_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_warp_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_warp_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -841,6 +957,11 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.dof_uniform);
         c.bgfx_destroy_uniform(r.fog_uniform);
         c.bgfx_destroy_uniform(r.outline_uniform);
+        c.bgfx_destroy_uniform(r.stylize_uniform);
+        c.bgfx_destroy_uniform(r.edge_uniform);
+        c.bgfx_destroy_uniform(r.edge_texel_uniform);
+        c.bgfx_destroy_uniform(r.warp_uniform);
+        c.bgfx_destroy_uniform(r.warp_params_uniform);
         c.bgfx_destroy_uniform(r.tex_prev);
         c.bgfx_destroy_uniform(r.trail_uniform);
         c.bgfx_destroy_uniform(r.ssr_uniform);
@@ -870,6 +991,13 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.dof_program);
         c.bgfx_destroy_program(r.fog_program);
         c.bgfx_destroy_program(r.outline_program);
+        c.bgfx_destroy_program(r.tint_program);
+        c.bgfx_destroy_program(r.smooth_program);
+        c.bgfx_destroy_program(r.stylize_program);
+        c.bgfx_destroy_program(r.edge_sobel_program);
+        c.bgfx_destroy_program(r.edge_nms_program);
+        c.bgfx_destroy_program(r.edge_hyst_program);
+        c.bgfx_destroy_program(r.warp_program);
         c.bgfx_destroy_program(r.trail_program);
         c.bgfx_destroy_program(r.ssr_program);
         c.bgfx_destroy_program(r.env_program);
@@ -1390,6 +1518,33 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.outline_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Blends a solid color into the frame masked by the texture on unit 1,
+    /// scaled by the mask value and opacity, so a face-part matte reads as a
+    /// soft makeup layer. mask_texture is a single-channel mask, color is rgb
+    /// 0..1, opacity 0..1.
+    pub fn submitTintPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, color: [3]f32, opacity: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ color[0], color[1], color[2], opacity };
+        c.bgfx_set_uniform(r.tint_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.tint_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Blends the frame toward a small neighbor average, masked by the texture
+    /// on unit 1 and scaled by amount, so a named region reads smoother. amount
+    /// 0..1; mask_texture is a single-channel mask.
+    pub fn submitSmoothPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, amount: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ amount, 0, 0, 0 };
+        c.bgfx_set_uniform(r.smooth_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.smooth_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Draws a motion-trail pass into view_id: the current frame on unit 0
     /// and the previous frame on unit 1, blended into an echo by `amount`.
     pub fn submitTrailPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, prev_texture: c.bgfx_texture_handle_t, amount: f32) void {
@@ -1450,15 +1605,78 @@ pub const Renderer = struct {
     }
 
     /// Draws one lens grade.pass node as a full-screen pass into view_id:
-    /// the frame on unit 0, its four grade params (exposure, contrast,
-    /// saturation, temperature) in u_grade, the one fixed grade_program
-    /// every grade.pass node shares.
-    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [4]f32) void {
+    /// the frame on unit 0 and its color adjustment in u_grade (three vec4:
+    /// tone, white balance with hue, then posterize and invert), the one
+    /// fixed grade_program every grade.pass node shares.
+    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [12]f32) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
-        c.bgfx_set_uniform(r.grade_params_uniform, &grade, 1);
+        c.bgfx_set_uniform(r.grade_params_uniform, &grade, 3);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.grade_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one lens stylize.pass node as a full-screen pass into view_id:
+    /// the frame on unit 0 and its filter in u_stylize (mode, strength,
+    /// threshold, levels), the one fixed stylize_program every node shares.
+    pub fn submitStylizePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.stylize_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.stylize_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one lens warp.pass node as a full-screen pass into view_id: the
+    /// frame on unit 0, u_warp as (mode, center.x, center.y, radius) and
+    /// u_warpParams as (strength, refractive_index, aspect, 0), the one fixed
+    /// warp_program every node shares.
+    pub fn submitWarpPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, warp: [4]f32, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.warp_uniform, &warp, 1);
+        c.bgfx_set_uniform(r.warp_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.warp_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// edge.pass's sobel stage into view_id: the frame on unit 0, u_edge as
+    /// (mode, strength, invert, 0) - mode 0 outputs the edge magnitude,
+    /// mode 1 the magnitude plus gradient direction canny reads - and the
+    /// per-texel step in u_edgeTexel.
+    pub fn submitEdgeSobel(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32, texel: [2]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.edge_uniform, &params, 1);
+        const texel_vec4 = [4]f32{ texel[0], texel[1], 0.0, 0.0 };
+        c.bgfx_set_uniform(r.edge_texel_uniform, &texel_vec4, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.edge_sobel_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// canny's non-maximum suppression into view_id: the packed magnitude and
+    /// direction on unit 0, u_edge as (low, high, 0, 0) for the hysteresis
+    /// band and u_edgeTexel for the along-gradient sample step.
+    pub fn submitEdgeNms(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32, texel: [2]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.edge_uniform, &params, 1);
+        const texel_vec4 = [4]f32{ texel[0], texel[1], 0.0, 0.0 };
+        c.bgfx_set_uniform(r.edge_texel_uniform, &texel_vec4, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.edge_nms_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// canny's weak-pixel hysteresis into view_id: the suppressed edges on
+    /// unit 0, u_edge.x the invert flag, u_edgeTexel the 3x3 neighbour step.
+    pub fn submitEdgeHyst(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32, texel: [2]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.edge_uniform, &params, 1);
+        const texel_vec4 = [4]f32{ texel[0], texel[1], 0.0, 0.0 };
+        c.bgfx_set_uniform(r.edge_texel_uniform, &texel_vec4, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.edge_hyst_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// bloom.pass's bright-extract stage into view_id: the frame on unit 0,

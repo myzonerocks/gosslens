@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.glass-sphere",
+  "version": "1.0.0",
+  "display_name": "Glass Sphere",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "glass", "type": "warp.pass", "inputs": {"frame": "camera"}, "params": {}, "warp": {"mode": "glass_sphere", "center_x": 0.5, "center_y": 0.5, "radius": 0.28, "strength": 1.0, "refractive_index": 0.71}}
+  ],
+  "triggers": []
+}

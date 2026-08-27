@@ -112,16 +112,43 @@ fn rgbaToNv12(gpa: std.mem.Allocator, frame: sampler.Frame) !Nv12Copy {
 /// bgfx's own default callback (no custom one is wired here, since
 /// RendererDesc has no callback field to carry one through the frozen
 /// ABI) writes it as out_path ++ ".tga".
+const RenderOpts = struct {
+    segmentation_model: ?[]const u8 = null,
+    corpus: []const u8 = corpus_path,
+    face: bool = true,
+    hands: bool = false,
+    depth: ?[]const f32 = null,
+    depth_w: u32 = 0,
+    depth_h: u32 = 0,
+    depth_near: f32 = 0,
+    depth_far: f32 = 0,
+};
+
 fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const u8, out_path: [:0]const u8, segmentation_model: ?[]const u8) !void {
+    return renderOnceWith(gpa, engine, bundle_path, out_path, .{ .segmentation_model = segmentation_model });
+}
+
+/// Renders one lens over a corpus frame through the real ABI. opts picks the
+/// corpus and which trackers run; a tracker left off is the control for a
+/// landmark-derived effect, whose mask channel then stays on the zero mask.
+fn renderOnceWith(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const u8, out_path: [:0]const u8, opts: RenderOpts) !void {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
 
     const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
     defer gpa.free(face_bytes);
-    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+    if (opts.face and abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
         return error.EnableFaceTrackingFailed;
     }
-    if (segmentation_model) |model_path| {
+    var hand_bytes: ?[]u8 = null;
+    defer if (hand_bytes) |hb| gpa.free(hb);
+    if (opts.hands) {
+        hand_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, hand_bundle_path, gpa, .limited(16 << 20));
+        if (abi.goss_session_enable_hand_tracking(session, hand_bytes.?.ptr, hand_bytes.?.len, 2) != .ok) {
+            return error.EnableHandTrackingFailed;
+        }
+    }
+    if (opts.segmentation_model) |model_path| {
         const segmentation_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, model_path, gpa, .limited(16 << 20));
         defer gpa.free(segmentation_bytes);
         if (abi.goss_session_enable_segmentation(session, segmentation_bytes.ptr, segmentation_bytes.len, 2) != .ok) {
@@ -146,7 +173,7 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
         return error.ActivationFailed;
     }
 
-    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    const corpus = try loadCorpusFrame(gpa, opts.corpus);
     defer corpus.deinit();
     const planes = try rgbaToNv12(gpa, corpus.frame);
     defer planes.deinit(gpa);
@@ -161,21 +188,44 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
         .timestamp_us = 1000,
     };
     const half_w = (planes.width + 1) / 2;
-    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
-        return error.TrackFrameFailed;
+    // Nothing to track when the control render enables no tracker; the frame
+    // still submits below so the pass composites over a real image.
+    if (opts.face or opts.hands or opts.segmentation_model != null) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.TrackFrameFailed;
+        }
+    }
+    // Depth submitted before the mask settles below, so a segmenter's mask
+    // fuses with it; a lens with no segmenter uses the depth as its own mask.
+    if (opts.depth) |depth| {
+        if (abi.goss_session_submit_depth(session, depth.ptr, opts.depth_w, opts.depth_h, opts.depth_near, opts.depth_far) != .ok) {
+            return error.SubmitDepthFailed;
+        }
     }
 
     // Face tracking runs off-thread; wait for a real result before
     // proceeding so the render below reflects real landmarks, not
     // whatever the worker's first frame or two happens to still be
     // computing.
-    var result: abi.FaceResult = undefined;
-    var polls: usize = 0;
-    while (abi.goss_session_face_result(session, &result) == .again) {
-        std.Thread.yield() catch {};
-        if (g_watch) c.glfwPollEvents();
-        polls += 1;
-        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    if (opts.face) {
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+    }
+    if (opts.hands) {
+        var hand_result: abi.HandResult = undefined;
+        var hand_polls: usize = 0;
+        while (abi.goss_session_hand_result(session, &hand_result) == .again or hand_result.hand_count == 0) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            hand_polls += 1;
+            if (hand_polls > 100_000_000) return error.HandResultTimedOut;
+        }
     }
 
     if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
@@ -186,7 +236,7 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
     // later than the face result, so render until the mask texture
     // exists - render_frame itself polls the worker, the same way a
     // real app's frame loop picks the mask up.
-    if (segmentation_model != null) {
+    if (opts.segmentation_model != null) {
         var mask_polls: usize = 0;
         while (session.segmentation_texture == null) {
             _ = abi.goss_engine_render_frame(engine, session);
@@ -5086,6 +5136,585 @@ fn proveGrade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the grade.pass color adjustments: a grayscale grade collapses
+/// every pixel's chroma so its channels read equal, and an invert grade
+/// flips the frame so each channel reads its complement against the
+/// identity grade. Both are deterministic and bit-stable across runs.
+fn proveColorAdjust(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const lenses = [_][]const u8{
+        ".lens-packages/plain-grade",
+        ".lens-packages/plain-grade",
+        ".lens-packages/mono-grade",
+        ".lens-packages/negative-grade",
+    };
+    var shots: [4][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (lenses) |pkg| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+            std.debug.print("conformance: FAIL color adjust lens activation\n", .{});
+            return false;
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+
+    if (!std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL grade color adjust is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    // Grayscale collapses chroma: every pixel's channels read one gray.
+    var mono_spread: u8 = 0;
+    var i: usize = 0;
+    while (i < shots[2].len) : (i += 4) {
+        const r = shots[2][i];
+        const g = shots[2][i + 1];
+        const b = shots[2][i + 2];
+        const rg = if (r > g) r - g else g - r;
+        const gb = if (g > b) g - b else b - g;
+        if (rg > mono_spread) mono_spread = rg;
+        if (gb > mono_spread) mono_spread = gb;
+    }
+    if (mono_spread > 1) {
+        std.debug.print("conformance: FAIL grayscale grade left chroma (max channel spread {d})\n", .{mono_spread});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[2], shots[0])) {
+        std.debug.print("conformance: FAIL grayscale grade did not change the frame\n", .{});
+        return false;
+    }
+
+    // Invert reads each channel as its complement against the identity grade,
+    // so an inverted byte plus the identity byte sums to 255.
+    var max_flip_err: u32 = 0;
+    i = 0;
+    while (i < shots[3].len) : (i += 4) {
+        for ([_]usize{ 0, 1, 2 }) |ch| {
+            const sum = @as(u32, shots[3][i + ch]) + @as(u32, shots[0][i + ch]);
+            const err = if (sum > 255) sum - 255 else 255 - sum;
+            if (err > max_flip_err) max_flip_err = err;
+        }
+    }
+    if (max_flip_err > 2) {
+        std.debug.print("conformance: FAIL invert grade is not the frame's complement (max error {d})\n", .{max_flip_err});
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[2], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-mono-grade.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF grade.pass color adjustments collapse chroma to gray and invert to the frame's complement deterministically\n", .{});
+    return true;
+}
+
+/// Captures one lens (or the plain frame when pkg is null) over the corpus:
+/// three settle frames then a readback, the shared body proveStylize's
+/// per-mode checks run on. The caller owns the returned RGBA8 buffer.
+fn captureStylizeShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, pkg: ?[]const u8) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (pkg) |p| {
+        if (abi.goss_session_activate_lens_from_directory(session, p.ptr, p.len) != .ok) {
+            std.debug.print("conformance: FAIL stylize lens activation {s}\n", .{p});
+            return error.ActivationFailed;
+        }
+    }
+    for (0..3) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+        return error.CaptureFailed;
+    }
+    return shot;
+}
+
+fn lumaByte(r: u8, g: u8, b: u8) u8 {
+    return @intCast((@as(u32, r) * 54 + @as(u32, g) * 183 + @as(u32, b) * 19) >> 8);
+}
+
+/// The largest gap between a pixel's channels anywhere in the frame - zero
+/// for a monochrome image (equal channels), large for a colour one.
+fn maxChannelSpread(buf: []const u8) u8 {
+    var spread: u8 = 0;
+    var i: usize = 0;
+    while (i + 3 < buf.len) : (i += 4) {
+        const r = buf[i];
+        const g = buf[i + 1];
+        const b = buf[i + 2];
+        const rg = if (r > g) r - g else g - r;
+        const gb = if (g > b) g - b else b - g;
+        if (rg > spread) spread = rg;
+        if (gb > spread) spread = gb;
+    }
+    return spread;
+}
+
+/// How many distinct byte values one channel takes across the frame - a
+/// quantized image collapses to a handful, a photo spans most of the range.
+fn distinctChannelValues(buf: []const u8, channel: usize) usize {
+    var seen = [_]bool{false} ** 256;
+    var i: usize = channel;
+    while (i < buf.len) : (i += 4) seen[buf[i]] = true;
+    var n: usize = 0;
+    for (seen) |s| {
+        if (s) n += 1;
+    }
+    return n;
+}
+
+/// The mean of every RGB byte in the frame - near 128 for a mid-grey relief.
+fn meanRgbByte(buf: []const u8) u32 {
+    var sum: u64 = 0;
+    var count: u64 = 0;
+    var i: usize = 0;
+    while (i + 3 < buf.len) : (i += 4) {
+        sum += @as(u64, buf[i]) + buf[i + 1] + buf[i + 2];
+        count += 3;
+    }
+    if (count == 0) return 0;
+    return @intCast(sum / count);
+}
+
+/// The fraction of pixels whose luma sits at one extreme - near 1.0 for an
+/// ink-on-paper image, low for a continuous-tone one.
+fn nearBinaryFraction(buf: []const u8) f32 {
+    var near: usize = 0;
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i + 3 < buf.len) : (i += 4) {
+        const l = lumaByte(buf[i], buf[i + 1], buf[i + 2]);
+        if (l < 24 or l > 232) near += 1;
+        total += 1;
+    }
+    if (total == 0) return 0;
+    return @as(f32, @floatFromInt(near)) / @as(f32, @floatFromInt(total));
+}
+
+/// Proves the stylize.pass modes, each with a signature only that filter
+/// makes, captured twice for bit-stability: sketch reduces to a monochrome
+/// pencil, toon quantizes each channel to a few levels, emboss recenters on
+/// mid-grey, and crosshatch binarizes to ink and paper.
+fn proveStylize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const control = try captureStylizeShot(gpa, engine, planes, null);
+    defer gpa.free(control);
+    const control_reds = distinctChannelValues(control, 0);
+
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/sketch");
+        defer gpa.free(a);
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/sketch");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL sketch is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL sketch did not change the frame\n", .{});
+            return false;
+        }
+        const spread = maxChannelSpread(a);
+        if (spread > 2) {
+            std.debug.print("conformance: FAIL sketch is not monochrome (channel spread {d})\n", .{spread});
+            return false;
+        }
+    }
+
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/toon");
+        defer gpa.free(a);
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/toon");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL toon is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL toon did not change the frame\n", .{});
+            return false;
+        }
+        const reds = distinctChannelValues(a, 0);
+        if (reds > 40 or reds * 2 >= control_reds) {
+            std.debug.print("conformance: FAIL toon did not quantize (distinct reds {d} vs frame {d})\n", .{ reds, control_reds });
+            return false;
+        }
+    }
+
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/emboss");
+        defer gpa.free(a);
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/emboss");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL emboss is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL emboss did not change the frame\n", .{});
+            return false;
+        }
+        const mean = meanRgbByte(a);
+        if (mean < 108 or mean > 148) {
+            std.debug.print("conformance: FAIL emboss is not centered on mid-grey (mean {d})\n", .{mean});
+            return false;
+        }
+    }
+
+    var hatch_shot: ?[]u8 = null;
+    defer if (hatch_shot) |h| gpa.free(h);
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/crosshatch");
+        hatch_shot = a;
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/crosshatch");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL crosshatch is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL crosshatch did not change the frame\n", .{});
+            return false;
+        }
+        const spread = maxChannelSpread(a);
+        const binary = nearBinaryFraction(a);
+        if (spread > 2 or binary < 0.80) {
+            std.debug.print("conformance: FAIL crosshatch is not ink-on-paper (spread {d}, binary {d:.2})\n", .{ spread, binary });
+            return false;
+        }
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, hatch_shot.?, 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-crosshatch.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF stylize.pass filters are deterministic - sketch monochrome, toon quantized, emboss mid-grey, crosshatch ink-on-paper\n", .{});
+    return true;
+}
+
+/// The fraction of pixels lit as an edge - luma above the midpoint. An edge
+/// map is mostly black, so this counts how much of the frame the detector
+/// marked, and the same measure lets canny be compared against raw sobel.
+fn litFraction(buf: []const u8) f32 {
+    var lit: usize = 0;
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i + 3 < buf.len) : (i += 4) {
+        if (lumaByte(buf[i], buf[i + 1], buf[i + 2]) > 128) lit += 1;
+        total += 1;
+    }
+    if (total == 0) return 0;
+    return @as(f32, @floatFromInt(lit)) / @as(f32, @floatFromInt(total));
+}
+
+/// Proves edge.pass on real content: sobel and canny each turn the frame into a
+/// near-monochrome edge map, deterministic across two captures, that lights up on
+/// a real portrait but goes almost black on a flat frame. Canny's suppression and
+/// hysteresis then leave strictly fewer lit pixels than raw sobel.
+fn proveEdge(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    // A flat mid-grey frame the same size: no gradients anywhere, so a faithful
+    // detector must return almost pure black. NV12 ignores alpha, so a uniform
+    // rgb fill is enough to make the control.
+    const flat_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(flat_rgba);
+    @memset(flat_rgba, 128);
+    const flat_frame: sampler.Frame = .{ .pixels = .{ .rgba8 = flat_rgba }, .width = corpus.frame.width, .height = corpus.frame.height };
+    const flat_planes = try rgbaToNv12(gpa, flat_frame);
+    defer flat_planes.deinit(gpa);
+
+    const control = try captureStylizeShot(gpa, engine, planes, null);
+    defer gpa.free(control);
+
+    var sobel_lit: f32 = 0;
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/sobel");
+        defer gpa.free(a);
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/sobel");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL sobel is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL sobel did not change the frame\n", .{});
+            return false;
+        }
+        const spread = maxChannelSpread(a);
+        if (spread > 2) {
+            std.debug.print("conformance: FAIL sobel is not monochrome (channel spread {d})\n", .{spread});
+            return false;
+        }
+        sobel_lit = litFraction(a);
+        if (sobel_lit < 0.03) {
+            std.debug.print("conformance: FAIL sobel found almost no edges on the corpus (lit {d:.3})\n", .{sobel_lit});
+            return false;
+        }
+        const flat = try captureStylizeShot(gpa, engine, flat_planes, ".lens-packages/sobel");
+        defer gpa.free(flat);
+        const flat_lit = litFraction(flat);
+        if (flat_lit > 0.02) {
+            std.debug.print("conformance: FAIL sobel lit a flat frame (lit {d:.3})\n", .{flat_lit});
+            return false;
+        }
+    }
+
+    var canny_shot: ?[]u8 = null;
+    defer if (canny_shot) |cs| gpa.free(cs);
+    var canny_lit: f32 = 0;
+    {
+        const a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/canny");
+        canny_shot = a;
+        const b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/canny");
+        defer gpa.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL canny is not bit-stable across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL canny did not change the frame\n", .{});
+            return false;
+        }
+        const spread = maxChannelSpread(a);
+        const binary = nearBinaryFraction(a);
+        if (spread > 2 or binary < 0.90) {
+            std.debug.print("conformance: FAIL canny is not a near-binary edge map (spread {d}, binary {d:.2})\n", .{ spread, binary });
+            return false;
+        }
+        canny_lit = litFraction(a);
+        if (canny_lit < 0.004) {
+            std.debug.print("conformance: FAIL canny found almost no edges on the corpus (lit {d:.3})\n", .{canny_lit});
+            return false;
+        }
+        const flat = try captureStylizeShot(gpa, engine, flat_planes, ".lens-packages/canny");
+        defer gpa.free(flat);
+        const flat_lit = litFraction(flat);
+        if (flat_lit > 0.02) {
+            std.debug.print("conformance: FAIL canny lit a flat frame (lit {d:.3})\n", .{flat_lit});
+            return false;
+        }
+    }
+
+    if (canny_lit >= sobel_lit) {
+        std.debug.print("conformance: FAIL canny is not thinner than sobel (canny {d:.3} vs sobel {d:.3})\n", .{ canny_lit, sobel_lit });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, canny_shot.?, 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-canny.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF edge.pass sobel and canny are deterministic near-binary edge maps, black on a flat frame, canny thinner than sobel ({d:.3} vs {d:.3})\n", .{ canny_lit, sobel_lit });
+    return true;
+}
+
+/// Renders one warp.pass manifest inline over the corpus and captures it -
+/// the from-json mirror of captureStylizeShot, so a proof can hold every
+/// warp parameter fixed but the strength and compare the two. A null manifest
+/// captures the plain passthrough frame.
+fn captureWarpShotJson(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, manifest_json: ?[]const u8) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (manifest_json) |m| {
+        if (abi.goss_session_activate_lens(session, m.ptr, m.len) != .ok) {
+            std.debug.print("conformance: FAIL warp lens activation\n", .{});
+            return error.ActivationFailed;
+        }
+    }
+    for (0..3) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+        return error.CaptureFailed;
+    }
+    return shot;
+}
+
+/// True when the top-left corner block of two captures is byte-identical -
+/// the region a radial warp centered on the frame must leave untouched, well
+/// outside its radius. This is the proof a warp is localized, not global.
+fn cornerBlockEqual(a: []const u8, b: []const u8, cap_width: usize, block: usize) bool {
+    var y: usize = 0;
+    while (y < block) : (y += 1) {
+        const row = y * cap_width * 4;
+        if (!std.mem.eql(u8, a[row .. row + block * 4], b[row .. row + block * 4])) return false;
+    }
+    return true;
+}
+
+/// True when the center block of two captures differs anywhere - where the
+/// warp actually displaces or refracts the image.
+fn centerBlockDiffers(a: []const u8, b: []const u8, cap_width: usize, cap_height: usize, block: usize) bool {
+    const x0 = cap_width / 2 - block / 2;
+    const y0 = cap_height / 2 - block / 2;
+    var y: usize = y0;
+    while (y < y0 + block) : (y += 1) {
+        const start = (y * cap_width + x0) * 4;
+        if (!std.mem.eql(u8, a[start .. start + block * 4], b[start .. start + block * 4])) return true;
+    }
+    return false;
+}
+
+/// True when every pixel in the top-left corner block is black - what
+/// sphere_refraction leaves everywhere outside its sphere.
+fn cornerBlockDark(buf: []const u8, cap_width: usize, block: usize) bool {
+    var y: usize = 0;
+    while (y < block) : (y += 1) {
+        var x: usize = 0;
+        while (x < block) : (x += 1) {
+            const i = (y * cap_width + x) * 4;
+            if (lumaByte(buf[i], buf[i + 1], buf[i + 2]) > 8) return false;
+        }
+    }
+    return true;
+}
+
+/// Proves warp.pass on real content: each mode is a radial distortion centered
+/// on the frame, bit-stable across two runs, changing its center block versus
+/// the same mode at strength zero, yet leaving a far corner outside the radius
+/// byte-identical to that identity control. sphere_refraction is black there.
+fn proveWarp(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const cap_w: usize = 400;
+    const cap_h: usize = 300;
+    // A 40x40 top-left block. Its farthest pixel sits at u ~0.099, so its
+    // distance from the centered warp exceeds 0.4 - well past every reference
+    // radius (0.28) whatever the aspect, since the x term alone clears it.
+    const corner: usize = 40;
+    // The center block a radial warp always touches on real content.
+    const center: usize = 40;
+
+    const modes = [_]struct { name: []const u8, mode: []const u8, refraction: bool }{
+        .{ .name = "glass-sphere", .mode = "glass_sphere", .refraction = false },
+        .{ .name = "sphere-refraction", .mode = "sphere_refraction", .refraction = true },
+        .{ .name = "bulge", .mode = "bulge", .refraction = false },
+        .{ .name = "pinch", .mode = "pinch", .refraction = false },
+        .{ .name = "swirl", .mode = "swirl", .refraction = false },
+    };
+
+    var showcase: ?[]u8 = null;
+    defer if (showcase) |s| gpa.free(s);
+
+    for (modes) |m| {
+        const pkg = try std.fmt.allocPrint(gpa, ".lens-packages/{s}", .{m.name});
+        defer gpa.free(pkg);
+
+        const warped_a = try captureStylizeShot(gpa, engine, planes, pkg);
+        defer gpa.free(warped_a);
+        const warped_b = try captureStylizeShot(gpa, engine, planes, pkg);
+        defer gpa.free(warped_b);
+        if (!std.mem.eql(u8, warped_a, warped_b)) {
+            std.debug.print("conformance: FAIL warp {s} is not bit-stable across runs\n", .{m.name});
+            return false;
+        }
+
+        // The same mode at strength zero: identity through the very same pass,
+        // so it shares the warp's resample everywhere and isolates the effect.
+        const control_json = try std.fmt.allocPrint(gpa,
+            \\{{"glf":"1.0","id":"goss.reference.warp-control","version":"1.0.0","display_name":"Warp Control","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{{"id":"w","type":"warp.pass","inputs":{{"frame":"camera"}},"params":{{}},"warp":{{"mode":"{s}","center_x":0.5,"center_y":0.5,"radius":0.28,"strength":0.0,"refractive_index":0.71}}}}],"triggers":[]}}
+        , .{m.mode});
+        defer gpa.free(control_json);
+        const control = try captureWarpShotJson(gpa, engine, planes, control_json);
+        defer gpa.free(control);
+
+        if (!centerBlockDiffers(warped_a, control, cap_w, cap_h, center)) {
+            std.debug.print("conformance: FAIL warp {s} did not change the center region\n", .{m.name});
+            return false;
+        }
+        if (!cornerBlockEqual(warped_a, control, cap_w, corner)) {
+            std.debug.print("conformance: FAIL warp {s} changed a far corner outside its radius (not localized)\n", .{m.name});
+            return false;
+        }
+        if (m.refraction and !cornerBlockDark(warped_a, cap_w, corner)) {
+            std.debug.print("conformance: FAIL sphere_refraction did not blacken the surround outside the sphere\n", .{});
+            return false;
+        }
+
+        if (std.mem.eql(u8, m.name, "glass-sphere")) {
+            showcase = try gpa.dupe(u8, warped_a);
+        }
+    }
+
+    if (showcase) |s| {
+        var png_bytes: std.ArrayList(u8) = .empty;
+        defer png_bytes.deinit(gpa);
+        try png.encodeRgba(gpa, &png_bytes, s, 400, 300);
+        try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-warp.png", .data = png_bytes.items });
+    }
+    std.debug.print("conformance: PROOF warp.pass modes are deterministic, localized radial distortions - the center warps while a far corner stays byte-identical to the identity control, sphere_refraction black outside the sphere\n", .{});
+    return true;
+}
+
 /// Proves a bloom.pass post-effect: the bright pass, separable blur and
 /// additive composite bleed a glow from the highlights, so a bloomed
 /// capture differs from the plain one and is bit-stable across runs (no
@@ -5698,6 +6327,102 @@ fn proveMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The mean r, g, b over a 40x40 centre block of a 400x300 RGBA capture -
+/// a low-noise read of a solid frame's one colour.
+fn centreMean(shot: []const u8) [3]f32 {
+    var sum = [3]u64{ 0, 0, 0 };
+    var count: u64 = 0;
+    var row: usize = 130;
+    while (row < 170) : (row += 1) {
+        var col: usize = 180;
+        while (col < 220) : (col += 1) {
+            const i = (row * @as(usize, width) + col) * 4;
+            sum[0] += shot[i + 0];
+            sum[1] += shot[i + 1];
+            sum[2] += shot[i + 2];
+            count += 1;
+        }
+    }
+    const n: f32 = @floatFromInt(count);
+    return .{
+        @as(f32, @floatFromInt(sum[0])) / n,
+        @as(f32, @floatFromInt(sum[1])) / n,
+        @as(f32, @floatFromInt(sum[2])) / n,
+    };
+}
+
+/// Proves the material colormatrix op computes an exact 3x3 colour transform,
+/// the primitive behind a generic colour matrix, an rgb gain, or a luminance
+/// compress in a shader.pass lens. A solid frame through material-color-matrix
+/// must equal its sepia matrix times the plain input to a byte, and be stable.
+fn proveMaterialOps(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const solid = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(solid);
+    // Three distinct channels, so every output channel mixing all three
+    // inputs tests the off-diagonal matrix terms, not just the row sums a
+    // grey would.
+    var p: usize = 0;
+    while (p < solid.len) : (p += 4) {
+        solid[p + 0] = 200;
+        solid[p + 1] = 120;
+        solid[p + 2] = 60;
+        solid[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = solid }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const plain = try captureStylizeShot(gpa, engine, planes, null);
+    defer gpa.free(plain);
+    const sepia_a = try captureStylizeShot(gpa, engine, planes, ".lens-packages/material-color-matrix");
+    defer gpa.free(sepia_a);
+    const sepia_b = try captureStylizeShot(gpa, engine, planes, ".lens-packages/material-color-matrix");
+    defer gpa.free(sepia_b);
+
+    if (!std.mem.eql(u8, sepia_a, sepia_b)) {
+        std.debug.print("conformance: FAIL colormatrix material is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    const in = centreMean(plain);
+    const got = centreMean(sepia_a);
+    // The sepia rows the lens authors, applied to the plain input the shader
+    // samples. Byte in, byte out, clamped exactly as saturate does on device.
+    const mat = [3][3]f32{
+        .{ 0.393, 0.769, 0.189 },
+        .{ 0.349, 0.686, 0.168 },
+        .{ 0.272, 0.534, 0.131 },
+    };
+    var want: [3]f32 = undefined;
+    var max_shift: f32 = 0;
+    for (0..3) |row| {
+        const acc = mat[row][0] * in[0] + mat[row][1] * in[1] + mat[row][2] * in[2];
+        want[row] = std.math.clamp(acc, 0.0, 255.0);
+        const shift = @abs(want[row] - in[row]);
+        if (shift > max_shift) max_shift = shift;
+    }
+    // The chosen input must actually move under the matrix, so the match
+    // below is a real constraint, never trivially met by an identity.
+    if (max_shift < 20.0) {
+        std.debug.print("conformance: FAIL colormatrix proof input does not exercise the transform\n", .{});
+        return false;
+    }
+    var max_err: f32 = 0;
+    for (0..3) |ch| {
+        const err = @abs(got[ch] - want[ch]);
+        if (err > max_err) max_err = err;
+    }
+    if (max_err > 3.0) {
+        std.debug.print(
+            "conformance: FAIL colormatrix is not the exact sepia transform: in ({d:.1},{d:.1},{d:.1}) got ({d:.1},{d:.1},{d:.1}) want ({d:.1},{d:.1},{d:.1}) err {d:.2}\n",
+            .{ in[0], in[1], in[2], got[0], got[1], got[2], want[0], want[1], want[2], max_err },
+        );
+        return false;
+    }
+    std.debug.print("conformance: PROOF a material colormatrix op applies an exact 3x3 colour transform (sepia) deterministically (err {d:.2})\n", .{max_err});
+    return true;
+}
+
 fn proveSceneSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // The deeplab scene segmenter infers 21 classes at 257 x 257 - both
     // past the portrait segmenters' shape. It must load, resample onto
@@ -5724,6 +6449,942 @@ fn proveSceneSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a 21-class 257x257 scene segmenter resamples onto the canonical mask grid and drives the subject mask deterministically\n", .{});
+    return true;
+}
+
+fn proveClassOutline(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // An outline.pass with a "person" mask traces the subject boundary off the
+    // segmentation mask instead of depth; with no segmenter the class is the
+    // zero mask, so the outline degrades to nothing.
+    try renderOnce(gpa, engine, ".lens-packages/outline-person", "zig-out/conformance-outline-a", single_class_model_path);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/outline-person", "zig-out/conformance-outline-b", single_class_model_path);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/outline-person", "zig-out/conformance-outline-unseg", null);
+    settle(engine);
+
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the person-mask outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const unseg = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-outline-unseg.tga", gpa, .limited(8 << 20));
+    defer gpa.free(unseg);
+    if (std.mem.eql(u8, a, unseg)) {
+        std.debug.print("conformance: FAIL the person-mask outline drew nothing - the mask edge never traced\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an outline.pass traces a segmentation class edge, a rim absent when the class is, bit-stable across runs\n", .{});
+    return true;
+}
+
+fn proveHeadMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // An outline.pass masked to "head" rims the face region off the face
+    // landmark hull with no segmentation model; with no face tracked the
+    // channel is the zero mask, so the rim degrades to nothing.
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-head", "zig-out/conformance-head-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-head", "zig-out/conformance-head-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-head", "zig-out/conformance-head-noface", .{ .face = false });
+    settle(engine);
+
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-head-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-head-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the head matte outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-head-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the head matte drew nothing - the landmark hull never rasterized\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an outline.pass rims the face-landmark head matte, gone with no face, bit-stable across runs\n", .{});
+    return true;
+}
+
+fn proveHandMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // An outline.pass masked to "hand" rims each tracked hand off its
+    // landmark hull with no segmentation model; with no hand tracked the
+    // channel is the zero mask, so the rim degrades to nothing.
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-hand", "zig-out/conformance-hand-a", .{ .corpus = hand_corpus_path, .face = false, .hands = true });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-hand", "zig-out/conformance-hand-b", .{ .corpus = hand_corpus_path, .face = false, .hands = true });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-hand", "zig-out/conformance-hand-nohand", .{ .corpus = hand_corpus_path, .face = false, .hands = false });
+    settle(engine);
+
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-hand-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-hand-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the hand matte outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const nohand = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-hand-nohand.tga", gpa, .limited(8 << 20));
+    defer gpa.free(nohand);
+    if (std.mem.eql(u8, a, nohand)) {
+        std.debug.print("conformance: FAIL the hand matte drew nothing - the landmark hull never rasterized\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an outline.pass rims the hand-landmark matte, gone with no hand, bit-stable across runs\n", .{});
+    return true;
+}
+
+fn proveLipsMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First prove the outer-lip loop is anatomically the lips: on a real
+    // tracked face its centroid sits below the nose, above the chin, and
+    // between the two mouth corners, so a wrong loop would fail here.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL lips face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        var cx: f32 = 0;
+        var cy: f32 = 0;
+        for (abi.outer_lip_loop) |idx| {
+            cx += lm[@as(usize, idx) * 3];
+            cy += lm[@as(usize, idx) * 3 + 1];
+        }
+        cx /= @floatFromInt(abi.outer_lip_loop.len);
+        cy /= @floatFromInt(abi.outer_lip_loop.len);
+        const nose_y = lm[1 * 3 + 1];
+        const chin_y = lm[152 * 3 + 1];
+        if (!(nose_y < cy and cy < chin_y)) {
+            std.debug.print("conformance: FAIL lip centroid not between nose and chin (y {d:.1} {d:.1} {d:.1})\n", .{ nose_y, cy, chin_y });
+            return false;
+        }
+        const lo_x = @min(lm[61 * 3], lm[291 * 3]);
+        const hi_x = @max(lm[61 * 3], lm[291 * 3]);
+        if (!(lo_x < cx and cx < hi_x)) {
+            std.debug.print("conformance: FAIL lip centroid not between the mouth corners (x {d:.1} {d:.1} {d:.1})\n", .{ lo_x, cx, hi_x });
+            return false;
+        }
+    }
+
+    // Then prove the render: the outline rims the lips, gone with no face,
+    // bit-stable across runs.
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-lips", "zig-out/conformance-lips-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-lips", "zig-out/conformance-lips-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-lips", "zig-out/conformance-lips-noface", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-lips-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-lips-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the lips matte outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-lips-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the lips matte drew nothing - the lip loop never rasterized\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the lips matte fills the outer-lip loop below the nose between the corners, rims the mouth, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
+/// The centroid (x, y in frame pixels) of a ring of mesh landmarks, read from
+/// a face result's flat landmark array.
+fn ringCentroid(lm: []const f32, loop: []const u16) [2]f32 {
+    var cx: f32 = 0;
+    var cy: f32 = 0;
+    for (loop) |idx| {
+        cx += lm[@as(usize, idx) * 3];
+        cy += lm[@as(usize, idx) * 3 + 1];
+    }
+    const n: f32 = @floatFromInt(loop.len);
+    return .{ cx / n, cy / n };
+}
+
+fn proveEyesMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First prove the eye loops are anatomically the eyes: on a real tracked
+    // face each eye centroid sits above the lips and the two flank the nose,
+    // so a swapped or wrong loop would fail here.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL eyes face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        const left = ringCentroid(lm, &abi.left_eye_loop);
+        const right = ringCentroid(lm, &abi.right_eye_loop);
+        const lips = ringCentroid(lm, &abi.outer_lip_loop);
+        if (!(left[1] < lips[1] and right[1] < lips[1])) {
+            std.debug.print("conformance: FAIL an eye centroid not above the lips (y L {d:.1} R {d:.1} lips {d:.1})\n", .{ left[1], right[1], lips[1] });
+            return false;
+        }
+        const nose_x = lm[1 * 3];
+        if ((left[0] > nose_x) == (right[0] > nose_x)) {
+            std.debug.print("conformance: FAIL the eyes not on opposite sides of the nose (x L {d:.1} R {d:.1} nose {d:.1})\n", .{ left[0], right[0], nose_x });
+            return false;
+        }
+    }
+
+    // Then prove the render: the outline rims both eyes, gone with no face,
+    // bit-stable across runs.
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-eyes", "zig-out/conformance-eyes-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-eyes", "zig-out/conformance-eyes-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-eyes", "zig-out/conformance-eyes-noface", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyes-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyes-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the eyes matte outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyes-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the eyes matte drew nothing - the eye loops never rasterized\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the eyes matte fills both eye loops above the lips and flanking the nose, rims the eyes, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
+fn proveBrowsMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First prove the brow loops are anatomically the brows: on a real
+    // tracked face each brow centroid sits above its own eye and the two
+    // flank the nose, so a swapped or wrong loop would fail here.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL brows face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        const left_brow = ringCentroid(lm, &abi.left_brow_loop);
+        const right_brow = ringCentroid(lm, &abi.right_brow_loop);
+        const left_eye = ringCentroid(lm, &abi.left_eye_loop);
+        const right_eye = ringCentroid(lm, &abi.right_eye_loop);
+        if (!(left_brow[1] < left_eye[1] and right_brow[1] < right_eye[1])) {
+            std.debug.print("conformance: FAIL a brow centroid not above its eye (y browL {d:.1} eyeL {d:.1} browR {d:.1} eyeR {d:.1})\n", .{ left_brow[1], left_eye[1], right_brow[1], right_eye[1] });
+            return false;
+        }
+        const nose_x = lm[1 * 3];
+        if ((left_brow[0] > nose_x) == (right_brow[0] > nose_x)) {
+            std.debug.print("conformance: FAIL the brows not on opposite sides of the nose (x L {d:.1} R {d:.1} nose {d:.1})\n", .{ left_brow[0], right_brow[0], nose_x });
+            return false;
+        }
+    }
+
+    // Then prove the render: the outline rims both brows, gone with no face,
+    // bit-stable across runs.
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-brows", "zig-out/conformance-brows-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-brows", "zig-out/conformance-brows-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/outline-brows", "zig-out/conformance-brows-noface", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-brows-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-brows-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the brows matte outline is not deterministic across runs\n", .{});
+        return false;
+    }
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-brows-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the brows matte drew nothing - the brow loops never rasterized\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the brows matte fills both brow loops above the eyes and flanking the nose, rims the brows, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
+fn proveTint(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A tint.pass masked to "lips" blends its color into the lip region off
+    // the lips matte; with no face the mask is empty, so the tint fades to
+    // nothing and the frame passes through.
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-tint-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-tint-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-tint-noface", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-tint-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-tint-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the lip tint is not deterministic across runs\n", .{});
+        return false;
+    }
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-tint-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the lip tint drew nothing - the mask never keyed the color\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a tint.pass blends its color into the lips matte, gone with no face, bit-stable across runs\n", .{});
+    return true;
+}
+
+fn proveMakeup(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // Eyeshadow and brow tint reuse tint.pass over the eyes and brows mattes.
+    // Each colors its own region, so both differ from the plain frame and
+    // from each other; with no face the control is the untouched frame.
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow", "zig-out/conformance-eyeshadow", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow", "zig-out/conformance-makeup-control", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/brow-tint", "zig-out/conformance-brow-tint", .{});
+    settle(engine);
+    const eyeshadow = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-eyeshadow.tga", gpa, .limited(8 << 20));
+    defer gpa.free(eyeshadow);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-makeup-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    const brow_tint = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-brow-tint.tga", gpa, .limited(8 << 20));
+    defer gpa.free(brow_tint);
+    if (std.mem.eql(u8, eyeshadow, control)) {
+        std.debug.print("conformance: FAIL eyeshadow drew nothing over the eyes\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, brow_tint, control)) {
+        std.debug.print("conformance: FAIL brow tint drew nothing over the brows\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, eyeshadow, brow_tint)) {
+        std.debug.print("conformance: FAIL eyeshadow and brow tint colored the same region\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF eyeshadow and brow tint each color their own matte, both differ from the plain frame and from each other\n", .{});
+    return true;
+}
+
+/// Counts the bytes that differ between two equal-length renders, a stand-in
+/// for how large a region an effect touched.
+fn countDiff(a: []const u8, b: []const u8) usize {
+    var n: usize = 0;
+    const len = @min(a.len, b.len);
+    for (a[0..len], b[0..len]) |x, y| {
+        if (x != y) n += 1;
+    }
+    return n;
+}
+
+fn proveIris(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First prove the iris loops are anatomically the irises: on a real
+    // tracked face each iris centroid sits above the lips and the two flank
+    // the nose, present only because the model refines iris landmarks.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL iris face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        const left = ringCentroid(lm, &abi.left_iris_loop);
+        const right = ringCentroid(lm, &abi.right_iris_loop);
+        const lips = ringCentroid(lm, &abi.outer_lip_loop);
+        if (!(left[1] < lips[1] and right[1] < lips[1])) {
+            std.debug.print("conformance: FAIL an iris centroid not above the lips (y L {d:.1} R {d:.1} lips {d:.1})\n", .{ left[1], right[1], lips[1] });
+            return false;
+        }
+        const nose_x = lm[1 * 3];
+        if ((left[0] > nose_x) == (right[0] > nose_x)) {
+            std.debug.print("conformance: FAIL the irises not on opposite sides of the nose (x L {d:.1} R {d:.1} nose {d:.1})\n", .{ left[0], right[0], nose_x });
+            return false;
+        }
+    }
+
+    // Then prove the render: the iris tint colors a non-empty region strictly
+    // smaller than eyeshadow over the whole eye, and is gone with no face.
+    try renderOnceWith(gpa, engine, ".lens-packages/iris-tint", "zig-out/conformance-iris-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/iris-tint", "zig-out/conformance-iris-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/iris-tint", "zig-out/conformance-iris-control", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow", "zig-out/conformance-iris-eyes", .{});
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-iris-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-iris-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-iris-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    const eyes = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-iris-eyes.tga", gpa, .limited(8 << 20));
+    defer gpa.free(eyes);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the iris tint is not deterministic across runs\n", .{});
+        return false;
+    }
+    const iris_diff = countDiff(a, control);
+    const eyes_diff = countDiff(eyes, control);
+    if (iris_diff == 0) {
+        std.debug.print("conformance: FAIL the iris tint drew nothing - no refined iris landmarks\n", .{});
+        return false;
+    }
+    if (iris_diff >= eyes_diff) {
+        std.debug.print("conformance: FAIL the iris tint is not smaller than the eye (iris {d} eye {d})\n", .{ iris_diff, eyes_diff });
+        return false;
+    }
+    std.debug.print("conformance: PROOF the iris tint colors just the iris, a region smaller than the eye, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
+fn proveFoundation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // Foundation tints the face_skin class, a model-derived channel, so this
+    // proves tint.pass keys the multiclass segmenter's classes as well as the
+    // landmark mattes; with no segmenter the class is empty and it fades out.
+    try renderOnceWith(gpa, engine, ".lens-packages/foundation", "zig-out/conformance-foundation-a", .{ .segmentation_model = multiclass_model_path, .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/foundation", "zig-out/conformance-foundation-b", .{ .segmentation_model = multiclass_model_path, .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/foundation", "zig-out/conformance-foundation-unseg", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-foundation-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-foundation-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the foundation tint is not deterministic across runs\n", .{});
+        return false;
+    }
+    const unseg = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-foundation-unseg.tga", gpa, .limited(8 << 20));
+    defer gpa.free(unseg);
+    if (std.mem.eql(u8, a, unseg)) {
+        std.debug.print("conformance: FAIL the foundation tint drew nothing - the model class never keyed the color\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a tint.pass keys a model class, foundation over face_skin, gone with no segmenter, bit-stable\n", .{});
+    return true;
+}
+
+fn proveGlam(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // The glam look chains three tint.pass nodes (lips, eyes, brows), each
+    // reading the previous one's output, so it stacks all three regions and
+    // touches more of the frame than any single tint - proving passes compose.
+    try renderOnceWith(gpa, engine, ".lens-packages/glam-look", "zig-out/conformance-glam-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/glam-look", "zig-out/conformance-glam-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/glam-look", "zig-out/conformance-glam-control", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-glam-lip", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/eyeshadow", "zig-out/conformance-glam-eye", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/brow-tint", "zig-out/conformance-glam-brow", .{});
+    settle(engine);
+    const glam_a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(glam_a);
+    const glam_b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(glam_b);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    const lip = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-lip.tga", gpa, .limited(8 << 20));
+    defer gpa.free(lip);
+    const eye = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-eye.tga", gpa, .limited(8 << 20));
+    defer gpa.free(eye);
+    const brow = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-glam-brow.tga", gpa, .limited(8 << 20));
+    defer gpa.free(brow);
+    if (!std.mem.eql(u8, glam_a, glam_b)) {
+        std.debug.print("conformance: FAIL the glam look is not deterministic across runs\n", .{});
+        return false;
+    }
+    const glam_d = countDiff(glam_a, control);
+    const lip_d = countDiff(lip, control);
+    const eye_d = countDiff(eye, control);
+    const brow_d = countDiff(brow, control);
+    if (glam_d == 0) {
+        std.debug.print("conformance: FAIL the glam look drew nothing\n", .{});
+        return false;
+    }
+    if (!(glam_d > lip_d and glam_d > eye_d and glam_d > brow_d)) {
+        std.debug.print("conformance: FAIL the glam look does not stack past a single region (glam {d} lip {d} eye {d} brow {d})\n", .{ glam_d, lip_d, eye_d, brow_d });
+        return false;
+    }
+    std.debug.print("conformance: PROOF three tint.pass nodes chain into one look, touching more than any single tint, bit-stable\n", .{});
+    return true;
+}
+
+fn proveDepthMatting(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // With a segmenter AND depth submitted, the subject mask is the two
+    // fused: depth prunes segmentation foreground behind the plane. A near
+    // depth keeps the subject, a far depth prunes it, so a subject-
+    // compositing lens differs between them.
+    const dw = 64;
+    const dh = 48;
+    var near_map: [dw * dh]f32 = undefined;
+    var far_map: [dw * dh]f32 = undefined;
+    for (&near_map) |*d| d.* = 0.5;
+    for (&far_map) |*d| d.* = 3.0;
+    const near_opts: RenderOpts = .{ .segmentation_model = single_class_model_path, .face = false, .depth = &near_map, .depth_w = dw, .depth_h = dh, .depth_near = 0.1, .depth_far = 5.0 };
+    try renderOnceWith(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-fuse-near-a", near_opts);
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-fuse-near-b", near_opts);
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/background-swap", "zig-out/conformance-fuse-far", .{ .segmentation_model = single_class_model_path, .face = false, .depth = &far_map, .depth_w = dw, .depth_h = dh, .depth_near = 0.1, .depth_far = 5.0 });
+    settle(engine);
+    const near_a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-fuse-near-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(near_a);
+    const near_b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-fuse-near-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(near_b);
+    const far = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-fuse-far.tga", gpa, .limited(8 << 20));
+    defer gpa.free(far);
+    if (!std.mem.eql(u8, near_a, near_b)) {
+        std.debug.print("conformance: FAIL depth-fused matting is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, near_a, far)) {
+        std.debug.print("conformance: FAIL depth did not refine the segmentation mask - near and far match\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF depth fuses with the segmenter: a far depth prunes subject the mask kept, differing from a near depth, bit-stable\n", .{});
+    return true;
+}
+
+/// Sum of absolute differences between each byte and the same channel of the
+/// next pixel across, a stand-in for how much fine detail a render holds; a
+/// blur lowers it.
+fn totalVariation(buf: []const u8) u64 {
+    var tv: u64 = 0;
+    var i: usize = 0;
+    while (i + 4 < buf.len) : (i += 1) {
+        tv += if (buf[i] > buf[i + 4]) buf[i] - buf[i + 4] else buf[i + 4] - buf[i];
+    }
+    return tv;
+}
+
+fn proveSmooth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A smooth.pass masked to the head region blends the face toward a local
+    // average, so it draws only there, is gone with no face, and lowers the
+    // frame's total variation (it genuinely smooths, not just recolors).
+    try renderOnceWith(gpa, engine, ".lens-packages/face-smooth", "zig-out/conformance-smooth-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/face-smooth", "zig-out/conformance-smooth-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/face-smooth", "zig-out/conformance-smooth-control", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-smooth-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-smooth-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-smooth-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL face smooth is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, a, control)) {
+        std.debug.print("conformance: FAIL face smooth drew nothing over the head\n", .{});
+        return false;
+    }
+    const tv_a = totalVariation(a);
+    const tv_control = totalVariation(control);
+    if (tv_a >= tv_control) {
+        std.debug.print("conformance: FAIL face smooth did not reduce detail (tv {d} vs {d})\n", .{ tv_a, tv_control });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a smooth.pass blurs the masked region, lowering total variation, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
+fn proveTeeth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // The teeth matte fills the inner-lip loop, the mouth aperture inside the
+    // outer lip. First prove the loop is the inner mouth: its centroid sits
+    // below the nose, above the chin, and between the mouth corners.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL teeth face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        const inner = ringCentroid(lm, &abi.inner_lip_loop);
+        const nose_y = lm[1 * 3 + 1];
+        const chin_y = lm[152 * 3 + 1];
+        if (!(nose_y < inner[1] and inner[1] < chin_y)) {
+            std.debug.print("conformance: FAIL inner-lip centroid not between nose and chin (y {d:.1} {d:.1} {d:.1})\n", .{ nose_y, inner[1], chin_y });
+            return false;
+        }
+        const lo_x = @min(lm[61 * 3], lm[291 * 3]);
+        const hi_x = @max(lm[61 * 3], lm[291 * 3]);
+        if (!(lo_x < inner[0] and inner[0] < hi_x)) {
+            std.debug.print("conformance: FAIL inner-lip centroid not between the mouth corners (x {d:.1} {d:.1} {d:.1})\n", .{ lo_x, inner[0], hi_x });
+            return false;
+        }
+    }
+
+    // Then prove the render: a whitening tint over the inner lip colors a
+    // smaller region than a lip tint over the outer lip, gone with no face.
+    try renderOnceWith(gpa, engine, ".lens-packages/teeth-whiten", "zig-out/conformance-teeth-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/teeth-whiten", "zig-out/conformance-teeth-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/teeth-whiten", "zig-out/conformance-teeth-control", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lip-tint", "zig-out/conformance-teeth-lip", .{});
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-teeth-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-teeth-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-teeth-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    const lip = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-teeth-lip.tga", gpa, .limited(8 << 20));
+    defer gpa.free(lip);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL teeth whiten is not deterministic across runs\n", .{});
+        return false;
+    }
+    const teeth_d = countDiff(a, control);
+    const lip_d = countDiff(lip, control);
+    if (teeth_d == 0) {
+        std.debug.print("conformance: FAIL teeth whiten drew nothing over the inner lip\n", .{});
+        return false;
+    }
+    if (teeth_d >= lip_d) {
+        std.debug.print("conformance: FAIL the inner-lip region is not smaller than the outer lip (teeth {d} lip {d})\n", .{ teeth_d, lip_d });
+        return false;
+    }
+    std.debug.print("conformance: PROOF teeth whiten fills the inner-lip mouth, a smaller region than the outer lip, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
+fn proveSharpen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A smooth.pass with a negative amount sharpens instead of blurs: it
+    // pushes the masked region away from its local average, raising total
+    // variation, the opposite of the smooth pass. Gone with no face.
+    try renderOnceWith(gpa, engine, ".lens-packages/detail-sharpen", "zig-out/conformance-sharpen-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/detail-sharpen", "zig-out/conformance-sharpen-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/detail-sharpen", "zig-out/conformance-sharpen-control", .{ .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sharpen-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sharpen-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-sharpen-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL detail sharpen is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, a, control)) {
+        std.debug.print("conformance: FAIL detail sharpen drew nothing over the head\n", .{});
+        return false;
+    }
+    const tv_a = totalVariation(a);
+    const tv_control = totalVariation(control);
+    if (tv_a <= tv_control) {
+        std.debug.print("conformance: FAIL detail sharpen did not raise detail (tv {d} vs {d})\n", .{ tv_a, tv_control });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a negative smooth amount sharpens the masked region, raising total variation, gone with no face, bit-stable\n", .{});
+    return true;
+}
+
+fn proveUserMediaSeg(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // goss_session_submit_segmentation_image feeds a still RGBA image to the
+    // segmenter; a subject-compositing lens then shows the segmented subject,
+    // differing from a session handed no image, and it is deterministic.
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const rgba = corpus.frame.pixels.rgba8;
+    const cw = corpus.frame.width;
+    const ch = corpus.frame.height;
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_img = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_img);
+    const shot_img2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_img2);
+    const shot_none = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_none);
+    var wi: u32 = 0;
+    var hi: u32 = 0;
+    var wi2: u32 = 0;
+    var hi2: u32 = 0;
+    var wn: u32 = 0;
+    var hn: u32 = 0;
+
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL user-media segmentation enable\n", .{});
+            return false;
+        }
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/background-swap", ".lens-packages/background-swap".len) != .ok) {
+            std.debug.print("conformance: FAIL user-media lens activation\n", .{});
+            return false;
+        }
+        if (abi.goss_session_submit_segmentation_image(session, rgba.ptr, cw, ch) != .ok) {
+            std.debug.print("conformance: FAIL submit_segmentation_image rejected the still\n", .{});
+            return false;
+        }
+        var polls: usize = 0;
+        while (session.segmentation_texture == null) {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            polls += 1;
+            if (polls > 1_000_000) {
+                std.debug.print("conformance: FAIL the submitted image never produced a mask\n", .{});
+                return false;
+            }
+        }
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_img.ptr, shot_img.len, &wi, &hi) != .ok) return error.CaptureFailed;
+        for (0..3) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_img2.ptr, shot_img2.len, &wi2, &hi2) != .ok) return error.CaptureFailed;
+    }
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/background-swap", ".lens-packages/background-swap".len) != .ok) return error.ActivationFailed;
+        for (0..10) |_| {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_none.ptr, shot_none.len, &wn, &hn) != .ok) return error.CaptureFailed;
+    }
+    if (wi == 0 or wi != wn or hi != hn or wi != wi2 or hi != hi2) {
+        std.debug.print("conformance: FAIL user-media capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_img[0 .. wi * hi * 4], shot_img2[0 .. wi * hi * 4])) {
+        std.debug.print("conformance: FAIL user-media segmentation is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shot_img[0 .. wi * hi * 4], shot_none[0 .. wn * hn * 4])) {
+        std.debug.print("conformance: FAIL the submitted image did not segment - composite unchanged from no image\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF submit_segmentation_image segments a still RGBA, changing the composite from a session given no image, deterministically\n", .{});
+    return true;
+}
+
+fn fillSolid(buf: []u8, r: u8, g: u8, b: u8) void {
+    var i: usize = 0;
+    while (i + 4 <= buf.len) : (i += 4) {
+        buf[i] = r;
+        buf[i + 1] = g;
+        buf[i + 2] = b;
+        buf[i + 3] = 255;
+    }
+}
+
+fn renderCapture(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, half_w: u32, buf: []u8, ow: *u32, oh: *u32) !void {
+    for (0..5) |_| {
+        _ = abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, buf.ptr, buf.len, ow, oh) != .ok) return error.CaptureFailed;
+}
+
+fn proveMakeupTransfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A reference-sourced tint.pass paints the lips in the makeup reference's
+    // sampled color, so two references of different colors drive different
+    // results and the transfer is deterministic.
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL makeup-transfer face tracking enable\n", .{});
+        return false;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/makeup-transfer", ".lens-packages/makeup-transfer".len) != .ok) {
+        std.debug.print("conformance: FAIL makeup-transfer lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+    var result: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &result) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+    const rw = corpus.frame.width;
+    const rh = corpus.frame.height;
+    const count: u32 = @intCast(result.landmarks.len / 3);
+    const ref = try gpa.alloc(u8, @as(usize, rw) * rh * 4);
+    defer gpa.free(ref);
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const red_a = try gpa.alloc(u8, cap);
+    defer gpa.free(red_a);
+    const red_b = try gpa.alloc(u8, cap);
+    defer gpa.free(red_b);
+    const blue = try gpa.alloc(u8, cap);
+    defer gpa.free(blue);
+    var wra: u32 = 0;
+    var hra: u32 = 0;
+    var wrb: u32 = 0;
+    var hrb: u32 = 0;
+    var wb: u32 = 0;
+    var hb: u32 = 0;
+
+    fillSolid(ref, 230, 30, 60);
+    if (abi.goss_session_set_makeup_reference(session, ref.ptr, rw, rh, &result.landmarks, count) != .ok) {
+        std.debug.print("conformance: FAIL set_makeup_reference rejected the red reference\n", .{});
+        return false;
+    }
+    try renderCapture(engine, session, &desc, planes, half_w, red_a, &wra, &hra);
+    try renderCapture(engine, session, &desc, planes, half_w, red_b, &wrb, &hrb);
+    fillSolid(ref, 40, 60, 220);
+    if (abi.goss_session_set_makeup_reference(session, ref.ptr, rw, rh, &result.landmarks, count) != .ok) return error.SetMakeupReferenceFailed;
+    try renderCapture(engine, session, &desc, planes, half_w, blue, &wb, &hb);
+
+    if (wra == 0 or wra != wb or hra != hb or wra != wrb or hra != hrb) {
+        std.debug.print("conformance: FAIL makeup-transfer capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, red_a[0 .. wra * hra * 4], red_b[0 .. wrb * hrb * 4])) {
+        std.debug.print("conformance: FAIL makeup transfer is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, red_a[0 .. wra * hra * 4], blue[0 .. wb * hb * 4])) {
+        std.debug.print("conformance: FAIL the reference color did not drive the tint - red and blue match\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a reference-sourced tint paints the lips in the makeup reference's color, red and blue references differing, deterministically\n", .{});
     return true;
 }
 
@@ -7259,6 +8920,50 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveExtrudedText(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "video-texture")) {
             if (!try proveVideoTexture(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "class-outline")) {
+            if (!try proveClassOutline(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "head-matte")) {
+            if (!try proveHeadMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "hand-matte")) {
+            if (!try proveHandMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "lips-matte")) {
+            if (!try proveLipsMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "eyes-matte")) {
+            if (!try proveEyesMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "brows-matte")) {
+            if (!try proveBrowsMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "tint")) {
+            if (!try proveTint(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "makeup")) {
+            if (!try proveMakeup(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "iris")) {
+            if (!try proveIris(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "foundation")) {
+            if (!try proveFoundation(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "glam")) {
+            if (!try proveGlam(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "depth-matting")) {
+            if (!try proveDepthMatting(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "smooth")) {
+            if (!try proveSmooth(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "teeth")) {
+            if (!try proveTeeth(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "sharpen")) {
+            if (!try proveSharpen(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "user-media-seg")) {
+            if (!try proveUserMediaSeg(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "makeup-transfer")) {
+            if (!try proveMakeupTransfer(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "color-adjust")) {
+            if (!try proveColorAdjust(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "stylize")) {
+            if (!try proveStylize(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "edge")) {
+            if (!try proveEdge(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "warp")) {
+            if (!try proveWarp(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "material-ops")) {
+            if (!try proveMaterialOps(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -7305,8 +9010,44 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("mask degradation");
     if (!try proveMaterialGraph(gpa, engine)) return 1;
     watchHold("material graph");
+    if (!try proveMaterialOps(gpa, engine)) return 1;
+    watchHold("material ops");
     if (!try proveSceneSegmentation(gpa, engine)) return 1;
     watchHold("scene segmentation");
+    if (!try proveClassOutline(gpa, engine)) return 1;
+    watchHold("class outline");
+    if (!try proveHeadMatte(gpa, engine)) return 1;
+    watchHold("head matte");
+    if (!try proveHandMatte(gpa, engine)) return 1;
+    watchHold("hand matte");
+    if (!try proveLipsMatte(gpa, engine)) return 1;
+    watchHold("lips matte");
+    if (!try proveEyesMatte(gpa, engine)) return 1;
+    watchHold("eyes matte");
+    if (!try proveBrowsMatte(gpa, engine)) return 1;
+    watchHold("brows matte");
+    if (!try proveTint(gpa, engine)) return 1;
+    watchHold("tint pass");
+    if (!try proveMakeup(gpa, engine)) return 1;
+    watchHold("makeup lenses");
+    if (!try proveIris(gpa, engine)) return 1;
+    watchHold("iris tint");
+    if (!try proveFoundation(gpa, engine)) return 1;
+    watchHold("foundation");
+    if (!try proveGlam(gpa, engine)) return 1;
+    watchHold("glam look");
+    if (!try proveDepthMatting(gpa, engine)) return 1;
+    watchHold("depth matting");
+    if (!try proveSmooth(gpa, engine)) return 1;
+    watchHold("face smooth");
+    if (!try proveTeeth(gpa, engine)) return 1;
+    watchHold("teeth whiten");
+    if (!try proveSharpen(gpa, engine)) return 1;
+    watchHold("detail sharpen");
+    if (!try proveUserMediaSeg(gpa, engine)) return 1;
+    watchHold("user-media segmentation");
+    if (!try proveMakeupTransfer(gpa, engine)) return 1;
+    watchHold("makeup transfer");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
@@ -7421,10 +9162,18 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("blur");
     if (!try proveGrade(gpa, engine)) return 1;
     watchHold("grade");
+    if (!try proveColorAdjust(gpa, engine)) return 1;
+    watchHold("color adjust");
     if (!try proveBloom(gpa, engine)) return 1;
     watchHold("bloom");
     if (!try proveStackedPostEffects(gpa, engine)) return 1;
     watchHold("stacked post effects");
+    if (!try proveStylize(gpa, engine)) return 1;
+    watchHold("stylize");
+    if (!try proveEdge(gpa, engine)) return 1;
+    watchHold("edge");
+    if (!try proveWarp(gpa, engine)) return 1;
+    watchHold("warp");
     if (!try proveExpressionScript(gpa, engine)) return 1;
     watchHold("expression script");
     if (!try proveEmber(gpa, engine)) return 1;

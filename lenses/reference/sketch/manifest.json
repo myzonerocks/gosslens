@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.sketch",
+  "version": "1.0.0",
+  "display_name": "Sketch",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "sketch", "type": "stylize.pass", "inputs": {"frame": "camera"}, "params": {}, "stylize": {"mode": "sketch", "strength": 1.0}}
+  ],
+  "triggers": []
+}

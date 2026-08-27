@@ -4,6 +4,12 @@ Gosslens has one C ABI and three public SDKs: Swift, Kotlin, and TypeScript.
 The ABI is the engine contract. This file is the public SDK naming and shape
 contract built on top of it.
 
+The ABI is also consumable directly. [sdk/c](../sdk/c) packages
+[include/gosslens.h](../include/gosslens.h) as a linkable library, so any
+language with a C FFI reaches the engine through the `goss_*` functions as they
+are spelled here. The C surface uses those names unchanged; the naming rules
+below govern the wrappers that rename them for a host language.
+
 A developer who learns one Gosslens SDK should not have to relearn the same
 operation on another platform.
 
@@ -207,6 +213,8 @@ file must move together.
 | `goss_session_body_count` | `bodyCount()`, how many bodies the last `submitBodies` kept, zero to `GOSS_BODY_MAX` | native tracking path |
 | `goss_session_body_result_at` | `bodyResultAt(index, result)`, reads the index-th submitted body; a caller loops zero to the count to visit every body | native tracking path |
 | `goss_session_submit_depth` | `submitDepth(depth, width, height, near, far)`, submits one frame's depth map (metres per pixel, row major) from the host AR backend (ARKit scene depth, ARCore Depth API, WebXR depth-sensing); an empty map clears it, kept for depth occlusion | native + web depth path |
+| `goss_session_submit_segmentation_image` | `submitSegmentationImage(rgba, width, height)`, segments a host-provided still RGBA image (row major) through the running segmenter, so a gallery photo gets a mask without a camera frame; again with no segmenter enabled | native + web segmentation |
+| `goss_session_set_makeup_reference` | `setMakeupReference(rgba, width, height, landmarks)`, samples a reference photo's makeup color per face part (the caller passes the reference face's 478 landmarks), so a `tint.pass` with `"source": "reference"` paints the live face in that color; empty landmarks clears it | native + web makeup |
 | `goss_session_face_region` | `faceRegion(region, outXyz)`, the newest tracked face's named attach point (x, y in frame pixels, z in the same scale) so a lens pins content to the forehead, glabella, nose tip, chin, an eye, a cheek, an ear, or the mouth centre/corner; see the `GOSS_FACE_REGION_*` points | native tracking path |
 | `goss_session_set_face_landmarks` | `setFaceLandmarks(points)`; web adds `sourceWidth, sourceHeight` since its analysis resolution is decoupled from the rendered frame's | Web analysis-producer path |
 | `goss_session_set_segmentation_mask` | `setSegmentationMask(mask)`, a mask_side x mask_side float mask the web tracking module produced, uploaded as the subject texture | Web analysis-producer path |

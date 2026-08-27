@@ -248,6 +248,32 @@ extension GossSession {
         }
     }
 
+    /// Segments a host-provided still image through the running segmenter:
+    /// rgba is width by height RGBA8 pixels, row major. The mask reaches the
+    /// active lens the way a camera frame's would. Throws again with no
+    /// segmenter enabled.
+    public func submitSegmentationImage(_ rgba: [UInt8], width: UInt32, height: UInt32) throws {
+        try rgba.withUnsafeBufferPointer { buf in
+            try checked(goss_session_submit_segmentation_image(handle, buf.baseAddress, width, height))
+        }
+    }
+
+    /// Samples a reference photo's makeup color per face part, so a tint.pass
+    /// with a reference source paints the live face in that color. rgba is
+    /// width by height RGBA8; landmarks is the reference face's 478 x, y, z
+    /// points. An empty landmarks array clears the reference.
+    public func setMakeupReference(_ rgba: [UInt8], width: UInt32, height: UInt32, landmarks: [Float]) throws {
+        if landmarks.isEmpty {
+            try checked(goss_session_set_makeup_reference(handle, nil, 0, 0, nil, 0))
+            return
+        }
+        try rgba.withUnsafeBufferPointer { rbuf in
+            try landmarks.withUnsafeBufferPointer { lbuf in
+                try checked(goss_session_set_makeup_reference(handle, rbuf.baseAddress, width, height, lbuf.baseAddress, UInt32(landmarks.count / 3)))
+            }
+        }
+    }
+
     /// The number of bodies the last submitBodies kept, zero to GOSS_BODY_MAX.
     public func bodyCount() throws -> Int {
         var count: UInt32 = 0

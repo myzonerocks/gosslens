@@ -305,6 +305,23 @@ pub const Renderer = struct {
         _ = threshold;
     }
 
+    pub fn submitTintPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, color: [3]f32, opacity: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = color;
+        _ = opacity;
+    }
+
+    pub fn submitSmoothPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, amount: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = amount;
+    }
+
     pub fn submitTrailPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, prev_texture: TextureHandle, amount: f32) void {
         _ = r;
         _ = view_id;
@@ -345,11 +362,50 @@ pub const Renderer = struct {
         _ = aspect;
     }
 
-    pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
+    pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [12]f32) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
         _ = grade;
+    }
+
+    pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params;
+    }
+
+    pub fn submitWarpPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, warp: [4]f32, params: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = warp;
+        _ = params;
+    }
+
+    pub fn submitEdgeSobel(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32, texel: [2]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params;
+        _ = texel;
+    }
+
+    pub fn submitEdgeNms(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32, texel: [2]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params;
+        _ = texel;
+    }
+
+    pub fn submitEdgeHyst(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32, texel: [2]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params;
+        _ = texel;
     }
 
     pub fn submitBloomExtract(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
@@ -797,6 +853,26 @@ pub const Renderer = struct {
     }
 
     pub fn loadGradeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadStylizeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadWarpProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadEdgeSobelProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadEdgeNmsProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadEdgeHystProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

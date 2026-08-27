@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.foundation",
+  "version": "1.0.0",
+  "display_name": "Foundation",
+  "engine_compat": ">=0.5",
+  "capabilities": ["segmentation"],
+  "parameters": [],
+  "nodes": [
+    {"id": "tint", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [0.85, 0.7, 0.6], "opacity": 0.3, "mask": "face_skin"}}
+  ],
+  "triggers": []
+}

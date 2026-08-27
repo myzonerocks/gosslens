@@ -73,6 +73,8 @@ object Gosslens {
     internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
+    internal external fun nativeSubmitSegmentationImage(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
+    internal external fun nativeSetMakeupReference(session: Long, rgba: ByteBuffer, width: Int, height: Int, landmarks: ByteBuffer, count: Int): Int
     internal external fun nativeBodyCount(session: Long): Int
     internal external fun nativeBodyResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeEnableBeauty(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
@@ -760,6 +762,31 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         buf.asFloatBuffer().put(depth)
         buf.rewind()
         return Gosslens.nativeSubmitDepth(handle, buf, width, height, near, far) == 0
+    }
+
+    /** Segments a host-provided still image through the running segmenter:
+     * rgba is width by height RGBA8 pixels, row major. The mask reaches the
+     * active lens the way a camera frame's would. */
+    fun submitSegmentationImage(rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSubmitSegmentationImage(handle, buf, width, height) == 0
+    }
+
+    /** Samples a reference photo's makeup color per face part, so a tint.pass
+     * with a reference source paints the live face in that color. rgba is
+     * width by height RGBA8; landmarks is the reference face's 478 x, y, z
+     * points. An empty landmarks array clears the reference. */
+    fun setMakeupReference(rgba: ByteArray, width: Int, height: Int, landmarks: FloatArray): Boolean {
+        if (landmarks.isEmpty()) return Gosslens.nativeSetMakeupReference(handle, ByteBuffer.allocateDirect(4), 0, 0, ByteBuffer.allocateDirect(4), 0) == 0
+        val rbuf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        rbuf.put(rgba)
+        rbuf.rewind()
+        val lbuf = ByteBuffer.allocateDirect(landmarks.size * 4).order(ByteOrder.nativeOrder())
+        lbuf.asFloatBuffer().put(landmarks)
+        lbuf.rewind()
+        return Gosslens.nativeSetMakeupReference(handle, rbuf, width, height, lbuf, landmarks.size / 3) == 0
     }
 
     /** The number of bodies the last submitBodies kept, zero to BODY_MAX. */

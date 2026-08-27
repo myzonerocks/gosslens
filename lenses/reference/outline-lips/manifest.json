@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.outline-lips",
+  "version": "1.0.0",
+  "display_name": "Lips Outline",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "outline", "type": "outline.pass", "inputs": {"frame": "camera"}, "params": {},
+     "outline": {"color": [0.9, 0.1, 0.3], "threshold": 0.3, "mask": "lips"}}
+  ],
+  "triggers": []
+}

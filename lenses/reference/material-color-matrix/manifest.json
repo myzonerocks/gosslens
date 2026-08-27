@@ -1,0 +1,33 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.material-color-matrix",
+  "version": "1.0.0",
+  "display_name": "Material Color Matrix",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "sepia", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {},
+     "material": {"output": 17, "nodes": [
+       {"kind": "uv"},
+       {"kind": "texture", "name": "texColor"},
+       {"kind": "sample", "inputs": [1, 0]},
+       {"kind": "split", "inputs": [2], "params": [0, 0, 0, 0]},
+       {"kind": "split", "inputs": [2], "params": [1, 0, 0, 0]},
+       {"kind": "split", "inputs": [2], "params": [2, 0, 0, 0]},
+       {"kind": "combine3", "inputs": [3, 4, 5]},
+       {"kind": "constant", "type": "vec3", "params": [0.393, 0.769, 0.189, 0.0]},
+       {"kind": "constant", "type": "vec3", "params": [0.349, 0.686, 0.168, 0.0]},
+       {"kind": "constant", "type": "vec3", "params": [0.272, 0.534, 0.131, 0.0]},
+       {"kind": "colormatrix", "inputs": [7, 8, 9, 6]},
+       {"kind": "saturate", "inputs": [10]},
+       {"kind": "split", "inputs": [11], "params": [0, 0, 0, 0]},
+       {"kind": "split", "inputs": [11], "params": [1, 0, 0, 0]},
+       {"kind": "split", "inputs": [11], "params": [2, 0, 0, 0]},
+       {"kind": "constant", "type": "float", "params": [1.0, 0.0, 0.0, 0.0]},
+       {"kind": "combine4", "inputs": [12, 13, 14, 15]},
+       {"kind": "output", "inputs": [16]}
+     ]}}
+  ],
+  "triggers": []
+}

@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.toon",
+  "version": "1.0.0",
+  "display_name": "Toon",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "toon", "type": "stylize.pass", "inputs": {"frame": "camera"}, "params": {}, "stylize": {"mode": "toon", "threshold": 0.2, "levels": 8.0}}
+  ],
+  "triggers": []
+}

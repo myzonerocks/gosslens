@@ -78,6 +78,17 @@ pub const FaceResult = face.Result;
 pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
+/// Re-exported for the conformance harness, which reads a face result's raw
+/// landmarks and needs the same loops the face-part mattes fill.
+pub const outer_lip_loop = face.outer_lip_loop;
+pub const left_eye_loop = face.left_eye_loop;
+pub const right_eye_loop = face.right_eye_loop;
+pub const left_brow_loop = face.left_brow_loop;
+pub const right_brow_loop = face.right_brow_loop;
+pub const left_iris_loop = face.left_iris_loop;
+pub const right_iris_loop = face.right_iris_loop;
+pub const inner_lip_loop = face.inner_lip_loop;
+
 pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
@@ -184,6 +195,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
+    "goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
+    "goss_status goss_session_set_makeup_reference(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height, const float *landmarks, uint32_t landmark_count)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
     "void goss_session_disable_beauty(goss_session *session)",
     "goss_status goss_session_set_beauty(goss_session *session, int32_t effect, float value)",
@@ -333,6 +346,11 @@ pub const Engine = struct {
     /// leaving the chain's two ping-pong targets free to hold the frame
     /// being read and the composite being written.
     bloom_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
+    /// An edge.pass canny node's own scratch pair, sized alongside
+    /// chain_targets: the blur, directional sobel, non-maximum suppression
+    /// and hysteresis stages ping-pong through these two, leaving the chain's
+    /// own targets holding the frame being read and the result being written.
+    edge_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
     chain_width: u16 = 0,
     chain_height: u16 = 0,
     /// Dedicated target for goss_engine_capture_frame - separate from
@@ -576,6 +594,10 @@ pub const Session = struct {
     /// joints (knees down) read absent, for selfie framing with the legs out.
     pose_upper_body: bool = false,
     segmentation_worker: ?*segmentation.Segmentation = null,
+    /// Monotonic timestamp for still images fed to the segmenter through
+    /// goss_session_submit_segmentation_image, so each submit orders after the
+    /// last the way successive camera frames do.
+    segmentation_image_seq: i64 = 0,
     /// The most recent mask, uploaded as a real GPU texture the same way
     /// a lut.pass asset is - a raw byte array has no reason to cross the
     /// frozen ABI surface when nothing outside the render thread ever
@@ -685,6 +707,34 @@ pub const Session = struct {
     fog_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     /// outline.pass nodes by graph index: their line color (rgb) and threshold.
     outline_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// outline.pass nodes that trace a mask channel's edge instead of depth,
+    /// by graph index, holding the channel (0 person, else a class).
+    outline_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// tint.pass nodes by graph index: their color (rgb) and opacity.
+    tint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// tint.pass nodes' mask channel by graph index (0 person, else a class).
+    tint_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// tint.pass nodes whose color comes from the makeup reference, not the
+    /// static field, by graph index.
+    tint_reference: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    /// Per-face-part color sampled from a reference photo by
+    /// goss_session_set_makeup_reference; a reference-sourced tint.pass reads
+    /// its channel's entry instead of a static color. null until set.
+    makeup_reference: [manifest.mask_channels.len]?[3]f32 = @splat(null),
+    /// smooth.pass nodes by graph index: their retouch amount.
+    smooth_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// smooth.pass nodes' mask channel by graph index (0 person, else a class).
+    smooth_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// stylize.pass nodes by graph index: their artistic filter packed for
+    /// u_stylize (mode, strength, threshold, levels), resolved at activation.
+    stylize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// edge.pass nodes by graph index: their detector packed as (mode, low,
+    /// high, blur_radius, strength, invert), resolved at activation.
+    edge_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [6]f32) = .empty,
+    /// warp.pass nodes by graph index: their distortion packed as (mode,
+    /// center_x, center_y, radius, strength, refractive_index, aspect_auto, 0),
+    /// resolved at activation.
+    warp_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [8]f32) = .empty,
     /// ssr.pass nodes by graph index: their reflection strength and floor plane.
     ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
@@ -842,10 +892,11 @@ pub const Session = struct {
     /// One bgfx texture per env.pass node whose equirect image finished
     /// loading, sampled by the camera pose instead of the gradient.
     env_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
-    /// The parametric color grade of each spliced grade.pass node, packed
-    /// as (exposure, contrast, saturation, temperature) - resolved once at
-    /// activation since grade.pass ships no asset and needs no loader.
-    grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// The color adjustment of each spliced grade.pass node, packed as
+    /// three vec4 (tone, white balance with hue, then posterize and
+    /// invert) - resolved once at activation since grade.pass ships no
+    /// asset and needs no loader.
+    grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [12]f32) = .empty,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1011,6 +1062,9 @@ pub fn destroyEngine(engine: *Engine) void {
     for (engine.bloom_targets) |slot| {
         if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
     }
+    for (engine.edge_targets) |slot| {
+        if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
+    }
     if (engine.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (engine.capture_staging) |staging| {
         if (engine.renderer) |*r| r.destroyTexture(staging);
@@ -1038,6 +1092,10 @@ fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
     for (&e.bloom_targets) |*slot| {
+        if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+    }
+    for (&e.edge_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
@@ -1509,7 +1567,21 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Depth fog degrades the same way: it needs the submitted depth.
             .fog => s.fog_params.contains(entry.graph_index) and s.depth_texture != null,
             // The depth-edge outline needs the submitted depth to find edges.
-            .outline => s.outline_params.contains(entry.graph_index) and s.depth_texture != null,
+            .outline => s.outline_params.contains(entry.graph_index) and (s.outline_masks.contains(entry.graph_index) or s.depth_texture != null),
+            // A tint is a masked color layer: it needs both its params and a
+            // named mask channel, else it holds the frame through.
+            .tint => s.tint_params.contains(entry.graph_index) and s.tint_masks.contains(entry.graph_index),
+            // A smooth is masked too: it needs its amount and a mask channel.
+            .smooth => s.smooth_params.contains(entry.graph_index) and s.smooth_masks.contains(entry.graph_index),
+            // A stylize pass ships no asset; its packed params resolve at
+            // activation, so it is ready the moment they are in place.
+            .stylize => s.stylize_params.contains(entry.graph_index),
+            // An edge pass ships no asset either; its detector params resolve
+            // at activation, so it is ready as soon as they are in place.
+            .edge => s.edge_params.contains(entry.graph_index),
+            // A warp pass ships no asset; its distortion params resolve at
+            // activation, so it is ready as soon as they are in place.
+            .warp => s.warp_params.contains(entry.graph_index),
             // A motion trail owns the frame it echoes (a session target it
             // seeds from the current frame on the first pass), so it is ready
             // as soon as its echo amount is resolved - no host input to gate on.
@@ -1682,6 +1754,98 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (!is_final) next_slot += 1;
                 }
             },
+            .stylize => {
+                const params = s.stylize_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitStylizePass(view_id, input_texture, params);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .edge => {
+                const edge = s.edge_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const is_final = drawn == ready_count;
+                const texel = [2]f32{ 1.0 / @as(f32, @floatFromInt(width)), 1.0 / @as(f32, @floatFromInt(height)) };
+                if (edge[0] < 0.5) {
+                    // Single-pass sobel: mode 0, gain in .y, invert in .z.
+                    const view_id = next_view_id;
+                    next_view_id += 1;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    r.tile = if (is_final) s.capture_tile else null;
+                    if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                    r.submitEdgeSobel(view_id, input_texture, .{ 0.0, edge[4], edge[5], 0.0 }, texel);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                } else {
+                    // Canny: blur, directional sobel, non-maximum suppression
+                    // and hysteresis ping-pong through the two edge scratch
+                    // targets, leaving the frame in input_texture intact.
+                    const scratch0 = e.edge_targets[0] orelse continue;
+                    const scratch1 = e.edge_targets[1] orelse continue;
+                    const base_texture = input_texture;
+                    const blur_step = edge[3] / 4.0;
+                    r.tile = null;
+                    var edge_view = next_view_id;
+                    next_view_id += 1;
+                    render.Renderer.setViewTarget(edge_view, scratch0, width, height);
+                    r.submitBlurPass(edge_view, base_texture, .{ blur_step * texel[0], 0.0 });
+
+                    edge_view = next_view_id;
+                    next_view_id += 1;
+                    render.Renderer.setViewTarget(edge_view, scratch1, width, height);
+                    r.submitBlurPass(edge_view, scratch0.texture, .{ 0.0, blur_step * texel[1] });
+
+                    edge_view = next_view_id;
+                    next_view_id += 1;
+                    render.Renderer.setViewTarget(edge_view, scratch0, width, height);
+                    r.submitEdgeSobel(edge_view, scratch1.texture, .{ 1.0, 0.0, 0.0, 0.0 }, texel);
+
+                    edge_view = next_view_id;
+                    next_view_id += 1;
+                    render.Renderer.setViewTarget(edge_view, scratch1, width, height);
+                    r.submitEdgeNms(edge_view, scratch0.texture, .{ edge[1], edge[2], 0.0, 0.0 }, texel);
+
+                    const view_id = next_view_id;
+                    next_view_id += 1;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    r.tile = if (is_final) s.capture_tile else null;
+                    if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                    r.submitEdgeHyst(view_id, scratch1.texture, .{ edge[5], 0.0, 0.0, 0.0 }, texel);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                }
+            },
+            .warp => {
+                const wp = s.warp_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // aspect_auto (wp[6]) reshapes the region into a circle on
+                // screen by the source frame's own height/width, the way
+                // gpupixel's sphere filters do; off keeps it square.
+                const aspect = if (wp[6] > 0.5) @as(f32, @floatFromInt(height)) / @as(f32, @floatFromInt(width)) else 1.0;
+                r.submitWarpPass(view_id, input_texture, .{ wp[0], wp[1], wp[2], wp[3] }, .{ wp[4], wp[5], aspect, 0.0 });
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
             .dof => {
                 const params = s.dof_params.get(entry.graph_index) orelse continue;
                 const depth_tex = s.depth_texture orelse continue;
@@ -1716,7 +1880,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             },
             .outline => {
                 const line = s.outline_params.get(entry.graph_index) orelse continue;
-                const depth_tex = s.depth_texture orelse continue;
+                // Trace a named mask channel's edge when the node has one, else
+                // the submitted depth; an absent class serves the zero mask, so
+                // the outline degrades to nothing rather than drawing wrong.
+                const edge_tex = if (s.outline_masks.get(entry.graph_index)) |channel|
+                    (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
+                else
+                    s.depth_texture orelse continue;
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -1724,7 +1894,50 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitOutlinePass(view_id, input_texture, depth_tex, .{ line[0], line[1], line[2] }, line[3]);
+                r.submitOutlinePass(view_id, input_texture, edge_tex, .{ line[0], line[1], line[2] }, line[3]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .tint => {
+                const params = s.tint_params.get(entry.graph_index) orelse continue;
+                const channel = s.tint_masks.get(entry.graph_index) orelse continue;
+                // The named channel's mask keys the color layer; an absent
+                // class serves the zero mask, so the tint fades to nothing.
+                const mask_tex = if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture;
+                // A reference-sourced tint paints the channel in the makeup
+                // reference's sampled color, falling back to the static color
+                // when no reference is set.
+                const tint_color: [3]f32 = if (s.tint_reference.contains(entry.graph_index))
+                    (s.makeup_reference[channel] orelse [3]f32{ params[0], params[1], params[2] })
+                else
+                    [3]f32{ params[0], params[1], params[2] };
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitTintPass(view_id, input_texture, mask_tex, tint_color, params[3]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .smooth => {
+                const amount = s.smooth_params.get(entry.graph_index) orelse continue;
+                const channel = s.smooth_masks.get(entry.graph_index) orelse continue;
+                const mask_tex = if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitSmoothPass(view_id, input_texture, mask_tex, amount);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2704,6 +2917,15 @@ pub fn destroySession(session: *Session) void {
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
+    session.outline_masks.deinit(session.engine.gpa);
+    session.tint_params.deinit(session.engine.gpa);
+    session.tint_masks.deinit(session.engine.gpa);
+    session.tint_reference.deinit(session.engine.gpa);
+    session.smooth_params.deinit(session.engine.gpa);
+    session.smooth_masks.deinit(session.engine.gpa);
+    session.stylize_params.deinit(session.engine.gpa);
+    session.edge_params.deinit(session.engine.gpa);
+    session.warp_params.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
@@ -3040,6 +3262,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
         pollDepthOcclusion(s);
+        pollLandmarkMattes(s);
         if (e.recording != null and e.recording_session == s and !s.capture_requested) {
             if (s.current) |current| {
                 recording_frame = prepareRecordingFrame(e, r);
@@ -3136,6 +3359,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollDepthOcclusion(s);
+    pollLandmarkMattes(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
         const mirror = resolveMirror(s, current.desc.flags);
@@ -3250,6 +3474,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollDepthOcclusion(s);
+    pollLandmarkMattes(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
         const mirror = resolveMirror(s, current.desc.flags);
@@ -4989,6 +5214,72 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
     return .ok;
 }
 
+/// Segments a host-provided still RGBA image: converts it to NV12 and feeds
+/// the running segmenter, so the next render picks up the mask the same way a
+/// camera frame would. again when no segmenter is enabled.
+pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const pixels = rgba orelse return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    const worker = s.segmentation_worker orelse return .again;
+    const gpa = s.engine.gpa;
+    const w: usize = width;
+    const h: usize = height;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    const y_out = gpa.alloc(u8, w * h) catch return .out_of_memory;
+    defer gpa.free(y_out);
+    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return .out_of_memory;
+    defer gpa.free(uv_out);
+    const conv = math.color.rgbToYuv(.bt601, .video);
+    math.color.rgbaToNv12(pixels[0 .. w * h * 4], w, h, conv, y_out, uv_out);
+    s.segmentation_image_seq += 1;
+    segmentation.submitNv12(worker, width, height, s.segmentation_image_seq, conv, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
+    return .ok;
+}
+
+/// The mean RGB (0..1) of a reference image sampled at a landmark loop's
+/// points by nearest pixel, standing in for that face part's makeup color.
+fn averageLoopColor(rgba: []const u8, width: u32, height: u32, lm: [*]const f32, loop: []const u16) [3]f32 {
+    var sum: [3]f32 = .{ 0, 0, 0 };
+    var n: f32 = 0;
+    const max_x: f32 = @floatFromInt(width - 1);
+    const max_y: f32 = @floatFromInt(height - 1);
+    for (loop) |idx| {
+        const x: u32 = @intFromFloat(std.math.clamp(lm[@as(usize, idx) * 3], 0, max_x));
+        const y: u32 = @intFromFloat(std.math.clamp(lm[@as(usize, idx) * 3 + 1], 0, max_y));
+        const o = (@as(usize, y) * width + x) * 4;
+        sum[0] += @as(f32, @floatFromInt(rgba[o])) / 255.0;
+        sum[1] += @as(f32, @floatFromInt(rgba[o + 1])) / 255.0;
+        sum[2] += @as(f32, @floatFromInt(rgba[o + 2])) / 255.0;
+        n += 1;
+    }
+    if (n == 0) return .{ 0, 0, 0 };
+    return .{ sum[0] / n, sum[1] / n, sum[2] / n };
+}
+
+/// Samples a reference photo's makeup color per face part: each face-part loop
+/// averages the reference RGBA at its points, so a reference-sourced tint.pass
+/// paints the live face in the photo's color. The caller passes the reference
+/// face landmarks (478, reference-pixel space); a zero count clears it.
+pub export fn goss_session_set_makeup_reference(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32, landmarks: ?[*]const f32, landmark_count: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (landmark_count == 0) {
+        s.makeup_reference = @splat(null);
+        return .ok;
+    }
+    if (landmark_count != face.landmark_count) return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    const pixels = rgba orelse return .invalid_argument;
+    const lm = landmarks orelse return .invalid_argument;
+    const rgba_slice = pixels[0 .. @as(usize, width) * height * 4];
+    s.makeup_reference = @splat(null);
+    s.makeup_reference[manifest.lips_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.outer_lip_loop);
+    s.makeup_reference[manifest.eyes_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.left_eye_loop);
+    s.makeup_reference[manifest.brows_channel] = averageLoopColor(rgba_slice, width, height, lm, &face.left_brow_loop);
+    return .ok;
+}
+
 /// Normalizes the submitted depth (near..far metres) into an R8 texture the
 /// dof.pass samples, replacing the previous frame's. A best-effort upload:
 /// on allocation failure the old texture stays, so the pass just holds.
@@ -5411,24 +5702,241 @@ fn maskToTexture(mask: *const [segmentation.mask_len]f32) ?render.TextureHandle 
     return render.Renderer.createMaskTexture(segmentation.mask_side, segmentation.mask_side, &bytes);
 }
 
+/// Which model output class feeds a named mask channel. selfie_multiclass
+/// lays its six labels in mask_channels[1..model_class_end] order, so channel
+/// c reads class c-1. Channels past that range derive another way and any
+/// other model's order is unknown, so both serve the zero mask.
+fn classChannelSource(class_count: u32, channel: usize) ?u32 {
+    if (channel >= manifest.model_class_end) return null;
+    if (class_count == manifest.model_class_end - 1) return @intCast(channel - 1);
+    return null;
+}
+
+/// When depth is submitted alongside the segmenter, prunes subject pixels the
+/// depth places at or behind the occlusion plane, so the two fuse into a
+/// sharper cut than the segmentation mask alone. No depth leaves it untouched.
+fn fuseDepthIntoMask(session: *Session, mask: *[segmentation.mask_len]f32) void {
+    if (session.depth_data.len == 0) return;
+    const plane = (session.depth_near + session.depth_far) * 0.5;
+    const side = segmentation.mask_side;
+    for (0..side) |y| {
+        for (0..side) |x| {
+            const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(side));
+            const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(side));
+            const scene = depthAt(session, u, v) orelse continue;
+            if (scene > 0 and scene >= plane) mask[y * side + x] = 0;
+        }
+    }
+}
+
 fn pollSegmentationMask(session: *Session) void {
     const worker = session.segmentation_worker orelse return;
     var mask: [segmentation.mask_len]f32 = undefined;
     if (!segmentation.readMask(worker, &mask)) return;
+    fuseDepthIntoMask(session, &mask);
 
     destroySegmentationTexture(session);
     session.segmentation_texture = maskToTexture(&mask);
 
-    // Class channels upload only when the active lens names them; the
-    // person channel (index zero) rides the subject texture above.
-    var it = session.shader_masks.valueIterator();
-    var needed: [manifest.mask_channels.len]bool = @splat(false);
-    while (it.next()) |channel| needed[channel.*] = true;
-    for (needed[1..], 1..) |need, channel| {
-        if (!need) continue;
-        if (!segmentation.readClassMask(worker, @intCast(channel - 1), &mask)) continue;
+    // Class channels upload only when a consumer of the active lens names
+    // them, shader or outline or tint, and the active model's label order
+    // maps to them; the person channel (index zero) rides the subject
+    // texture above.
+    const class_count = segmentation.classCount(worker);
+    for (1..manifest.mask_channels.len) |channel| {
+        if (!maskChannelNeeded(session, @intCast(channel))) continue;
+        const source = classChannelSource(class_count, channel) orelse continue;
+        if (!segmentation.readClassMask(worker, source, &mask)) continue;
         session.segmentation_class_textures[channel] = maskToTexture(&mask);
     }
+}
+
+/// True when any active mask consumer, shader or outline or tint, names this
+/// channel, so a class the running lens never reads is never built.
+fn maskChannelNeeded(session: *Session, channel: u8) bool {
+    var shader_it = session.shader_masks.valueIterator();
+    while (shader_it.next()) |c| if (c.* == channel) return true;
+    var outline_it = session.outline_masks.valueIterator();
+    while (outline_it.next()) |c| if (c.* == channel) return true;
+    var tint_it = session.tint_masks.valueIterator();
+    while (tint_it.next()) |c| if (c.* == channel) return true;
+    var smooth_it = session.smooth_masks.valueIterator();
+    while (smooth_it.next()) |c| if (c.* == channel) return true;
+    return false;
+}
+
+fn clearClassTexture(session: *Session, channel: u8) void {
+    if (session.engine.renderer) |*r| {
+        if (session.segmentation_class_textures[channel]) |texture| r.destroyTexture(texture);
+    }
+    session.segmentation_class_textures[channel] = null;
+}
+
+/// The current face landmarks projected into the [0,1] mask grid: the
+/// internal tracking worker where it runs, else the host-fed web set. Fills
+/// out with one (u, v) per landmark and returns true when a face is present.
+fn faceMattePoints(session: *Session, out: *[face.landmark_count][2]f32) bool {
+    const desc = (session.current orelse return false).desc;
+    const w: f32 = @floatFromInt(desc.width);
+    const h: f32 = @floatFromInt(desc.height);
+    if (w <= 0 or h <= 0) return false;
+    if (session.face_tracking) |worker| {
+        var result: face.Result = undefined;
+        if (tracking.readResult(worker, &result) and result.landmark_count_out > 0 and result.presence >= 0.5) {
+            for (0..face.landmark_count) |i| {
+                out[i] = .{ result.landmarks[i * 3] / w, result.landmarks[i * 3 + 1] / h };
+            }
+            return true;
+        }
+    }
+    if (session.web_face_landmarks) |landmarks| {
+        for (0..face.landmark_count) |i| out[i] = .{ landmarks[i].x / w, landmarks[i].y / h };
+        return true;
+    }
+    return false;
+}
+
+fn hullCross(o: [2]f32, a: [2]f32, b: [2]f32) f32 {
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+}
+
+/// Rasterizes the convex hull of the landmark points into the mask grid,
+/// without clearing, so several hulls union by filling in turn. Monotone
+/// chain over points sorted by x then y, then fillPolygon fills the hull.
+fn fillLandmarkHull(points: []const [2]f32, mask: *[segmentation.mask_len]f32) void {
+    if (points.len < 3 or points.len > face.landmark_count) return;
+    var pts_buf: [face.landmark_count][2]f32 = undefined;
+    @memcpy(pts_buf[0..points.len], points);
+    const pts = pts_buf[0..points.len];
+    std.sort.pdq([2]f32, pts, {}, struct {
+        fn lt(_: void, a: [2]f32, b: [2]f32) bool {
+            return if (a[0] == b[0]) a[1] < b[1] else a[0] < b[0];
+        }
+    }.lt);
+    var hull: [face.landmark_count * 2][2]f32 = undefined;
+    var k: usize = 0;
+    for (pts) |pt| {
+        while (k >= 2 and hullCross(hull[k - 2], hull[k - 1], pt) <= 0) k -= 1;
+        hull[k] = pt;
+        k += 1;
+    }
+    const upper_floor = k + 1;
+    var j: usize = pts.len - 1;
+    while (j > 0) : (j -= 1) {
+        const pt = pts[j - 1];
+        while (k >= upper_floor and hullCross(hull[k - 2], hull[k - 1], pt) <= 0) k -= 1;
+        hull[k] = pt;
+        k += 1;
+    }
+    const hull_len = k - 1;
+    fillPolygon(hull[0..hull_len], mask);
+}
+
+/// Rasterizes an ordered polygon into the mask grid by the even-odd rule,
+/// setting one inside without clearing, so several fills union. Sorts each
+/// scanline's edge crossings and fills between successive pairs, so a concave
+/// ring rasterizes as faithfully as a convex one.
+fn fillPolygon(poly: []const [2]f32, mask: *[segmentation.mask_len]f32) void {
+    if (poly.len < 3) return;
+    const side = segmentation.mask_side;
+    const side_f: f32 = @floatFromInt(side);
+    for (0..side) |y| {
+        const v = (@as(f32, @floatFromInt(y)) + 0.5) / side_f;
+        var xs: [face.landmark_count]f32 = undefined;
+        var n: usize = 0;
+        var e: usize = 0;
+        while (e < poly.len and n < xs.len) : (e += 1) {
+            const a = poly[e];
+            const b = poly[(e + 1) % poly.len];
+            if ((a[1] <= v) == (b[1] <= v)) continue;
+            xs[n] = a[0] + (v - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+            n += 1;
+        }
+        if (n < 2) continue;
+        std.sort.pdq(f32, xs[0..n], {}, struct {
+            fn lt(_: void, p: f32, q: f32) bool {
+                return p < q;
+            }
+        }.lt);
+        var i: usize = 0;
+        while (i + 1 < n) : (i += 2) {
+            var x0: i64 = @intFromFloat(@floor(xs[i] * side_f));
+            var x1: i64 = @intFromFloat(@ceil(xs[i + 1] * side_f));
+            if (x0 < 0) x0 = 0;
+            if (x1 > @as(i64, @intCast(side))) x1 = @intCast(side);
+            var x: i64 = x0;
+            while (x < x1) : (x += 1) mask[y * side + @as(usize, @intCast(x))] = 1;
+        }
+    }
+}
+
+/// Builds the landmark-derived mattes each frame: the face hull feeds the
+/// head channel, every tracked hand's hull unions into the hand channel, so
+/// a mask consumer can rim or key those regions with no segmentation model.
+fn pollLandmarkMattes(session: *Session) void {
+    pollHeadMatte(session);
+    pollHandMatte(session);
+    pollFacePartMatte(session, manifest.lips_channel, &.{&face.outer_lip_loop});
+    pollFacePartMatte(session, manifest.eyes_channel, &.{ &face.left_eye_loop, &face.right_eye_loop });
+    pollFacePartMatte(session, manifest.brows_channel, &.{ &face.left_brow_loop, &face.right_brow_loop });
+    pollFacePartMatte(session, manifest.iris_channel, &.{ &face.left_iris_loop, &face.right_iris_loop });
+    pollFacePartMatte(session, manifest.teeth_channel, &.{&face.inner_lip_loop});
+}
+
+/// Builds a face-part matte channel from one or more landmark loops, unioned,
+/// when a lens names it: each loop is a ring of mesh landmark indices filled
+/// as a polygon, so a consumer can rim or tint the mouth or eyes with no
+/// segmentation model. No face this frame leaves the channel on the zero mask.
+fn pollFacePartMatte(session: *Session, channel: u8, loops: []const []const u16) void {
+    if (!maskChannelNeeded(session, channel)) return;
+    var points: [face.landmark_count][2]f32 = undefined;
+    if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
+    var mask: [segmentation.mask_len]f32 = undefined;
+    @memset(&mask, 0);
+    var ring: [face.landmark_count][2]f32 = undefined;
+    for (loops) |loop| {
+        for (loop, 0..) |idx, i| ring[i] = points[idx];
+        fillPolygon(ring[0..loop.len], &mask);
+    }
+    clearClassTexture(session, channel);
+    session.segmentation_class_textures[channel] = maskToTexture(&mask);
+}
+
+fn pollHeadMatte(session: *Session) void {
+    const head: u8 = manifest.head_channel;
+    if (!maskChannelNeeded(session, head)) return;
+    var points: [face.landmark_count][2]f32 = undefined;
+    if (!faceMattePoints(session, &points)) return clearClassTexture(session, head);
+    var mask: [segmentation.mask_len]f32 = undefined;
+    @memset(&mask, 0);
+    fillLandmarkHull(points[0..], &mask);
+    clearClassTexture(session, head);
+    session.segmentation_class_textures[head] = maskToTexture(&mask);
+}
+
+fn pollHandMatte(session: *Session) void {
+    const chan: u8 = manifest.hand_channel;
+    if (!maskChannelNeeded(session, chan)) return;
+    const worker = session.hand_tracking orelse return clearClassTexture(session, chan);
+    const desc = (session.current orelse return clearClassTexture(session, chan)).desc;
+    const w: f32 = @floatFromInt(desc.width);
+    const h: f32 = @floatFromInt(desc.height);
+    var result: hand.Result = undefined;
+    if (w <= 0 or h <= 0 or !tracking.hand_worker.readResult(worker, &result) or result.hand_count == 0) {
+        return clearClassTexture(session, chan);
+    }
+    var mask: [segmentation.mask_len]f32 = undefined;
+    @memset(&mask, 0);
+    var any = false;
+    for (result.hands[0..result.hand_count]) |tracked| {
+        if (tracked.presence < 0.5) continue;
+        var pts: [hand.landmark_count][2]f32 = undefined;
+        for (0..hand.landmark_count) |i| pts[i] = .{ tracked.landmarks[i * 3] / w, tracked.landmarks[i * 3 + 1] / h };
+        fillLandmarkHull(pts[0..], &mask);
+        any = true;
+    }
+    clearClassTexture(session, chan);
+    if (any) session.segmentation_class_textures[chan] = maskToTexture(&mask);
 }
 
 /// When the host submits depth and no in-engine segmenter runs, the depth
@@ -5490,6 +5998,15 @@ fn destroyBlendState(session: *Session) void {
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
+    session.outline_masks.clearRetainingCapacity();
+    session.tint_params.clearRetainingCapacity();
+    session.tint_masks.clearRetainingCapacity();
+    session.tint_reference.clearRetainingCapacity();
+    session.smooth_params.clearRetainingCapacity();
+    session.smooth_masks.clearRetainingCapacity();
+    session.stylize_params.clearRetainingCapacity();
+    session.edge_params.clearRetainingCapacity();
+    session.warp_params.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
     session.ssr_params.clearRetainingCapacity();
     session.env_params.clearRetainingCapacity();
@@ -5887,6 +6404,11 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createDofParams(s, gpa) catch {};
     createFogParams(s, gpa) catch {};
     createOutlineParams(s, gpa) catch {};
+    createTintParams(s, gpa) catch {};
+    createSmoothParams(s, gpa) catch {};
+    createStylizeParams(s, gpa) catch {};
+    createEdgeParams(s, gpa) catch {};
+    createWarpParams(s, gpa) catch {};
     createTrailParams(s, gpa) catch {};
     createSsrParams(s, gpa) catch {};
     createEnvParams(s, gpa) catch {};
@@ -5972,6 +6494,65 @@ fn createOutlineParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(outlines);
     for (outlines) |o| {
         session.outline_params.put(gpa, o.graph_index, .{ o.color[0], o.color[1], o.color[2], o.threshold }) catch {};
+        if (o.mask_channel) |channel| session.outline_masks.put(gpa, o.graph_index, channel) catch {};
+    }
+}
+
+/// Resolves the active lens's tint.pass nodes into session.tint_params and
+/// tint_masks, once at activation - mirrors createOutlineParams.
+fn createTintParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const tints = try lens.tintPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(tints);
+    for (tints) |tp| {
+        session.tint_params.put(gpa, tp.graph_index, .{ tp.color[0], tp.color[1], tp.color[2], tp.opacity }) catch {};
+        if (tp.mask_channel) |channel| session.tint_masks.put(gpa, tp.graph_index, channel) catch {};
+        if (tp.from_reference) session.tint_reference.put(gpa, tp.graph_index, {}) catch {};
+    }
+}
+
+/// Resolves the active lens's smooth.pass nodes into session.smooth_params and
+/// smooth_masks, once at activation - mirrors createTintParams.
+fn createSmoothParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const smooths = try lens.smoothPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(smooths);
+    for (smooths) |sp| {
+        session.smooth_params.put(gpa, sp.graph_index, sp.amount) catch {};
+        if (sp.mask_channel) |channel| session.smooth_masks.put(gpa, sp.graph_index, channel) catch {};
+    }
+}
+
+/// Resolves the active lens's stylize.pass nodes into session.stylize_params,
+/// once at activation - mirrors createGradeParams, no asset or loader.
+fn createStylizeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const stylizes = try lens.stylizePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(stylizes);
+    for (stylizes) |yp| {
+        session.stylize_params.put(gpa, yp.graph_index, yp.params) catch {};
+    }
+}
+
+/// Resolves the active lens's edge.pass nodes into session.edge_params,
+/// once at activation - mirrors createStylizeParams, no asset or loader.
+fn createEdgeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const edges = try lens.edgePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(edges);
+    for (edges) |ep| {
+        session.edge_params.put(gpa, ep.graph_index, ep.params) catch {};
+    }
+}
+
+/// Resolves the active lens's warp.pass nodes into session.warp_params,
+/// once at activation - mirrors createEdgeParams, no asset or loader.
+fn createWarpParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const warps = try lens.warpPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(warps);
+    for (warps) |wp| {
+        session.warp_params.put(gpa, wp.graph_index, wp.params) catch {};
     }
 }
 
@@ -6943,6 +7524,11 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createDofParams(session, gpa);
     try createFogParams(session, gpa);
     try createOutlineParams(session, gpa);
+    try createTintParams(session, gpa);
+    try createSmoothParams(session, gpa);
+    try createStylizeParams(session, gpa);
+    try createEdgeParams(session, gpa);
+    try createWarpParams(session, gpa);
     try createTrailParams(session, gpa);
     try createSsrParams(session, gpa);
     try createEnvParams(session, gpa);

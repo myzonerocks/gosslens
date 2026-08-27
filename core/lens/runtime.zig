@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, tint_pass, smooth_pass, stylize_pass, edge_pass, warp_pass, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -53,6 +53,11 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "dof.pass")) return .dof_pass;
     if (std.mem.eql(u8, type_str, "fog.pass")) return .fog_pass;
     if (std.mem.eql(u8, type_str, "outline.pass")) return .outline_pass;
+    if (std.mem.eql(u8, type_str, "tint.pass")) return .tint_pass;
+    if (std.mem.eql(u8, type_str, "smooth.pass")) return .smooth_pass;
+    if (std.mem.eql(u8, type_str, "stylize.pass")) return .stylize_pass;
+    if (std.mem.eql(u8, type_str, "edge.pass")) return .edge_pass;
+    if (std.mem.eql(u8, type_str, "warp.pass")) return .warp_pass;
     if (std.mem.eql(u8, type_str, "trail.pass")) return .trail_pass;
     if (std.mem.eql(u8, type_str, "ssr.pass")) return .ssr_pass;
     if (std.mem.eql(u8, type_str, "env.pass")) return .env_pass;
@@ -85,7 +90,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .tint_pass, .smooth_pass, .stylize_pass, .edge_pass, .warp_pass, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
     };
 }
 
@@ -138,6 +143,16 @@ const LensNode = struct {
     fog: ?manifest.FogField = null,
     /// .outline_pass only: the node's line color and depth threshold.
     outline: ?manifest.OutlineField = null,
+    /// .tint_pass only: the node's color, opacity, and mask channel.
+    tint: ?manifest.TintField = null,
+    /// .smooth_pass only: the node's amount and mask channel.
+    smooth: ?manifest.SmoothField = null,
+    /// .stylize_pass only: the node's artistic mode and parameters.
+    stylize: ?manifest.StylizeField = null,
+    /// .edge_pass only: the node's detector mode and parameters.
+    edge: ?manifest.EdgeField = null,
+    /// .warp_pass only: the node's distortion mode and parameters.
+    warp: ?manifest.WarpField = null,
     /// .trail_pass only: the node's motion-trail echo amount.
     trail: ?manifest.TrailField = null,
     /// .ssr_pass only: the node's reflection strength and floor plane.
@@ -266,11 +281,11 @@ pub const VideoNode = struct {
 };
 
 /// One grade.pass node ready for the caller to draw - which graph node
-/// it is, and its parametric color grade packed as (exposure, contrast,
-/// saturation, temperature) for the renderer's u_grade uniform.
+/// it is, and its color adjustment packed as three vec4 for u_grade: tone,
+/// then white balance with hue, then posterize and invert.
 pub const GradePassNode = struct {
     graph_index: graph.NodeIndex,
-    grade: [4]f32,
+    grade: [12]f32,
 };
 
 /// One bloom.pass node ready for the caller to draw - which graph node it
@@ -296,6 +311,50 @@ pub const OutlinePassNode = struct {
     graph_index: graph.NodeIndex,
     color: [3]f32,
     threshold: f32,
+    /// The mask channel to outline, or null to trace the submitted depth.
+    mask_channel: ?u8,
+};
+
+pub const TintPassNode = struct {
+    graph_index: graph.NodeIndex,
+    color: [3]f32,
+    opacity: f32,
+    /// The mask channel the tint fills, null when the node named none.
+    mask_channel: ?u8,
+    /// Color comes from the makeup reference, not the static rgb.
+    from_reference: bool,
+};
+
+pub const SmoothPassNode = struct {
+    graph_index: graph.NodeIndex,
+    amount: f32,
+    /// The mask channel the smooth acts on, null when the node named none.
+    mask_channel: ?u8,
+};
+
+/// One stylize.pass node ready for the caller to draw - which graph node it
+/// is, and its artistic filter packed for u_stylize: the mode index, then
+/// strength, edge threshold, and colour quantization levels.
+pub const StylizePassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [4]f32,
+};
+
+/// One edge.pass node ready for the caller to draw - which graph node it is,
+/// and its detector packed as (mode, low, high, blur_radius, strength, invert):
+/// mode 0 draws a single-pass sobel, mode 1 the multi-pass canny chain.
+pub const EdgePassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [6]f32,
+};
+
+/// One warp.pass node ready for the caller to draw - which graph node it is,
+/// and its distortion packed as (mode, center_x, center_y, radius, strength,
+/// refractive_index, aspect_auto, unused). mode 0 glass_sphere, 1
+/// sphere_refraction, 2 bulge, 3 pinch, 4 swirl.
+pub const WarpPassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [8]f32,
 };
 
 pub const TrailPassNode = struct {
@@ -319,7 +378,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, trail, ssr, env, model, mesh, draw_board, sprite };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, tint, smooth, stylize, edge, warp, trail, ssr, env, model, mesh, draw_board, sprite };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -458,7 +517,12 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .grade_pass) continue;
             const gr = node.grade orelse manifest.GradeField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .grade = .{ gr.exposure, gr.contrast, gr.saturation, gr.temperature } });
+            const hue_rad: f32 = gr.hue * (std.math.pi / 180.0);
+            try out.append(gpa, .{ .graph_index = node.graph_index, .grade = .{
+                gr.exposure, gr.contrast, gr.saturation, gr.temperature,
+                gr.brightness, hue_rad,   gr.tint,       gr.grayscale,
+                gr.invert,    gr.posterize, 0,           0,
+            } });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -518,7 +582,85 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .outline_pass) continue;
             const o = node.outline orelse manifest.OutlineField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ o.r, o.g, o.b }, .threshold = o.threshold });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ o.r, o.g, o.b }, .threshold = o.threshold, .mask_channel = o.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every tint.pass node this lens spliced, in execution order, each
+    /// carrying its color, opacity, and mask channel.
+    pub fn tintPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]TintPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(TintPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .tint_pass) continue;
+            const tf = node.tint orelse manifest.TintField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ tf.r, tf.g, tf.b }, .opacity = tf.opacity, .mask_channel = tf.mask_channel, .from_reference = tf.from_reference });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every smooth.pass node this lens spliced, in execution order, each
+    /// carrying its retouch amount and mask channel.
+    pub fn smoothPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]SmoothPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(SmoothPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .smooth_pass) continue;
+            const sf = node.smooth orelse manifest.SmoothField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .amount = sf.amount, .mask_channel = sf.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every stylize.pass node this lens spliced, in execution order, each
+    /// carrying its artistic filter packed for u_stylize (mode index, then
+    /// strength, threshold, and quantization levels).
+    pub fn stylizePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]StylizePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(StylizePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .stylize_pass) continue;
+            const yf = node.stylize orelse manifest.StylizeField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(yf.mode)), yf.strength, yf.threshold, yf.levels } });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every edge.pass node this lens spliced, in execution order, each
+    /// carrying its detector packed as (mode, low, high, blur_radius,
+    /// strength, invert) - mode 0 sobel, mode 1 canny.
+    pub fn edgePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]EdgePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(EdgePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .edge_pass) continue;
+            const ef = node.edge orelse manifest.EdgeField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(ef.mode)), ef.low_threshold, ef.high_threshold, ef.blur_radius, ef.strength, if (ef.invert) 1 else 0 } });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every warp.pass node this lens spliced, in execution order, each
+    /// carrying its distortion packed as (mode, center_x, center_y, radius,
+    /// strength, refractive_index, aspect_auto, unused).
+    pub fn warpPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]WarpPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(WarpPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .warp_pass) continue;
+            const wf = node.warp orelse manifest.WarpField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(wf.mode)), wf.center_x, wf.center_y, wf.radius, wf.strength, wf.refractive_index, if (wf.aspect_auto) 1 else 0, 0 } });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -669,6 +811,11 @@ pub const Lens = struct {
                 .dof_pass => .dof,
                 .fog_pass => .fog,
                 .outline_pass => .outline,
+                .tint_pass => .tint,
+                .smooth_pass => .smooth,
+                .stylize_pass => .stylize,
+                .edge_pass => .edge,
+                .warp_pass => .warp,
                 .trail_pass => .trail,
                 .ssr_pass => .ssr,
                 .env_pass => .env,
@@ -899,6 +1046,11 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .dof = if (node_type == .dof_pass) node.dof else null,
             .fog = if (node_type == .fog_pass) node.fog else null,
             .outline = if (node_type == .outline_pass) node.outline else null,
+            .tint = if (node_type == .tint_pass) node.tint else null,
+            .smooth = if (node_type == .smooth_pass) node.smooth else null,
+            .stylize = if (node_type == .stylize_pass) node.stylize else null,
+            .edge = if (node_type == .edge_pass) node.edge else null,
+            .warp = if (node_type == .warp_pass) node.warp else null,
             .trail = if (node_type == .trail_pass) node.trail else null,
             .ssr = if (node_type == .ssr_pass) node.ssr else null,
             .env = if (node_type == .env_pass) node.env else null,

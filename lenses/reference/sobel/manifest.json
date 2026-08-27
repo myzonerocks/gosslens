@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.sobel",
+  "version": "1.0.0",
+  "display_name": "Sobel Edges",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "sobel", "type": "edge.pass", "inputs": {"frame": "camera"}, "params": {}, "edge": {"mode": "sobel", "strength": 2.0}}
+  ],
+  "triggers": []
+}
