@@ -9,6 +9,7 @@ const graph = @import("graph");
 const math = @import("math");
 const gltf = @import("gltf");
 const render = @import("render");
+const image = @import("image");
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_NONE", "1");
@@ -200,17 +201,9 @@ fn writePpm(path: []const u8, w: u32, h: u32, pitch: u32, bgra: [*]const u8, yfl
     const body = try gpa.alloc(u8, 64 + w * h * 3);
     defer gpa.free(body);
     const header = try std.fmt.bufPrint(body[0..64], "P6\n{d} {d}\n255\n", .{ w, h });
-    var len: usize = header.len;
-    for (0..h) |row_index| {
-        const source_row = if (yflip) h - 1 - row_index else row_index;
-        const row = bgra[source_row * pitch ..][0 .. w * 4];
-        for (0..w) |x| {
-            body[len] = row[x * 4 + 2];
-            body[len + 1] = row[x * 4 + 1];
-            body[len + 2] = row[x * 4];
-            len += 3;
-        }
-    }
+    // BGRA to tightly packed 24-bit RGB, flipped to match the screenshot.
+    try image.bgraToRgb(bgra, pitch, body[header.len..].ptr, w * 3, w, h, yflip);
+    const len = header.len + w * h * 3;
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = path, .data = body[0..len] });
 }
 

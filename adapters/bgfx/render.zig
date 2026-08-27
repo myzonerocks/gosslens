@@ -7,6 +7,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const math = @import("math");
+const image = @import("image");
 const blobs = @import("shader_blobs");
 const makeup_mesh = @import("makeup_mesh");
 const face_mesh_topology = @import("face_mesh_topology");
@@ -1191,14 +1192,8 @@ pub const Renderer = struct {
             }
             const mem = c.bgfx_alloc(@as(u32, width) * height * 4) orelse return self.handle;
             const dst: [*]u8 = mem.*.data;
-            for (0..height) |row| {
-                const src_row = data[(height - 1 - row) * stride ..];
-                const dst_row = dst[row * width * 4 ..];
-                for (0..width) |col| {
-                    const src_col = width - 1 - col;
-                    @memcpy(dst_row[col * 4 ..][0..4], src_row[src_col * 4 ..][0..4]);
-                }
-            }
+            // Both axes reversed (a half turn) matches uploadRgba's flip.
+            image.argbRotate(data, stride, dst, @as(u32, width) * 4, width, height, .half) catch return self.handle;
             c.bgfx_update_texture_2d(self.handle, 0, 0, 0, 0, width, height, mem, std.math.maxInt(u16));
             return self.handle;
         }
@@ -2568,18 +2563,10 @@ pub const Renderer = struct {
 
         // Both axes reversed: bgfx's HTML5/WebGL2 backend samples (0,0)
         // as the last pixel of an uploaded 2D texture, not the first. The
-        // reversed copy lands in a ring slot referenced through make_ref,
-        // matching the old bgfx_alloc path byte for byte.
+        // reversed copy lands in a ring slot referenced through make_ref.
         const size: usize = @as(usize, width) * height * 4;
         const dst = r.rgba_ring.next(r.gpa, size) orelse return error.OutOfMemory;
-        for (0..height) |row| {
-            const src_row = rgba[(height - 1 - row) * stride ..];
-            const dst_row = dst[row * width * 4 ..];
-            for (0..width) |col| {
-                const src_col = width - 1 - col;
-                @memcpy(dst_row[col * 4 ..][0..4], src_row[src_col * 4 ..][0..4]);
-            }
-        }
+        image.argbRotate(rgba, stride, dst.ptr, @as(u32, width) * 4, width, height, .half) catch return error.Unsupported;
         c.bgfx_update_texture_2d(cache.texture, 0, 0, 0, 0, width, height, c.bgfx_make_ref(dst.ptr, @intCast(size)), std.math.maxInt(u16));
 
         return cache.texture;

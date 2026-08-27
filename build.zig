@@ -1093,6 +1093,7 @@ pub fn build(b: *std.Build) void {
         render_module.link_libc = true;
         addBgfxCallbacks(b, render_module);
         if (shader_blobs_module) |sb| render_module.addImport("shader_blobs", sb);
+        if (host_asset) |am| render_module.addImport("image", am.image) else render_module.addImport("image", imageStubModule(b, target, optimize));
 
         const harness_module = b.createModule(.{
             .root_source_file = b.path("harness/desktop.zig"),
@@ -1111,10 +1112,17 @@ pub fn build(b: *std.Build) void {
         harness_module.link_libc = true;
         if (shader_blobs_module) |sb| harness_module.addImport("shader_blobs", sb);
         harness_module.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
-        harness_module.addCSourceFile(.{
-            .file = b.path("harness/lodepng_impl.c"),
-            .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
-        });
+        if (host_asset) |am| {
+            // The real image adapter already compiles lodepng; importing it
+            // here is the one provider, so the decoder is not double-linked.
+            harness_module.addImport("image", am.image);
+        } else {
+            harness_module.addImport("image", imageStubModule(b, target, optimize));
+            harness_module.addCSourceFile(.{
+                .file = b.path("harness/lodepng_impl.c"),
+                .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+            });
+        }
         const harness_exe = b.addExecutable(.{
             .name = "harness",
             .root_module = harness_module,
@@ -1631,6 +1639,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     const gltf_android = if (have_cgltf_android) gltfModule(b, android_target, optimize, math_android) else null;
     const android_asset = realAssetModules(b, android_target, optimize, gltf_android);
     abi_android.addImport("image", android_asset.image);
+    render_android.addImport("image", android_asset.image);
     abi_android.addImport("asset", android_asset.asset);
     if (gltf_android) |gm| abi_android.addImport("gltf", gm);
     const jni_module = b.createModule(.{
@@ -3678,6 +3687,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     const gltf_ios = if (have_cgltf_ios) gltfModule(b, ios_target, optimize, math_ios) else null;
     const ios_asset = realAssetModules(b, ios_target, optimize, gltf_ios);
     abi_ios.addImport("image", ios_asset.image);
+    render_ios.addImport("image", ios_asset.image);
     abi_ios.addImport("asset", ios_asset.asset);
     if (gltf_ios) |gm| abi_ios.addImport("gltf", gm);
     const gosslens_ios = b.addLibrary(.{
@@ -4124,6 +4134,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("runtime", lens_runtime_em);
     const image_em = imageStubModule(b, em_target, .ReleaseSmall);
     abi_em.addImport("image", image_em);
+    render_em.addImport("image", image_em);
     const gltf_stub_em = gltfStubModule(b, em_target, .ReleaseSmall, math_em);
     abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em, gltf_stub_em));
     abi_em.addImport("gltf", gltf_stub_em);
@@ -4298,6 +4309,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     // on the search path, not Zig's own (nonexistent, for this target)
     // libc linkage.
     render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+    render_em.addImport("image", imageStubModule(b, em_target, .ReleaseSmall));
     addBgfxCallbacks(b, render_em);
 
     const driver_em = b.createModule(.{

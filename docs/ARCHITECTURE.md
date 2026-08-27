@@ -120,6 +120,16 @@ private converter in tracking, media, capture, or an SDK.
 "Central" means one CPU conversion path. It does not mean every frame is copied
 through libyuv.
 
+The one deliberate exception is the tracking module's tensor sampler in
+`core/tracking/sampler.zig`. It is a fused model-input sampler, not a general
+pixel converter: it inverse-maps each output tensor pixel back into the source
+and samples NV12 or RGBA bilinearly with rotation, letterboxing, and range
+scaling in one pass that reads the frame once and allocates nothing. libyuv
+cannot emit that shape, the sampler's color matrices come from
+`core/math/color.zig`, and every tracking pipeline shares it. Routing it through
+`adapters/image/` would force a full-frame conversion and copy onto the
+per-frame path for no fidelity gain, so it stays separate by design.
+
 ## Capability rails
 
 These capabilities ride existing seams rather than new machinery. Vendored

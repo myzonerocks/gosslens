@@ -6,6 +6,10 @@
 //! frames arrive as NV12 planes on devices and as packed RGBA elsewhere;
 //! both sample directly, NV12 through the exact color conversion for the
 //! frame's standard and range.
+//!
+//! This is a fused model-input sampler, not a general pixel converter, so
+//! it stays outside adapters/image by design; the recorded exception lives
+//! in docs/ARCHITECTURE.md under Media.
 
 const std = @import("std");
 const math = @import("math");

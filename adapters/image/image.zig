@@ -16,6 +16,28 @@ const c = @cImport({
 extern fn ABGRToJ420(src_abgr: [*]const u8, src_stride_abgr: c_int, dst_y: [*]u8, dst_stride_y: c_int, dst_u: [*]u8, dst_stride_u: c_int, dst_v: [*]u8, dst_stride_v: c_int, width: c_int, height: c_int) c_int;
 extern fn I420ToNV12(src_y: [*]const u8, src_stride_y: c_int, src_u: [*]const u8, src_stride_u: c_int, src_v: [*]const u8, src_stride_v: c_int, dst_y: [*]u8, dst_stride_y: c_int, dst_uv: [*]u8, dst_stride_uv: c_int, width: c_int, height: c_int) c_int;
 extern fn ARGBScale(src: [*]const u8, src_stride: c_int, src_w: c_int, src_h: c_int, dst: [*]u8, dst_stride: c_int, dst_w: c_int, dst_h: c_int, filtering: c_int) c_int;
+extern fn ARGBToNV12Matrix(src_argb: [*]const u8, src_stride: c_int, dst_y: [*]u8, dst_stride_y: c_int, dst_uv: [*]u8, dst_stride_uv: c_int, argb: *const ArgbConstants, width: c_int, height: c_int) c_int;
+extern fn ABGRToARGB(src: [*]const u8, src_stride: c_int, dst: [*]u8, dst_stride: c_int, width: c_int, height: c_int) c_int;
+extern fn ARGBRotate(src: [*]const u8, src_stride: c_int, dst: [*]u8, dst_stride: c_int, src_width: c_int, src_height: c_int, mode: c_int) c_int;
+extern fn ARGBMirror(src: [*]const u8, src_stride: c_int, dst: [*]u8, dst_stride: c_int, width: c_int, height: c_int) c_int;
+extern fn ARGBToRAW(src_argb: [*]const u8, src_stride: c_int, dst_raw: [*]u8, dst_stride: c_int, width: c_int, height: c_int) c_int;
+
+// libyuv's RGB-to-YUV coefficient tables, C-linkage globals picked by
+// standard and range. We only pass their address; the layout mirrors
+// libyuv's own struct so the pointer is well typed.
+const ArgbConstants = extern struct {
+    rgb_to_y: [32]u8,
+    rgb_to_u: [32]i8,
+    rgb_to_v: [32]i8,
+    add_y: [16]u16,
+    add_uv: [16]u16,
+};
+extern const kAbgrI601Constants: ArgbConstants;
+extern const kAbgrJPEGConstants: ArgbConstants;
+extern const kAbgrH709Constants: ArgbConstants;
+extern const kAbgrF709Constants: ArgbConstants;
+extern const kAbgrU2020Constants: ArgbConstants;
+extern const kAbgrV2020Constants: ArgbConstants;
 
 pub const Image = struct {
     width: u32,
@@ -64,6 +86,43 @@ pub fn rgbaToNv12(gpa: std.mem.Allocator, rgba: []const u8, width: u32, height: 
         return error.ConversionFailed;
     }
     if (I420ToNV12(y_out.ptr, @intCast(w), u_plane.ptr, @intCast(half_w), v_plane.ptr, @intCast(half_w), y_out.ptr, @intCast(w), uv_out.ptr, @intCast(half_w * 2), @intCast(width), @intCast(height)) != 0) {
+        return error.ConversionFailed;
+    }
+}
+
+/// The camera color standard and range the frame descriptor carries, the
+/// two axes that pick the RGB-to-YUV matrix. The GPU path selects the
+/// matching shader constants; this is the CPU side of the same choice.
+pub const Standard = enum { bt601, bt709, bt2020 };
+pub const Range = enum { video, full };
+
+fn argbConstantsFor(standard: Standard, range: Range) *const ArgbConstants {
+    return switch (standard) {
+        .bt601 => switch (range) {
+            .video => &kAbgrI601Constants,
+            .full => &kAbgrJPEGConstants,
+        },
+        .bt709 => switch (range) {
+            .video => &kAbgrH709Constants,
+            .full => &kAbgrF709Constants,
+        },
+        .bt2020 => switch (range) {
+            .video => &kAbgrU2020Constants,
+            .full => &kAbgrV2020Constants,
+        },
+    };
+}
+
+/// Converts tightly packed RGBA8 to NV12 for the caller's standard and
+/// range, straight through libyuv with no scratch plane. y_out holds
+/// width*height bytes, uv_out the interleaved half-resolution chroma.
+pub fn argbToNv12(rgba: []const u8, width: u32, height: u32, standard: Standard, range: Range, y_out: []u8, uv_out: []u8) ConvertError!void {
+    const w: usize = width;
+    const h: usize = height;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    if (rgba.len < w * h * 4 or y_out.len < w * h or uv_out.len < half_w * 2 * half_h) return error.ConversionFailed;
+    if (ARGBToNV12Matrix(rgba.ptr, @intCast(w * 4), y_out.ptr, @intCast(w), uv_out.ptr, @intCast(half_w * 2), argbConstantsFor(standard, range), @intCast(width), @intCast(height)) != 0) {
         return error.ConversionFailed;
     }
 }
@@ -127,6 +186,39 @@ test "undersized planes refuse" {
     try t.expectError(error.ConversionFailed, rgbaToNv12(t.allocator, &rgba, 2, 2, &y_plane, &uv_plane));
 }
 
+test "swapRedBlue turns rgba into bgra" {
+    var pixels = [_]u8{ 10, 20, 30, 40, 50, 60, 70, 80 };
+    try swapRedBlue(&pixels);
+    try t.expectEqualSlices(u8, &.{ 30, 20, 10, 40, 70, 60, 50, 80 }, &pixels);
+}
+
+test "argbToNv12 encodes bt709 video-range anchors" {
+    // Solid white lands near video-range luma 235, neutral chroma 128.
+    const white = [_]u8{ 255, 255, 255, 255 } ** 4;
+    var y: [4]u8 = undefined;
+    var uv: [2]u8 = undefined;
+    try argbToNv12(&white, 2, 2, .bt709, .video, &y, &uv);
+    for (y) |v| try t.expect(@abs(@as(i32, v) - 235) <= 1);
+    try t.expect(@abs(@as(i32, uv[0]) - 128) <= 1);
+    try t.expect(@abs(@as(i32, uv[1]) - 128) <= 1);
+}
+
+test "argbRotate half turn reverses both axes" {
+    // A 2x1 pair of distinct pixels comes back swapped after a half turn.
+    const src = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var dst: [8]u8 = undefined;
+    try argbRotate(&src, 8, &dst, 8, 2, 1, .half);
+    try t.expectEqualSlices(u8, &.{ 5, 6, 7, 8, 1, 2, 3, 4 }, &dst);
+}
+
+test "bgraToRgb drops alpha and reorders to rgb" {
+    // One BGRA pixel (B=1,G=2,R=3,A=4) packs to RGB (3,2,1).
+    const src = [_]u8{ 1, 2, 3, 4 };
+    var dst: [3]u8 = undefined;
+    try bgraToRgb(&src, 4, &dst, 3, 1, 1, false);
+    try t.expectEqualSlices(u8, &.{ 3, 2, 1 }, &dst);
+}
+
 /// Box-filter downscales tightly packed RGBA8 to the output size - the
 /// anti-aliasing pass for high-quality still capture. The box filter
 /// averages each channel independently, so RGBA vs libyuv's ABGR word
@@ -137,4 +229,36 @@ pub fn downsampleBox(src: []const u8, src_width: u32, src_height: u32, dst: []u8
     if (ARGBScale(src.ptr, @intCast(src_width * 4), @intCast(src_width), @intCast(src_height), dst.ptr, @intCast(dst_width * 4), @intCast(dst_width), @intCast(dst_height), 3) != 0) {
         return error.ConversionFailed;
     }
+}
+
+/// Swaps the red and blue channels of a packed 8-bit-per-channel image in
+/// place - RGBA to BGRA and back, the one reorder a WebRTC source needs.
+/// libyuv's ABGRToARGB is exactly that swizzle and is safe with src == dst.
+pub fn swapRedBlue(pixels: []u8) ConvertError!void {
+    const count: usize = pixels.len / 4;
+    if (count == 0) return;
+    if (ABGRToARGB(pixels.ptr, @intCast(count * 4), pixels.ptr, @intCast(count * 4), @intCast(count), 1) != 0) return error.ConversionFailed;
+}
+
+/// The rotations libyuv can apply while copying 4-byte-per-pixel data.
+pub const Rotation = enum(c_int) { none = 0, cw90 = 90, half = 180, cw270 = 270 };
+
+/// Rotates a packed 4-byte-per-pixel image into the caller's destination,
+/// no allocation. A half turn is the both-axes flip the live upload paths
+/// need to match a backend that samples the last texel as (0,0).
+pub fn argbRotate(src: [*]const u8, src_stride: u32, dst: [*]u8, dst_stride: u32, width: u32, height: u32, rotation: Rotation) ConvertError!void {
+    if (ARGBRotate(src, @intCast(src_stride), dst, @intCast(dst_stride), @intCast(width), @intCast(height), @intFromEnum(rotation)) != 0) return error.ConversionFailed;
+}
+
+/// Mirrors a packed 4-byte-per-pixel image horizontally into dst.
+pub fn argbMirror(src: [*]const u8, src_stride: u32, dst: [*]u8, dst_stride: u32, width: u32, height: u32) ConvertError!void {
+    if (ARGBMirror(src, @intCast(src_stride), dst, @intCast(dst_stride), @intCast(width), @intCast(height)) != 0) return error.ConversionFailed;
+}
+
+/// Packs BGRA8 into tightly interleaved 24-bit RGB, dropping alpha and
+/// optionally flipping top-to-bottom - the screenshot writer's one pixel
+/// step. A negative height is libyuv's own bottom-up-source convention.
+pub fn bgraToRgb(src: [*]const u8, src_stride: u32, dst: [*]u8, dst_stride: u32, width: u32, height: u32, flip: bool) ConvertError!void {
+    const h: c_int = if (flip) -@as(c_int, @intCast(height)) else @intCast(height);
+    if (ARGBToRAW(src, @intCast(src_stride), dst, @intCast(dst_stride), @intCast(width), h) != 0) return error.ConversionFailed;
 }

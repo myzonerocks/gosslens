@@ -3606,17 +3606,6 @@ pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, ou
     return .ok;
 }
 
-/// Swaps the red and blue channels of a packed 8-bit-per-channel image in
-/// place - RGBA to BGRA and back, the one difference a WebRTC source needs.
-fn swapRedBlue(pixels: []u8) void {
-    var i: usize = 0;
-    while (i + 3 < pixels.len) : (i += 4) {
-        const red = pixels[i];
-        pixels[i] = pixels[i + 2];
-        pixels[i + 2] = red;
-    }
-}
-
 /// The supported per-frame composited output for a live broadcast source:
 /// renders the current frame with the lens chain baked in and reads it back
 /// in a WebRTC-friendly format (rgba8, bgra8 or nv12), so a LiveKit or WebRTC
@@ -3654,24 +3643,17 @@ pub export fn goss_engine_capture_live_frame(engine: ?*Engine, session: ?*Sessio
         render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
         const ready_frame = render.Renderer.readTexture(staging, e.capture_convert.ptr);
         while (r.frame() < ready_frame) {}
-        // The readback is packed RGBA; rgbaToNv12 reads R,G,B in that order,
-        // so it needs no swizzle. BT.709 video range, the broadcast default.
-        const conv = math.color.rgbToYuv(.bt709, .video);
-        math.color.rgbaToNv12(e.capture_convert[0..rgba_size], wpx, hpx, conv, data[0..y_size], data[y_size..out_size]);
+        // The readback is packed RGBA and argbToNv12 reads R,G,B in that
+        // order, so no swizzle first. BT.709 video range broadcast default.
+        image.argbToNv12(e.capture_convert[0..rgba_size], @intCast(wpx), @intCast(hpx), .bt709, .video, data[0..y_size], data[y_size..out_size]) catch return .unsupported;
         return .ok;
     }
 
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, data);
     while (r.frame() < ready_frame) {}
-    if (format == pixel_format_bgra8) swapRedBlue(data[0..rgba_size]);
+    if (format == pixel_format_bgra8) image.swapRedBlue(data[0..rgba_size]) catch return .unsupported;
     return .ok;
-}
-
-test "swapRedBlue turns rgba into bgra" {
-    var pixels = [_]u8{ 10, 20, 30, 40, 50, 60, 70, 80 };
-    swapRedBlue(&pixels);
-    try std.testing.expectEqualSlices(u8, &.{ 30, 20, 10, 40, 70, 60, 50, 80 }, &pixels);
 }
 
 /// Renders the current frame with the lens chain baked in, landing the final
@@ -5523,7 +5505,7 @@ pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?
     const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return .out_of_memory;
     defer gpa.free(uv_out);
     const conv = math.color.rgbToYuv(.bt601, .video);
-    math.color.rgbaToNv12(pixels[0 .. w * h * 4], w, h, conv, y_out, uv_out);
+    image.argbToNv12(pixels[0 .. w * h * 4], @intCast(w), @intCast(h), .bt601, .video, y_out, uv_out) catch return .unsupported;
     s.segmentation_image_seq += 1;
     segmentation.submitNv12(worker, width, height, s.segmentation_image_seq, conv, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
     return .ok;
