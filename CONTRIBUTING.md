@@ -34,7 +34,7 @@ resolve the pinned compiler as `zig.exe`. The toolchain lands in the same
 elevation or developer mode is needed.
 
 The portable bar runs here: `zig build test`, `gate`, `abi`, `vendor-sync`,
-`fetch-models`, `lens-validate`, and `wasm`. The on-screen `harness` and
+`fetch-models`, `shaderc`, and `lens-validate`. The on-screen `harness` and
 `conformance` runners are macOS-only, so `zig build ci` is not the local bar on
 a Windows host; a change still has to clear it on macOS or Linux before it
 merges. Building the Android library needs the NDK named in `ANDROID_NDK_ROOT`
