@@ -102,6 +102,26 @@ A lens's triggers can also react to signals you already feed: `camera.zoom`,
 `head.nod`/`head.shake`/`head.tilt` follow the face tracker. The full grammar is
 in [the lens spec](../lenses/SPEC.md).
 
+## Scripted lenses
+
+`activateLens` splices a manifest's nodes in; the lens then runs on its own
+clock. Tick it once per render frame with the live signals it evaluates its
+triggers and script nodes against, and it drives whatever effect values, ramps,
+and QuickJS logic the manifest declares:
+
+    val signals = GossLensSignals()
+    signals.set(hasFace, handsPresent, tap = false,
+                worldTrackingState = 0.0, audioLevel = 0.0, blendshapes)
+    session.tickLens(dtUs, signals)
+
+Tick every frame even when no new tracking result landed, so the lens's own
+animation ramps advance at display rate rather than tracking cadence.
+`fireEvent(name)` hands the lens an app moment its `event('name')` triggers see
+for one tick; `parameterValue(name)` reads a live parameter back, including
+whatever a script node last wrote. `activateLensFromDirectory(path)` activates a
+packaged `.glens` bundle instead of raw JSON, compiling each shader pass for the
+running backend, and `deactivateLens` unsplices whatever is active.
+
 ## Multiple faces
 
 `enableFaceTracking` drives the single internal tracker, and a face-anchored
@@ -131,6 +151,64 @@ knee of the tracked figure:
 tracked hand:
 
     val tip = session.handJoint(Gosslens.HAND_JOINT_INDEX_TIP) ?: return
+
+## Hands and pose
+
+`enableFaceTracking` has hand and pose twins. Each stands its own worker up from
+a `.task` bundle and publishes a reusable result you read back per frame:
+
+    session.enableHandTracking(handTask, threads = 2)
+    session.enablePoseTracking(poseTask, threads = 2)
+
+    val hands = GossHandResult()
+    if (session.handResult(hands)) { /* hands.handCount, landmarks, gestures */ }
+
+    val pose = GossPoseResult()
+    if (session.poseResult(pose)) { /* pose.landmarkCount, pose.landmarks */ }
+
+A `gesture_recognizer.task` bundle additionally scores each hand's canned gesture
+into `hands.gestures` - open palm, fist, victory, and the rest; a plain hand
+landmarker leaves them `GESTURE_NONE`. `setPoseUpperBody(true)` trims the pose to
+the upper body when the legs sit out of frame. `disableHandTracking` and
+`disablePoseTracking` tear each worker down.
+
+## Segmentation
+
+A pass paints only the region of a named mask channel. Sixteen are addressable:
+person, background, hair, body_skin, face_skin, clothes and others come from the
+segmentation model; head, hand, lips, eyes, brows, iris and teeth ride the face
+and hand landmarks the trackers publish; contour and highlight cluster face
+landmarks for makeup shading. The manifest names the channel each pass acts on.
+
+To run the segmenter over a still you hold rather than the live camera frame,
+hand it in as RGBA8 and its mask reaches the active lens the way a camera
+frame's would:
+
+    session.submitSegmentationImage(rgba, width, height)
+
+## Beauty and makeup
+
+The beauty chain is a separate effect stack you stand up from a directory of its
+shader and image assets, then drive one effect at a time:
+
+    session.enableBeauty(resourceDir)
+    session.setSmooth(0.6f)
+    session.setLipstick(0.4f)
+
+`setSmooth`, `setWhiten`, `setThinFace`, `setBigEye`, `setLipstick` and
+`setBlush` each clamp to zero and one and are the named face of
+`setBeauty(effect, amount)`. A lens applies its own default beauty values on
+activation and animates them as its triggers fire, so a manifest and hand-set
+values drive the same chain.
+
+`setMakeupReference` samples a reference photo's makeup color per face part, so a
+tint.pass with a "reference" source paints the live face in that color. Pass the
+photo as RGBA8 with its own 478-point face landmarks; an empty array clears it:
+
+    session.setMakeupReference(rgba, width, height, referenceLandmarks)
+
+`beautifyFrame` runs the whole chain over one RGBA frame on the calling thread,
+the CPU path for a still you hold outside the render loop.
 
 ## Depth
 
@@ -173,6 +251,48 @@ and close it; the engine keeps the undo/redo stack and hands back the ribbon
 `setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x, y, z)`/`endARStroke` are the
 world-anchored twin: points are pushed in the world frame world tracking reports,
 so a stroke stays fixed in the scene.
+
+## Compositing
+
+The camera is the base layer; register more RGBA sources and arrange them into a
+split, grid, or picture-in-picture. Define a source, push frames into it, and
+set the layout:
+
+    session.defineSource("guest")
+    session.submitSourceFrameRgba("guest", rgba, width, height, stride)
+    session.setLayout(3)   // 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid, 5 overlay
+
+`setSourceComposite` gives a source its own blend: opacity, a matte from its
+alpha (key mode 1), or a chroma key against a color within a similarity
+threshold (key mode 2); the name "camera" addresses the base:
+
+    session.setSourceComposite("guest", opacity = 0.9f, keyMode = 2,
+                               keyG = 1f, similarity = 0.3f)
+
+`defineScreenShare` registers a source that letterboxes to fit its cell instead
+of stretching. `removeSource` drops one, and `clearLayout` returns to the camera
+alone.
+
+## Capture and recording
+
+`capturePhoto` renders the composited frame and returns it as PNG bytes,
+deterministic - the same pixels give the same bytes - for a share sheet or a
+saved still:
+
+    val png = engine.capturePhoto(session) ?: return
+
+`captureStill` is the high-resolution path: the frame at its own or a requested
+size, encoded PNG, JPEG or HEIC, with a color-space tag and an optional 16-bit
+PNG. `startRecording` opens an MP4 the renderer appends each rendered frame to,
+effects baked in, until `stopRecording`:
+
+    engine.startRecording(session, path, hevc = true)
+    // render frames as usual...
+    engine.stopRecording()
+
+`GossRecordingPolicy` and `GossCaptureUi` from Camera controls carry the clip
+cap, timer, night mode and the rest for your recorder and capture chrome; the
+engine stores the intent and you read it back and apply it.
 
 ## Lives and calls
 

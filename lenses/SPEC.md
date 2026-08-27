@@ -135,6 +135,18 @@ other nodes in the same list by their `id`:
 }
 ```
 
+The beauty node types run the engine's built-in landmark retouch and makeup.
+A `beauty.face` node softens skin with a `smooth` param (0..1) and brightens
+teeth with a `whiten` param (0..1). A `beauty.reshape` node reshapes the face
+by landmark: `thin_face` (0..1) narrows the jaw, `big_eye` (0..1) enlarges the
+eyes. A `beauty.lipstick` node tints the lips and a `beauty.blusher` node
+warms the cheeks, each driven by a single `blend` param (0..1) that fades the
+effect in. All four read the tracked face landmarks, so they declare the
+`face` capability and pass the frame through untouched without a tracked face,
+the standard capability degradation. They carry no mask field: the makeup
+region comes from the landmarks, not a named channel, which is what separates
+them from the mask-keyed `tint.pass` and `smooth.pass` passes below.
+
 A `model.gltf` node may add `"anchor": "face"`, pinning the model to the
 tracked head: the runtime fits the canonical face's metric geometry to
 the live landmarks and poses the model with that transform, so model
@@ -336,13 +348,17 @@ depth and holds the frame through when none is submitted. It ships no asset
 and defaults its fields.
 
 A `"tint.pass"` node is a masked color layer. It carries a `"tint": {"color",
-"opacity", "mask", "source"}` block: it blends `color` (three 0..1 numbers)
-into the region a named `mask` channel marks, scaled by the mask and
+"opacity", "mask", "source", "blend"}` block: it folds `color` (three 0..1
+numbers) into the region a named `mask` channel marks, scaled by the mask and
 `opacity` (0..1), so a face-part matte or a segmentation class reads as soft
-makeup. With `"source": "reference"` the color comes from the makeup
-reference set through the ABI for that channel instead of the static rgb. A
-tint naming no mask, or a channel the running lens never fills, serves the
-zero mask and draws nothing.
+makeup. `blend` picks how the color folds in: `normal` (the default) blends
+straight toward the color for flat makeup, `multiply` darkens through it for a
+contour shadow, and `screen` lightens through it for a highlight, the two
+folds keeping the skin texture a flat blend would wash out. With
+`"source": "reference"` the color comes from the makeup reference set through
+the ABI for that channel instead of the static rgb. A tint naming no mask, or
+a channel the running lens never fills, serves the zero mask and draws
+nothing.
 
 A `"smooth.pass"` node is a masked detail pass. It carries a `"smooth":
 {"amount", "mask"}` block: it mixes the masked region toward a small neighbor
@@ -498,9 +514,10 @@ which is what lets a scripted lens be conformance bit-stable.
 
 The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
-compose the runtime's built-in ones (capture input, beauty filters, shader
+compose the runtime's built-in ones (capture input, the beauty nodes, shader
 passes reading `shaders/*.glsl`, the post-effect passes blur/grade/bloom/
-dof/fog/outline/trail/ssr/env, glTF model draws, LUT passes, compositing,
+dof/fog/outline/tint/smooth/matte/stylize/edge/warp/trail/ssr/env, glTF model
+draws, LUT passes, compositing,
 the draw board, the layout composite, the 2D sprite, the 2D text, the
 `video.texture` node, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
@@ -611,14 +628,24 @@ shared by every lens shader pass: `a_position`/`a_texcoord0` in,
 fragment shader is GLSL source written to that contract (bgfx's shader
 dialect: `$input v_texcoord0`, `#include <bgfx_shader.sh>`).
 
-A `shader.pass` node may also name a segmentation mask channel with a
-`mask` field: `person`, `background`, `hair`, `body_skin`, `face_skin`,
-`clothes`, or `others`. The shader then reads it through
-`SAMPLER2D(s_texMask, 2)` beside the frame's own `s_texColor`. When the
-running session cannot provide the channel (segmentation disabled, or a
-single-class model without it), the sampler serves the all-foreground
-default, the same degradation rule every capability follows. An unknown
-channel name fails validation.
+A `shader.pass` node may also name a mask channel with a `mask` field. The
+valid channel names are the same set every mask-keyed node draws from
+(`tint.pass`, `smooth.pass`, `matte.refine`, `outline.pass`). Seven come from
+the segmentation model: `person`, `background`, `hair`, `body_skin`,
+`face_skin`, `clothes`, `others`. Nine more ride the face and hand landmarks
+rather than a segmentation model: `head` and `hand` follow the tracked head
+and hand, `lips`, `eyes`, `brows`, `iris`, and `teeth` are the face parts, and
+`contour` and `highlight` are clustered face regions (contour the cheekbone
+hollows, nose sides, and jaw; highlight the cheekbone tops, brow bones, nose
+bridge, cupid's bow, and chin), so a makeup lens keys those two directly. The
+shader reads the channel through `SAMPLER2D(s_texMask, 2)` beside the frame's
+own `s_texColor`. When a named channel has no live data (segmentation
+disabled, a single-class model without it, or no face or hand tracked for a
+landmark channel), the sampler serves the zero mask so the masked effect draws
+nothing, the same degradation rule every capability follows. A `shader.pass`
+that names no channel at all samples the all-foreground default instead, so a
+shader that reads `s_texMask` without keying a channel still runs over the
+whole frame. An unknown channel name fails validation.
 
 Compilation happens at package time, not on the device: the engine's pinned
 shader toolchain runs wherever a bundle is built or validated, producing
@@ -720,12 +747,13 @@ never through code.**
 
 ## 9. Conformance
 
-The reference set (`lenses/reference/`) has 115 lens bundles, at least one
+The reference set (`lenses/reference/`) has 151 lens bundles, at least one
 per node type and capability class the format defines: shader passes, the
-beauty nodes, `mesh.face`, glTF models and the face, body, skeleton, and
-world anchors, physics bodies with joints and jiggle, cloth, strand hair,
-CPU and GPU particles, material graphs, the post-effect passes, and the
-sprite, text, video, script, and audio-playback paths. The validator runs
+beauty nodes and the masked makeup passes, `mesh.face`, glTF models and the
+face, body, skeleton, and world anchors, physics bodies with joints and
+jiggle, cloth, strand hair, CPU and GPU particles, material graphs, the
+post-effect passes, and the sprite, text, video, script, and audio-playback
+paths. The validator runs
 against every one in CI (`lens-validate-reference`). A core subset also
 runs end to end through the production ABI in the pixel-hash conformance
 harness: shader-tint (no capabilities), beauty-baseline (face),

@@ -1,14 +1,16 @@
 # API
 
-Gosslens has one C ABI and three public SDKs: Swift, Kotlin, and TypeScript.
-The ABI is the engine contract. This file is the public SDK naming and shape
-contract built on top of it.
+Gosslens has one C ABI and five SDKs on top of it: Swift, Kotlin, TypeScript,
+C, and the Android JNI binding. The ABI is the engine contract. This file is
+the public SDK naming and shape contract built on top of it.
 
-The ABI is also consumable directly. [sdk/c](../sdk/c) packages
-[include/gosslens.h](../include/gosslens.h) as a linkable library, so any
-language with a C FFI reaches the engine through the `goss_*` functions as they
-are spelled here. The C surface uses those names unchanged; the naming rules
-below govern the wrappers that rename them for a host language.
+The C SDK is the ABI packaged as a first-class SDK of its own.
+[sdk/c](../sdk/c) builds [include/gosslens.h](../include/gosslens.h) into a
+linkable library - a static archive and a shared object from `zig build c`,
+with a README, a runnable demo, and a CMake import - so any language with a C
+FFI reaches all 113 `goss_*` operations through the header as they are spelled
+here. The C surface uses those names unchanged; the naming rules below govern
+the wrappers that rename them for a host language.
 
 A developer who learns one Gosslens SDK should not have to relearn the same
 operation on another platform.
@@ -313,6 +315,41 @@ ribbon for the renderer to draw.
 | `goss_session_ar_brush_undo` / `_clear` | `arBrushUndo()` / `arBrushClear()`, the world-brush stacks | world-tracking SDKs |
 | `goss_session_grab` / `_release` | `grab(x, y, z)` grabs the nearest dynamic physics body to a world point and drags it there, driving it kinematically so it gathers throw velocity; `release()` lets it fly off dynamic again | all SDKs |
 | `goss_session_add_collider` / `_erase_collider` | `addCollider(x, y, z)` drops a static sphere collider at a world point that content lands on live; `eraseCollider(x, y, z, radius)` removes every live collider within radius - drawing and erasing a 2D collider world | all SDKs |
+
+## Lens graph vocabulary
+
+`activateLens` takes a manifest whose render graph is built from a fixed set of
+node and pass types, and whose segmentation-driven passes name a fixed set of
+mask channels. These names are the manifest contract, not `goss_*` operations,
+so they live in the engine rather than the table above; they are listed here so
+an SDK author knows what a lens can ask for.
+
+The 29 node and pass types (`NodeType` in
+[core/lens/runtime.zig](../core/lens/runtime.zig)) are `beauty.face`,
+`beauty.reshape`, `beauty.lipstick`, `beauty.blusher`, `shader.pass`,
+`lut.pass`, `blend.pass`, `blur.pass`, `grade.pass`, `bloom.pass`, `dof.pass`,
+`fog.pass`, `outline.pass`, `tint.pass`, `smooth.pass`, `matte.refine`,
+`stylize.pass`, `edge.pass`, `warp.pass`, `trail.pass`, `ssr.pass`, `env.pass`,
+`model.gltf`, `mesh.face`, `draw.board`, `layout.composite`, `sprite.2d`,
+`text.2d`, and `video.texture`. A `tint.pass` carries a `normal`, `multiply`,
+or `screen` blend mode.
+
+A `shader.pass` node's fragment shader can itself be a material graph of 38 ops
+(`NodeKind` in [core/material/graph.zig](../core/material/graph.zig)): the
+sources `uv`, `time`, `constant`, `uniform`, `texture`; `sample`; the maths
+`add`, `subtract`, `multiply`, `divide`, `power`, `min`, `max`, `atan2`, `dot`,
+`distance`, `normalize`, `length`, `saturate`, `abs`, `floor`, `fract`, `sin`,
+`cos`, `sqrt`, `clamp`, `refract`, `step`, `smoothstep`, `mod`, `mix`; the
+vector ops `split`, `combine3`, `combine4`, `colormatrix`; the shading
+`lambert`, `fresnel`; and the graph root `output`.
+
+The 16 mask channels a pass can name, which `segmentationChannels()` reports a
+bitmask over (`mask_channels` in
+[core/lens/manifest.zig](../core/lens/manifest.zig)), are `person`,
+`background`, `hair`, `body_skin`, `face_skin`, `clothes`, `others`, `head`,
+`hand`, `lips`, `eyes`, `brows`, `iris`, `teeth`, `contour`, and `highlight`.
+The person and multiclass channels ride the segmenter; `head`, `hand`, the face
+parts, `contour`, and `highlight` ride the face and hand landmarks instead.
 
 ## Web tracking module
 

@@ -82,38 +82,111 @@ save-original, stabilization) round-trips for your `MediaRecorder`, and
 front-screen flash) for the capture chrome you draw. The engine validates and
 clamps every field; you read it back and apply it.
 
+## Lenses
+
+A lens is a manifest plus its assets. Activate one from its manifest JSON, and
+drop it again with `deactivateLens`:
+
+    session.activateLens(manifestJson);
+    session.deactivateLens();
+
+The web build activates from the manifest JSON directly. The directory-bundle
+path the native SDKs also take is not wired here: a wasm target has no file IO,
+and the `shader.pass`, `lut.pass`, and `blend.pass` nodes it would carry need
+compiled resources this SDK has no way to hand over yet. A lens built entirely
+from `beauty.*` nodes (the beauty-baseline lens, say) activates and runs for
+real regardless, through the same beauty chain the effects below drive.
+
+A lens that reads face, hand, pose, or segmentation data renders nothing until
+you feed the matching tracker result each frame (see Tracking); it stays silent,
+with no error. A lens's triggers also react to signals you already feed:
+`camera.zoom`, `camera.focus` and `camera.exposure` follow the camera controls
+above, `geo.in_region` follows the geofence below, and `gaze.*` and
+`head.nod`/`head.shake`/`head.tilt` follow the face tracker. The full grammar is
+in [the lens spec](../lenses/SPEC.md).
+
+Advance the lens's own clock, triggers, and script nodes once per display frame
+with `tickLens`, passing the live signals this tick evaluates against:
+
+    session.tickLens(dtUs, {
+      hasFace: result.presence >= 0.5,
+      blendshapes: result.blendshapes,
+    });
+
+Omitted signal fields read as false or zero, so a bare `tickLens(dtUs)` only
+advances triggers with no `when` gate. `fireEvent(name)` delivers a named event
+to the lens's `event('name')` triggers for the next tick, and
+`parameterValue(name)` reads a live lens parameter back, including whatever a
+script node last wrote.
+
+## Beauty and makeup
+
+The six beauty effects are direct session calls, each an amount in 0..1:
+
+    session.setSmooth(0.6);
+    session.setWhiten(0.5);
+    session.setThinFace(0.3);
+    session.setBigEye(0.2);
+    session.setLipstick(0.7);
+    session.setBlush(0.4);
+
+Whiten reads four lookup textures, and lipstick and blush their own source
+images, none of which the core decodes. Load them once after setup; the SDK
+decodes the PNGs, and until they resolve the matching setter stays a no-op:
+
+    await session.loadWhitenLuts(new URL("./res/", baseUrl));     // the four lookup_*.png
+    await session.loadMakeupTextures(new URL("./res/", baseUrl)); // mouth.png, blusher.png
+
+`setMakeupReference` samples a reference photo's makeup color per face part, so a
+lens's `tint.pass` with a reference source paints the live face in that color.
+Pass the reference RGBA and its 478-point face landmarks; an empty landmarks
+array clears it:
+
+    session.setMakeupReference(refRgba, refWidth, refHeight, refLandmarks);
+
 ## Tracking
 
 Face, hand, pose, and segmentation run in the `gosslens_tracking.wasm` module,
-off the main thread in a Worker. Each tracker takes the module bytes and a
-model bundle and returns its result synchronously inside the worker:
+off the main thread in a Worker. Each pipeline is a class that takes the module
+bytes and a model bundle and runs inference synchronously inside the worker:
 
     // tracking-worker.ts
-    import { GossFaceTracker } from "@gosslens/core";
+    import { GossFaceTracker, GossHandTracker, GossPoseTracker } from "@gosslens/core";
 
     const moduleBytes = await (await fetch(trackingWasmUrl)).arrayBuffer();
-    const tracker = await GossFaceTracker.create(moduleBytes, faceTaskBytes);
+    const face = await GossFaceTracker.create(moduleBytes, faceTaskBytes);
+    const hands = await GossHandTracker.create(moduleBytes, gestureTaskBytes);
+    const pose = await GossPoseTracker.create(moduleBytes, poseTaskBytes);
     // per frame, on RGBA pixels from the camera canvas:
-    const result = tracker.process(rgba, width, height, timestampUs);
+    const faceResult = face.process(rgba, width, height, timestampUs);
+    const handResult = hands.process(rgba, width, height, timestampUs);
+    const poseResult = pose.process(rgba, width, height, timestampUs);
 
+Standing a tracker up is the web equivalent of the native SDKs' enable calls:
+this build runs no internal engine tracker, so you run the pipeline you need and
+feed its result back. `GossHandTracker` returns up to two hands, each with 21
+landmarks, a handedness score, and a canned gesture when the gesture bundle is
+loaded; `GossPoseTracker` returns the 33-point skeleton.
 [`demo/tracking-worker.ts`](../sdk/ts/demo/tracking-worker.ts) is the reference
 worker, and [`demo/track-worker.ts`](../sdk/ts/demo/track-worker.ts) stands all
-four pipelines up over still images. Feed a segmentation mask back to the
-session with `setSegmentationMask` so a lens can composite against it.
+four pipelines up over still images.
 
 The `.task`/`.tflite` bundles (`face_landmarker.task`, `gesture_recognizer.task`,
 `pose_landmarker_full.task`, `selfie_multiclass.tflite`) are the ones
 `fetch-models` writes; host and fetch the ones your lenses use.
 
-The single-face path is `setFaceLandmarks`. To fan a face-anchored lens out
-across every face in frame, hand the engine the faces you tracked this frame:
+Feed the tracked results back to the session for a lens to anchor to. The
+single-face path is `setFaceLandmarks`. To fan a face-anchored lens out across
+every face in frame, hand the engine the faces you tracked this frame:
 
     session.submitFaces(faces);      // GossFaceInput[], up to GOSS_FACE_MAX; [] clears
     for (let i = 0; i < session.faceCount(); i++) {
       const face = session.faceResultAt(i);
     }
 
-`submitBodies` is the multi-person equivalent, reaching every tracked figure:
+`submitBodies` is the multi-person equivalent, reaching every tracked figure;
+`setPoseUpperBody(true)` drops the skeleton's legs (knees down) for selfie
+framing where they are out of shot:
 
     session.submitBodies(bodies);    // GossPoseInput[], up to GOSS_BODY_MAX; [] clears
     for (let i = 0; i < session.bodyCount(); i++) {
@@ -122,23 +195,45 @@ across every face in frame, hand the engine the faces you tracked this frame:
 
 `faceRegion` returns the tracked point of a named attach point for pinning
 content - forehead, glabella, nose tip, chin, an eye, a cheek, an ear, or a mouth
-corner:
+corner - reading the face landmarks you last submitted:
 
     const p = session.faceRegion(GossFaceRegion.Forehead);
 
-`bodyJoint` is the body-skeleton equivalent, pinning to a shoulder, wrist, or
-knee of the tracked figure:
-
-    const joint = session.bodyJoint(GossBodyJoint.LeftWrist);
-
-`handJoint` is the hand equivalent, pinning to a fingertip or the wrist of the
-tracked hand:
-
-    const tip = session.handJoint(GossHandJoint.IndexTip);
+For a body or hand joint, read the point off the tracker result directly: the
+pose result carries all 33 landmarks, each hand its 21. The `bodyJoint` and
+`handJoint` session pins read the engine's own internal trackers, which this
+build does not stand up, so they stay empty here; on native they return the
+named joint's point.
 
 The face tracker also drives the `gaze.*` and `head.nod`/`head.shake`/`head.tilt`
 lens triggers; `camera.*` follow the camera controls and `geo.in_region` the
 geofence below. The full grammar is in [the lens spec](../lenses/SPEC.md).
+
+## Segmentation
+
+`GossSegmenter` runs a single `.tflite` model through the same tracking module
+and returns a subject mask, `GOSS_SEGMENTATION_MASK_SIDE` squared floats, plus
+the model's own class channels. Feed the subject mask back as the texture the
+lens's blend and mask channels sample:
+
+    const segmenter = await GossSegmenter.create(moduleBytes, selfieMulticlassBytes);
+    const subject = segmenter.process(rgba, width, height);
+    session.setSegmentationMask(subject);      // null clears it
+
+`selfie_multiclass.tflite` publishes the seven channels in
+`GOSS_SEGMENTATION_CHANNELS` (person, background, hair, body_skin, face_skin,
+clothes, others); `hair_segmenter.tflite` and `deeplab_v3.tflite` are the other
+shipped models, a single hair mask and another multiclass label set. A lens that
+names class channels reports them as a bitmask from `segmentationChannels`;
+upload exactly those each frame with `setSegmentationClassMask`, after the
+subject mask, since setting the subject clears the classes:
+
+    const wanted = session.segmentationChannels();
+    for (let channel = 1; channel < GOSS_SEGMENTATION_CHANNELS.length; channel++) {
+      if (wanted & (1 << channel)) {
+        session.setSegmentationClassMask(channel, segmenter.classMask(channel - 1));
+      }
+    }
 
 ## Depth
 
@@ -186,6 +281,46 @@ and close it; the engine keeps the undo/redo stack and hands back the ribbon
 world-anchored twin: points are pushed in the world frame world tracking reports,
 so a stroke stays fixed in the scene.
 
+## Capture and recording
+
+The browser owns encoding on the web, so photo and video capture run through it.
+`captureFrame` reads the composited canvas back and returns a PNG data URL:
+
+    const png = await engine.captureFrame(session);   // or preview.captureFrame()
+
+`captureStill` is the high-resolution path, decoupled from the preview size: it
+renders the composite at its own or a requested resolution, supersamples, and
+returns the encoded bytes with the format, gamut, and bit depth you tag. It
+needs the wasm renderer, so it is a no-op on the pure WebGL2 fallback:
+
+    const jpeg = await engine.captureStill(session, { width: 4032, height: 3024, format: 1, quality: 90 });
+
+For video, drive a `MediaRecorder` off `canvas.captureStream()` yourself.
+`setRecordingPolicy`/`recordingPolicy` round-trips the clip cap, segment and loop
+mode, speed preset, mic mute, save-original, and stabilization the engine
+normalizes, so the recorder and chrome you build read one validated policy. The
+still encoder is the core's own (PNG and JPEG, wide-gamut and 16-bit PNG tagged);
+the live video encoder stays native-only, which is why recording runs through
+the browser. See [PARITY.md](PARITY.md).
+
+## Compositing
+
+Beyond the camera, a session composites named RGBA sources into one frame, for a
+duet, a stitch, or a live grid. The camera is the implicit source 0; define
+others by name and push a frame into each:
+
+    session.defineSource("guest");
+    session.submitSourceFrameRgba("guest", rgba, width, height, width * 4);
+    session.setLayout(3);   // 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid
+
+`setSourceComposite` sets a source's opacity and key mode (none, matte, or a
+chroma key with its color and similarity), so a keyed guest drops onto the base:
+
+    session.setSourceComposite("guest", 1, 2, [0, 1, 0], 0.4);   // chroma-key green
+
+`defineScreenShare` registers a source whose frame letterboxes to fit its cell,
+`removeSource` drops one, and `clearLayout` returns to the camera alone.
+
 ## Lives and calls
 
 The web is the easy case: the rendered canvas is already a live video source.
@@ -198,12 +333,13 @@ LiveKit or any WebRTC peer:
 
 Keep the render loop running (`renderFrame` per frame) and the track carries
 every composited frame. Reach for `captureLiveFrame` only when you need the
-raw pixels (BGRA by default) rather than a track. For audio, `submitAudio`
-feeds mic samples in for audio-reactive lenses, and `mixOutputAudio` folds the
-lens's own sound into the mic block you are about to publish and returns the
-mixed interleaved s16 for your outgoing WebRTC audio track (pass `null` for the
-mic to send the lens sound over silence). `pullAudio` still pulls the lens sound
-alone for local WebAudio playback with no call in progress.
+raw pixels (BGRA by default) rather than a track. For audio, `mixOutputAudio`
+folds the lens's own sound into the mic block you are about to publish and
+returns the mixed interleaved s16 for your outgoing WebRTC audio track: it
+resamples the lens sound to your track's rate and sums it in, so there is
+nothing to hand-mix (pass `null` for the mic to send the lens sound over
+silence). `pullAudio` still pulls the lens sound alone for local WebAudio
+playback with no call in progress.
 
 ## Method names
 
