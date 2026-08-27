@@ -376,6 +376,14 @@ pub const Renderer = struct {
         _ = params;
     }
 
+    pub fn submitWarpPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, warp: [4]f32, params: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = warp;
+        _ = params;
+    }
+
     pub fn submitEdgeSobel(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32, texel: [2]f32) void {
         _ = r;
         _ = view_id;
@@ -849,6 +857,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadStylizeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadWarpProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

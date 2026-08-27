@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.swirl",
+  "version": "1.0.0",
+  "display_name": "Swirl",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "swirl", "type": "warp.pass", "inputs": {"frame": "camera"}, "params": {}, "warp": {"mode": "swirl", "center_x": 0.5, "center_y": 0.5, "radius": 0.28, "strength": 2.0}}
+  ],
+  "triggers": []
+}

@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.pinch",
+  "version": "1.0.0",
+  "display_name": "Pinch",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "pinch", "type": "warp.pass", "inputs": {"frame": "camera"}, "params": {}, "warp": {"mode": "pinch", "center_x": 0.5, "center_y": 0.5, "radius": 0.28, "strength": 2.0}}
+  ],
+  "triggers": []
+}

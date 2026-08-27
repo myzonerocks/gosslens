@@ -4364,6 +4364,10 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         .{ .name = "fs_edge_sobel", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_edge_nms", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_edge_hyst", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // warp.pass's own fixed fragment shader: one geometric distortion
+        // that branches on its mode uniform (glass sphere, sphere refraction,
+        // bulge, pinch, swirl), resampling the frame at a displaced UV.
+        .{ .name = "fs_warp_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_trail_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_ssr_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_env_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },

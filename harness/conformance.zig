@@ -5563,6 +5563,158 @@ fn proveEdge(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Renders one warp.pass manifest inline over the corpus and captures it -
+/// the from-json mirror of captureStylizeShot, so a proof can hold every
+/// warp parameter fixed but the strength and compare the two. A null manifest
+/// captures the plain passthrough frame.
+fn captureWarpShotJson(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, manifest_json: ?[]const u8) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (manifest_json) |m| {
+        if (abi.goss_session_activate_lens(session, m.ptr, m.len) != .ok) {
+            std.debug.print("conformance: FAIL warp lens activation\n", .{});
+            return error.ActivationFailed;
+        }
+    }
+    for (0..3) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+        return error.CaptureFailed;
+    }
+    return shot;
+}
+
+/// True when the top-left corner block of two captures is byte-identical -
+/// the region a radial warp centered on the frame must leave untouched, well
+/// outside its radius. This is the proof a warp is localized, not global.
+fn cornerBlockEqual(a: []const u8, b: []const u8, cap_width: usize, block: usize) bool {
+    var y: usize = 0;
+    while (y < block) : (y += 1) {
+        const row = y * cap_width * 4;
+        if (!std.mem.eql(u8, a[row .. row + block * 4], b[row .. row + block * 4])) return false;
+    }
+    return true;
+}
+
+/// True when the center block of two captures differs anywhere - where the
+/// warp actually displaces or refracts the image.
+fn centerBlockDiffers(a: []const u8, b: []const u8, cap_width: usize, cap_height: usize, block: usize) bool {
+    const x0 = cap_width / 2 - block / 2;
+    const y0 = cap_height / 2 - block / 2;
+    var y: usize = y0;
+    while (y < y0 + block) : (y += 1) {
+        const start = (y * cap_width + x0) * 4;
+        if (!std.mem.eql(u8, a[start .. start + block * 4], b[start .. start + block * 4])) return true;
+    }
+    return false;
+}
+
+/// True when every pixel in the top-left corner block is black - what
+/// sphere_refraction leaves everywhere outside its sphere.
+fn cornerBlockDark(buf: []const u8, cap_width: usize, block: usize) bool {
+    var y: usize = 0;
+    while (y < block) : (y += 1) {
+        var x: usize = 0;
+        while (x < block) : (x += 1) {
+            const i = (y * cap_width + x) * 4;
+            if (lumaByte(buf[i], buf[i + 1], buf[i + 2]) > 8) return false;
+        }
+    }
+    return true;
+}
+
+/// Proves warp.pass on real content: each mode is a radial distortion centered
+/// on the frame, bit-stable across two runs, changing its center block versus
+/// the same mode at strength zero, yet leaving a far corner outside the radius
+/// byte-identical to that identity control. sphere_refraction is black there.
+fn proveWarp(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const cap_w: usize = 400;
+    const cap_h: usize = 300;
+    // A 40x40 top-left block. Its farthest pixel sits at u ~0.099, so its
+    // distance from the centered warp exceeds 0.4 - well past every reference
+    // radius (0.28) whatever the aspect, since the x term alone clears it.
+    const corner: usize = 40;
+    // The center block a radial warp always touches on real content.
+    const center: usize = 40;
+
+    const modes = [_]struct { name: []const u8, mode: []const u8, refraction: bool }{
+        .{ .name = "glass-sphere", .mode = "glass_sphere", .refraction = false },
+        .{ .name = "sphere-refraction", .mode = "sphere_refraction", .refraction = true },
+        .{ .name = "bulge", .mode = "bulge", .refraction = false },
+        .{ .name = "pinch", .mode = "pinch", .refraction = false },
+        .{ .name = "swirl", .mode = "swirl", .refraction = false },
+    };
+
+    var showcase: ?[]u8 = null;
+    defer if (showcase) |s| gpa.free(s);
+
+    for (modes) |m| {
+        const pkg = try std.fmt.allocPrint(gpa, ".lens-packages/{s}", .{m.name});
+        defer gpa.free(pkg);
+
+        const warped_a = try captureStylizeShot(gpa, engine, planes, pkg);
+        defer gpa.free(warped_a);
+        const warped_b = try captureStylizeShot(gpa, engine, planes, pkg);
+        defer gpa.free(warped_b);
+        if (!std.mem.eql(u8, warped_a, warped_b)) {
+            std.debug.print("conformance: FAIL warp {s} is not bit-stable across runs\n", .{m.name});
+            return false;
+        }
+
+        // The same mode at strength zero: identity through the very same pass,
+        // so it shares the warp's resample everywhere and isolates the effect.
+        const control_json = try std.fmt.allocPrint(gpa,
+            \\{{"glf":"1.0","id":"goss.reference.warp-control","version":"1.0.0","display_name":"Warp Control","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{{"id":"w","type":"warp.pass","inputs":{{"frame":"camera"}},"params":{{}},"warp":{{"mode":"{s}","center_x":0.5,"center_y":0.5,"radius":0.28,"strength":0.0,"refractive_index":0.71}}}}],"triggers":[]}}
+        , .{m.mode});
+        defer gpa.free(control_json);
+        const control = try captureWarpShotJson(gpa, engine, planes, control_json);
+        defer gpa.free(control);
+
+        if (!centerBlockDiffers(warped_a, control, cap_w, cap_h, center)) {
+            std.debug.print("conformance: FAIL warp {s} did not change the center region\n", .{m.name});
+            return false;
+        }
+        if (!cornerBlockEqual(warped_a, control, cap_w, corner)) {
+            std.debug.print("conformance: FAIL warp {s} changed a far corner outside its radius (not localized)\n", .{m.name});
+            return false;
+        }
+        if (m.refraction and !cornerBlockDark(warped_a, cap_w, corner)) {
+            std.debug.print("conformance: FAIL sphere_refraction did not blacken the surround outside the sphere\n", .{});
+            return false;
+        }
+
+        if (std.mem.eql(u8, m.name, "glass-sphere")) {
+            showcase = try gpa.dupe(u8, warped_a);
+        }
+    }
+
+    if (showcase) |s| {
+        var png_bytes: std.ArrayList(u8) = .empty;
+        defer png_bytes.deinit(gpa);
+        try png.encodeRgba(gpa, &png_bytes, s, 400, 300);
+        try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-warp.png", .data = png_bytes.items });
+    }
+    std.debug.print("conformance: PROOF warp.pass modes are deterministic, localized radial distortions - the center warps while a far corner stays byte-identical to the identity control, sphere_refraction black outside the sphere\n", .{});
+    return true;
+}
+
 /// Proves a bloom.pass post-effect: the bright pass, separable blur and
 /// additive composite bleed a glow from the highlights, so a bloomed
 /// capture differs from the plain one and is bit-stable across runs (no
@@ -8712,6 +8864,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveStylize(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "edge")) {
             if (!try proveEdge(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "warp")) {
+            if (!try proveWarp(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -8918,6 +9072,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("stylize");
     if (!try proveEdge(gpa, engine)) return 1;
     watchHold("edge");
+    if (!try proveWarp(gpa, engine)) return 1;
+    watchHold("warp");
     if (!try proveExpressionScript(gpa, engine)) return 1;
     watchHold("expression script");
     if (!try proveEmber(gpa, engine)) return 1;

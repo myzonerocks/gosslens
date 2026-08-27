@@ -112,6 +112,7 @@ pub const Renderer = struct {
     edge_sobel_program: c.bgfx_program_handle_t,
     edge_nms_program: c.bgfx_program_handle_t,
     edge_hyst_program: c.bgfx_program_handle_t,
+    warp_program: c.bgfx_program_handle_t,
     trail_program: c.bgfx_program_handle_t,
     ssr_program: c.bgfx_program_handle_t,
     env_program: c.bgfx_program_handle_t,
@@ -178,6 +179,8 @@ pub const Renderer = struct {
     stylize_uniform: c.bgfx_uniform_handle_t,
     edge_uniform: c.bgfx_uniform_handle_t,
     edge_texel_uniform: c.bgfx_uniform_handle_t,
+    warp_uniform: c.bgfx_uniform_handle_t,
+    warp_params_uniform: c.bgfx_uniform_handle_t,
     tex_prev: c.bgfx_uniform_handle_t,
     trail_uniform: c.bgfx_uniform_handle_t,
     ssr_uniform: c.bgfx_uniform_handle_t,
@@ -347,6 +350,7 @@ pub const Renderer = struct {
         const edge_sobel_program = try loadEdgeSobelProgram();
         const edge_nms_program = try loadEdgeNmsProgram();
         const edge_hyst_program = try loadEdgeHystProgram();
+        const warp_program = try loadWarpProgram();
         const trail_program = try loadTrailProgram();
         const ssr_program = try loadSsrProgram();
         const env_program = try loadEnvProgram();
@@ -431,6 +435,7 @@ pub const Renderer = struct {
             .edge_sobel_program = edge_sobel_program,
             .edge_nms_program = edge_nms_program,
             .edge_hyst_program = edge_hyst_program,
+            .warp_program = warp_program,
             .trail_program = trail_program,
             .ssr_program = ssr_program,
             .env_program = env_program,
@@ -483,6 +488,8 @@ pub const Renderer = struct {
             .stylize_uniform = c.bgfx_create_uniform("u_stylize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .edge_uniform = c.bgfx_create_uniform("u_edge", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .edge_texel_uniform = c.bgfx_create_uniform("u_edgeTexel", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .warp_uniform = c.bgfx_create_uniform("u_warp", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .warp_params_uniform = c.bgfx_create_uniform("u_warpParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tex_prev = c.bgfx_create_uniform("s_texPrev", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .trail_uniform = c.bgfx_create_uniform("u_trail", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .ssr_uniform = c.bgfx_create_uniform("u_ssr", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -753,6 +760,18 @@ pub const Renderer = struct {
         };
     }
 
+    /// warp.pass's own fixed program: one geometric distortion that branches
+    /// on its mode uniform, shared by every warp.pass node like stylize_program.
+    pub fn loadWarpProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_warp_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_warp_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_warp_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_warp_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// layout.composite's per-source blend program, shared by every source: the
     /// shared vertex contract plus the composite fragment shader.
     pub fn loadCompositeProgram() !c.bgfx_program_handle_t {
@@ -941,6 +960,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.stylize_uniform);
         c.bgfx_destroy_uniform(r.edge_uniform);
         c.bgfx_destroy_uniform(r.edge_texel_uniform);
+        c.bgfx_destroy_uniform(r.warp_uniform);
+        c.bgfx_destroy_uniform(r.warp_params_uniform);
         c.bgfx_destroy_uniform(r.tex_prev);
         c.bgfx_destroy_uniform(r.trail_uniform);
         c.bgfx_destroy_uniform(r.ssr_uniform);
@@ -976,6 +997,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.edge_sobel_program);
         c.bgfx_destroy_program(r.edge_nms_program);
         c.bgfx_destroy_program(r.edge_hyst_program);
+        c.bgfx_destroy_program(r.warp_program);
         c.bgfx_destroy_program(r.trail_program);
         c.bgfx_destroy_program(r.ssr_program);
         c.bgfx_destroy_program(r.env_program);
@@ -1603,6 +1625,19 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.stylize_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.stylize_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one lens warp.pass node as a full-screen pass into view_id: the
+    /// frame on unit 0, u_warp as (mode, center.x, center.y, radius) and
+    /// u_warpParams as (strength, refractive_index, aspect, 0), the one fixed
+    /// warp_program every node shares.
+    pub fn submitWarpPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, warp: [4]f32, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.warp_uniform, &warp, 1);
+        c.bgfx_set_uniform(r.warp_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.warp_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// edge.pass's sobel stage into view_id: the frame on unit 0, u_edge as

@@ -368,6 +368,19 @@ hysteresis band and `blur_radius` its pre-blur width in texels; sobel ignores
 all three. `invert` draws dark edges on a light field instead of light on dark.
 It reads no host input, ships no asset, and is always ready.
 
+A `"warp.pass"` node is a geometric distortion over the whole frame, radial
+around a center within a radius. It carries a `"warp": {"mode", "center_x",
+"center_y", "radius", "strength", "refractive_index", "aspect_auto"}` block.
+`mode` is `glass_sphere` (a glass lens that refracts the frame through a sphere
+and lets the surround through), `sphere_refraction` (the same refraction but the
+classic crystal ball, black outside the sphere), `bulge` (magnify toward the
+center), `pinch` (pull the image inward) or `swirl` (twist about the center).
+`center_x` and `center_y` place the distortion, `radius` sizes it, and
+`strength` scales how hard it pushes, with zero an identity. `refractive_index`
+is the glass index the two sphere modes bend the view ray by; the three UV warps
+ignore it. `aspect_auto` keeps the region circular on screen by correcting for
+the frame's aspect. It reads no host input, ships no asset, and is always ready.
+
 A `"trail.pass"` node is a motion-trail post-effect. It carries a `"trail":
 {"amount"}` block: `amount` (0..1) is how much of the previous frame the
 current one keeps, so moving subjects smear a fading echo behind them while a

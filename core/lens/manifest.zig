@@ -315,6 +315,28 @@ pub const EdgeField = struct {
     invert: bool = false,
 };
 
+pub const WarpField = struct {
+    /// A warp.pass node's geometric distortion, all radial around a center
+    /// within a radius. glass_sphere and sphere_refraction bend the frame
+    /// through a glass ball - one keeps the surround, the other blackens it -
+    /// while bulge magnifies, pinch shrinks, and swirl twists.
+    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl } = .glass_sphere,
+    /// The distortion center in normalized frame coordinates.
+    center_x: f32 = 0.5,
+    center_y: f32 = 0.5,
+    /// The distortion radius (0..1). A pixel beyond it passes through, or for
+    /// sphere_refraction goes black.
+    radius: f32 = 0.25,
+    /// How hard the warp pushes: the displacement scale for bulge, pinch and
+    /// swirl and the refraction blend for the two sphere modes. Zero is identity.
+    strength: f32 = 1.0,
+    /// The glass index of refraction the two sphere modes bend the view ray by.
+    refractive_index: f32 = 0.71,
+    /// Correct the radius for the frame's own aspect so the region stays a
+    /// circle on screen; off treats the frame as square.
+    aspect_auto: bool = true,
+};
+
 pub const TrailField = struct {
     /// A trail.pass node's echo amount (0..1): how much of the previous
     /// frame blends into this one, so moving content leaves a motion trail.
@@ -529,6 +551,8 @@ pub const Node = struct {
     stylize: ?StylizeField = null,
     /// Set only on an edge.pass node: its detector mode and parameters.
     edge: ?EdgeField = null,
+    /// Set only on a warp.pass node: its distortion mode and parameters.
+    warp: ?WarpField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -1558,6 +1582,34 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "edge.pass")) {
             edge_field = .{};
         }
+        var warp_field: ?WarpField = null;
+        if (getField(object, "warp")) |wv| {
+            const wmark = path.push("warp");
+            if (!std.mem.eql(u8, node_type, "warp.pass")) {
+                try diags.add(path.slice(), "warp is a warp.pass field, found it on '{s}'", .{node_type});
+            } else if (wv != .object) {
+                try diags.add(path.slice(), "warp must be an object", .{});
+            } else {
+                var field: WarpField = .{};
+                if (getField(wv.object, "mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "warp mode names an unknown distortion '{s}'", .{name});
+                    }
+                }
+                if (getField(wv.object, "center_x")) |v| field.center_x = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.center_x)), 0.0, 1.0);
+                if (getField(wv.object, "center_y")) |v| field.center_y = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.center_y)), 0.0, 1.0);
+                if (getField(wv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0.01, 1.0);
+                if (getField(wv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 4.0);
+                if (getField(wv.object, "refractive_index")) |v| field.refractive_index = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.refractive_index)), 0.1, 1.0);
+                if (getField(wv.object, "aspect_auto")) |v| {
+                    if (v == .bool) field.aspect_auto = v.bool;
+                }
+                warp_field = field;
+            }
+            path.pop(wmark);
+        } else if (std.mem.eql(u8, node_type, "warp.pass")) {
+            warp_field = .{};
+        }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
             const tmark = path.push("trail");
@@ -2176,6 +2228,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .smooth = smooth_field,
             .stylize = stylize_field,
             .edge = edge_field,
+            .warp = warp_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,
