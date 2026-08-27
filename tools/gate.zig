@@ -121,6 +121,27 @@ const frozen_float_spread = [_][]const u8{
     "goss_session_erase_collider",
 };
 
+// W10: a reference-taking platform handle is acquired, released on
+// replace, and released at destroy, all on an owning instance. A
+// file-scope var holding one aliases every instance and outlives its
+// paired release, so it is banned outright.
+const platform_reference_tokens = [_][]const u8{
+    "ANativeWindow",
+    "AMediaCodec",
+    "AMediaMuxer",
+    "CVPixelBuffer",
+    "CVMetalTexture",
+    "IOSurface",
+};
+
+// W10, the paired form: a reference-taking acquire and its release live
+// in the same file, so a file that acquires without ever naming the
+// release cannot be pairing them at all.
+const platform_acquire_release = [_]struct { acquire: []const u8, release: []const u8 }{
+    .{ .acquire = "ANativeWindow_fromSurface", .release = "ANativeWindow_release" },
+    .{ .acquire = "AMediaCodec_createInputSurface", .release = "ANativeWindow_release" },
+};
+
 // A PR body is a short paragraph, not a report: what changed and why,
 // nothing about how the change was proven out. Modeled on how ghostty's
 // own PRs read - three sentences, no headers, no checklist.
@@ -245,8 +266,11 @@ const Gate = struct {
     fn checkFileProvenance(g: *Gate, paths: []const []const u8) !void {
         for (paths) |path| {
             const stat = Io.Dir.cwd().statFile(g.io, path, .{}) catch continue;
-            if (stat.size > max_file_scan_bytes) continue;
-            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            // Scan every byte the inbound cap admits: a file between the
+            // old 1MB read limit and the 4MB inbound cap used to slip
+            // provenance entirely while still entering history.
+            if (stat.size > max_staged_file_bytes) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_staged_file_bytes)) catch continue;
             if (looksBinary(content)) continue;
             if (findBannedToken(content)) |tok| {
                 try g.flag("provenance: '{s}' contains banned token '{s}'", .{ path, tok });
@@ -617,7 +641,82 @@ const Gate = struct {
             }
         }
     }
+
+    // W3 mechanical check: a pub export fn returning ?*T or a status
+    // cannot fail, so an errdefer in its body is dead code. The fix
+    // moves the fallible work to a private fn; any errdefer inside an
+    // export fn body across the tracked Zig sources fails here.
+    fn checkExportErrdefer(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 22)) catch continue;
+            var line_start: usize = 0;
+            while (line_start < content.len) {
+                const line_end = std.mem.indexOfScalarPos(u8, content, line_start, '\n') orelse content.len;
+                const line = content[line_start..line_end];
+                if (isExportFnSignature(line)) {
+                    if (zigFnBody(content, line_start)) |body| {
+                        if (zigCodeContainsWord(content[body.start..body.end], "errdefer")) {
+                            try g.flag("export-errdefer: '{s}' has an errdefer inside an export fn (dead code there); split the fallible body into a private fn and return it `catch null`", .{path});
+                        }
+                    }
+                }
+                line_start = line_end + 1;
+            }
+        }
+    }
+
+    // W10 mechanical check: a file-scope var holding a platform
+    // reference aliases every instance and outlives its paired release.
+    // Per-instance handles live on the instance struct; a top-level var
+    // naming one of the reference-taking platform types is banned.
+    fn checkPlatformReferences(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            const is_zig = std.mem.endsWith(u8, path, ".zig");
+            const is_objc = std.mem.endsWith(u8, path, ".mm") or std.mem.endsWith(u8, path, ".m");
+            if (!is_zig and !is_objc) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 22)) catch continue;
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0 or line[0] == ' ' or line[0] == '\t') continue;
+                if (!isFileScopeVar(line, is_zig)) continue;
+                for (platform_reference_tokens) |tok| {
+                    if (std.mem.indexOf(u8, line, tok) != null) {
+                        try g.flag("platform-ref: '{s}' holds '{s}' in a file-scope var; a platform reference lives on the owning instance, released on replace and at destroy, never in a global", .{ path, tok });
+                        break;
+                    }
+                }
+            }
+            for (platform_acquire_release) |pair| {
+                if (std.mem.indexOf(u8, content, pair.acquire) != null and std.mem.indexOf(u8, content, pair.release) == null) {
+                    try g.flag("platform-ref: '{s}' calls '{s}' but never '{s}'; the acquire and its release must both be visible in the file that owns the handle", .{ path, pair.acquire, pair.release });
+                }
+            }
+        }
+    }
 };
+
+// A column-zero export fn definition line, `export fn` or `pub export
+// fn`; an indented one is not a top-level export.
+fn isExportFnSignature(line: []const u8) bool {
+    if (line.len == 0 or line[0] == ' ' or line[0] == '\t') return false;
+    return std.mem.startsWith(u8, line, "export fn ") or std.mem.startsWith(u8, line, "pub export fn ");
+}
+
+// A file-scope variable declaration: a Zig top-level `var`/`pub var`/
+// `threadlocal var`, or an ObjC++ file-scope `static`. Const bindings
+// and extern fn decls do not hold a mutable acquired reference.
+fn isFileScopeVar(line: []const u8, is_zig: bool) bool {
+    if (is_zig) {
+        return std.mem.startsWith(u8, line, "var ") or
+            std.mem.startsWith(u8, line, "pub var ") or
+            std.mem.startsWith(u8, line, "threadlocal var ") or
+            std.mem.startsWith(u8, line, "pub threadlocal var ");
+    }
+    return std.mem.startsWith(u8, line, "static ");
+}
 
 fn isFrozenSpread(name: []const u8) bool {
     for (frozen_float_spread) |f| {
@@ -693,6 +792,95 @@ fn stripCComments(arena: Allocator, text: []const u8) ![]u8 {
     return out[0..n];
 }
 
+const FnBody = struct { start: usize, end: usize };
+
+// The brace-delimited body of a fn whose signature begins at
+// `sig_start`: past its parameter parens to the opening brace, then to
+// the matching close. Null if either delimiter never resolves.
+fn zigFnBody(text: []const u8, sig_start: usize) ?FnBody {
+    const paren_open = std.mem.indexOfScalarPos(u8, text, sig_start, '(') orelse return null;
+    const params = balancedParens(text, paren_open) orelse return null;
+    const after_params = paren_open + 1 + params.len + 1;
+    const brace = std.mem.indexOfScalarPos(u8, text, after_params, '{') orelse return null;
+    const end = matchBrace(text, brace) orelse return null;
+    return .{ .start = brace, .end = end };
+}
+
+// The index just past the brace matching the one at `open`, counting
+// depth while skipping Zig strings, char literals, and comments so a
+// brace inside any of those never moves the count.
+fn matchBrace(text: []const u8, open: usize) ?usize {
+    var depth: usize = 0;
+    var i = open;
+    while (i < text.len) {
+        if (skipZigTrivia(text, i)) |next| {
+            i = next;
+            continue;
+        }
+        switch (text[i]) {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i + 1;
+            },
+            else => {},
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// True when `word` appears as a whole token in `text` outside any
+// string, char literal, or comment; keyword scans use it so a match in
+// a literal is never a hit.
+fn zigCodeContainsWord(text: []const u8, word: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) {
+        if (skipZigTrivia(text, i)) |next| {
+            i = next;
+            continue;
+        }
+        if (std.mem.startsWith(u8, text[i..], word)) {
+            const before_ok = i == 0 or !isIdentChar(text[i - 1]);
+            const after = i + word.len;
+            const after_ok = after >= text.len or !isIdentChar(text[after]);
+            if (before_ok and after_ok) return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// If `text[i]` opens a Zig line comment, multiline string, string, or
+// char literal, the index just past it; otherwise null. One skipper
+// backs both the brace matcher and the keyword scan.
+fn skipZigTrivia(text: []const u8, i: usize) ?usize {
+    const ch = text[i];
+    if (ch == '/' and i + 1 < text.len and text[i + 1] == '/') {
+        return std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+    }
+    if (ch == '\\' and i + 1 < text.len and text[i + 1] == '\\') {
+        return std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+    }
+    if (ch == '"') return scanQuoted(text, i, '"');
+    if (ch == '\'') return scanQuoted(text, i, '\'');
+    return null;
+}
+
+// The index just past a quote-delimited literal opening at `i`,
+// honoring backslash escapes.
+fn scanQuoted(text: []const u8, i: usize, quote: u8) usize {
+    var j = i + 1;
+    while (j < text.len and text[j] != quote) : (j += 1) {
+        if (text[j] == '\\') j += 1;
+    }
+    return @min(j + 1, text.len);
+}
+
+fn isIdentChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_';
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     var g: Gate = .{ .arena = arena, .io = init.io };
@@ -713,6 +901,8 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkProseDashes(paths);
         try g.checkBoundaryStance();
         try g.checkFloatCap();
+        try g.checkExportErrdefer(paths);
+        try g.checkPlatformReferences(paths);
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
@@ -721,6 +911,8 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkProseDashes(paths);
         try g.checkBoundaryStance();
         try g.checkFloatCap();
+        try g.checkExportErrdefer(paths);
+        try g.checkPlatformReferences(paths);
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});
@@ -1293,4 +1485,46 @@ test "C comments are blanked so a paren or float inside one is not a signature" 
     try std.testing.expect(std.mem.indexOf(u8, cleaned, "float") == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, cleaned, '(') == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, cleaned, 'c') != null);
+}
+
+test "export fn signature lines are recognized only at column zero" {
+    try std.testing.expect(isExportFnSignature("export fn goss_x() void {"));
+    try std.testing.expect(isExportFnSignature("pub export fn goss_y(a: u32) ?*T {"));
+    try std.testing.expect(!isExportFnSignature("    export fn nested() void {"));
+    try std.testing.expect(!isExportFnSignature("fn createY() Err!*T {"));
+    try std.testing.expect(!isExportFnSignature("// export fn in a comment"));
+}
+
+test "brace matching skips braces inside strings, chars, and comments" {
+    const text = "fn f() void {\n  const s = \"}{ not a brace\";\n  const c = '}';\n  // } comment\n}\nafter";
+    const body = zigFnBody(text, 0).?;
+    try std.testing.expectEqualStrings("after", std.mem.trim(u8, text[body.end..], "\n"));
+}
+
+test "an errdefer in an export fn body is detected, one in a nested private fn is not the export's" {
+    const with = "pub export fn goss_a() ?*T {\n  const x = alloc() catch return null;\n  errdefer free(x);\n  return x;\n}\n";
+    const body = zigFnBody(with, 0).?;
+    try std.testing.expect(zigCodeContainsWord(with[body.start..body.end], "errdefer"));
+
+    const without = "pub export fn goss_b() ?*T {\n  return makeB() catch null;\n}\nfn makeB() Err!*T {\n  const x = try alloc();\n  errdefer free(x);\n  return x;\n}\n";
+    const export_body = zigFnBody(without, 0).?;
+    try std.testing.expect(!zigCodeContainsWord(without[export_body.start..export_body.end], "errdefer"));
+}
+
+test "a keyword inside a string or comment is not a code hit" {
+    try std.testing.expect(!zigCodeContainsWord("const s = \"errdefer here\";", "errdefer"));
+    try std.testing.expect(!zigCodeContainsWord("// errdefer here", "errdefer"));
+    try std.testing.expect(zigCodeContainsWord("  errdefer free(x);", "errdefer"));
+    try std.testing.expect(!zigCodeContainsWord("myerrdeferx();", "errdefer"));
+}
+
+test "file-scope var forms are recognized, const and extern decls are not" {
+    try std.testing.expect(isFileScopeVar("var w: *c.ANativeWindow = undefined;", true));
+    try std.testing.expect(isFileScopeVar("pub var g: ?*c.AMediaCodec = null;", true));
+    try std.testing.expect(!isFileScopeVar("const ANativeWindow = opaque {};", true));
+    try std.testing.expect(!isFileScopeVar("extern fn ANativeWindow_release(w: ?*anyopaque) void;", true));
+    try std.testing.expect(isFileScopeVar("static AMediaCodec *g_codec;", false));
+    // Shape only; a plain var is a file-scope var, and carries no
+    // platform token for checkPlatformReferences to flag.
+    try std.testing.expect(isFileScopeVar("var harness_io: std.Io = undefined;", true));
 }

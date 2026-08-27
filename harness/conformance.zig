@@ -6262,40 +6262,80 @@ fn proveHostileManifest(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 /// cycles of the adapter-heavy lenses (blur, grade, bloom, audio, script) run
 /// on a headless engine under a leak-checking allocator, which reports no leak
 /// only if every session and the engine free everything - a phone-heat gate.
-fn proveNoLeaks(gpa: std.mem.Allocator) !bool {
-    _ = gpa;
-    const leak_lenses = [_][]const u8{
-        ".lens-packages/soft-blur",
-        ".lens-packages/warm-grade",
-        ".lens-packages/glow-bloom",
-        ".lens-packages/sound-beat",
-        ".lens-packages/script-param",
-    };
-    var check: std.heap.DebugAllocator(.{}) = .init;
-    const leak_gpa = check.allocator();
-    {
-        const engine = try abi.createEngine(leak_gpa, .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
-        defer abi.destroyEngine(engine);
-        var cycle: usize = 0;
-        while (cycle < 32) : (cycle += 1) {
-            for (leak_lenses) |pkg| {
-                const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
-                defer abi.destroySession(session);
-                _ = abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len);
-                var signals = std.mem.zeroes(abi.LensSignals);
-                signals.has_face = true;
-                var t: u32 = 0;
-                while (t < 4) : (t += 1) {
-                    _ = abi.goss_session_tick_lens(session, 33_333, &signals);
-                }
+/// Submits `frames` corpus frames through the loader and render path on
+/// the renderer-backed engine, the same submit/decode/nv12 sequence a
+/// live session runs.
+fn submitCorpusFrames(gpa: std.mem.Allocator, engine: *abi.Engine, session: *abi.Session, frames: u32) !void {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    for (0..frames) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+}
+
+/// The full-rendering leak gate on the renderer-backed engine: a real
+/// lens is activated (its status checked, never ignored), frames submit
+/// and render through the loaders, a photo captures, a recording runs.
+/// A warm-up settles the caches; the repeat proves no heap grew.
+fn proveNoLeaks(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *CountingAllocator) !bool {
+    const round = struct {
+        fn once(g: std.mem.Allocator, e: *abi.Engine) !void {
+            const bundle = ".lens-packages/soft-blur";
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) return error.ActivationFailed;
+            try submitCorpusFrames(g, e, session, 8);
+
+            var needed: usize = 0;
+            var pw: u32 = 0;
+            var ph: u32 = 0;
+            var probe: [1]u8 = undefined;
+            if (abi.goss_engine_capture_photo(e, session, &probe, 0, &needed, &pw, &ph) != .invalid_argument or needed == 0) return error.CaptureProbeFailed;
+            const photo_png = try g.alloc(u8, needed);
+            defer g.free(photo_png);
+            var got: usize = 0;
+            if (abi.goss_engine_capture_photo(e, session, photo_png.ptr, photo_png.len, &got, &pw, &ph) != .ok) return error.CaptureFailed;
+
+            if (abi.recording_supported) {
+                const path = "zig-out/conformance-noleaks.mp4";
+                if (abi.goss_engine_recording_start(e, session, path.ptr, path.len, null) != .ok) return error.RecordStartFailed;
+                try submitCorpusFrames(g, e, session, 24);
+                if (abi.goss_engine_recording_stop(e) != .ok) return error.RecordStopFailed;
             }
         }
-    }
-    if (check.deinit() == .leak) {
-        std.debug.print("conformance: FAIL the session lifecycle leaked memory across activate/tick/destroy cycles\n", .{});
+    };
+
+    try round.once(gpa, engine);
+    settle(engine);
+    const base = counter.inUse();
+    const jolt_base = goss_jolt_live_bytes();
+    const qjs_base = goss_qjs_live_bytes();
+    const ma_base = goss_ma_live_bytes();
+
+    try round.once(gpa, engine);
+    settle(engine);
+    const after = counter.inUse();
+    if (after > base) {
+        std.debug.print("conformance: FAIL the full rendering lifecycle grew the heap {d} -> {d} bytes\n", .{ base, after });
         return false;
     }
-    std.debug.print("conformance: PROOF repeated lens activate/tick/destroy cycles leak no memory (blur, grade, bloom, audio, script)\n", .{});
+
+    const jolt_after = goss_jolt_live_bytes();
+    const qjs_after = goss_qjs_live_bytes();
+    const ma_after = goss_ma_live_bytes();
+    if (jolt_after > jolt_base or qjs_after > qjs_base or ma_after > ma_base) {
+        std.debug.print("conformance: FAIL a vendor heap grew across the full rendering lifecycle (jolt {d}->{d}, qjs {d}->{d}, miniaudio {d}->{d})\n", .{ jolt_base, jolt_after, qjs_base, qjs_after, ma_base, ma_after });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a full rendering lifecycle (activate, submit, render, capture, record, loaders) leaks no Zig or vendor-heap memory\n", .{});
     return true;
 }
 
@@ -10416,7 +10456,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("tiled post effect");
     if (!try proveHostileManifest(gpa, engine)) return 1;
     watchHold("hostile manifest");
-    if (!try proveNoLeaks(gpa)) return 1;
+    if (!try proveNoLeaks(gpa, engine, &frame_counter)) return 1;
     watchHold("no leaks");
     if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;
     watchHold("per frame budget");

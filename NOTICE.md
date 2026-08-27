@@ -29,6 +29,7 @@ Third-party source currently present under `third_party/` includes:
 - Jolt Physics
 - libyuv
 - LiteRT
+- miniaudio
 - ml_dtypes
 - neon2sse
 - pthreadpool

@@ -190,12 +190,16 @@ const Sync = struct {
             s.fail("{s}: pin name '{s}' does not match its directory", .{ name, pin.name });
             return;
         }
-        if (pin.opt_in and !explicit) {
-            std.debug.print("vendor-sync: {s} opt-in, skipped\n", .{name});
-            return;
-        }
+        // The license is validated on every run, before any skip: a
+        // pinned opt-in that never syncs on this host still declares a
+        // license, and a bad one must fail closed rather than hide
+        // behind the skip.
         if (!licenseAllowed(pin.license) and !licenseExcepted(pin.name, pin.license)) {
             s.fail("{s}: license '{s}' is not on the allowlist", .{ name, pin.license });
+            return;
+        }
+        if (pin.opt_in and !explicit) {
+            std.debug.print("vendor-sync: {s} opt-in, skipped\n", .{name});
             return;
         }
         if (s.vendorSynced(pin)) {

@@ -206,9 +206,11 @@ Allowed without a separate policy change:
 Explicitly approved exceptions, recorded per component under `third_party/`
 and enforced by the vendor sync's license check: Eigen under MPL-2.0
 (file-level copyleft on Eigen's own files only, consumed unmodified),
-fft2d under the Ooura permission notice, and the Emscripten Python
-runtime under PSF-2.0. Each was reviewed against the proprietary-use
-posture above; an exception here never widens the general allowlist.
+fft2d under the Ooura permission notice, the Emscripten Python
+runtime under PSF-2.0, and miniaudio under MIT-0 (public-domain-style
+permissive, no attribution required). Each was reviewed against the
+proprietary-use posture above; an exception here never widens the
+general allowlist.
 
 Blocked:
 

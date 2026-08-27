@@ -459,6 +459,16 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(media_video_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
+    // The target-independent headless leak gate rides `zig build ci` on
+    // every platform, so the session lifecycle proof runs where no GPU
+    // or render stack exists, not only on the macOS conformance host.
+    const lifecycle_proof_module = b.createModule(.{
+        .root_source_file = b.path("harness/lifecycle_proof.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "abi", .module = abi_module }},
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lifecycle_proof_module })).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
     test_step.dependOn(&b.addRunArtifact(vendor_sync_tests).step);
     test_step.dependOn(&b.addRunArtifact(fetch_models_tests).step);
@@ -1343,6 +1353,11 @@ pub fn build(b: *std.Build) void {
         run_conformance.step.dependOn(lens_package_reference_step);
         if (b.args) |args| run_conformance.addArgs(args);
         conformance_step.dependOn(&run_conformance.step);
+        // The leak gates ride the merge bar where the render stack exists:
+        // on macOS `zig build ci` runs the full conformance, submit and
+        // render and capture and record and loaders included. Non-GPU
+        // hosts still run the headless lifecycle proof through test_step.
+        ci_step.dependOn(conformance_step);
     } else {
         const missing = b.addFail("gosslens: harness needs macos and synced render vendors, run zig build vendor-sync");
         harness_step.dependOn(&missing.step);
