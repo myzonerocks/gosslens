@@ -93,7 +93,8 @@ const Fetch = struct {
 };
 
 pub fn main(init: std.process.Init) !u8 {
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+    const arena = init.arena.allocator();
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, arena);
     _ = args.next();
     var check_only = false;
     while (args.next()) |arg| {
@@ -105,7 +106,6 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
 
-    const arena = init.arena.allocator();
     var f: Fetch = .{ .arena = arena, .io = init.io, .check_only = check_only };
 
     const source = try Io.Dir.cwd().readFileAllocOptions(f.io, "third_party/models.lock", arena, .limited(1 << 16), .of(u8), 0);

@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !u8 {
     try writeSurface(&surface.writer);
     const current = surface.writer.buffered();
 
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, arena);
     _ = args.next();
     const mode = args.next() orelse "--print";
 

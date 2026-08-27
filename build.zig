@@ -1,6 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// The one android ndk the android target builds against.
+const ndk_version = "29.0.14206865";
+
 pub fn build(b: *std.Build) void {
     enforcePinnedZig(b);
 
@@ -1325,10 +1328,15 @@ pub fn build(b: *std.Build) void {
 // sources; zig is the C++ and Objective-C++ compiler for every target,
 // device targets included. Debug config follows the zig optimize mode.
 fn ndkSysroot(b: *std.Build) ?[]const u8 {
-    const prebuilt = if (@import("builtin").os.tag == .macos) "darwin-x86_64" else "linux-x86_64";
+    const host = @import("builtin").os.tag;
+    const prebuilt = switch (host) {
+        .macos => "darwin-x86_64",
+        .windows => "windows-x86_64",
+        else => "linux-x86_64",
+    };
     // CI runners and other machines name the NDK through the standard
-    // environment variables; the lab machine's fixed install is the
-    // fallback.
+    // environment variables; a default sdk install is the fallback, under
+    // the per-host location the sdk manager writes.
     for ([_][]const u8{ "ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "ANDROID_NDK_LATEST_HOME" }) |name| {
         if (b.graph.environ_map.get(name)) |root| {
             const sysroot = b.pathJoin(&.{ root, "toolchains", "llvm", "prebuilt", prebuilt, "sysroot" });
@@ -1336,8 +1344,11 @@ fn ndkSysroot(b: *std.Build) ?[]const u8 {
             return sysroot;
         }
     }
-    const home = b.graph.environ_map.get("HOME") orelse return null;
-    const sysroot = b.pathJoin(&.{ home, "Library", "Android", "sdk", "ndk", "29.0.14206865", "toolchains", "llvm", "prebuilt", prebuilt, "sysroot" });
+    const sdk = if (host == .windows)
+        b.pathJoin(&.{ b.graph.environ_map.get("LOCALAPPDATA") orelse return null, "Android", "Sdk" })
+    else
+        b.pathJoin(&.{ b.graph.environ_map.get("HOME") orelse return null, "Library", "Android", "sdk" });
+    const sysroot = b.pathJoin(&.{ sdk, "ndk", ndk_version, "toolchains", "llvm", "prebuilt", prebuilt, "sysroot" });
     b.build_root.handle.access(b.graph.io, sysroot, .{}) catch return null;
     return sysroot;
 }
@@ -1384,7 +1395,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         return;
     };
     const sysroot = ndkSysroot(b) orelse {
-        const missing = b.addFail("gosslens: ndk 29.0.14206865 not installed under ~/Library/Android/sdk/ndk");
+        const missing = b.addFail(b.fmt("gosslens: ndk {s} not found; install it or point ANDROID_NDK_ROOT at it", .{ndk_version}));
         android_step.dependOn(&missing.step);
         return;
     };
@@ -3790,7 +3801,10 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     for ([_][]const u8{ glslang, ".vendor/bgfx/3rdparty", spirv_tools ++ "/include", spirv_tools ++ "/source" }) |dir| {
         glslang_module.addIncludePath(b.path(dir));
     }
-    for ([_][]const u8{ "glslang/MachineIndependent", "glslang/MachineIndependent/preprocessor", "glslang/GenericCodeGen", "glslang/ResourceLimits", "glslang/OSDependent/Unix", "glslang/HLSL", "SPIRV" }) |dir| {
+    // glslang keeps its host abstraction in one directory per host family;
+    // the Unix source does not compile against a windows libc.
+    const glslang_os = if (target.result.os.tag == .windows) "glslang/OSDependent/Windows" else "glslang/OSDependent/Unix";
+    for ([_][]const u8{ "glslang/MachineIndependent", "glslang/MachineIndependent/preprocessor", "glslang/GenericCodeGen", "glslang/ResourceLimits", glslang_os, "glslang/HLSL", "SPIRV" }) |dir| {
         addCxxDir(b, glslang_module, b.fmt("{s}/{s}", .{ glslang, dir }), &cxx17, &.{});
     }
     const glslang_lib = b.addLibrary(.{ .name = "glslang", .linkage = .static, .root_module = glslang_module });
@@ -3850,8 +3864,25 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     addCxxDir(b, shaderc_module, bgfx_dir ++ "/tools/shaderc", &cxx17, &.{});
     shaderc_module.addCSourceFile(.{ .file = b.path(bgfx_dir ++ "/src/vertexlayout.cpp"), .flags = &cxx17 });
     shaderc_module.addCSourceFile(.{ .file = b.path(bgfx_dir ++ "/src/shader.cpp"), .flags = &cxx17 });
-    shaderc_module.addCSourceFile(.{ .file = b.path(".vendor/bx/src/amalgamated.cpp"), .flags = &cxx17 });
-    for ([_][]const u8{ "image.cpp", "image_cubemap_filter.cpp", "image_decode.cpp", "image_encode.cpp" }) |file| {
+    if (target.result.os.tag == .windows) {
+        // Two bx assumptions the mingw crt breaks: its directory reader is
+        // POSIX-only, and shaderc needs only bx::stat from outside it; and
+        // filepath.cpp declares GetModuleFileNameA itself unless windows.h
+        // got there first, which only the amalgamated unit does.
+        shaderc_module.addCMacro("BX_CONFIG_CRT_DIRECTORY_READER", "0");
+        addCxxDir(b, shaderc_module, ".vendor/bx/src", &cxx17, &.{"amalgamated.cpp"});
+    } else {
+        shaderc_module.addCSourceFile(.{ .file = b.path(".vendor/bx/src/amalgamated.cpp"), .flags = &cxx17 });
+    }
+    // shaderc calls none of bimg's texture encoders, whose third-party
+    // sources this build does not vendor. Mach-O and ELF drop the unreferenced
+    // object; a COFF link resolves every symbol it names, so windows takes the
+    // decoders alone, and the wic parser the decode table always names.
+    const bimg_sources: []const []const u8 = if (target.result.os.tag == .windows)
+        &.{ "image.cpp", "image_cubemap_filter.cpp", "image_decode.cpp", "image_decode_wic.cpp" }
+    else
+        &.{ "image.cpp", "image_cubemap_filter.cpp", "image_decode.cpp", "image_encode.cpp" };
+    for (bimg_sources) |file| {
         shaderc_module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/bimg/src/{s}", .{file})), .flags = &cxx17 });
     }
     for ([_][]const u8{
@@ -3868,6 +3899,8 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     shaderc_module.addCMacro("BIMG_CONFIG_PARSE_AVIF", "0");
     shaderc_module.addCMacro("BIMG_CONFIG_PARSE_HEIF", "0");
     shaderc_module.addCMacro("BIMG_CONFIG_PARSE_EXR", "0");
+    // Off, so the wic parser compiles as its stub and shaderc needs no COM.
+    if (target.result.os.tag == .windows) shaderc_module.addCMacro("BIMG_CONFIG_PARSE_WIC", "0");
 
     const shaderc_exe = b.addExecutable(.{ .name = "shaderc", .root_module = shaderc_module });
     shaderc_module.linkLibrary(fcpp_lib);

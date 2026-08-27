@@ -174,6 +174,8 @@ fn compileShaderProfiles(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Di
     for (shader_profiles) |profile| {
         const out_path = if (package_dir) |dir|
             try std.fmt.allocPrint(diags.arena, "{s}/shaders/{s}.{s}.bin", .{ dir, stem, profile.tag })
+        else if (@import("builtin").os.tag == .windows)
+            "NUL"
         else
             "/dev/null";
         var argv: std.ArrayList([]const u8) = .empty;
@@ -403,7 +405,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, arena);
     _ = args.next();
     var bundle_path: ?[]const u8 = null;
     var package_dir: ?[]const u8 = null;
