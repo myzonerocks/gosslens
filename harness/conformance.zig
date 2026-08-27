@@ -9693,7 +9693,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "gosslens conformance", null, null) orelse return error.WindowCreate;
+    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "conformance", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
     g_watch_window = window;
 

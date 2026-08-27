@@ -267,7 +267,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "gosslens harness", null, null) orelse return error.WindowCreate;
+    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "preview", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
 
     var init: c.bgfx_init_t = undefined;
