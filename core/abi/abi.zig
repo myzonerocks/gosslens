@@ -195,6 +195,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
+    "goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
     "void goss_session_disable_beauty(goss_session *session)",
     "goss_status goss_session_set_beauty(goss_session *session, int32_t effect, float value)",
@@ -587,6 +588,10 @@ pub const Session = struct {
     /// joints (knees down) read absent, for selfie framing with the legs out.
     pose_upper_body: bool = false,
     segmentation_worker: ?*segmentation.Segmentation = null,
+    /// Monotonic timestamp for still images fed to the segmenter through
+    /// goss_session_submit_segmentation_image, so each submit orders after the
+    /// last the way successive camera frames do.
+    segmentation_image_seq: i64 = 0,
     /// The most recent mask, uploaded as a real GPU texture the same way
     /// a lut.pass asset is - a raw byte array has no reason to cross the
     /// frozen ABI surface when nothing outside the render thread ever
@@ -5063,6 +5068,30 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
     s.depth_near = near;
     s.depth_far = far;
     updateDepthTexture(s, gpa);
+    return .ok;
+}
+
+/// Segments a host-provided still RGBA image: converts it to NV12 and feeds
+/// the running segmenter, so the next render picks up the mask the same way a
+/// camera frame would. again when no segmenter is enabled.
+pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const pixels = rgba orelse return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    const worker = s.segmentation_worker orelse return .again;
+    const gpa = s.engine.gpa;
+    const w: usize = width;
+    const h: usize = height;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    const y_out = gpa.alloc(u8, w * h) catch return .out_of_memory;
+    defer gpa.free(y_out);
+    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return .out_of_memory;
+    defer gpa.free(uv_out);
+    const conv = math.color.rgbToYuv(.bt601, .video);
+    math.color.rgbaToNv12(pixels[0 .. w * h * 4], w, h, conv, y_out, uv_out);
+    s.segmentation_image_seq += 1;
+    segmentation.submitNv12(worker, width, height, s.segmentation_image_seq, conv, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
     return .ok;
 }
 

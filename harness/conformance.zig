@@ -6520,6 +6520,102 @@ fn proveSharpen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveUserMediaSeg(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // goss_session_submit_segmentation_image feeds a still RGBA image to the
+    // segmenter; a subject-compositing lens then shows the segmented subject,
+    // differing from a session handed no image, and it is deterministic.
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const rgba = corpus.frame.pixels.rgba8;
+    const cw = corpus.frame.width;
+    const ch = corpus.frame.height;
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_img = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_img);
+    const shot_img2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_img2);
+    const shot_none = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_none);
+    var wi: u32 = 0;
+    var hi: u32 = 0;
+    var wi2: u32 = 0;
+    var hi2: u32 = 0;
+    var wn: u32 = 0;
+    var hn: u32 = 0;
+
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL user-media segmentation enable\n", .{});
+            return false;
+        }
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/background-swap", ".lens-packages/background-swap".len) != .ok) {
+            std.debug.print("conformance: FAIL user-media lens activation\n", .{});
+            return false;
+        }
+        if (abi.goss_session_submit_segmentation_image(session, rgba.ptr, cw, ch) != .ok) {
+            std.debug.print("conformance: FAIL submit_segmentation_image rejected the still\n", .{});
+            return false;
+        }
+        var polls: usize = 0;
+        while (session.segmentation_texture == null) {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            polls += 1;
+            if (polls > 1_000_000) {
+                std.debug.print("conformance: FAIL the submitted image never produced a mask\n", .{});
+                return false;
+            }
+        }
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_img.ptr, shot_img.len, &wi, &hi) != .ok) return error.CaptureFailed;
+        for (0..3) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_img2.ptr, shot_img2.len, &wi2, &hi2) != .ok) return error.CaptureFailed;
+    }
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/background-swap", ".lens-packages/background-swap".len) != .ok) return error.ActivationFailed;
+        for (0..10) |_| {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_none.ptr, shot_none.len, &wn, &hn) != .ok) return error.CaptureFailed;
+    }
+    if (wi == 0 or wi != wn or hi != hn or wi != wi2 or hi != hi2) {
+        std.debug.print("conformance: FAIL user-media capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_img[0 .. wi * hi * 4], shot_img2[0 .. wi * hi * 4])) {
+        std.debug.print("conformance: FAIL user-media segmentation is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shot_img[0 .. wi * hi * 4], shot_none[0 .. wn * hn * 4])) {
+        std.debug.print("conformance: FAIL the submitted image did not segment - composite unchanged from no image\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF submit_segmentation_image segments a still RGBA, changing the composite from a session given no image, deterministically\n", .{});
+    return true;
+}
+
 /// Proves goss_engine_capture_photo end to end: the size probe
 /// reports the exact needed size, a capture into an exactly-sized
 /// buffer yields well-formed PNG bytes, and two captures of the same
@@ -8082,6 +8178,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveTeeth(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "sharpen")) {
             if (!try proveSharpen(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "user-media-seg")) {
+            if (!try proveUserMediaSeg(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -8160,6 +8258,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("teeth whiten");
     if (!try proveSharpen(gpa, engine)) return 1;
     watchHold("detail sharpen");
+    if (!try proveUserMediaSeg(gpa, engine)) return 1;
+    watchHold("user-media segmentation");
     if (!try proveVideoRecording(gpa, engine)) return 1;
     watchHold("video recording");
     if (!try provePlatformPhotos(gpa, engine)) return 1;
