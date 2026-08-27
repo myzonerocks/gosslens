@@ -19,6 +19,12 @@ const max_steps_per_advance: u32 = 32;
 const settle_distance: f32 = 1e-4;
 const settle_velocity: f32 = 1e-3;
 
+/// Milliseconds to microseconds without overflowing the u32 the ramp holds:
+/// a caller-supplied duration that would wrap is saturated instead.
+fn usFromMs(duration_ms: u32) u32 {
+    return @intCast(@min(@as(u64, duration_ms) * 1000, std.math.maxInt(u32)));
+}
+
 pub const Curve = enum { linear, ease_in_quad, ease_out_quad, ease_in_out_quad, ease_in_out_cubic, ease_in_out_sine, spring };
 
 /// Maps linear progress (0..1) to an eased progress for the time-based
@@ -53,7 +59,7 @@ pub const Ramp = struct {
             .value = current,
             .target = target,
             .curve = .linear,
-            .duration_us = duration_ms * 1000,
+            .duration_us = usFromMs(duration_ms),
         };
         if (ramp.duration_us == 0) {
             ramp.value = target;
@@ -68,7 +74,7 @@ pub const Ramp = struct {
             .value = current,
             .target = target,
             .curve = curve,
-            .duration_us = duration_ms * 1000,
+            .duration_us = usFromMs(duration_ms),
         };
         if (ramp.duration_us == 0) {
             ramp.value = target;
@@ -110,6 +116,14 @@ pub const Ramp = struct {
             const accel = self.stiffness * (self.target - self.value) - self.damping * self.velocity;
             self.velocity += accel * fixed_step_seconds;
             self.value += self.velocity * fixed_step_seconds;
+            // A manifest-fed inf/NaN stiffness or damping diverges the step;
+            // settle on the target rather than forward a NaN to the GPU chain.
+            if (!std.math.isFinite(self.value) or !std.math.isFinite(self.velocity)) {
+                self.value = self.target;
+                self.velocity = 0;
+                self.done = true;
+                return;
+            }
             if (@abs(self.target - self.value) < settle_distance and @abs(self.velocity) < settle_velocity) {
                 self.value = self.target;
                 self.velocity = 0;
@@ -224,4 +238,18 @@ test "a long pause caps its catch-up burst instead of spiraling" {
     const v = ramp.advance(10_000_000);
     try t.expect(std.math.isFinite(v));
     try t.expect(v >= 0 and v <= 1.5);
+}
+
+test "an inf-stiffness spring settles finite rather than forwarding a NaN" {
+    var ramp = Ramp.startSpring(0, 1, std.math.inf(f32), 0);
+    const v = ramp.advance(fixed_step_us);
+    try t.expect(std.math.isFinite(v));
+    try t.expectEqual(@as(f32, 1), v);
+    try t.expect(ramp.done);
+}
+
+test "an absurd duration saturates instead of overflowing the us field" {
+    const ramp = Ramp.startLinear(0, 1, std.math.maxInt(u32));
+    try t.expectEqual(std.math.maxInt(u32), ramp.duration_us);
+    try t.expect(!ramp.done);
 }

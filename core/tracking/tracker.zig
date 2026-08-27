@@ -38,7 +38,9 @@ pub const Tracker = struct {
     /// Landmark output either refines the next frame's crop or drops the
     /// lock when the model reports the face gone.
     pub fn onLandmarks(tracker: *Tracker, presence: f32, landmarks: *const [face.landmark_count]face.Landmark) Status {
-        if (presence < presence_floor) {
+        // Positive test: a NaN presence (comparison false) drops the lock too,
+        // so a model emitting NaN cannot hold and republish a stale region.
+        if (!(presence >= presence_floor)) {
             tracker.region = null;
             return .searching;
         }
@@ -89,4 +91,12 @@ test "a low presence score drops the lock" {
     try t.expectEqual(Status.searching, tracker.onLandmarks(0.2, &landmarks));
     try t.expectEqual(@as(?sampler.Region, null), tracker.cropForFrame());
     try t.expectEqual(Status.searching, tracker.status());
+}
+
+test "a NaN presence score drops the lock rather than holding it" {
+    var tracker: Tracker = .{};
+    tracker.onDetection(.{ .center_x = 0, .center_y = 0, .side = 100, .rotation = 0 });
+    const landmarks = syntheticLandmarks();
+    try t.expectEqual(Status.searching, tracker.onLandmarks(std.math.nan(f32), &landmarks));
+    try t.expectEqual(@as(?sampler.Region, null), tracker.cropForFrame());
 }

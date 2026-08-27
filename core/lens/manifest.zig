@@ -14,6 +14,9 @@ pub const max_parameters = 256;
 pub const max_nodes = 128;
 pub const max_triggers = 256;
 pub const max_when_bytes = 1024;
+/// A ramp holds its duration in microseconds (u32), so a millisecond
+/// duration is bounded to keep ms*1000 inside that width (about 71 minutes).
+pub const max_duration_ms: f64 = std.math.maxInt(u32) / 1000;
 
 pub const Capability = enum {
     face,
@@ -850,37 +853,19 @@ fn jsonDepth(value: std.json.Value) usize {
 
 fn readVec3(value: std.json.Value, out: *[3]f32) bool {
     if (value != .array or value.array.items.len != 3) return false;
-    for (value.array.items, 0..) |item, i| {
-        out[i] = switch (item) {
-            .float => |f| @floatCast(f),
-            .integer => |n| @floatFromInt(n),
-            else => return false,
-        };
-    }
+    for (value.array.items, 0..) |item, i| out[i] = @floatCast(numberOf(item) orelse return false);
     return true;
 }
 
 fn readVec4(value: std.json.Value, out: *[4]f32) bool {
     if (value != .array or value.array.items.len != 4) return false;
-    for (value.array.items, 0..) |item, i| {
-        out[i] = switch (item) {
-            .float => |f| @floatCast(f),
-            .integer => |n| @floatFromInt(n),
-            else => return false,
-        };
-    }
+    for (value.array.items, 0..) |item, i| out[i] = @floatCast(numberOf(item) orelse return false);
     return true;
 }
 
 fn readVec6(value: std.json.Value, out: *[6]f32) bool {
     if (value != .array or value.array.items.len != 6) return false;
-    for (value.array.items, 0..) |item, i| {
-        out[i] = switch (item) {
-            .float => |f| @floatCast(f),
-            .integer => |n| @floatFromInt(n),
-            else => return false,
-        };
-    }
+    for (value.array.items, 0..) |item, i| out[i] = @floatCast(numberOf(item) orelse return false);
     return true;
 }
 
@@ -947,12 +932,23 @@ fn keyModeValue(s: []const u8) u8 {
     return 0;
 }
 
+/// The finite f64 range that still narrows to a finite f32. Every numeric
+/// field a lens carries is an f32 descriptor; a JSON 1e300 would otherwise
+/// cast to inf and feed a body or particle born non-finite.
+const f32_limit: f64 = std.math.floatMax(f32);
+
+/// Reads a JSON number, rejecting anything that would not survive the f32
+/// narrowing every consumer performs: NaN, inf, or a magnitude past f32's
+/// range. Out-of-range reads fall back to the caller's default or diagnostic.
 fn numberOf(value: std.json.Value) ?f64 {
-    return switch (value) {
+    const n: f64 = switch (value) {
         .integer => |i| @floatFromInt(i),
         .float => |f| f,
-        else => null,
+        else => return null,
     };
+    // Written as a positive test so NaN (all comparisons false) is rejected.
+    if (!(n >= -f32_limit and n <= f32_limit)) return null;
+    return n;
 }
 
 /// Parses "major.minor" strictly: two decimal runs separated by one dot,
@@ -1062,6 +1058,14 @@ fn parseParamValue(diags: *Diagnostics, path: *PathStack, param_type: ParamType,
                 try diags.add(path.slice(), "expected a number", .{});
                 return null;
             };
+            // Guard the i32 narrowing: a 1e10 default would trap the cast in a
+            // safe build and go UB in release. Positive test rejects NaN too.
+            const i32_min: f64 = std.math.minInt(i32);
+            const i32_max: f64 = std.math.maxInt(i32);
+            if (!(n >= i32_min and n <= i32_max)) {
+                try diags.add(path.slice(), "int is out of range", .{});
+                return null;
+            }
             return .{ .int = @intFromFloat(n) };
         },
         .bool => {
@@ -1190,7 +1194,10 @@ fn parseBinding(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         },
         .bool => |b| return .{ .literal_bool = b },
         .integer, .float => {
-            const n = numberOf(value).?;
+            const n = numberOf(value) orelse {
+                try diags.add(path.slice(), "number is out of range", .{});
+                return null;
+            };
             return .{ .literal_float = @floatCast(n) };
         },
         else => {
@@ -2464,7 +2471,16 @@ fn parseAction(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, 
             path.pop(mark);
             break :blk 0;
         };
-        action.duration_ms = @intFromFloat(@max(0, n));
+        // Bound the ms so the ramp's ms*1000 microsecond math stays inside u32;
+        // an out-of-range duration is a diagnostic and holds at zero.
+        if (!(n >= 0 and n <= max_duration_ms)) {
+            const mark = path.push("duration_ms");
+            try diags.add(path.slice(), "duration is out of range", .{});
+            path.pop(mark);
+            action.duration_ms = 0;
+        } else {
+            action.duration_ms = @intFromFloat(n);
+        }
     }
     if (getField(object, "curve")) |v| {
         const s = switch (v) {

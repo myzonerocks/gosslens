@@ -5,6 +5,7 @@
 #define MA_NO_DEVICE_IO
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
+#include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,6 +91,9 @@ static int goss_mixer_take(GossMixer *m, ma_decoder *dec) {
     ma_uint64 got = 0;
     ma_decoder_read_pcm_frames(dec, pcm, total, &got);
     ma_decoder_uninit(dec);
+    // A truncated or undecodable file can read zero frames while reporting a
+    // length; registering it would loop a voice over uninitialized PCM. Refuse.
+    if (got == 0) { goss_ma_free(pcm, NULL); return -1; }
     int id = m->sound_count++;
     m->sounds[id].pcm = pcm;
     m->sounds[id].frames = got;
@@ -135,8 +139,19 @@ int goss_mixer_load_memory(GossMixer *m, const void *data, size_t size) {
     return goss_mixer_take(m, &dec);
 }
 
+// Clamps a scaled float sample into the s16 range as a long, rejecting NaN
+// by construction so the float-to-integer cast can never be undefined.
+static long clamp_sample(float f) {
+    if (!(f > -32768.0f)) return -32768;
+    if (f > 32767.0f) return 32767;
+    return (long)f;
+}
+
 void goss_mixer_play(GossMixer *m, int sound_id, int loop, float gain) {
     if (!m || sound_id < 0 || sound_id >= m->sound_count) return;
+    // A non-finite gain would make the per-sample cast undefined; a silent
+    // voice is the safe reading of a broken value.
+    if (!isfinite(gain)) gain = 0.0f;
     for (int i = 0; i < GOSS_MAX_VOICES; i++) {
         if (!m->voices[i].active) {
             m->voices[i].sound = sound_id;
@@ -172,7 +187,7 @@ void goss_mixer_pull(GossMixer *m, short *out, int frames) {
                 else { vo->active = 0; break; }
             }
             for (int c = 0; c < ch; c++) {
-                long mixed = out[f * ch + c] + (long)(s->pcm[vo->cursor * ch + c] * vo->gain);
+                long mixed = out[f * ch + c] + clamp_sample((float)s->pcm[vo->cursor * ch + c] * vo->gain);
                 if (mixed > 32767) mixed = 32767;
                 if (mixed < -32768) mixed = -32768;
                 out[f * ch + c] = (short)mixed;

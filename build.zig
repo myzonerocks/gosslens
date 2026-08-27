@@ -1041,6 +1041,9 @@ pub fn build(b: *std.Build) void {
         gosslens_wasm.rdynamic = true;
         wasm_step.dependOn(&b.addInstallArtifact(gosslens_wasm, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
     }
+    // The wasm core rides the local gate so a stub that drifts out of lockstep
+    // with the real gltf/asset signatures fails here, not on the web later.
+    ci_step.dependOn(wasm_step);
 
     // The render-capable half of the web core, real bgfx underneath
     // instead of render_stub.zig - separate from wasm_step above (which
@@ -1277,6 +1280,10 @@ pub fn build(b: *std.Build) void {
         conformance_module.addImport("gif", gifModule(b, target, optimize));
         conformance_module.addImport("jpeg", conformance_jpeg_module);
         conformance_module.addImport("color", conformance_color_module);
+        // The hostile-input tripwire drives the untrusted parsers directly.
+        conformance_module.addImport("manifest", lens_manifest_module);
+        conformance_module.addImport("material", material_module);
+        if (gltf_module) |gm| conformance_module.addImport("gltf", gm);
         const world_replay_module = b.createModule(.{
             .root_source_file = b.path("harness/world_replay.zig"),
             .target = target,

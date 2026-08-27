@@ -22,6 +22,7 @@
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/SpringSettings.h>
 #include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/Body/BodyLockMulti.h>
 #include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
 #include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
 #include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
@@ -38,6 +39,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdarg>
+#include <initializer_list>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -81,6 +83,26 @@ struct HairInstance {
   JPH::Hair* hair = nullptr;
 };
 
+// A constraint plus the two bodies it references, so removing either body can
+// first drop the constraints that would otherwise hold a dangling Body*.
+struct ConstraintRecord {
+  JPH::Ref<JPH::Constraint> constraint;
+  JPH::BodyID a;
+  JPH::BodyID b;
+};
+
+// Every untrusted creation scalar is finite-checked before it becomes a Jolt
+// object: a body born non-finite would poison the rollback guard whose own
+// baseline is that first pose.
+bool allFinite(std::initializer_list<float> vs) {
+  for (float v : vs) if (!std::isfinite(v)) return false;
+  return true;
+}
+
+// Read-boundary floor: a soft-body or hair vertex that diverged reads as zero
+// rather than uploading a NaN into the mesh path.
+float finiteOr0(float v) { return std::isfinite(v) ? v : 0.0f; }
+
 // A moving body tracked for the post-substep guard. Its last finite pose is
 // kept so a step that blows a velocity or position non-finite is rolled back
 // rather than propagating a NaN through the world; a planar body also has its
@@ -116,6 +138,7 @@ struct World {
   bool hair_ready = false;
   std::vector<HairInstance> hairs;
   std::vector<TrackedBody> tracked_bodies;
+  std::vector<ConstraintRecord> constraints;
   int total_substeps = 0;
 
   // Hair objects are plain owned pointers (JPH::Hair is not refcounted);
@@ -206,6 +229,14 @@ T* nothrowNew(A&&... args) {
   return new (memory) T(std::forward<A>(args)...);
 }
 
+// Registers a created constraint with the system and records it against its
+// two bodies. A null constraint (creation failed) is ignored.
+void add_constraint(World* world, JPH::Constraint* constraint, JPH::BodyID a, JPH::BodyID b) {
+  if (constraint == nullptr) return;
+  world->system.AddConstraint(constraint);
+  world->constraints.push_back({JPH::Ref<JPH::Constraint>(constraint), a, b});
+}
+
 }  // namespace
 
 extern "C" void* goss_physics_world_create(float gravity_y) {
@@ -256,6 +287,7 @@ extern "C" size_t goss_jolt_live_bytes(void) {
 // planar is set the body is confined to the z = 0 plane - x/y translation
 // and z spin only, a 2D world inside the 3D engine.
 static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, float px, float py, float pz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
+  if (world == nullptr || !allFinite({px, py, pz, qx, qy, qz, qw, friction, restitution})) return UINT32_MAX;
   const JPH::EMotionType motion_type = motion == 1   ? JPH::EMotionType::Dynamic
                                        : motion == 2 ? JPH::EMotionType::Kinematic
                                                      : JPH::EMotionType::Static;
@@ -278,7 +310,7 @@ static uint32_t finalize_body(World* world, JPH::Ref<JPH::Shape> body_shape, flo
 // (x radius, y half height), 3 capsule (x radius, y half height); a
 // rotation can lay a capsule or cylinder on its side.
 static uint32_t create_body(World* world, uint32_t shape, float px, float py, float pz, float sx, float sy, float sz, float qx, float qy, float qz, float qw, float friction, float restitution, uint32_t motion, uint32_t planar) {
-  if (world == nullptr) return UINT32_MAX;
+  if (world == nullptr || !allFinite({sx, sy, sz})) return UINT32_MAX;
   JPH::Ref<JPH::Shape> body_shape;
   if (shape == 0) {
     body_shape = nothrowNew<JPH::BoxShape>(JPH::Vec3(sx, sy, sz));
@@ -362,26 +394,19 @@ extern "C" uint32_t goss_physics_body_add_mesh(void* handle, const float* points
 // points - the chain link for content hanging off an anchor body.
 extern "C" int32_t goss_physics_constrain_distance(void* handle, uint32_t body_a, uint32_t body_b, float ax, float ay, float az, float bx, float by, float bz, float min_distance, float max_distance) {
   auto* world = static_cast<World*>(handle);
-  if (world == nullptr) return -1;
-  JPH::Body* a = nullptr;
-  JPH::Body* b = nullptr;
-  {
-    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
-    if (!lock_a.Succeeded()) return -1;
-    a = &lock_a.GetBody();
-  }
-  {
-    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
-    if (!lock_b.Succeeded()) return -1;
-    b = &lock_b.GetBody();
-  }
+  if (world == nullptr || !allFinite({ax, ay, az, bx, by, bz, min_distance, max_distance})) return -1;
+  const JPH::BodyID ids[2] = {JPH::BodyID(body_a), JPH::BodyID(body_b)};
+  JPH::BodyLockMultiWrite lock(world->system.GetBodyLockInterface(), ids, 2);
+  JPH::Body* a = lock.GetBody(0);
+  JPH::Body* b = lock.GetBody(1);
+  if (a == nullptr || b == nullptr) return -1;
   JPH::DistanceConstraintSettings settings;
   settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
   settings.mPoint1 = JPH::RVec3(ax, ay, az);
   settings.mPoint2 = JPH::RVec3(bx, by, bz);
   settings.mMinDistance = min_distance;
   settings.mMaxDistance = max_distance;
-  world->system.AddConstraint(settings.Create(*a, *b));
+  add_constraint(world, settings.Create(*a, *b), ids[0], ids[1]);
   return 0;
 }
 
@@ -389,24 +414,17 @@ extern "C" int32_t goss_physics_constrain_distance(void* handle, uint32_t body_a
 // coincident while the bodies rotate freely about it - a pendulum pivot.
 extern "C" int32_t goss_physics_constrain_point(void* handle, uint32_t body_a, uint32_t body_b, float ax, float ay, float az, float bx, float by, float bz) {
   auto* world = static_cast<World*>(handle);
-  if (world == nullptr) return -1;
-  JPH::Body* a = nullptr;
-  JPH::Body* b = nullptr;
-  {
-    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
-    if (!lock_a.Succeeded()) return -1;
-    a = &lock_a.GetBody();
-  }
-  {
-    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
-    if (!lock_b.Succeeded()) return -1;
-    b = &lock_b.GetBody();
-  }
+  if (world == nullptr || !allFinite({ax, ay, az, bx, by, bz})) return -1;
+  const JPH::BodyID ids[2] = {JPH::BodyID(body_a), JPH::BodyID(body_b)};
+  JPH::BodyLockMultiWrite lock(world->system.GetBodyLockInterface(), ids, 2);
+  JPH::Body* a = lock.GetBody(0);
+  JPH::Body* b = lock.GetBody(1);
+  if (a == nullptr || b == nullptr) return -1;
   JPH::PointConstraintSettings settings;
   settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
   settings.mPoint1 = JPH::RVec3(ax, ay, az);
   settings.mPoint2 = JPH::RVec3(bx, by, bz);
-  world->system.AddConstraint(settings.Create(*a, *b));
+  add_constraint(world, settings.Create(*a, *b), ids[0], ids[1]);
   return 0;
 }
 
@@ -415,22 +433,15 @@ extern "C" int32_t goss_physics_constrain_point(void* handle, uint32_t body_a, u
 extern "C" int32_t goss_physics_constrain_fixed(void* handle, uint32_t body_a, uint32_t body_b) {
   auto* world = static_cast<World*>(handle);
   if (world == nullptr) return -1;
-  JPH::Body* a = nullptr;
-  JPH::Body* b = nullptr;
-  {
-    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
-    if (!lock_a.Succeeded()) return -1;
-    a = &lock_a.GetBody();
-  }
-  {
-    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
-    if (!lock_b.Succeeded()) return -1;
-    b = &lock_b.GetBody();
-  }
+  const JPH::BodyID ids[2] = {JPH::BodyID(body_a), JPH::BodyID(body_b)};
+  JPH::BodyLockMultiWrite lock(world->system.GetBodyLockInterface(), ids, 2);
+  JPH::Body* a = lock.GetBody(0);
+  JPH::Body* b = lock.GetBody(1);
+  if (a == nullptr || b == nullptr) return -1;
   JPH::FixedConstraintSettings settings;
   settings.mSpace = JPH::EConstraintSpace::WorldSpace;
   settings.mAutoDetectPoint = true;
-  world->system.AddConstraint(settings.Create(*a, *b));
+  add_constraint(world, settings.Create(*a, *b), ids[0], ids[1]);
   return 0;
 }
 
@@ -438,19 +449,12 @@ extern "C" int32_t goss_physics_constrain_fixed(void* handle, uint32_t body_a, u
 // one plane perpendicular to the axis (a door or single-axis pendulum).
 extern "C" int32_t goss_physics_constrain_hinge(void* handle, uint32_t body_a, uint32_t body_b, float px, float py, float pz, float hx, float hy, float hz) {
   auto* world = static_cast<World*>(handle);
-  if (world == nullptr) return -1;
-  JPH::Body* a = nullptr;
-  JPH::Body* b = nullptr;
-  {
-    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
-    if (!lock_a.Succeeded()) return -1;
-    a = &lock_a.GetBody();
-  }
-  {
-    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
-    if (!lock_b.Succeeded()) return -1;
-    b = &lock_b.GetBody();
-  }
+  if (world == nullptr || !allFinite({px, py, pz, hx, hy, hz})) return -1;
+  const JPH::BodyID ids[2] = {JPH::BodyID(body_a), JPH::BodyID(body_b)};
+  JPH::BodyLockMultiWrite lock(world->system.GetBodyLockInterface(), ids, 2);
+  JPH::Body* a = lock.GetBody(0);
+  JPH::Body* b = lock.GetBody(1);
+  if (a == nullptr || b == nullptr) return -1;
   JPH::Vec3 axis = JPH::Vec3(hx, hy, hz).Normalized();
   // A reference direction not parallel to the axis, so the normal is stable.
   JPH::Vec3 ref = (std::abs(axis.GetY()) < 0.99f) ? JPH::Vec3(0, 1, 0) : JPH::Vec3(1, 0, 0);
@@ -460,7 +464,7 @@ extern "C" int32_t goss_physics_constrain_hinge(void* handle, uint32_t body_a, u
   settings.mPoint1 = settings.mPoint2 = JPH::RVec3(px, py, pz);
   settings.mHingeAxis1 = settings.mHingeAxis2 = axis;
   settings.mNormalAxis1 = settings.mNormalAxis2 = normal;
-  world->system.AddConstraint(settings.Create(*a, *b));
+  add_constraint(world, settings.Create(*a, *b), ids[0], ids[1]);
   return 0;
 }
 
@@ -469,19 +473,12 @@ extern "C" int32_t goss_physics_constrain_hinge(void* handle, uint32_t body_a, u
 // under load and bobs back, unlike the rigid distance chain.
 extern "C" int32_t goss_physics_constrain_spring(void* handle, uint32_t body_a, uint32_t body_b, float ax, float ay, float az, float bx, float by, float bz, float rest_length, float frequency, float damping) {
   auto* world = static_cast<World*>(handle);
-  if (world == nullptr) return -1;
-  JPH::Body* a = nullptr;
-  JPH::Body* b = nullptr;
-  {
-    JPH::BodyLockWrite lock_a(world->system.GetBodyLockInterface(), JPH::BodyID(body_a));
-    if (!lock_a.Succeeded()) return -1;
-    a = &lock_a.GetBody();
-  }
-  {
-    JPH::BodyLockWrite lock_b(world->system.GetBodyLockInterface(), JPH::BodyID(body_b));
-    if (!lock_b.Succeeded()) return -1;
-    b = &lock_b.GetBody();
-  }
+  if (world == nullptr || !allFinite({ax, ay, az, bx, by, bz, rest_length, frequency, damping})) return -1;
+  const JPH::BodyID ids[2] = {JPH::BodyID(body_a), JPH::BodyID(body_b)};
+  JPH::BodyLockMultiWrite lock(world->system.GetBodyLockInterface(), ids, 2);
+  JPH::Body* a = lock.GetBody(0);
+  JPH::Body* b = lock.GetBody(1);
+  if (a == nullptr || b == nullptr) return -1;
   JPH::DistanceConstraintSettings settings;
   settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
   settings.mPoint1 = JPH::RVec3(ax, ay, az);
@@ -489,7 +486,7 @@ extern "C" int32_t goss_physics_constrain_spring(void* handle, uint32_t body_a, 
   settings.mMinDistance = rest_length;
   settings.mMaxDistance = rest_length;
   settings.mLimitsSpringSettings = JPH::SpringSettings(JPH::ESpringMode::FrequencyAndDamping, frequency, damping);
-  world->system.AddConstraint(settings.Create(*a, *b));
+  add_constraint(world, settings.Create(*a, *b), ids[0], ids[1]);
   return 0;
 }
 
@@ -507,10 +504,22 @@ extern "C" void goss_physics_body_move(void* handle, uint32_t body, float px, fl
 extern "C" void goss_physics_body_set_motion(void* handle, uint32_t body, uint32_t motion) {
   auto* world = static_cast<World*>(handle);
   if (world == nullptr) return;
+  auto& bi = world->system.GetBodyInterface();
+  const JPH::BodyID id(body);
+  {
+    // A body created static has no MotionProperties; switching it to dynamic
+    // or kinematic would deref null past the routed assert. Refuse instead.
+    JPH::BodyLockRead lock(world->system.GetBodyLockInterface(), id);
+    if (!lock.Succeeded()) return;
+    if (motion != 0 && lock.GetBody().GetMotionPropertiesUnchecked() == nullptr) return;
+  }
   const JPH::EMotionType motion_type = motion == 1   ? JPH::EMotionType::Dynamic
                                        : motion == 2 ? JPH::EMotionType::Kinematic
                                                      : JPH::EMotionType::Static;
-  world->system.GetBodyInterface().SetMotionType(JPH::BodyID(body), motion_type, JPH::EActivation::Activate);
+  bi.SetMotionType(id, motion_type, JPH::EActivation::Activate);
+  // Keep the object layer in step with the motion so broad-phase filtering
+  // stays correct after the switch, not stale from creation.
+  bi.SetObjectLayer(id, motion == 0 ? layer_static : layer_moving);
 }
 
 // Removes a body from the world and destroys it - an erased live collider.
@@ -519,6 +528,14 @@ extern "C" void goss_physics_body_remove(void* handle, uint32_t body) {
   if (world == nullptr) return;
   auto& bi = world->system.GetBodyInterface();
   const JPH::BodyID id(body);
+  // Drop constraints that reference this body before it is destroyed: a live
+  // constraint would keep a dangling Body* dereferenced on the next step.
+  for (size_t i = world->constraints.size(); i-- > 0;) {
+    if (world->constraints[i].a == id || world->constraints[i].b == id) {
+      world->system.RemoveConstraint(world->constraints[i].constraint);
+      world->constraints.erase(world->constraints.begin() + i);
+    }
+  }
   for (size_t i = 0; i < world->tracked_bodies.size(); ++i) {
     if (world->tracked_bodies[i].id == id) {
       world->tracked_bodies.erase(world->tracked_bodies.begin() + i);
@@ -602,7 +619,7 @@ extern "C" int32_t goss_physics_body_pose(void* handle, uint32_t body, float* ou
 // Vertices are row-major (cols*rows) so the reader returns mesh order.
 extern "C" uint32_t goss_physics_add_cloth(void* handle, uint32_t cols, uint32_t rows, float width, float height, float px, float py, float pz) {
   auto* world = static_cast<World*>(handle);
-  if (world == nullptr || cols < 2 || rows < 2) return UINT32_MAX;
+  if (world == nullptr || cols < 2 || rows < 2 || !allFinite({width, height, px, py, pz})) return UINT32_MAX;
   JPH::Ref<JPH::SoftBodySharedSettings> shared = nothrowNew<JPH::SoftBodySharedSettings>();
   if (shared == nullptr) return UINT32_MAX;
   for (uint32_t y = 0; y < rows; y++) {
@@ -635,6 +652,10 @@ extern "C" uint32_t goss_physics_add_cloth(void* handle, uint32_t cols, uint32_t
 extern "C" uint32_t goss_physics_add_softbody(void* handle, const float* verts, uint32_t vert_count, const uint32_t* faces, uint32_t face_count, float pressure, uint32_t pin_top, float px, float py, float pz) {
   auto* world = static_cast<World*>(handle);
   if (world == nullptr || verts == nullptr || faces == nullptr || vert_count < 4 || face_count < 4) return UINT32_MAX;
+  if (!allFinite({pressure, px, py, pz})) return UINT32_MAX;
+  // A non-finite input vertex would seed a soft body born diverged; refuse it
+  // rather than let the sim carry the NaN.
+  for (uint32_t i = 0; i < vert_count * 3; ++i) if (!std::isfinite(verts[i])) return UINT32_MAX;
   // Pinning holds the top cap so a balloon hangs in place instead of falling.
   float min_y = verts[1], max_y = verts[1];
   for (uint32_t i = 0; i < vert_count; ++i) {
@@ -679,9 +700,9 @@ extern "C" uint32_t goss_physics_cloth_read(void* handle, uint32_t body, float* 
   const uint32_t count = (uint32_t)verts.size() < max_vertices ? (uint32_t)verts.size() : max_vertices;
   for (uint32_t i = 0; i < count; i++) {
     const JPH::RVec3 p = com + verts[i].mPosition;
-    out[i * 3 + 0] = (float)p.GetX();
-    out[i * 3 + 1] = (float)p.GetY();
-    out[i * 3 + 2] = (float)p.GetZ();
+    out[i * 3 + 0] = finiteOr0((float)p.GetX());
+    out[i * 3 + 1] = finiteOr0((float)p.GetY());
+    out[i * 3 + 2] = finiteOr0((float)p.GetZ());
   }
   return count;
 }
@@ -692,7 +713,7 @@ extern "C" uint32_t goss_physics_cloth_read(void* handle, uint32_t body, float* 
 // backend, deterministic.
 extern "C" uint32_t goss_physics_add_hair(void* handle, uint32_t strand_count, uint32_t verts, float length) {
   auto* world = static_cast<World*>(handle);
-  if (world == nullptr || strand_count < 1 || verts < 2) return UINT32_MAX;
+  if (world == nullptr || strand_count < 1 || verts < 2 || !std::isfinite(length)) return UINT32_MAX;
   if (!g_hair_registered) { JPH::RegisterHair(); g_hair_registered = true; }
   if (!world->hair_ready) {
     world->compute = JPH::StaticCast<JPH::ComputeSystemCPU>(JPH::CreateComputeSystemCPU().Get());
@@ -775,9 +796,9 @@ extern "C" uint32_t goss_physics_hair_read(void* handle, uint32_t hair_id, float
   if (positions == nullptr) return 0;
   const uint32_t count = world->hairs[hair_id].settings->GetNumVerticesPadded() < max_vertices ? world->hairs[hair_id].settings->GetNumVerticesPadded() : max_vertices;
   for (uint32_t i = 0; i < count; i++) {
-    out[i * 3 + 0] = positions[i].x;
-    out[i * 3 + 1] = positions[i].y;
-    out[i * 3 + 2] = positions[i].z;
+    out[i * 3 + 0] = finiteOr0(positions[i].x);
+    out[i * 3 + 1] = finiteOr0(positions[i].y);
+    out[i * 3 + 2] = finiteOr0(positions[i].z);
   }
   return count;
 }

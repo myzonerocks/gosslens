@@ -360,6 +360,12 @@ fn createPoseInstance(task_ptr: ?[*]const u8, task_len: usize) !*PoseInstance {
     const total = anchorTotal(&detector_engine) orelse return error.CreateFailed;
     const plan = detector.planForModel(detector_side, total) orelse return error.CreateFailed;
 
+    // Reinstate the native output-size contract the wasm path had dropped: a
+    // JS bundle whose landmark model is short must be refused here, not read
+    // out of bounds on the frame path where the decode assert compiles out.
+    if (floatCount(&landmarks_engine, 0, false) < pose.raw_landmark_count * pose.raw_values_per_landmark) return error.CreateFailed;
+    if (floatCount(&landmarks_engine, 1, false) < 1) return error.CreateFailed;
+
     const anchors = try gpa.alloc(detector.Anchor, total);
     errdefer gpa.free(anchors);
     detector.generateAnchors(detector_side, plan, anchors);
@@ -441,7 +447,8 @@ pub export fn goss_pose_process(instance: ?*PoseInstance, rgba: ?[*]const u8, wi
     p.landmarks_engine.invoke() catch return status_invalid;
     const raw_landmarks = p.landmarks_engine.outputFloats(0) catch return status_invalid;
     const presence = presenceScore((p.landmarks_engine.outputFloats(1) catch return status_invalid)[0]);
-    if (presence < pose_presence_floor) {
+    // Positive test so a NaN presence drops the lock rather than holding it.
+    if (!(presence >= pose_presence_floor)) {
         p.lock = null;
         poseEmpty(p, timestamp_us);
         return status_ok;
@@ -561,6 +568,11 @@ fn createHandInstance(task_ptr: ?[*]const u8, task_len: usize) !*HandInstance {
     const total = anchorTotal(&detector_engine) orelse return error.CreateFailed;
     const plan = detector.planForModel(detector_side, total) orelse return error.CreateFailed;
     if (floatCount(&landmarks_engine, 0, false) != hand.landmark_count * 3) return error.CreateFailed;
+    // Presence, handedness, and the world landmark stream the frame path reads
+    // by index; refuse a model missing any of them rather than read OOB later.
+    if (floatCount(&landmarks_engine, 1, false) < 1) return error.CreateFailed;
+    if (floatCount(&landmarks_engine, 2, false) < 1) return error.CreateFailed;
+    if (floatCount(&landmarks_engine, 3, false) < hand.landmark_count * 3) return error.CreateFailed;
 
     var embedder_payload: ?bundle.Payload = null;
     errdefer if (embedder_payload) |payload| payload.deinit(gpa);
@@ -733,7 +745,8 @@ pub export fn goss_hand_process(instance: ?*HandInstance, rgba: ?[*]const u8, wi
         p.landmarks_engine.invoke() catch continue;
         const raw_landmarks = p.landmarks_engine.outputFloats(0) catch continue;
         const presence = presenceScore((p.landmarks_engine.outputFloats(1) catch continue)[0]);
-        if (presence < hand_presence_floor) {
+        // Positive test so a NaN presence drops the lock rather than holding it.
+        if (!(presence >= hand_presence_floor)) {
             maybe_lock.* = null;
             continue;
         }

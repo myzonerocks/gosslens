@@ -23,7 +23,9 @@ const alloc_header = @sizeOf(usize) * 2;
 
 fn bridgeAlloc(user: ?*anyopaque, size: c.cgltf_size) callconv(.c) ?*anyopaque {
     const gpa: *const std.mem.Allocator = @ptrCast(@alignCast(user.?));
-    const total = alloc_header + size;
+    // A hostile size near usize max must not wrap the header add into a
+    // small allocation the writer then overruns; refuse instead.
+    const total = std.math.add(usize, alloc_header, size) catch return null;
     const raw = gpa.alignedAlloc(u8, .fromByteUnits(16), total) catch return null;
     std.mem.writeInt(usize, raw[0..@sizeOf(usize)], total, .little);
     return raw.ptr + alloc_header;
@@ -330,11 +332,15 @@ pub const Node = struct {
 
 /// A parsed glTF or GLB asset, fully resident in memory. The `gpa` pointer
 /// must stay stable for the asset's lifetime, so it lives in the struct and
-/// the cgltf options point back into it.
+/// the cgltf options point back into it. cgltf also keeps pointers INTO the
+/// caller's `bytes` (the GLB binary chunk), so those bytes must outlive the
+/// Asset - decodeModel copies everything out before returning for that reason.
 pub const Asset = struct {
     gpa_box: *std.mem.Allocator,
     data: *c.cgltf_data,
 
+    /// `bytes` is borrowed, not copied: it must stay valid and unmodified
+    /// until deinit. GLB binary-chunk views point straight into it.
     pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Asset {
         const gpa_box = try gpa.create(std.mem.Allocator);
         errdefer gpa.destroy(gpa_box);
@@ -392,7 +398,11 @@ pub const Asset = struct {
         const view = image.buffer_view orelse return null;
         const buffer_data = view.*.buffer.*.data orelse return null;
         const base: [*]const u8 = @ptrCast(buffer_data);
-        return base[view.*.offset .. view.*.offset + view.*.size];
+        const end = std.math.add(usize, view.*.offset, view.*.size) catch return null;
+        // The view lands inside the buffer cgltf validated at parse time; the
+        // borrowed bytes it points at outlive this call by the Asset contract.
+        std.debug.assert(view.*.offset <= end);
+        return base[view.*.offset..end];
     }
 
     pub fn node(a: *const Asset, index: usize) Node {
@@ -573,6 +583,9 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
     var asset = try Asset.parse(gpa, bytes);
     defer asset.deinit();
     if (asset.meshCount() == 0) return error.MalformedAsset;
+    // cgltf accepts a mesh with no primitives; primitive(0) would then build
+    // a view over NULL and vertexCount() would deref it. Refuse first.
+    if (asset.mesh(0).primitiveCount() == 0) return error.MalformedAsset;
     const prim = asset.mesh(0).primitive(0);
     const vertex_count = prim.vertexCount();
     const index_count = prim.indexCount();
@@ -878,6 +891,15 @@ test "truncated glb fails closed" {
     for ([_]usize{ 4, 11, 20, glb.len / 2 }) |cut| {
         try t.expectError(error.MalformedAsset, Asset.parse(t.allocator, glb[0..cut]));
     }
+}
+
+test "a mesh with zero primitives is refused, not a null deref" {
+    // cgltf parses and validates this; decodeModel must refuse before it
+    // reaches primitive(0) over a NULL primitive list.
+    const json =
+        \\{"asset":{"version":"2.0"},"meshes":[{}]}
+    ;
+    try t.expectError(error.MalformedAsset, decodeModel(t.allocator, json));
 }
 
 test "external buffer references are refused" {

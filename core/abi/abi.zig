@@ -3277,9 +3277,17 @@ pub export fn goss_engine_destroy(engine: ?*Engine) void {
     destroyEngine(engine orelse return);
 }
 
+/// Untrusted frame dimensions must fit the u16 the render and capture paths
+/// narrow them to; reject 0 or over 65535 before any cast rather than trap
+/// inside the ABI with a host width the caller cannot recover from.
+fn validDims(width: u32, height: u32) bool {
+    return width != 0 and width <= 65535 and height != 0 and height <= 65535;
+}
+
 pub export fn goss_engine_init_renderer(engine: ?*Engine, desc: ?*const RendererDesc) Status {
     const e = engine orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
     if (e.renderer != null) return .invalid_argument;
     e.renderer = render.Renderer.init(e.gpa, .{
         .native_window_handle = d.native_window_handle,
@@ -4512,6 +4520,7 @@ pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, nam
     const nm = name orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const rgba_ptr = rgba orelse return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
     if (d.pixel_format != pixel_format_bgra8 and d.pixel_format != pixel_format_rgba8) return .invalid_argument;
     const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
     _ = r;
@@ -4968,6 +4977,7 @@ pub export fn goss_session_submit_frame(session: ?*Session, desc: ?*const FrameD
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const p = planes orelse return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
     if (s.engine.renderer == null) return .renderer_unavailable;
 
     releaseCurrentFrame(s);
@@ -5103,6 +5113,7 @@ pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const F
     const d = desc orelse return .invalid_argument;
     const y_ptr = y orelse return .invalid_argument;
     const uv_ptr = uv orelse return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
 
@@ -5139,6 +5150,7 @@ pub export fn goss_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*co
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const rgba_ptr = rgba orelse return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
     if (d.pixel_format != pixel_format_bgra8 and d.pixel_format != pixel_format_rgba8) return .invalid_argument;
     const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
 
@@ -5157,6 +5169,7 @@ pub export fn goss_session_submit_hardware_buffer(session: ?*Session, desc: ?*co
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const buffer = hardware_buffer orelse return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
 
@@ -5289,7 +5302,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const uv_plane = uv orelse return .invalid_argument;
     if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
-    if (d.width == 0 or d.height == 0) return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
     const standard: math.color.Standard = switch (d.color_standard) {
         0 => .bt601,
@@ -5448,6 +5461,7 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
         return .ok;
     }
     const src = depth orelse return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
     if (s.depth_data.len != count) {
         if (s.depth_data.len != 0) gpa.free(s.depth_data);
         s.depth_data = gpa.alloc(f32, count) catch {
@@ -5472,7 +5486,7 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
 pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
     const s = session orelse return .invalid_argument;
     const pixels = rgba orelse return .invalid_argument;
-    if (width == 0 or height == 0) return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
     const worker = s.segmentation_worker orelse return .again;
     const gpa = s.engine.gpa;
     const w: usize = width;

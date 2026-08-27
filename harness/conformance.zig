@@ -16,6 +16,9 @@ const image_adapter = @import("image");
 const png = @import("png");
 const world_replay = @import("world_replay");
 const math = @import("math");
+const lens_manifest = @import("manifest");
+const material = @import("material");
+const gltf = @import("gltf");
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_NONE", "1");
@@ -6156,6 +6159,105 @@ fn proveExpressionScript(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Counts the diagnostics a manifest source parses to, freeing everything.
+/// The arena owns the diagnostic strings; the manifest owns its own arena.
+fn manifestDiagCount(gpa: std.mem.Allocator, source: []const u8) !usize {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var diags: lens_manifest.Diagnostics = .{ .arena = arena.allocator() };
+    var parsed = try lens_manifest.parse(gpa, &diags, source);
+    if (parsed) |*m| m.deinit();
+    return diags.list.items.len;
+}
+
+/// The hostile-input tripwire: the exact adversarial values from the audit are
+/// fed to the untrusted parsers, each asserted to FAIL CLOSED (a diagnostic or
+/// a typed error) rather than crash. A safe twin isolates the hostile value so
+/// unrelated schema diagnostics cannot mask a regression.
+fn proveHostileManifest(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const Pair = struct { name: []const u8, safe: []const u8, hostile: []const u8 };
+    const pairs = [_]Pair{
+        .{
+            .name = "1e10 int default",
+            .safe =
+            \\{"glf":"1.0","id":"h","version":"1.0","display_name":"H","parameters":[{"name":"p","type":"int","default":5,"min":0,"max":100}]}
+            ,
+            .hostile =
+            \\{"glf":"1.0","id":"h","version":"1.0","display_name":"H","parameters":[{"name":"p","type":"int","default":1e10,"min":0,"max":100}]}
+            ,
+        },
+        .{
+            .name = "1e300 vec component",
+            .safe =
+            \\{"glf":"1.0","id":"h","version":"1.0","display_name":"H","nodes":[{"type":"model.gltf","id":"n","src":"m.glb","particles":{"color":[1,0,0]}}]}
+            ,
+            .hostile =
+            \\{"glf":"1.0","id":"h","version":"1.0","display_name":"H","nodes":[{"type":"model.gltf","id":"n","src":"m.glb","particles":{"color":[1e300,0,0]}}]}
+            ,
+        },
+        .{
+            .name = "1e10 duration",
+            .safe =
+            \\{"glf":"1.0","id":"h","version":"1.0","display_name":"H","triggers":[{"when":"start","action":{"kind":"param_ramp","target":"p","to":1,"duration_ms":100}}]}
+            ,
+            .hostile =
+            \\{"glf":"1.0","id":"h","version":"1.0","display_name":"H","triggers":[{"when":"start","action":{"kind":"param_ramp","target":"p","to":1,"duration_ms":1e10}}]}
+            ,
+        },
+    };
+    for (pairs) |pair| {
+        const safe_count = try manifestDiagCount(gpa, pair.safe);
+        const hostile_count = try manifestDiagCount(gpa, pair.hostile);
+        if (hostile_count <= safe_count) {
+            std.debug.print("conformance: FAIL hostile '{s}' raised no extra diagnostic (safe {d}, hostile {d})\n", .{ pair.name, safe_count, hostile_count });
+            return false;
+        }
+    }
+
+    // A material graph node chain past the cap must be refused with a typed
+    // error, not recursed into a native stack overflow.
+    {
+        const chain = material.max_nodes + 2;
+        const nodes = try gpa.alloc(material.Node, chain);
+        defer gpa.free(nodes);
+        for (nodes) |*n| n.* = .{ .kind = .uv };
+        nodes[chain - 1] = .{ .kind = .output, .inputs = &.{0} };
+        const types = try gpa.alloc(material.ValueType, chain);
+        defer gpa.free(types);
+        material.validate(gpa, .{ .nodes = nodes, .root = chain - 1 }, types) catch |err| {
+            if (err != error.TooManyNodes) {
+                std.debug.print("conformance: FAIL deep material chain gave {t}, expected TooManyNodes\n", .{err});
+                return false;
+            }
+        };
+    }
+
+    // A glTF mesh with zero primitives must refuse, not null-deref.
+    {
+        const json = "{\"asset\":{\"version\":\"2.0\"},\"meshes\":[{}]}";
+        if (gltf.decodeModel(gpa, json)) |model| {
+            gltf.freeDecodedModel(gpa, model);
+            std.debug.print("conformance: FAIL zero-primitive glb was decoded, expected an error\n", .{});
+            return false;
+        } else |_| {}
+    }
+
+    // A malformed model bundle must fail closed at the ABI, not read OOB or
+    // crash: garbage task bytes cannot stand up a tracker.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        const garbage = [_]u8{0xab} ** 64;
+        if (abi.goss_session_enable_face_tracking(session, &garbage, garbage.len, 1) == .ok) {
+            std.debug.print("conformance: FAIL a garbage face bundle was accepted\n", .{});
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF hostile inputs fail closed with a diagnostic\n", .{});
+    return true;
+}
+
 /// Proves the session lifecycle leaks no memory: many activate/tick/destroy
 /// cycles of the adapter-heavy lenses (blur, grade, bloom, audio, script) run
 /// on a headless engine under a leak-checking allocator, which reports no leak
@@ -6267,7 +6369,7 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
     // is the honest baseline the repeat must not exceed.
     try round.all(gpa, engine);
     settle(engine);
-    const base = counter.in_use;
+    const base = counter.inUse();
     const jolt_base = goss_jolt_live_bytes();
     const qjs_base = goss_qjs_live_bytes();
     const ma_base = goss_ma_live_bytes();
@@ -6275,7 +6377,7 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
     // Second round: the same work again, no lasting growth allowed.
     try round.all(gpa, engine);
     settle(engine);
-    const after = counter.in_use;
+    const after = counter.inUse();
 
     if (after > base) {
         std.debug.print("conformance: FAIL a subsystem grew the heap {d} -> {d} bytes across a second lifecycle\n", .{ base, after });
@@ -6300,42 +6402,61 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
 /// Wraps an allocator to track bytes currently in use, so the per-frame
 /// gate can watch the heap footprint settle instead of timing the wall
 /// clock (which drifts machine to machine).
+/// The engine's asset-loader and tracking threads allocate concurrently with
+/// the render thread, so the counters are atomic: a non-atomic += / -= could
+/// lose an update and silently corrupt the very leak proof they back.
 const CountingAllocator = struct {
     backing: std.mem.Allocator,
-    in_use: usize = 0,
-    peak: usize = 0,
+    in_use_atomic: std.atomic.Value(usize) = .init(0),
+    peak_atomic: std.atomic.Value(usize) = .init(0),
 
     fn allocator(self: *CountingAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
-    fn bump(self: *CountingAllocator) void {
-        if (self.in_use > self.peak) self.peak = self.in_use;
+    fn inUse(self: *const CountingAllocator) usize {
+        return self.in_use_atomic.load(.monotonic);
+    }
+    fn peakBytes(self: *const CountingAllocator) usize {
+        return self.peak_atomic.load(.monotonic);
+    }
+    fn resetPeakToInUse(self: *CountingAllocator) void {
+        self.peak_atomic.store(self.in_use_atomic.load(.monotonic), .monotonic);
+    }
+    // Raises the recorded peak to `current` with a CAS loop so a concurrent
+    // grow cannot clobber a higher peak another thread just set.
+    fn bump(self: *CountingAllocator, current: usize) void {
+        var seen = self.peak_atomic.load(.monotonic);
+        while (current > seen) {
+            seen = self.peak_atomic.cmpxchgWeak(seen, current, .monotonic, .monotonic) orelse break;
+        }
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const p = self.backing.rawAlloc(len, alignment, ra) orelse return null;
-        self.in_use += len;
-        self.bump();
+        self.bump(self.in_use_atomic.fetchAdd(len, .monotonic) + len);
         return p;
     }
     fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         if (!self.backing.rawResize(buf, alignment, new_len, ra)) return false;
-        self.in_use = self.in_use - buf.len + new_len;
-        self.bump();
+        self.bump(self.applyDelta(buf.len, new_len));
         return true;
     }
     fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const p = self.backing.rawRemap(buf, alignment, new_len, ra) orelse return null;
-        self.in_use = self.in_use - buf.len + new_len;
-        self.bump();
+        self.bump(self.applyDelta(buf.len, new_len));
         return p;
     }
     fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         self.backing.rawFree(buf, alignment, ra);
-        self.in_use -= buf.len;
+        _ = self.in_use_atomic.fetchSub(buf.len, .monotonic);
+    }
+    // Applies a resize's signed byte delta atomically, returning the new total.
+    fn applyDelta(self: *CountingAllocator, old_len: usize, new_len: usize) usize {
+        if (new_len >= old_len) return self.in_use_atomic.fetchAdd(new_len - old_len, .monotonic) + (new_len - old_len);
+        return self.in_use_atomic.fetchSub(old_len - new_len, .monotonic) - (old_len - new_len);
     }
 };
 
@@ -6378,8 +6499,9 @@ fn provePerFrameBudget(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *Co
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
         if (frame >= warmup) {
-            if (counter.in_use < steady_min) steady_min = counter.in_use;
-            if (counter.in_use > steady_max) steady_max = counter.in_use;
+            const now = counter.inUse();
+            if (now < steady_min) steady_min = now;
+            if (now > steady_max) steady_max = now;
         }
     }
 
@@ -6443,15 +6565,15 @@ fn provePeakBoundedCapture(gpa: std.mem.Allocator, engine: *abi.Engine, counter:
         fn run(e: *abi.Engine, sess: *abi.Session, ct: *CountingAllocator, config: *const abi.CaptureConfig, out: []u8, no_stream: bool) usize {
             sess.capture_tile_cap = 100;
             sess.capture_no_stream = no_stream;
-            ct.peak = ct.in_use;
-            const base = ct.in_use;
+            ct.resetPeakToInUse();
+            const base = ct.inUse();
             var ol: usize = 0;
             var cw: u32 = 0;
             var ch: u32 = 0;
             _ = abi.goss_engine_capture_still(e, sess, config, out.ptr, out.len, &ol, &cw, &ch);
             sess.capture_tile_cap = 0;
             sess.capture_no_stream = false;
-            return ct.peak - base;
+            return ct.peakBytes() - base;
         }
     }.run;
 
@@ -9937,6 +10059,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveMaterialOps(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "second-lifecycle")) {
             if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) return 1;
+        } else if (std.mem.eql(u8, only, "hostile-manifest")) {
+            if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -10193,6 +10317,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("full stack");
     if (!try proveTiledPostEffect(gpa, engine)) return 1;
     watchHold("tiled post effect");
+    if (!try proveHostileManifest(gpa, engine)) return 1;
+    watchHold("hostile manifest");
     if (!try proveNoLeaks(gpa)) return 1;
     watchHold("no leaks");
     if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;
