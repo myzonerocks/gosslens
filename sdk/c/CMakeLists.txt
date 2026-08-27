@@ -23,8 +23,8 @@ set_target_properties(gosslens PROPERTIES
     IMPORTED_LOCATION "${_goss_shared}"
     INTERFACE_INCLUDE_DIRECTORIES "${GOSSLENS_SDK_DIR}/include")
 
-add_executable(gosslens_minimal examples/minimal.c)
-target_compile_features(gosslens_minimal PRIVATE c_std_11)
-target_link_libraries(gosslens_minimal PRIVATE gosslens)
-set_target_properties(gosslens_minimal PROPERTIES
+add_executable(gosslens_demo demo/main.c)
+target_compile_features(gosslens_demo PRIVATE c_std_11)
+target_link_libraries(gosslens_demo PRIVATE gosslens)
+set_target_properties(gosslens_demo PROPERTIES
     BUILD_RPATH "${GOSSLENS_SDK_DIR}/lib")

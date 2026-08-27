@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-# Stage the C SDK, then compile and run the minimal example against it. It
+# Stage the C SDK, then compile and run the example against it. It
 # links the shared library, so the system compiler needs nothing on the link
 # line but -lgosslens. Set CC to pick a compiler, ZIG for a specific zig.
 
@@ -23,11 +23,11 @@ cc="${CC:-cc}"
 # Compile and link. The binary goes next to the staged library under zig-out,
 # which is not part of the tracked tree. -rpath lets it find the shared library
 # at its staged location without an install step.
-"$cc" "$here/minimal.c" \
+"$cc" "$here/main.c" \
     -std=c11 \
     -I"$sdk/include" \
     -L"$sdk/lib" -lgosslens \
     -Wl,-rpath,"$sdk/lib" \
-    -o "$sdk/minimal"
+    -o "$sdk/main"
 
-exec "$sdk/minimal"
+exec "$sdk/main"

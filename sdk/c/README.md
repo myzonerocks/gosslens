@@ -72,11 +72,11 @@ exercise the ABI from C without a window, which is what the example does.
 
 ## Example
 
-[`examples/minimal.c`](examples/minimal.c) drives that slice end to end and is
+[`demo/main.c`](demo/main.c) drives that slice end to end and is
 the fastest way to confirm the library links and runs:
 
 ```
-sdk/c/examples/build.sh
+sdk/c/demo/build.sh
 ```
 
 builds `c-sdk`, compiles the example against the shared library, and runs it.
