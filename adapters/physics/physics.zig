@@ -27,8 +27,8 @@ pub const invalid_body: u32 = std.math.maxInt(u32);
 
 extern fn goss_physics_world_create(gravity_y: f32) ?*anyopaque;
 extern fn goss_physics_world_destroy(handle: *anyopaque) void;
-extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, motion: u32) u32;
-extern fn goss_physics_body_add_oriented(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, qx: f32, qy: f32, qz: f32, qw: f32, motion: u32) u32;
+extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, pos: *const [3]f32, size: *const [3]f32, motion: u32) u32;
+extern fn goss_physics_body_add_oriented(handle: *anyopaque, shape: u32, pos: *const [3]f32, size: *const [3]f32, quat: *const [4]f32, motion: u32) u32;
 extern fn goss_physics_body_add_material(handle: *anyopaque, shape: u32, pos: *const [3]f32, size: *const [3]f32, quat: *const [4]f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
 extern fn goss_physics_body_add_hull(handle: *anyopaque, points: [*]const f32, point_count: u32, pos: *const [3]f32, quat: *const [4]f32, friction: f32, restitution: f32, motion: u32, planar: u32) u32;
 extern fn goss_physics_body_add_mesh(handle: *anyopaque, points: [*]const f32, point_count: u32, indices: [*]const u32, index_count: u32, pos: *const [3]f32, quat: *const [4]f32, friction: f32, restitution: f32) u32;
@@ -37,14 +37,14 @@ extern fn goss_physics_body_set_motion(handle: *anyopaque, body: u32, motion: u3
 extern fn goss_physics_body_remove(handle: *anyopaque, body: u32) void;
 extern fn goss_physics_body_wake(handle: *anyopaque, body: u32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
-extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
-extern fn goss_physics_constrain_point(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) i32;
+extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, point_a: *const [3]f32, point_b: *const [3]f32, min: f32, max: f32) i32;
+extern fn goss_physics_constrain_point(handle: *anyopaque, a: u32, b: u32, point_a: *const [3]f32, point_b: *const [3]f32) i32;
 extern fn goss_physics_constrain_fixed(handle: *anyopaque, a: u32, b: u32) i32;
-extern fn goss_physics_constrain_hinge(handle: *anyopaque, a: u32, b: u32, px: f32, py: f32, pz: f32, hx: f32, hy: f32, hz: f32) i32;
-extern fn goss_physics_constrain_spring(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, rest_length: f32, frequency: f32, damping: f32) i32;
-extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
-extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, px: f32, py: f32, pz: f32) u32;
-extern fn goss_physics_add_softbody(handle: *anyopaque, verts: [*]const f32, vert_count: u32, faces: [*]const u32, face_count: u32, pressure: f32, pin_top: u32, px: f32, py: f32, pz: f32) u32;
+extern fn goss_physics_constrain_hinge(handle: *anyopaque, a: u32, b: u32, pivot: *const [3]f32, axis: *const [3]f32) i32;
+extern fn goss_physics_constrain_spring(handle: *anyopaque, a: u32, b: u32, point_a: *const [3]f32, point_b: *const [3]f32, rest_length: f32, frequency: f32, damping: f32) i32;
+extern fn goss_physics_body_move(handle: *anyopaque, body: u32, pos: *const [3]f32, dt: f32) void;
+extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, pos: *const [3]f32) u32;
+extern fn goss_physics_add_softbody(handle: *anyopaque, verts: [*]const f32, vert_count: u32, faces: [*]const u32, face_count: u32, pressure: f32, pin_top: u32, pos: *const [3]f32) u32;
 extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
 extern fn goss_physics_add_hair(handle: *anyopaque, strand_count: u32, verts: u32, length: f32) u32;
 extern fn goss_physics_remove_hair(handle: *anyopaque, hair_id: u32) u32;
@@ -64,7 +64,7 @@ pub const World = struct {
 
     /// Half extents size a box; a sphere reads its radius from size[0].
     pub fn addBody(world: World, shape: Shape, position: [3]f32, size: [3]f32, motion: Motion) !u32 {
-        const id = goss_physics_body_add(world.handle, @intFromEnum(shape), position[0], position[1], position[2], size[0], size[1], size[2], @intFromEnum(motion));
+        const id = goss_physics_body_add(world.handle, @intFromEnum(shape), &position, &size, @intFromEnum(motion));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -72,7 +72,7 @@ pub const World = struct {
     /// Adds a body rotated by a quaternion (x, y, z, w), so an elongated
     /// shape can lie on its side or a static collider can tilt.
     pub fn addBodyOriented(world: World, shape: Shape, position: [3]f32, size: [3]f32, rotation: [4]f32, motion: Motion) !u32 {
-        const id = goss_physics_body_add_oriented(world.handle, @intFromEnum(shape), position[0], position[1], position[2], size[0], size[1], size[2], rotation[0], rotation[1], rotation[2], rotation[3], @intFromEnum(motion));
+        const id = goss_physics_body_add_oriented(world.handle, @intFromEnum(shape), &position, &size, &rotation, @intFromEnum(motion));
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -113,14 +113,14 @@ pub const World = struct {
     /// Links two bodies with a distance constraint between local attach
     /// points - the chain link for content hanging off an anchor.
     pub fn constrainDistance(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32, min: f32, max: f32) !void {
-        if (goss_physics_constrain_distance(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], min, max) != 0) return error.ConstraintFailed;
+        if (goss_physics_constrain_distance(world.handle, a, b, &point_a, &point_b, min, max) != 0) return error.ConstraintFailed;
     }
 
     /// Pins two bodies at a single point (a ball joint): the point stays
     /// coincident while the bodies rotate freely about it - a pendulum pivot,
     /// unlike a distance constraint that only bounds separation.
     pub fn constrainPoint(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32) !void {
-        if (goss_physics_constrain_point(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2]) != 0) return error.ConstraintFailed;
+        if (goss_physics_constrain_point(world.handle, a, b, &point_a, &point_b) != 0) return error.ConstraintFailed;
     }
 
     /// Welds two bodies together rigidly at their current relative pose (a
@@ -134,20 +134,20 @@ pub const World = struct {
     /// one plane perpendicular to the axis (a door or single-axis pendulum),
     /// unlike a point joint that swings every way.
     pub fn constrainHinge(world: World, a: u32, b: u32, pivot: [3]f32, axis: [3]f32) !void {
-        if (goss_physics_constrain_hinge(world.handle, a, b, pivot[0], pivot[1], pivot[2], axis[0], axis[1], axis[2]) != 0) return error.ConstraintFailed;
+        if (goss_physics_constrain_hinge(world.handle, a, b, &pivot, &axis) != 0) return error.ConstraintFailed;
     }
 
     /// Tethers two bodies with a spring held at rest_length (frequency in
     /// Hz, damping 0..1): it stretches under load and bobs back, unlike the
     /// rigid distance chain.
     pub fn constrainSpring(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32, rest_length: f32, frequency: f32, damping: f32) !void {
-        if (goss_physics_constrain_spring(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], rest_length, frequency, damping) != 0) return error.ConstraintFailed;
+        if (goss_physics_constrain_spring(world.handle, a, b, &point_a, &point_b, rest_length, frequency, damping) != 0) return error.ConstraintFailed;
     }
 
     /// Drives a kinematic body toward a pose over dt; chained bodies
     /// swing after it.
     pub fn moveBody(world: World, body: u32, position: [3]f32, dt_seconds: f32) void {
-        goss_physics_body_move(world.handle, body, position[0], position[1], position[2], dt_seconds);
+        goss_physics_body_move(world.handle, body, &position, dt_seconds);
     }
 
     /// Switches a body's motion type at runtime - a dynamic body grabbed into
@@ -170,7 +170,7 @@ pub const World = struct {
 
     /// Adds a pinned-top cloth grid; its deformed vertices drive a mesh.
     pub fn addCloth(world: World, cols: u32, rows: u32, width: f32, height: f32, position: [3]f32) !u32 {
-        const id = goss_physics_add_cloth(world.handle, cols, rows, width, height, position[0], position[1], position[2]);
+        const id = goss_physics_add_cloth(world.handle, cols, rows, width, height, &position);
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }
@@ -180,7 +180,7 @@ pub const World = struct {
     /// `pin_top` holds the top cap so it hangs in place. Reads back with clothRead.
     pub fn addSoftBody(world: World, verts: []const [3]f32, faces: []const u32, pressure: f32, pin_top: bool, position: [3]f32) !u32 {
         const flat: [*]const f32 = @ptrCast(verts.ptr);
-        const id = goss_physics_add_softbody(world.handle, flat, @intCast(verts.len), faces.ptr, @intCast(faces.len / 3), pressure, @intFromBool(pin_top), position[0], position[1], position[2]);
+        const id = goss_physics_add_softbody(world.handle, flat, @intCast(verts.len), faces.ptr, @intCast(faces.len / 3), pressure, @intFromBool(pin_top), &position);
         if (id == invalid_body) return error.BodyAddFailed;
         return id;
     }

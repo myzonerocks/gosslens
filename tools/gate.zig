@@ -102,6 +102,25 @@ const verbose_comment_markers = [_][]const u8{
 // a sentence would do), not a hypothetical.
 const max_comment_block_lines: usize = 4;
 
+// W7: a signature crossing C carries at most four scalar float
+// parameters. A [3]/[4] float group crosses by pointer, since spilling
+// past the argument registers is the x86 marshalling bug that corrupts
+// the group. The fifth consecutive scalar float is the rejection line.
+const max_scalar_float_params: usize = 4;
+
+// The frozen public ABI ops that already shipped loose float spreads.
+// Conformance pins their lowering; they migrate to by-pointer groups at
+// the next ABI major, when the frozen surface may change shape.
+const frozen_float_spread = [_][]const u8{
+    "goss_session_brush_set_style",
+    "goss_session_ar_brush_set_style",
+    "goss_session_set_source_composite",
+    "goss_session_grab",
+    "goss_session_ar_brush_point",
+    "goss_session_add_collider",
+    "goss_session_erase_collider",
+};
+
 // A PR body is a short paragraph, not a report: what changed and why,
 // nothing about how the change was proven out. Modeled on how ghostty's
 // own PRs read - three sentences, no headers, no checklist.
@@ -547,7 +566,132 @@ const Gate = struct {
             try g.flag("boundary: '{s}' compiles -fno-exceptions but its first line does not state the stance and the build.zig site that sets it", .{path});
         }
     }
+
+    // W7 mechanical check: no C-crossing signature carries more than four
+    // consecutive scalar floats. Covers the public header and the physics
+    // extern boundary; only the frozen public spreads are exempt.
+    fn checkFloatCap(g: *Gate) !void {
+        try g.checkFloatCapHeader("include/gosslens.h");
+        try g.checkFloatCapExterns("adapters/physics/physics.zig");
+    }
+
+    // Every goss_ prototype in the C header: the identifier before a '('
+    // names the callee, the balanced parens hold its parameters.
+    fn checkFloatCapHeader(g: *Gate, path: []const u8) !void {
+        const raw = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 20)) catch {
+            try g.flag("float-cap: cannot read '{s}' to count scalar floats per signature", .{path});
+            return;
+        };
+        const text = try stripCComments(g.arena, raw);
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            if (text[i] != '(') continue;
+            var start = i;
+            while (start > 0 and (std.ascii.isAlphanumeric(text[start - 1]) or text[start - 1] == '_')) start -= 1;
+            const name = text[start..i];
+            if (!std.mem.startsWith(u8, name, "goss_")) continue;
+            const args = balancedParens(text, i) orelse continue;
+            const run = maxConsecutiveScalarFloats(args, false);
+            if (run > max_scalar_float_params and !isFrozenSpread(name)) {
+                try g.flag("float-cap: '{s}' passes {d} consecutive scalar floats across C; pass the [3]/[4] group by pointer (const float*), the cap is {d}", .{ name, run, max_scalar_float_params });
+            }
+        }
+    }
+
+    // Every extern fn goss_ declaration in the physics shim boundary.
+    fn checkFloatCapExterns(g: *Gate, path: []const u8) !void {
+        const text = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 20)) catch {
+            try g.flag("float-cap: cannot read '{s}' to count scalar floats per extern", .{path});
+            return;
+        };
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trimStart(u8, line, " \t");
+            if (!std.mem.startsWith(u8, trimmed, "extern fn goss_")) continue;
+            const open = std.mem.indexOfScalar(u8, trimmed, '(') orelse continue;
+            const name = std.mem.trim(u8, trimmed["extern fn ".len..open], " \t");
+            const args = balancedParens(trimmed, open) orelse continue;
+            const run = maxConsecutiveScalarFloats(args, true);
+            if (run > max_scalar_float_params and !isFrozenSpread(name)) {
+                try g.flag("float-cap: extern '{s}' passes {d} consecutive scalar f32 across C; pass the [3]/[4] group as *const [N]f32, the cap is {d}", .{ name, run, max_scalar_float_params });
+            }
+        }
+    }
 };
+
+fn isFrozenSpread(name: []const u8) bool {
+    for (frozen_float_spread) |f| {
+        if (std.mem.eql(u8, name, f)) return true;
+    }
+    return false;
+}
+
+// The longest run of adjacent scalar-float parameters in an argument
+// list. A pointer or array parameter (the by-pointer group) breaks the
+// run, as does any non-float. `zig` picks the f32 spelling.
+fn maxConsecutiveScalarFloats(args: []const u8, zig: bool) usize {
+    var best: usize = 0;
+    var cur: usize = 0;
+    var it = std.mem.splitScalar(u8, args, ',');
+    while (it.next()) |raw| {
+        const param = std.mem.trim(u8, raw, " \t\r\n");
+        if (param.len == 0) continue;
+        const scalar = if (zig) isZigScalarFloat(param) else isCScalarFloat(param);
+        if (scalar) {
+            cur += 1;
+            if (cur > best) best = cur;
+        } else {
+            cur = 0;
+        }
+    }
+    return best;
+}
+
+// A C parameter that is a bare `float`: a pointer or array is the
+// by-pointer form and does not count.
+fn isCScalarFloat(param: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, param, '*') != null) return false;
+    if (std.mem.indexOfScalar(u8, param, '[') != null) return false;
+    var toks = std.mem.tokenizeAny(u8, param, " \t");
+    while (toks.next()) |tok| {
+        if (std.mem.eql(u8, tok, "float")) return true;
+    }
+    return false;
+}
+
+// A Zig extern parameter whose type is exactly `f32`; `*const [3]f32`
+// and `[*]const f32` are the by-pointer forms and do not count.
+fn isZigScalarFloat(param: []const u8) bool {
+    const colon = std.mem.indexOfScalar(u8, param, ':') orelse return false;
+    const ty = std.mem.trim(u8, param[colon + 1 ..], " \t\r\n");
+    return std.mem.eql(u8, ty, "f32");
+}
+
+// Blanks C block and line comments so a '(' or the word float inside a
+// comment cannot be read as part of a signature.
+fn stripCComments(arena: Allocator, text: []const u8) ![]u8 {
+    const out = try arena.alloc(u8, text.len);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (i + 1 < text.len and text[i] == '/' and text[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < text.len and !(text[i] == '*' and text[i + 1] == '/')) i += 1;
+            i = @min(i + 2, text.len);
+            out[n] = ' ';
+            n += 1;
+            continue;
+        }
+        if (i + 1 < text.len and text[i] == '/' and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        out[n] = text[i];
+        n += 1;
+        i += 1;
+    }
+    return out[0..n];
+}
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
@@ -568,6 +712,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkCommentHygiene(&.{"--cached"});
         try g.checkProseDashes(paths);
         try g.checkBoundaryStance();
+        try g.checkFloatCap();
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
@@ -575,6 +720,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkFileProvenance(paths);
         try g.checkProseDashes(paths);
         try g.checkBoundaryStance();
+        try g.checkFloatCap();
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});
@@ -1118,4 +1264,33 @@ test "C++ source extensions are recognized, C and headers are not" {
     try std.testing.expect(isCxxSourcePath("adapters/media/video_apple.mm"));
     try std.testing.expect(!isCxxSourcePath("adapters/script/qjs_shim.c"));
     try std.testing.expect(!isCxxSourcePath("include/gosslens.h"));
+}
+
+test "consecutive scalar floats are counted, pointers and arrays break the run" {
+    // C: a by-pointer group counts as zero; a loose spread counts fully.
+    try std.testing.expectEqual(@as(usize, 5), maxConsecutiveScalarFloats("void* h, float r, float g, float b, float a, float width", false));
+    try std.testing.expectEqual(@as(usize, 0), maxConsecutiveScalarFloats("void* h, const float* pos, const float* size, uint32_t m", false));
+    try std.testing.expectEqual(@as(usize, 2), maxConsecutiveScalarFloats("const float* p, float min_distance, float max_distance", false));
+    // A uint between two floats breaks the run.
+    try std.testing.expectEqual(@as(usize, 4), maxConsecutiveScalarFloats("float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity", false));
+    // Zig: only a bare f32 counts, not *const [N]f32 or [*]const f32.
+    try std.testing.expectEqual(@as(usize, 0), maxConsecutiveScalarFloats("handle: *anyopaque, pos: *const [3]f32, size: *const [3]f32", true));
+    try std.testing.expectEqual(@as(usize, 3), maxConsecutiveScalarFloats("a: u32, rest_length: f32, frequency: f32, damping: f32", true));
+    try std.testing.expectEqual(@as(usize, 0), maxConsecutiveScalarFloats("verts: [*]const f32, count: u32", true));
+}
+
+test "the frozen public spreads are exempt, other names are not" {
+    try std.testing.expect(isFrozenSpread("goss_session_brush_set_style"));
+    try std.testing.expect(isFrozenSpread("goss_session_ar_brush_set_style"));
+    try std.testing.expect(!isFrozenSpread("goss_physics_body_add_oriented"));
+    try std.testing.expect(!isFrozenSpread("goss_physics_constrain_spring"));
+}
+
+test "C comments are blanked so a paren or float inside one is not a signature" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const cleaned = try stripCComments(arena_state.allocator(), "a /* float x( */ b // float y(\nc");
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "float") == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, cleaned, '(') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, cleaned, 'c') != null);
 }
