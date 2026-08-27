@@ -158,6 +158,33 @@ pub const right_brow_loop = [_]u16{ 46, 53, 52, 65, 55, 107, 66, 105, 63, 70 };
 pub const left_iris_loop = [_]u16{ 474, 475, 476, 477 };
 pub const right_iris_loop = [_]u16{ 469, 470, 471, 472 };
 
+/// Contour shadow regions, each a cluster of mesh landmarks whose convex hull
+/// covers a hollow the face reads as depth: the cheekbone hollows, the nose
+/// sides, and the jaw and temple. A face-part matte fills each hull and unions
+/// them, so a tint darkening this channel sculpts the face from tracking.
+pub const contour_regions = [_][]const u16{
+    &.{ 116, 123, 205, 36, 142 },
+    &.{ 345, 352, 425, 266, 371 },
+    &.{ 129, 98, 49, 45 },
+    &.{ 358, 327, 279, 275 },
+    &.{ 127, 234, 93, 132 },
+    &.{ 356, 454, 323, 361 },
+};
+
+/// Highlight regions, each a cluster whose convex hull covers a plane the face
+/// reads as raised: the cheekbone tops, the brow bones, the nose bridge, the
+/// cupid's bow, and the chin. A face-part matte fills each hull and unions
+/// them, so a tint lightening this channel lifts the face from tracking.
+pub const highlight_regions = [_][]const u16{
+    &.{ 117, 118, 50, 101 },
+    &.{ 346, 347, 280, 330 },
+    &.{ 105, 66, 107, 55 },
+    &.{ 334, 296, 336, 285 },
+    &.{ 6, 197, 195, 122, 351 },
+    &.{ 0, 37, 267, 164 },
+    &.{ 152, 199, 148, 377 },
+};
+
 /// The tracked point for a region: x, y in frame pixels and z in the same
 /// scale, read straight from the mesh. landmarks is a result's flat array.
 pub fn regionPoint(landmarks: *const [landmark_count * 3]f32, region: Region) [3]f32 {

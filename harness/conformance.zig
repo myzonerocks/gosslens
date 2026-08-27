@@ -6998,6 +6998,119 @@ fn proveGlam(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The sum of every pixel byte after the 18-byte TGA header, a monotonic proxy
+/// for total frame brightness: a multiply darken can only lower it, a screen
+/// lighten can only raise it, across every color channel at once.
+fn pixelByteSum(tga: []const u8) u64 {
+    if (tga.len <= 18) return 0;
+    var sum: u64 = 0;
+    for (tga[18..]) |byte| sum += byte;
+    return sum;
+}
+
+fn proveContourHighlight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First prove the region clusters are anatomically placed: on a real
+    // tracked face the two cheek-hollow contours flank the nose, the nose-
+    // bridge highlight sits central and above the nose tip, and the chin
+    // highlight sits below the lips, so a mislabeled cluster would fail here.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL contour face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        const cheek_r = ringCentroid(lm, abi.contour_regions[0]);
+        const cheek_l = ringCentroid(lm, abi.contour_regions[1]);
+        const bridge = ringCentroid(lm, abi.highlight_regions[4]);
+        const chin = ringCentroid(lm, abi.highlight_regions[6]);
+        const lips = ringCentroid(lm, &abi.outer_lip_loop);
+        const nose_x = lm[1 * 3];
+        const nose_y = lm[1 * 3 + 1];
+        if ((cheek_r[0] > nose_x) == (cheek_l[0] > nose_x)) {
+            std.debug.print("conformance: FAIL the contour cheeks not on opposite sides of the nose (x R {d:.1} L {d:.1} nose {d:.1})\n", .{ cheek_r[0], cheek_l[0], nose_x });
+            return false;
+        }
+        const lo_x = @min(cheek_r[0], cheek_l[0]);
+        const hi_x = @max(cheek_r[0], cheek_l[0]);
+        if (!(lo_x < bridge[0] and bridge[0] < hi_x and bridge[1] < nose_y)) {
+            std.debug.print("conformance: FAIL the nose-bridge highlight not central and above the tip (x {d:.1} in {d:.1}..{d:.1}, y {d:.1} tip {d:.1})\n", .{ bridge[0], lo_x, hi_x, bridge[1], nose_y });
+            return false;
+        }
+        if (!(chin[1] > lips[1])) {
+            std.debug.print("conformance: FAIL the chin highlight not below the lips (y chin {d:.1} lips {d:.1})\n", .{ chin[1], lips[1] });
+            return false;
+        }
+    }
+
+    // Then prove the render: contour multiplies its shadow into its matte so
+    // the frame darkens, highlight screens its light into its matte so the
+    // frame brightens, both key off the face and vanish without one, and the
+    // combined look is bit-stable across two runs.
+    try renderOnceWith(gpa, engine, ".lens-packages/contour-highlight", "zig-out/conformance-ch-a", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/contour-highlight", "zig-out/conformance-ch-b", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/contour-highlight", "zig-out/conformance-ch-control", .{ .face = false });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/face-contour", "zig-out/conformance-ch-contour", .{});
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/face-highlight", "zig-out/conformance-ch-highlight", .{});
+    settle(engine);
+    const ch_a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-ch-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(ch_a);
+    const ch_b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-ch-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(ch_b);
+    const control = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-ch-control.tga", gpa, .limited(8 << 20));
+    defer gpa.free(control);
+    const contour = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-ch-contour.tga", gpa, .limited(8 << 20));
+    defer gpa.free(contour);
+    const highlight = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-ch-highlight.tga", gpa, .limited(8 << 20));
+    defer gpa.free(highlight);
+    if (!std.mem.eql(u8, ch_a, ch_b)) {
+        std.debug.print("conformance: FAIL the contour-highlight look is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, ch_a, control)) {
+        std.debug.print("conformance: FAIL the contour-highlight look drew nothing - the mattes never keyed\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, contour, control) or std.mem.eql(u8, highlight, control)) {
+        std.debug.print("conformance: FAIL a contour or highlight matte never rasterized\n", .{});
+        return false;
+    }
+    const base_sum = pixelByteSum(control);
+    if (!(pixelByteSum(contour) < base_sum)) {
+        std.debug.print("conformance: FAIL the contour did not darken the frame (contour {d} base {d})\n", .{ pixelByteSum(contour), base_sum });
+        return false;
+    }
+    if (!(pixelByteSum(highlight) > base_sum)) {
+        std.debug.print("conformance: FAIL the highlight did not brighten the frame (highlight {d} base {d})\n", .{ pixelByteSum(highlight), base_sum });
+        return false;
+    }
+    std.debug.print("conformance: PROOF contour darkens its cheekbone-hollow matte and highlight brightens its raised-plane matte, both keyed off the face, gone without one, bit-stable\n", .{});
+    return true;
+}
+
 fn proveDepthMatting(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // With a segmenter AND depth submitted, the subject mask is the two
     // fused: depth prunes segmentation foreground behind the plane. A near
@@ -9113,6 +9226,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveFoundation(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "glam")) {
             if (!try proveGlam(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "contour-highlight")) {
+            if (!try proveContourHighlight(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "depth-matting")) {
             if (!try proveDepthMatting(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "smooth")) {
@@ -9209,6 +9324,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("foundation");
     if (!try proveGlam(gpa, engine)) return 1;
     watchHold("glam look");
+    if (!try proveContourHighlight(gpa, engine)) return 1;
+    watchHold("contour highlight");
     if (!try proveDepthMatting(gpa, engine)) return 1;
     watchHold("depth matting");
     if (!try proveSmooth(gpa, engine)) return 1;

@@ -327,6 +327,8 @@ pub const TintPassNode = struct {
     mask_channel: ?u8,
     /// Color comes from the makeup reference, not the static rgb.
     from_reference: bool,
+    /// How the color folds in: 0 blend, 1 multiply (darken), 2 screen (lighten).
+    blend: u8,
 };
 
 pub const SmoothPassNode = struct {
@@ -611,7 +613,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .tint_pass) continue;
             const tf = node.tint orelse manifest.TintField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ tf.r, tf.g, tf.b }, .opacity = tf.opacity, .mask_channel = tf.mask_channel, .from_reference = tf.from_reference });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ tf.r, tf.g, tf.b }, .opacity = tf.opacity, .mask_channel = tf.mask_channel, .from_reference = tf.from_reference, .blend = @intFromEnum(tf.blend) });
         }
         return out.toOwnedSlice(gpa);
     }

@@ -176,6 +176,7 @@ pub const Renderer = struct {
     fog_uniform: c.bgfx_uniform_handle_t,
     outline_uniform: c.bgfx_uniform_handle_t,
     tint_uniform: c.bgfx_uniform_handle_t,
+    tint_mode_uniform: c.bgfx_uniform_handle_t,
     smooth_uniform: c.bgfx_uniform_handle_t,
     matte_refine_uniform: c.bgfx_uniform_handle_t,
     stylize_uniform: c.bgfx_uniform_handle_t,
@@ -488,6 +489,7 @@ pub const Renderer = struct {
             .fog_uniform = c.bgfx_create_uniform("u_fog", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .outline_uniform = c.bgfx_create_uniform("u_outline", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tint_uniform = c.bgfx_create_uniform("u_tint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .tint_mode_uniform = c.bgfx_create_uniform("u_tintMode", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .smooth_uniform = c.bgfx_create_uniform("u_smooth", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .matte_refine_uniform = c.bgfx_create_uniform("u_matteRefine", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .stylize_uniform = c.bgfx_create_uniform("u_stylize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -974,6 +976,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.dof_uniform);
         c.bgfx_destroy_uniform(r.fog_uniform);
         c.bgfx_destroy_uniform(r.outline_uniform);
+        c.bgfx_destroy_uniform(r.tint_mode_uniform);
         c.bgfx_destroy_uniform(r.matte_refine_uniform);
         c.bgfx_destroy_uniform(r.stylize_uniform);
         c.bgfx_destroy_uniform(r.edge_uniform);
@@ -1541,12 +1544,14 @@ pub const Renderer = struct {
     /// scaled by the mask value and opacity, so a face-part matte reads as a
     /// soft makeup layer. mask_texture is a single-channel mask, color is rgb
     /// 0..1, opacity 0..1.
-    pub fn submitTintPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, color: [3]f32, opacity: f32) void {
+    pub fn submitTintPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, color: [3]f32, opacity: f32, mode: u8) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(1, r.tex_depth, mask_texture, std.math.maxInt(u32));
         const params = [4]f32{ color[0], color[1], color[2], opacity };
         c.bgfx_set_uniform(r.tint_uniform, &params, 1);
+        const mode_params = [4]f32{ @floatFromInt(mode), 0, 0, 0 };
+        c.bgfx_set_uniform(r.tint_mode_uniform, &mode_params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.tint_program, 0, c.BGFX_DISCARD_ALL);
     }

@@ -55,9 +55,10 @@ pub const NodeParam = struct { name: []const u8, binding: ParamBinding };
 /// lens-format vocabulary; a running session without the class serves
 /// the zero mask, so the effect draws nothing rather than everywhere.
 pub const mask_channels = [_][]const u8{
-    "person",  "background", "hair", "body_skin", "face_skin",
-    "clothes", "others",     "head", "hand",      "lips",
-    "eyes",    "brows",      "iris", "teeth",
+    "person",  "background", "hair",    "body_skin", "face_skin",
+    "clothes", "others",     "head",    "hand",      "lips",
+    "eyes",    "brows",      "iris",    "teeth",     "contour",
+    "highlight",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -72,6 +73,11 @@ pub const eyes_channel = 10;
 pub const brows_channel = 11;
 pub const iris_channel = 12;
 pub const teeth_channel = 13;
+/// Contour and highlight ride clustered face landmarks, not the segmenter:
+/// contour darkens the cheekbone hollows, nose sides and jaw, highlight
+/// lightens the cheekbone tops, brow bones, nose bridge, cupid's bow and chin.
+pub const contour_channel = 14;
+pub const highlight_channel = 15;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {
@@ -264,6 +270,12 @@ pub const OutlineField = struct {
     mask_channel: ?u8 = null,
 };
 
+/// How a tint.pass folds its color into the masked region. normal blends
+/// straight toward the color (the makeup default); multiply darkens through it
+/// for a contour shadow; screen lightens through it for a highlight, each
+/// keeping the underlying skin texture the flat blend would wash out.
+pub const TintBlend = enum { normal, multiply, screen };
+
 pub const TintField = struct {
     /// A tint.pass node's color (rgb, 0..1) and the opacity it blends into
     /// the masked region, so a face-part matte reads as a soft makeup layer.
@@ -276,6 +288,8 @@ pub const TintField = struct {
     /// When set by "source": "reference", the color comes from the makeup
     /// reference sampled for this channel, not the static rgb above.
     from_reference: bool = false,
+    /// How the color folds into the region: straight blend, darken, or lighten.
+    blend: TintBlend = .normal,
 };
 
 pub const SmoothField = struct {
@@ -1519,6 +1533,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         } else if (!std.mem.eql(u8, name, "static")) {
                             try diags.add(path.slice(), "tint source must be reference or static", .{});
                         }
+                    }
+                }
+                if (getField(tv.object, "blend")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(TintBlend, name)) |mode| field.blend = mode else try diags.add(path.slice(), "tint blend must be normal, multiply, or screen", .{});
                     }
                 }
                 tint_field = field;

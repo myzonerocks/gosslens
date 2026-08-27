@@ -88,6 +88,8 @@ pub const right_brow_loop = face.right_brow_loop;
 pub const left_iris_loop = face.left_iris_loop;
 pub const right_iris_loop = face.right_iris_loop;
 pub const inner_lip_loop = face.inner_lip_loop;
+pub const contour_regions = face.contour_regions;
+pub const highlight_regions = face.highlight_regions;
 
 pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
@@ -714,6 +716,9 @@ pub const Session = struct {
     tint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     /// tint.pass nodes' mask channel by graph index (0 person, else a class).
     tint_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// tint.pass nodes' blend mode by graph index: 0 normal blend, 1 multiply
+    /// (contour darken), 2 screen (highlight lighten). Absent reads as normal.
+    tint_modes: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     /// tint.pass nodes whose color comes from the makeup reference, not the
     /// static field, by graph index.
     tint_reference: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
@@ -1922,6 +1927,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     (s.makeup_reference[channel] orelse [3]f32{ params[0], params[1], params[2] })
                 else
                     [3]f32{ params[0], params[1], params[2] };
+                const mode = s.tint_modes.get(entry.graph_index) orelse 0;
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -1929,7 +1935,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitTintPass(view_id, input_texture, mask_tex, tint_color, params[3]);
+                r.submitTintPass(view_id, input_texture, mask_tex, tint_color, params[3], mode);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2951,6 +2957,7 @@ pub fn destroySession(session: *Session) void {
     session.outline_masks.deinit(session.engine.gpa);
     session.tint_params.deinit(session.engine.gpa);
     session.tint_masks.deinit(session.engine.gpa);
+    session.tint_modes.deinit(session.engine.gpa);
     session.tint_reference.deinit(session.engine.gpa);
     session.smooth_params.deinit(session.engine.gpa);
     session.smooth_masks.deinit(session.engine.gpa);
@@ -5916,6 +5923,27 @@ fn pollLandmarkMattes(session: *Session) void {
     pollFacePartMatte(session, manifest.brows_channel, &.{ &face.left_brow_loop, &face.right_brow_loop });
     pollFacePartMatte(session, manifest.iris_channel, &.{ &face.left_iris_loop, &face.right_iris_loop });
     pollFacePartMatte(session, manifest.teeth_channel, &.{&face.inner_lip_loop});
+    pollFaceHullMatte(session, manifest.contour_channel, &face.contour_regions);
+    pollFaceHullMatte(session, manifest.highlight_channel, &face.highlight_regions);
+}
+
+/// Builds a contour or highlight matte from clustered face landmarks: each
+/// region's convex hull fills into the mask and unions, so a tint keying the
+/// channel darkens or lightens those planes. No face this frame leaves the
+/// channel on the zero mask, so the makeup degrades to nothing.
+fn pollFaceHullMatte(session: *Session, channel: u8, regions: []const []const u16) void {
+    if (!maskChannelNeeded(session, channel)) return;
+    var points: [face.landmark_count][2]f32 = undefined;
+    if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
+    var mask: [segmentation.mask_len]f32 = undefined;
+    @memset(&mask, 0);
+    var cluster: [face.landmark_count][2]f32 = undefined;
+    for (regions) |region| {
+        for (region, 0..) |idx, i| cluster[i] = points[idx];
+        fillLandmarkHull(cluster[0..region.len], &mask);
+    }
+    clearClassTexture(session, channel);
+    session.segmentation_class_textures[channel] = maskToTexture(&mask);
 }
 
 /// Builds a face-part matte channel from one or more landmark loops, unioned,
@@ -6036,6 +6064,7 @@ fn destroyBlendState(session: *Session) void {
     session.outline_masks.clearRetainingCapacity();
     session.tint_params.clearRetainingCapacity();
     session.tint_masks.clearRetainingCapacity();
+    session.tint_modes.clearRetainingCapacity();
     session.tint_reference.clearRetainingCapacity();
     session.smooth_params.clearRetainingCapacity();
     session.smooth_masks.clearRetainingCapacity();
@@ -6546,6 +6575,7 @@ fn createTintParams(session: *Session, gpa: std.mem.Allocator) !void {
         session.tint_params.put(gpa, tp.graph_index, .{ tp.color[0], tp.color[1], tp.color[2], tp.opacity }) catch {};
         if (tp.mask_channel) |channel| session.tint_masks.put(gpa, tp.graph_index, channel) catch {};
         if (tp.from_reference) session.tint_reference.put(gpa, tp.graph_index, {}) catch {};
+        if (tp.blend != 0) session.tint_modes.put(gpa, tp.graph_index, tp.blend) catch {};
     }
 }
 
