@@ -780,6 +780,19 @@ pub const PhysicsBody = struct {
     jiggle_damping: f32 = 0.3,
 };
 
+/// How a model.gltf node is steered by the recognized gestures, a turntable
+/// input scheme: orbit spins it with a drag, dolly scales it with a pinch, and
+/// roll turns it with a two-finger twist. All off unless named.
+pub const ModelControl = struct {
+    orbit: bool = false,
+    dolly: bool = false,
+    roll: bool = false,
+
+    pub fn any(self: ModelControl) bool {
+        return self.orbit or self.dolly or self.roll;
+    }
+};
+
 pub const Node = struct {
     id: []const u8,
     type: []const u8,
@@ -795,6 +808,8 @@ pub const Node = struct {
     skeleton_anchor: bool = false,
     /// True when a model.gltf node anchors to the tracked world.
     world_anchor: bool = false,
+    /// Set when a model.gltf node is turntable-controlled by the gestures.
+    control: ?ModelControl = null,
     /// Set when the manifest gives the node a rigid body.
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
@@ -1514,6 +1529,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var body_anchor = false;
         var skeleton_anchor = false;
         var world_anchor = false;
+        var model_control: ?ModelControl = null;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
         var particle_field: ?ParticleField = null;
@@ -2782,6 +2798,27 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(anchor_mark);
         }
+        if (getField(object, "control")) |cv| {
+            const control_mark = path.push("control");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "control is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (cv != .object) {
+                try diags.add(path.slice(), "control must be an object", .{});
+            } else {
+                var mc: ModelControl = .{};
+                if (getField(cv.object, "orbit")) |b| {
+                    if (b == .bool) mc.orbit = b.bool;
+                }
+                if (getField(cv.object, "dolly")) |b| {
+                    if (b == .bool) mc.dolly = b.bool;
+                }
+                if (getField(cv.object, "roll")) |b| {
+                    if (b == .bool) mc.roll = b.bool;
+                }
+                model_control = mc;
+            }
+            path.pop(control_mark);
+        }
 
         const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
         const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
@@ -2821,6 +2858,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .params = try params.toOwnedSlice(arena),
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
+            .control = model_control,
             .body_anchor = body_anchor,
             .skeleton_anchor = skeleton_anchor,
             .world_anchor = world_anchor,
@@ -3649,6 +3687,22 @@ test "a sprite.2d node parses its interaction block" {
     try t.expect(sp.interaction.rotate);
     try t.expectEqualStrings("hit", sp.interaction.tap_event);
     try t.expect(sp.interaction.any());
+}
+
+test "a model.gltf node parses its turntable control block" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "figure", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "control": {"orbit": true, "dolly": true, "roll": true}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const control = manifest.nodes[0].control orelse return error.TestUnexpectedResult;
+    try t.expect(control.orbit);
+    try t.expect(control.dolly);
+    try t.expect(control.roll);
+    try t.expect(control.any());
 }
 
 test "a sprite.2d node with no sprite block defaults to full frame" {

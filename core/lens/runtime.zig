@@ -134,6 +134,8 @@ const LensNode = struct {
     balloon: ?manifest.BalloonField = null,
     hair: ?manifest.HairField = null,
     particles: ?manifest.ParticleField = null,
+    /// .model_gltf only: the turntable gesture control, when the node declares one.
+    control: ?manifest.ModelControl = null,
     /// .model_gltf only: a parameter name per animation clip whose live
     /// value is that clip's blend weight; empty plays the first clip.
     /// Slices into the retained manifest arena, not separately owned.
@@ -254,6 +256,7 @@ pub const ModelNode = struct {
     balloon: ?manifest.BalloonField = null,
     hair: ?manifest.HairField = null,
     particles: ?manifest.ParticleField = null,
+    control: ?manifest.ModelControl = null,
 };
 
 /// One mesh.face node ready for the caller to load and draw - which
@@ -1005,7 +1008,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .model_gltf) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles, .control = node.control });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1383,6 +1386,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .balloon = if (node_type == .model_gltf) node.balloon else null,
             .hair = if (node_type == .model_gltf) node.hair else null,
             .particles = if (node_type == .model_gltf) node.particles else null,
+            .control = if (node_type == .model_gltf) node.control else null,
             .clip_weights = if (node_type == .model_gltf) node.clip_weights else &.{},
             .morph_weights = if (node_type == .model_gltf) node.morph_weights else &.{},
             .sprite = if (node_type == .sprite_2d) node.sprite else null,

@@ -1058,6 +1058,9 @@ pub const Session = struct {
     /// A sprite.2d node's live interaction transform, when it declares one, so
     /// the recognized gestures drag and scale it and a tap on it fires an event.
     sprite_interactions: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteInteraction) = .empty,
+    /// A model.gltf node's live turntable control, when it declares one, so the
+    /// gestures orbit, dolly and roll it each tick.
+    model_controls: std.AutoHashMapUnmanaged(graph.NodeIndex, ModelControlState) = .empty,
     /// An animated sprite's frame state, when it declares frames > 1: the
     /// per-frame loads in flight, the textures they land in, and the rate
     /// the draw cycles them at off the lens clock.
@@ -3187,6 +3190,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const elapsed_us = if (active_lens) |lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
                 const elapsed_seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0;
                 var model_matrix = modelPoseMatrix(loaded, elapsed_seconds, active_lens, entry.graph_index);
+                // A turntable control orbits, dollies and rolls the model, in
+                // its own local frame before any anchor places it in the scene.
+                if (s.model_controls.get(entry.graph_index)) |mc| model_matrix = mc.matrix().mul(model_matrix);
                 // A morphable mesh deforms its rest positions by the lens's
                 // bound morph weights and re-uploads once, before any anchor
                 // path draws it; an unbound mesh keeps its rest shape.
@@ -3525,6 +3531,7 @@ pub fn destroySession(session: *Session) void {
     session.sprite_rects.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
+    session.model_controls.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
     session.dof_params.deinit(session.engine.gpa);
@@ -6951,6 +6958,7 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_rects.clearRetainingCapacity();
     session.sprite_opacity_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
+    session.model_controls.clearRetainingCapacity();
     var anim_it = session.sprite_anims.valueIterator();
     while (anim_it.next()) |anim| {
         for (anim.loaders) |maybe| if (maybe) |l| l.deinit();
@@ -8065,6 +8073,68 @@ fn inRect(x: f32, y: f32, r: [4]f32) bool {
     return x >= r[0] and x <= r[0] + r[2] and y >= r[1] and y <= r[1] + r[3];
 }
 
+/// A model.gltf node's live turntable transform, accumulated from the gestures
+/// each tick: orbit yaw and pitch from a drag, a dolly scale from a pinch, and
+/// a roll from a two-finger twist. Multiplied onto the model pose at draw.
+const ModelControlState = struct {
+    cfg: manifest.ModelControl,
+    yaw: f32 = 0,
+    pitch: f32 = 0,
+    roll: f32 = 0,
+    scale: f32 = 1,
+    dragging: bool = false,
+    last_px: f32 = 0,
+    last_py: f32 = 0,
+    pinching: bool = false,
+    scale_at_pinch: f32 = 1,
+    rolling: bool = false,
+    roll_at_start: f32 = 0,
+
+    fn update(self: *ModelControlState, sig: *const trigger.Signals) void {
+        const px: f32 = @floatCast(sig.pointer_x);
+        const py: f32 = @floatCast(sig.pointer_y);
+        if (self.cfg.orbit) {
+            if (sig.touch_drag) {
+                if (!self.dragging) {
+                    self.dragging = true;
+                    self.last_px = px;
+                    self.last_py = py;
+                } else {
+                    self.yaw += (px - self.last_px) * std.math.tau;
+                    self.pitch += (py - self.last_py) * std.math.tau;
+                    self.last_px = px;
+                    self.last_py = py;
+                }
+            } else self.dragging = false;
+        }
+        if (self.cfg.dolly) {
+            const p: f32 = @floatCast(sig.touch_pinch);
+            if (p != 1.0) {
+                if (!self.pinching) {
+                    self.pinching = true;
+                    self.scale_at_pinch = self.scale;
+                }
+                self.scale = std.math.clamp(self.scale_at_pinch * p, 0.1, 10.0);
+            } else self.pinching = false;
+        }
+        if (self.cfg.roll) {
+            const rr: f32 = @floatCast(sig.touch_rotate);
+            if (rr != 0) {
+                if (!self.rolling) {
+                    self.rolling = true;
+                    self.roll_at_start = self.roll;
+                }
+                self.roll = self.roll_at_start + rr;
+            } else self.rolling = false;
+        }
+    }
+
+    fn matrix(self: ModelControlState) math.Mat4 {
+        const s = math.Mat4.scaling(.{ self.scale, self.scale, self.scale });
+        return math.Mat4.rotationY(self.yaw).mul(math.Mat4.rotationX(self.pitch)).mul(math.Mat4.rotationZ(self.roll)).mul(s);
+    }
+};
+
 /// (assets/<stem>.png, or assets/<stem>_<i>.png for an animated sprite)
 /// and records the rect it draws at - mirrors createBlendLoaders, plus the
 /// static rect the render loop needs.
@@ -8510,6 +8580,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.world_anchor) {
             session.model_world_anchors.put(gpa, model.graph_index, {}) catch {};
+        }
+        if (model.control) |c| {
+            if (c.any()) session.model_controls.put(gpa, model.graph_index, .{ .cfg = c }) catch {};
         }
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
@@ -9730,6 +9803,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     // Interactive sprites consume the same gestures: a drag moves one, a pinch
     // scales it, and a tap on one queues its event alongside the host events.
     updateSpriteInteractions(s, &live_signals, g.start_x, g.start_y);
+    // Controlled models turntable off the same gestures: orbit, dolly and roll.
+    var mc_it = s.model_controls.valueIterator();
+    while (mc_it.next()) |mc| mc.update(&live_signals);
     // Head movement rides the tracked head pose, computed and scanned
     // on-device; only the nod/shake/tilt edges reach the lens, never the pose.
     s.head_clock_us += @as(i64, dt_us);
@@ -10614,6 +10690,28 @@ test "a slider reports its track position and a carousel steps on swipe" {
     try t.expectApproxEqAbs(@as(f32, 2.0), car.update(&lsig, 0, 0).carousel.?, 1e-5);
     var rsig = trigger.Signals{ .touch_swipe = 2 };
     try t.expectApproxEqAbs(@as(f32, 1.0), car.update(&rsig, 0, 0).carousel.?, 1e-5);
+}
+
+test "a model control orbits, dollies and rolls from the gestures" {
+    var mc = ModelControlState{ .cfg = .{ .orbit = true, .dolly = true, .roll = true } };
+    // A drag accumulates yaw; the rising edge only anchors, the next moves it.
+    var d1 = trigger.Signals{ .touch_drag = true, .pointer_x = 0.5, .pointer_y = 0.5 };
+    mc.update(&d1);
+    var d2 = trigger.Signals{ .touch_drag = true, .pointer_x = 0.75, .pointer_y = 0.5 };
+    mc.update(&d2);
+    try t.expect(mc.yaw > 0.0);
+
+    // A pinch dollies the scale and a twist rolls it.
+    var p = trigger.Signals{ .touch_pinch = 2.0 };
+    mc.update(&p);
+    try t.expectApproxEqAbs(@as(f32, 2.0), mc.scale, 1e-5);
+    var r = trigger.Signals{ .touch_rotate = 0.4 };
+    mc.update(&r);
+    try t.expectApproxEqAbs(@as(f32, 0.4), mc.roll, 1e-5);
+
+    // The control matrix is identity when nothing has moved it.
+    const idle = ModelControlState{ .cfg = .{ .orbit = true } };
+    try t.expectApproxEqAbs(@as(f32, 1.0), idle.matrix().cols[0][0], 1e-6);
 }
 
 test "a haptic trigger surfaces through goss_session_pull_haptic" {

@@ -186,6 +186,15 @@ so ramping a weight opens a blendshape (a smile, a blink). Each name must be
 a declared parameter, a target past the list contributes nothing, and with
 no `morph_weights` the mesh draws unmorphed.
 
+A `model.gltf` node may add `"control": {"orbit", "dolly", "roll"}`, a
+turntable the recognized gestures steer: `orbit` spins the model with a drag
+(yaw from the horizontal, pitch from the vertical), `dolly` scales it with a
+pinch, and `roll` turns it with a two-finger twist. The accumulated transform
+multiplies onto the model's pose in its own local frame, before any anchor
+places it, so a lens lets a viewer turn a character in the frame. The gestures
+are the same `goss_session_touch` input the touch signals read, so a control
+and a script can share one input stream.
+
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
 pose drives the model matrix once simulation starts. `body` is `box`,
 `sphere`, `cylinder`, `capsule` (the last two axis vertical), `hull`, or
