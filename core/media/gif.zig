@@ -289,7 +289,9 @@ pub fn decode(gpa: std.mem.Allocator, bytes: []const u8) !Decoded {
         // the disposal after it can roll the change back.
         if (disposal == .previous) @memcpy(previous, canvas);
 
-        const min_code_size: u5 = @intCast(try r.byte());
+        const raw_min_code_size = try r.byte();
+        if (raw_min_code_size < 2 or raw_min_code_size > 11) return Error.BadImage;
+        const min_code_size: u5 = @intCast(raw_min_code_size);
         const lzw = try r.readSubBlocks(gpa);
         defer gpa.free(lzw);
         const indices = try lzwDecode(gpa, lzw, min_code_size, @as(usize, fw) * fh);
@@ -381,6 +383,19 @@ test "rejects a frame outside the logical screen" {
         0, 0, 0, 255, 255, 255,
         0x2C, 0, 0, 0, 0, 4, 0, 4, 0, 0, // 4x4 frame in a 2x2 screen
         2, 2, 0x04, 0x0A, 0x00,
+        0x3B,
+    };
+    try std.testing.expectError(Error.BadImage, decode(gpa, &bytes));
+}
+
+test "rejects an out-of-range lzw minimum code size" {
+    const gpa = std.testing.allocator;
+    const bytes = [_]u8{
+        'G', 'I', 'F', '8', '9', 'a',
+        2, 0, 2, 0, 0x80, 0, 0,
+        0, 0, 0, 255, 255, 255,
+        0x2C, 0, 0, 0, 0, 2, 0, 2, 0, 0, // 2x2 frame in a 2x2 screen
+        32, 0x00, // a code size of 32 does not fit the twelve-bit table
         0x3B,
     };
     try std.testing.expectError(Error.BadImage, decode(gpa, &bytes));

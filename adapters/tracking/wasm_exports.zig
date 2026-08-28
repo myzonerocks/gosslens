@@ -118,6 +118,12 @@ fn createFaceInstance(task_ptr: ?[*]const u8, task_len: usize) !*Instance {
     const total = anchorTotal(&detector_engine) orelse return error.CreateFailed;
     const plan = detector.planForModel(detector_side, total) orelse return error.CreateFailed;
 
+    // Reinstate the native output-size contract the wasm face path dropped: a
+    // bundle whose landmark model is short must be refused here, not read out
+    // of bounds on the frame path where the decode assert compiles out.
+    if (floatCount(&landmarks_engine, 0, false) < face.landmark_count * 3) return error.CreateFailed;
+    if (floatCount(&landmarks_engine, 1, false) < 1) return error.CreateFailed;
+
     const anchors = try gpa.alloc(detector.Anchor, total);
     errdefer gpa.free(anchors);
     detector.generateAnchors(detector_side, plan, anchors);

@@ -1502,7 +1502,6 @@ export class GossSession {
       visibilities: this.mod.HEAPF32.slice(visStart, presStart),
       presences: this.mod.HEAPF32.slice(presStart, presStart + GOSS_POSE_LANDMARK_COUNT),
     };
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, POSE_RESULT_BYTES]);
     return out;
   }
 

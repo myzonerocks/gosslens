@@ -2195,7 +2195,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         for (indices_value.array.items) |index_value| {
                             switch (index_value) {
                                 .integer => |n| {
-                                    if (n < 0) {
+                                    if (n < 0 or n > std.math.maxInt(u32)) {
                                         idx_ok = false;
                                     } else {
                                         idx[ii] = @intCast(n);
@@ -2311,7 +2311,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                             } else {
                                 if (getField(jiggle_value.object, "segments")) |seg_value| {
                                     switch (seg_value) {
-                                        .integer => |n| body.jiggle_segments = if (n > 0) @intCast(n) else 0,
+                                        .integer => |n| body.jiggle_segments = if (n > 0) @intCast(@min(n, 128)) else 0,
                                         else => try diags.add(path.slice(), "physics chain jiggle segments must be a whole number", .{}),
                                     }
                                 }
@@ -2993,6 +2993,22 @@ test "a physics body parses on a model node" {
     try t.expectEqual(@as(f32, 0.2), body.size[0]);
     try t.expectEqual(@as(f32, 1.5), body.position[1]);
     try t.expect(body.dynamic);
+}
+
+test "a physics chain jiggle count past a sane cap is clamped, not a crash" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "anchor", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+        \\    "physics": {"body": "box", "motion": "kinematic"}},
+        \\   {"id": "bead", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+        \\    "physics": {"body": "sphere", "motion": "dynamic",
+        \\     "chain": {"to": "anchor", "length": 0.4, "jiggle": {"segments": 4294967296}}}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expect(manifest.nodes[1].physics.?.jiggle_segments <= 128);
 }
 
 test "physics on a non-model node is rejected" {
