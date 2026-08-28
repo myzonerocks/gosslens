@@ -7304,6 +7304,159 @@ fn proveHeadMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The largest absolute per-channel difference between the two captures at
+/// pixel index i (four bytes per pixel, rgb weighed).
+fn pixelChannelDiff(a: []const u8, b: []const u8, i: usize) u8 {
+    var d: u8 = 0;
+    var ch: usize = 0;
+    while (ch < 3) : (ch += 1) {
+        const cd = if (a[i + ch] > b[i + ch]) a[i + ch] - b[i + ch] else b[i + ch] - a[i + ch];
+        if (cd > d) d = cd;
+    }
+    return d;
+}
+
+/// The mean absolute per-channel difference between two captures over every
+/// pixel - low when they hold the same image, high when they diverge.
+fn wholeFrameMeanDiff(a: []const u8, b: []const u8) u32 {
+    var sum: u64 = 0;
+    var i: usize = 0;
+    while (i + 3 < a.len) : (i += 4) {
+        var ch: usize = 0;
+        while (ch < 3) : (ch += 1) {
+            sum += if (a[i + ch] > b[i + ch]) a[i + ch] - b[i + ch] else b[i + ch] - a[i + ch];
+        }
+    }
+    return @intCast(sum / (a.len / 4 * 3));
+}
+
+/// Renders one inline-JSON lens (or the plain frame when json is null) over the
+/// corpus, optionally with the face tracker live so the head matte fills, and
+/// reads the composited frame back off the GPU.
+fn captureOccluderShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, json: ?[]const u8, face: bool) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    var face_bytes: ?[]u8 = null;
+    defer if (face_bytes) |fb| gpa.free(fb);
+    if (face) {
+        face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.?.ptr, face_bytes.?.len, 2) != .ok) return error.EnableFaceTrackingFailed;
+    }
+    if (json) |j| {
+        if (abi.goss_session_activate_lens(session, j.ptr, j.len) != .ok) {
+            std.debug.print("conformance: FAIL head-occluder lens activation\n", .{});
+            return error.ActivationFailed;
+        }
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (face) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+    }
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves the head occluder hides 3D content behind the head. A grade whitens
+/// the whole frame as a stand-in content layer; an occluder.pass after it
+/// reveals the head matte's camera frame, so the head region shows the head,
+/// not the object, while outside it the object still shows - keyed to the face.
+fn proveHeadOccluder(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const cap_w: usize = 400;
+    const corner: usize = 30;
+
+    // The object behind the head: a grade that whitens the whole frame, a
+    // synthetic content layer standing in for 3D content drawn behind the head.
+    const content_json =
+        \\{"glf":"1.0","id":"goss.reference.head-occluder-content","version":"1.0.0","display_name":"Occluder Content","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"obj","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"brightness":2.0}}],"triggers":[]}
+    ;
+    // The same content with a head occluder after it: the head matte reveals
+    // the camera frame, so the whitened object is hidden behind the head.
+    const occluder_json =
+        \\{"glf":"1.0","id":"goss.reference.head-occluder-proof","version":"1.0.0","display_name":"Occluder Proof","engine_compat":">=0.5","capabilities":["face"],"parameters":[],"nodes":[{"id":"obj","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"brightness":2.0}},{"id":"head","type":"occluder.pass","inputs":{"frame":"obj"},"params":{},"occluder":{"mask":"head","expand":0.0,"softness":0.03}}],"triggers":[]}
+    ;
+
+    const plain = try captureOccluderShot(gpa, engine, planes, null, true);
+    defer gpa.free(plain);
+    const content = try captureOccluderShot(gpa, engine, planes, content_json, true);
+    defer gpa.free(content);
+    const occ_a = try captureOccluderShot(gpa, engine, planes, occluder_json, true);
+    defer gpa.free(occ_a);
+    const occ_b = try captureOccluderShot(gpa, engine, planes, occluder_json, true);
+    defer gpa.free(occ_b);
+    const occ_noface = try captureOccluderShot(gpa, engine, planes, occluder_json, false);
+    defer gpa.free(occ_noface);
+
+    if (!std.mem.eql(u8, occ_a, occ_b)) {
+        std.debug.print("conformance: FAIL the head occluder is not deterministic across runs\n", .{});
+        return false;
+    }
+    // The reveal region is where the occluder changed the frame versus the
+    // no-face control (whose head matte is the zero mask): the head matte. Over
+    // it, sum the distance from the camera frame and from the whitened object.
+    var reveal_count: usize = 0;
+    var to_camera: u64 = 0;
+    var to_object: u64 = 0;
+    var i: usize = 0;
+    while (i + 3 < occ_a.len) : (i += 4) {
+        if (pixelChannelDiff(occ_a, occ_noface, i) <= 8) continue;
+        reveal_count += 1;
+        var ch: usize = 0;
+        while (ch < 3) : (ch += 1) {
+            to_camera += if (occ_a[i + ch] > plain[i + ch]) occ_a[i + ch] - plain[i + ch] else plain[i + ch] - occ_a[i + ch];
+            to_object += if (occ_a[i + ch] > content[i + ch]) occ_a[i + ch] - content[i + ch] else content[i + ch] - occ_a[i + ch];
+        }
+    }
+    // The head was present and occluded a real block of the object.
+    if (reveal_count < 500) {
+        std.debug.print("conformance: FAIL the occluder revealed too small a region ({d} pixels)\n", .{reveal_count});
+        return false;
+    }
+    // No colour of its own: over the revealed head the frame sits far closer to
+    // the camera than to the whitened object, so it shows the head not the object.
+    if (!(to_camera * 3 < to_object)) {
+        std.debug.print("conformance: FAIL the head region does not reveal the camera (camera dist {d}, object dist {d})\n", .{ to_camera, to_object });
+        return false;
+    }
+    // Outside the head the object is untouched: the top-left corner is
+    // byte-identical to the no-face control, so the reveal is local to the matte.
+    if (!cornerBlockEqual(occ_a, occ_noface, cap_w, corner)) {
+        std.debug.print("conformance: FAIL the occluder changed a corner outside the head matte\n", .{});
+        return false;
+    }
+    // Keyed to the face: with no face the head matte is empty, so the object
+    // shows through the whole frame, the control staying close to the object.
+    if (!(wholeFrameMeanDiff(occ_noface, content) < 4)) {
+        std.debug.print("conformance: FAIL with no face the occluder still altered the object ({d})\n", .{wholeFrameMeanDiff(occ_noface, content)});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the head occluder hides content behind the head: over {d} revealed head pixels the frame shows the camera not the object (camera dist {d}, object dist {d}), a corner outside the matte is byte-identical, gone with no face, bit-stable\n", .{ reveal_count, to_camera, to_object });
+    return true;
+}
+
 fn proveHandMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // An outline.pass masked to "hand" rims each tracked hand off its
     // landmark hull with no segmentation model; with no hand tracked the
@@ -10645,6 +10798,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveClassOutline(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "head-matte")) {
             if (!try proveHeadMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "head-occluder")) {
+            if (!try proveHeadOccluder(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hand-matte")) {
             if (!try proveHandMatte(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "lips-matte")) {
@@ -10763,6 +10918,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("class outline");
     if (!try proveHeadMatte(gpa, engine)) return 1;
     watchHold("head matte");
+    if (!try proveHeadOccluder(gpa, engine)) return 1;
+    watchHold("head occluder");
     if (!try proveHandMatte(gpa, engine)) return 1;
     watchHold("hand matte");
     if (!try proveLipsMatte(gpa, engine)) return 1;

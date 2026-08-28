@@ -4400,6 +4400,9 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         .{ .name = "fs_fog_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_outline_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_tint_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // occluder.pass's own fixed head-occluder shader, same kit-authored
+        // reasoning as fs_smooth_pass below.
+        .{ .name = "fs_occluder_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_smooth_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // retouch.pass's own fixed fragment shader: a mode-branched selective
         // skin filter (edge-aware blemish smooth or T-zone shine matte), same

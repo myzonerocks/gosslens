@@ -754,6 +754,18 @@ pub const Session = struct {
     /// outline.pass nodes that trace a mask channel's edge instead of depth,
     /// by graph index, holding the channel (0 person, else a class).
     outline_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// occluder.pass nodes by graph index: their silhouette expand and edge
+    /// softness. The head matte reveals the preserved frame over content.
+    occluder_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// occluder.pass nodes' revealed mask channel by graph index (head by
+    /// default, else another landmark or class channel).
+    occluder_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// The camera frame preserved at chain start, held across the chain so an
+    /// occluder.pass reveals the head over content drawn behind it; sized to
+    /// the frame and null until a lens carries an occluder node.
+    occluder_frame_target: ?render.Renderer.OffscreenTarget = null,
+    occluder_frame_w: u16 = 0,
+    occluder_frame_h: u16 = 0,
     /// tint.pass nodes by graph index: their color (rgb) and opacity.
     tint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     /// tint.pass nodes' mask channel by graph index (0 person, else a class).
@@ -1213,6 +1225,25 @@ fn ensureTrailPrev(s: *Session, width: u16, height: u16) !void {
     s.prev_frame_w = width;
     s.prev_frame_h = height;
     s.prev_frame_valid = false;
+}
+
+/// (Re)creates the session-owned frame an occluder.pass reveals the head from,
+/// only when the frame size changes or it doesn't exist yet. Seeded each frame
+/// with the camera frame at chain start, so the reveal restores the real head.
+fn ensureOccluderFrame(s: *Session, width: u16, height: u16) !void {
+    if (s.occluder_frame_w == width and s.occluder_frame_h == height and s.occluder_frame_target != null) return;
+    if (s.occluder_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.occluder_frame_target = null;
+    s.occluder_frame_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.occluder_frame_w = width;
+    s.occluder_frame_h = height;
+}
+
+/// Whether the active chain carries an occluder.pass node, so the camera frame
+/// is preserved at chain start for the reveal. Cheap: the chain is short.
+fn chainHasOccluder(s: *const Session) bool {
+    for (s.chain_order) |entry| if (entry.kind == .occluder) return true;
+    return false;
 }
 
 /// Whether the live preview needs the GPU beauty compositing bridge
@@ -1723,6 +1754,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .fog => s.fog_params.contains(entry.graph_index) and s.depth_texture != null,
             // The depth-edge outline needs the submitted depth to find edges.
             .outline => s.outline_params.contains(entry.graph_index) and (s.outline_masks.contains(entry.graph_index) or s.depth_texture != null),
+            // The head occluder needs its params and a named matte channel; the
+            // channel degrades to the zero mask with no face, so it holds the
+            // frame through rather than blocking the chain.
+            .occluder => s.occluder_params.contains(entry.graph_index) and s.occluder_masks.contains(entry.graph_index),
             // A tint is a masked color layer: it needs both its params and a
             // named mask channel, else it holds the frame through.
             .tint => s.tint_params.contains(entry.graph_index) and s.tint_masks.contains(entry.graph_index),
@@ -1837,6 +1872,20 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         r.submitPreview(0, current.preview, rotation * 90, mirror);
     }
     var input_texture = targets[0].texture;
+
+    // An occluder.pass reveals the head from the camera frame, so keep a copy
+    // of it here at chain start before any content draws over it. Only a lens
+    // carrying an occluder node pays for the copy, so nothing else shifts.
+    if (chainHasOccluder(s)) {
+        ensureOccluderFrame(s, width, height) catch {};
+        if (s.occluder_frame_target) |oft| {
+            const seed_view = next_view_id;
+            next_view_id += 1;
+            r.tile = null;
+            render.Renderer.setViewTarget(seed_view, oft, width, height);
+            r.submitShaderPass(seed_view, r.passthroughProgram(), targets[0].texture, r.default_mask_texture);
+        }
+    }
 
     if (beauty_active) {
         input_texture = if (is_web)
@@ -2097,6 +2146,28 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitOutlinePass(view_id, input_texture, edge_tex, .{ line[0], line[1], line[2] }, line[3]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .occluder => {
+                const params = s.occluder_params.get(entry.graph_index) orelse continue;
+                const channel = s.occluder_masks.get(entry.graph_index) orelse continue;
+                // The named matte keys the reveal; an absent class serves the
+                // zero mask, so with no face the occluder holds the frame through.
+                const mask_tex = if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture;
+                // The frame preserved at chain start is the head to reveal; if
+                // it never landed, revealing the frame itself is a no-op.
+                const restore = if (s.occluder_frame_target) |oft| oft.texture else input_texture;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitOccluderPass(view_id, input_texture, restore, mask_tex, .{ params[0], params[0], params[1], 0 });
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3162,6 +3233,8 @@ pub fn destroySession(session: *Session) void {
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
     session.outline_masks.deinit(session.engine.gpa);
+    session.occluder_params.deinit(session.engine.gpa);
+    session.occluder_masks.deinit(session.engine.gpa);
     session.tint_params.deinit(session.engine.gpa);
     session.tint_masks.deinit(session.engine.gpa);
     session.tint_modes.deinit(session.engine.gpa);
@@ -3182,6 +3255,7 @@ pub fn destroySession(session: *Session) void {
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.occluder_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
@@ -6098,6 +6172,8 @@ fn maskChannelNeeded(session: *Session, channel: u8) bool {
     while (shader_it.next()) |c| if (c.* == channel) return true;
     var outline_it = session.outline_masks.valueIterator();
     while (outline_it.next()) |c| if (c.* == channel) return true;
+    var occluder_it = session.occluder_masks.valueIterator();
+    while (occluder_it.next()) |c| if (c.* == channel) return true;
     var tint_it = session.tint_masks.valueIterator();
     while (tint_it.next()) |c| if (c.* == channel) return true;
     var smooth_it = session.smooth_masks.valueIterator();
@@ -6413,6 +6489,8 @@ fn destroyBlendState(session: *Session) void {
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
     session.outline_masks.clearRetainingCapacity();
+    session.occluder_params.clearRetainingCapacity();
+    session.occluder_masks.clearRetainingCapacity();
     session.tint_params.clearRetainingCapacity();
     session.tint_masks.clearRetainingCapacity();
     session.tint_modes.clearRetainingCapacity();
@@ -6833,6 +6911,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createDofParams(s, gpa) catch {};
     createFogParams(s, gpa) catch {};
     createOutlineParams(s, gpa) catch {};
+    createOccluderParams(s, gpa) catch {};
     createTintParams(s, gpa) catch {};
     createSmoothParams(s, gpa) catch {};
     createRetouchParams(s, gpa) catch {};
@@ -6927,6 +7006,18 @@ fn createOutlineParams(session: *Session, gpa: std.mem.Allocator) !void {
     for (outlines) |o| {
         session.outline_params.put(gpa, o.graph_index, .{ o.color[0], o.color[1], o.color[2], o.threshold }) catch {};
         if (o.mask_channel) |channel| session.outline_masks.put(gpa, o.graph_index, channel) catch {};
+    }
+}
+
+/// Resolves the active lens's occluder.pass nodes into session.occluder_params
+/// and occluder_masks, once at activation - mirrors createOutlineParams.
+fn createOccluderParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const occluders = try lens.occluderPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(occluders);
+    for (occluders) |o| {
+        session.occluder_params.put(gpa, o.graph_index, o.params) catch {};
+        session.occluder_masks.put(gpa, o.graph_index, o.mask_channel) catch {};
     }
 }
 
@@ -8046,6 +8137,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createDofParams(session, gpa);
     try createFogParams(session, gpa);
     try createOutlineParams(session, gpa);
+    try createOccluderParams(session, gpa);
     try createTintParams(session, gpa);
     try createSmoothParams(session, gpa);
     try createRetouchParams(session, gpa);

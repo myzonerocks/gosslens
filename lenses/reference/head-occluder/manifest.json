@@ -1,0 +1,16 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.head-occluder",
+  "version": "1.0.0",
+  "display_name": "Head Occluder",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "orbs", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 80, "pattern": "fountain", "gravity": 4.0, "speed": 2.0, "lifetime": 2.0, "mesh": true, "mesh_shape": "cube", "size": 22, "color": [0.9, 0.6, 0.3], "instanced": false}},
+    {"id": "head", "type": "occluder.pass", "inputs": {"frame": "orbs"}, "params": {},
+     "occluder": {"mask": "head", "expand": 0.01, "softness": 0.03}}
+  ],
+  "triggers": []
+}

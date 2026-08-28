@@ -289,6 +289,16 @@ pub const OutlineField = struct {
     mask_channel: ?u8 = null,
 };
 
+pub const OccluderField = struct {
+    /// An occluder.pass node reveals the head over the composited frame so 3D
+    /// content drawn behind it is hidden by the head. expand grows the
+    /// silhouette (frame fractions), softness feathers its edge, and mask names
+    /// the landmark matte channel it reveals, the head by default.
+    expand: f32 = 0.0,
+    softness: f32 = 0.02,
+    mask_channel: u8 = head_channel,
+};
+
 /// How a tint.pass folds its color into the masked region. normal blends
 /// straight toward the color (the makeup default); multiply darkens through it
 /// for a contour shadow; screen lightens through it for a highlight, each
@@ -719,6 +729,9 @@ pub const Node = struct {
     fog: ?FogField = null,
     /// Set only on an outline.pass node: its line color and depth threshold.
     outline: ?OutlineField = null,
+    /// Set only on an occluder.pass node: its silhouette expand, edge softness,
+    /// and the head-matte channel it reveals.
+    occluder: ?OccluderField = null,
     /// Set only on a tint.pass node: its color, opacity, and mask channel.
     tint: ?TintField = null,
     /// Set only on a smooth.pass node: its amount and mask channel.
@@ -1662,6 +1675,28 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "outline.pass")) {
             outline_field = .{};
         }
+        var occluder_field: ?OccluderField = null;
+        if (getField(object, "occluder")) |ov| {
+            const omark = path.push("occluder");
+            if (!std.mem.eql(u8, node_type, "occluder.pass")) {
+                try diags.add(path.slice(), "occluder is an occluder.pass field, found it on '{s}'", .{node_type});
+            } else if (ov != .object) {
+                try diags.add(path.slice(), "occluder must be an object", .{});
+            } else {
+                var field: OccluderField = .{};
+                if (getField(ov.object, "expand")) |v| field.expand = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.expand)), 0.0, 0.2);
+                if (getField(ov.object, "softness")) |v| field.softness = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.softness)), 0.0, 0.5);
+                if (getField(ov.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "occluder mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                occluder_field = field;
+            }
+            path.pop(omark);
+        } else if (std.mem.eql(u8, node_type, "occluder.pass")) {
+            occluder_field = .{};
+        }
         var tint_field: ?TintField = null;
         if (getField(object, "tint")) |tv| {
             const tintmark = path.push("tint");
@@ -2525,6 +2560,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .dof = dof_field,
             .fog = fog_field,
             .outline = outline_field,
+            .occluder = occluder_field,
             .tint = tint_field,
             .smooth = smooth_field,
             .retouch = retouch_field,

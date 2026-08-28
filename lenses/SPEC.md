@@ -347,6 +347,20 @@ outline while flat regions stay untouched. With no `mask` it reads the host's
 depth and holds the frame through when none is submitted. It ships no asset
 and defaults its fields.
 
+An `"occluder.pass"` node is a head occluder for 3D content. It carries an
+`"occluder": {"mask", "expand", "softness"}` block: where a named `mask` channel
+marks the subject (the `head` matte by default, from the face landmarks) it
+reveals the camera frame back over the composited image, so model, particle,
+and brush content drawn earlier in the chain reads as sitting behind the head
+and is hidden by it, while content after the occluder sits in front and shows.
+`expand` grows the revealed silhouette a little (0..0.2 in frame fractions) to
+cover content peeking past the matte edge, and `softness` feathers that edge
+(0..0.5). The pass adds no color of its own; it only reveals the frame. With no
+face the head matte is the zero mask, so it holds the composited frame through.
+The engine has no depth attachment on its composite targets and draws 3D
+content without a depth test, so occlusion is this screen-space reveal keyed to
+the landmark matte, ordered by the chain, rather than a depth-buffer cull.
+
 A `"tint.pass"` node is a masked color layer. It carries a `"tint": {"color",
 "opacity", "mask", "source", "blend", "finish"}` block: it folds `color` (three
 0..1 numbers) into the region a named `mask` channel marks, scaled by the mask
@@ -706,7 +720,8 @@ dialect: `$input v_texcoord0`, `#include <bgfx_shader.sh>`).
 
 A `shader.pass` node may also name a mask channel with a `mask` field. The
 valid channel names are the same set every mask-keyed node draws from
-(`tint.pass`, `smooth.pass`, `retouch.pass`, `matte.refine`, `outline.pass`).
+(`tint.pass`, `smooth.pass`, `retouch.pass`, `matte.refine`, `outline.pass`,
+`occluder.pass`).
 Seven come from the segmentation model: `person`, `background`, `hair`,
 `body_skin`, `face_skin`, `clothes`, `others`. The rest ride the face and hand
 landmarks rather than a segmentation model: `head` and `hand` follow the tracked

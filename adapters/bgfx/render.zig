@@ -156,6 +156,7 @@ pub const Renderer = struct {
     fog_program: c.bgfx_program_handle_t,
     outline_program: c.bgfx_program_handle_t,
     tint_program: c.bgfx_program_handle_t,
+    occluder_program: c.bgfx_program_handle_t,
     smooth_program: c.bgfx_program_handle_t,
     retouch_program: c.bgfx_program_handle_t,
     matte_refine_program: c.bgfx_program_handle_t,
@@ -229,6 +230,7 @@ pub const Renderer = struct {
     tint_uniform: c.bgfx_uniform_handle_t,
     tint_mode_uniform: c.bgfx_uniform_handle_t,
     tint_finish_uniform: c.bgfx_uniform_handle_t,
+    occluder_uniform: c.bgfx_uniform_handle_t,
     smooth_uniform: c.bgfx_uniform_handle_t,
     retouch_uniform: c.bgfx_uniform_handle_t,
     matte_refine_uniform: c.bgfx_uniform_handle_t,
@@ -408,6 +410,7 @@ pub const Renderer = struct {
         const fog_program = try loadFogProgram();
         const outline_program = try loadOutlineProgram();
         const tint_program = try loadTintProgram();
+        const occluder_program = try loadOccluderProgram();
         const smooth_program = try loadSmoothProgram();
         const retouch_program = try loadRetouchProgram();
         const matte_refine_program = try loadMatteRefineProgram();
@@ -496,6 +499,7 @@ pub const Renderer = struct {
             .fog_program = fog_program,
             .outline_program = outline_program,
             .tint_program = tint_program,
+            .occluder_program = occluder_program,
             .smooth_program = smooth_program,
             .retouch_program = retouch_program,
             .matte_refine_program = matte_refine_program,
@@ -555,6 +559,7 @@ pub const Renderer = struct {
             .tint_uniform = c.bgfx_create_uniform("u_tint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tint_mode_uniform = c.bgfx_create_uniform("u_tintMode", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tint_finish_uniform = c.bgfx_create_uniform("u_tintFinish", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .occluder_uniform = c.bgfx_create_uniform("u_occluder", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .smooth_uniform = c.bgfx_create_uniform("u_smooth", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .retouch_uniform = c.bgfx_create_uniform("u_retouch", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .matte_refine_uniform = c.bgfx_create_uniform("u_matteRefine", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -717,6 +722,19 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_tint_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_tint_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_tint_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// occluder.pass's own fixed head-occluder program: the composited frame
+    /// on unit 0, the preserved camera frame on unit 1, and the head matte on
+    /// unit 2, revealing the head over content drawn behind it.
+    pub fn loadOccluderProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_occluder_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_occluder_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_occluder_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_occluder_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -1081,6 +1099,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.outline_uniform);
         c.bgfx_destroy_uniform(r.tint_mode_uniform);
         c.bgfx_destroy_uniform(r.tint_finish_uniform);
+        c.bgfx_destroy_uniform(r.occluder_uniform);
         c.bgfx_destroy_uniform(r.matte_refine_uniform);
         c.bgfx_destroy_uniform(r.stylize_uniform);
         c.bgfx_destroy_uniform(r.edge_uniform);
@@ -1132,6 +1151,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.fog_program);
         c.bgfx_destroy_program(r.outline_program);
         c.bgfx_destroy_program(r.tint_program);
+        c.bgfx_destroy_program(r.occluder_program);
         c.bgfx_destroy_program(r.smooth_program);
         c.bgfx_destroy_program(r.retouch_program);
         c.bgfx_destroy_program(r.matte_refine_program);
@@ -1699,6 +1719,20 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.tint_finish_uniform, &finish_params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.tint_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Reveals the head over the frame: the composited frame on unit 0, the
+    /// preserved camera frame on unit 1, and the head matte on unit 2, mixing
+    /// the camera frame back in where the matte is set so content drawn behind
+    /// the head is hidden by it. params is (grow x, grow y, softness, 0).
+    pub fn submitOccluderPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, restore_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_background, restore_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.occluder_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.occluder_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Blends the frame toward a small neighbor average, masked by the texture
