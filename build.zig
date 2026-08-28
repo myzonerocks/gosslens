@@ -321,6 +321,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("manifest", lens_manifest_module);
     abi_module.addImport("trigger", lens_trigger_module);
     abi_module.addImport("runtime", lens_runtime_module);
+    abi_module.addImport("gesture", gestureModule(b, target, optimize));
 
     const lens_validator_module = b.createModule(.{
         .root_source_file = b.path("lenses/validator/main.zig"),
@@ -775,6 +776,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("world_board", worldBoardModule(b, target, optimize));
         abi_tracking_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_tracking_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
+        abi_tracking_module.addImport("gesture", gestureModule(b, target, optimize));
         abi_tracking_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_tracking_module.addImport("particles", particlesModule(b, target, optimize));
         abi_tracking_module.addImport("sph", sphModule(b, target, optimize));
@@ -996,6 +998,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("world_board", worldBoardModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
+    abi_wasm.addImport("gesture", gestureModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("particles", particlesModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("sph", sphModule(b, wasm_target, .ReleaseSmall));
@@ -1198,6 +1201,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("world_board", worldBoardModule(b, target, optimize));
         abi_conformance_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_conformance_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
+        abi_conformance_module.addImport("gesture", gestureModule(b, target, optimize));
         abi_conformance_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_conformance_module.addImport("particles", particlesModule(b, target, optimize));
         abi_conformance_module.addImport("sph", sphModule(b, target, optimize));
@@ -1530,6 +1534,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("world_board", worldBoardModule(b, android_target, optimize));
     abi_android.addImport("physics", physicsModule(b, android_target, optimize, true));
     abi_android.addImport("script", scriptModule(b, android_target, optimize, true));
+    abi_android.addImport("gesture", gestureModule(b, android_target, optimize));
     abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, true));
     abi_android.addImport("particles", particlesModule(b, android_target, optimize));
     abi_android.addImport("sph", sphModule(b, android_target, optimize));
@@ -1869,6 +1874,14 @@ fn audioPlaybackModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
 fn particlesModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("core/particles/particles.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn gestureModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("core/input/gesture.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -3560,6 +3573,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     };
     abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, have_jolt_ios));
     abi_ios.addImport("script", scriptModule(b, ios_target, optimize, have_quickjs_ios));
+    abi_ios.addImport("gesture", gestureModule(b, ios_target, optimize));
     abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, have_miniaudio_ios));
     abi_ios.addImport("particles", particlesModule(b, ios_target, optimize));
     abi_ios.addImport("sph", sphModule(b, ios_target, optimize));
@@ -4124,6 +4138,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("world_board", worldBoardModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, true));
+    abi_em.addImport("gesture", gestureModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("particles", particlesModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("sph", sphModule(b, em_target, .ReleaseSmall));

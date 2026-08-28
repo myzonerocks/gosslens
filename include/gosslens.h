@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 53u
+#define GOSS_ABI_MINOR 54u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -783,6 +783,12 @@ goss_status goss_session_ar_brush_point(goss_session *session, float x, float y,
 goss_status goss_session_ar_brush_end(goss_session *session);
 goss_status goss_session_ar_brush_undo(goss_session *session);
 goss_status goss_session_ar_brush_clear(goss_session *session);
+
+/* Screen touch. Feed one event per finger so the engine recognizes the screen
+ * gestures a lens reacts to and the pointer position. phase is 0 began, 1
+ * moved, 2 ended, 3 cancelled; pointer_id names the finger; x and y are
+ * normalized 0..1. Recognized gestures reach the lens at the next tick. */
+goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y);
 
 /* Grab and throw. goss_session_grab moves the nearest dynamic physics body to a
  * world point and, while it holds one, drags it there; the body is driven

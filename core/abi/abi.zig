@@ -41,6 +41,7 @@ const pose = @import("pose");
 const beauty = @import("beauty");
 const manifest = @import("manifest");
 const trigger = @import("trigger");
+const gesture = @import("gesture");
 const asset = @import("asset");
 const image = @import("image");
 const gltf = @import("gltf");
@@ -219,6 +220,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_tick_lens(goss_session *session, uint32_t dt_us, const goss_lens_signals *signals)",
     "goss_status goss_physics_hair_remove(goss_session *session, uint32_t hair_id)",
     "goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle)",
+    "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -892,6 +894,10 @@ pub const Session = struct {
     body_clock_us: i64 = 0,
     body_jump_refractory_us: i64 = 0,
     body_wave_refractory_us: i64 = 0,
+    /// The screen touch stream the host feeds through goss_session_touch,
+    /// recognized into gestures at tick so only the completed gestures and the
+    /// pointer position reach a lens, never the raw stream.
+    touch: gesture.Recognizer = .{},
     /// The current bone bend angles, filled at tick from the pose worker so a
     /// lens can compare one by name; the signal points here until the next tick.
     bone_angles: [pose.bone_count]f32 = @splat(0),
@@ -5239,6 +5245,23 @@ pub export fn goss_session_ar_brush_undo(session: ?*Session) Status {
     return .ok;
 }
 
+/// Feeds one screen touch event into the session's gesture recognizer. phase
+/// is 0 began, 1 moved, 2 ended, 3 cancelled; pointer_id names the finger for
+/// multi-touch; x and y are normalized 0..1 over the frame. The stream is
+/// recognized into gestures the next tick delivers to the lens.
+pub export fn goss_session_touch(session: ?*Session, phase: u32, pointer_id: u32, x: f32, y: f32) Status {
+    const s = session orelse return .invalid_argument;
+    const p: gesture.Phase = switch (phase) {
+        0 => .began,
+        1 => .moved,
+        2 => .ended,
+        3 => .cancelled,
+        else => return .invalid_argument,
+    };
+    s.touch.feed(p, pointer_id, x, y);
+    return .ok;
+}
+
 /// Grabs the nearest dynamic body to a world point and drags it there; while
 /// something is grabbed the point just updates the drag target. The body is
 /// driven kinematically each tick, so it follows the pointer and builds the
@@ -7122,7 +7145,7 @@ fn setupScript(s: *Session) void {
 // signals, then the full ARKit blendshape set by name so a script can react
 // to an expression (lens.signals.jawOpen) the way a trigger reads
 // jawOpen.blendshape. Built once - every name is a static string.
-const base_signal_names = [_][*:0]const u8{ "face_present", "hands_present", "audio_level", "audio_beat", "world_tracking_state", "tap" };
+const base_signal_names = [_][*:0]const u8{ "face_present", "hands_present", "audio_level", "audio_beat", "world_tracking_state", "tap", "touch_double_tap", "touch_long_press", "touch_swipe", "touch_drag", "touch_pinch", "touch_rotate", "pointer_x", "pointer_y" };
 const script_signal_names = blk: {
     var arr: [base_signal_names.len + face.blendshape_count][*:0]const u8 = undefined;
     for (base_signal_names, 0..) |name, i| arr[i] = name;
@@ -7140,6 +7163,14 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
     sig_values[3] = if (signals.audio_beat) 1.0 else 0.0;
     sig_values[4] = signals.world_tracking_state;
     sig_values[5] = if (signals.tap) 1.0 else 0.0;
+    sig_values[6] = if (signals.touch_double_tap) 1.0 else 0.0;
+    sig_values[7] = if (signals.touch_long_press) 1.0 else 0.0;
+    sig_values[8] = @floatFromInt(signals.touch_swipe);
+    sig_values[9] = if (signals.touch_drag) 1.0 else 0.0;
+    sig_values[10] = signals.touch_pinch;
+    sig_values[11] = signals.touch_rotate;
+    sig_values[12] = signals.pointer_x;
+    sig_values[13] = signals.pointer_y;
     for (0..face.blendshape_count) |i| {
         sig_values[base_signal_names.len + i] = if (signals.blendshapes) |bs| bs[i] else 0.0;
     }
@@ -9418,6 +9449,19 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     live_signals.camera_zoom = @max(s.camera_controls.zoom_factor, 1);
     live_signals.camera_focus = s.cam_focus_pulse;
     live_signals.camera_exposure = s.cam_exposure_pulse;
+    // Screen gestures ride the touch stream the host fed since the last tick;
+    // the recognizer resolves them here so only completed gestures and the
+    // pointer position reach the lens, never the raw touches.
+    const g = s.touch.poll(@as(i64, dt_us));
+    if (g.tap) live_signals.tap = true;
+    live_signals.touch_double_tap = g.double_tap;
+    live_signals.touch_long_press = g.long_press;
+    live_signals.touch_swipe = @intFromEnum(g.swipe);
+    live_signals.touch_drag = g.dragging;
+    live_signals.touch_pinch = g.pinch_scale;
+    live_signals.touch_rotate = g.rotate;
+    live_signals.pointer_x = g.pointer_x;
+    live_signals.pointer_y = g.pointer_y;
     // Head movement rides the tracked head pose, computed and scanned
     // on-device; only the nod/shake/tilt edges reach the lens, never the pose.
     s.head_clock_us += @as(i64, dt_us);
