@@ -4458,6 +4458,10 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // beauty.lipstick/beauty.blusher's own fixed fragment shader,
         // same reasoning as fs_lut_pass above.
         .{ .name = "fs_makeup", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
+        // paint.face's own fixed fragment shader: the lens texture laid onto
+        // the tracked face through the makeup mesh UVs, masked to a channel
+        // and blended over the skin. Shares vs_makeup's vec2 vertex contract.
+        .{ .name = "fs_paint_face", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
         // model.gltf's own fixed fragment shader: a flat material-tint
         // fill, same reasoning as fs_lut_pass above - pairs with the
         // shared vs_lens_pass.sc vertex contract, not its own stage.

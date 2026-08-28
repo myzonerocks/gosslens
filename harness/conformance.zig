@@ -8121,6 +8121,246 @@ fn proveFoundation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// One composited frame captured through the deterministic readback path
+/// (goss_engine_capture_frame), kept as tightly packed RGBA so a proof can
+/// sample any pixel the lens produced without touching the flaky backbuffer
+/// screenshot path.
+const Shot = struct {
+    w: usize,
+    h: usize,
+    data: []u8,
+    fn r(s: Shot, x: usize, y: usize) i32 {
+        return @as(i32, s.data[(y * s.w + x) * 4]);
+    }
+    fn g(s: Shot, x: usize, y: usize) i32 {
+        return @as(i32, s.data[(y * s.w + x) * 4 + 1]);
+    }
+    fn b(s: Shot, x: usize, y: usize) i32 {
+        return @as(i32, s.data[(y * s.w + x) * 4 + 2]);
+    }
+};
+
+/// Activates a lens over the corpus frame and reads the composited output back
+/// as RGBA. face gates whether the face tracker runs, so the same lens with no
+/// face is the control an image-projection effect degrades to.
+fn captureLens(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const u8, face: bool) !Shot {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer settle(engine);
+    defer abi.destroySession(session);
+
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (face and abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        return error.EnableFaceTrackingFailed;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len) != .ok) {
+        return error.ActivationFailed;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (face) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+    }
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    // Real frames first, so the paint texture load and the landmark mattes
+    // land before the capture path reads the composite back.
+    for (0..12) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    var probe: u8 = 0;
+    _ = abi.goss_engine_capture_frame(engine, session, @ptrCast(&probe), 0, &w, &h);
+    if (w == 0 or h == 0) return error.CaptureSize;
+    const size = @as(usize, w) * @as(usize, h) * 4;
+    const data = try gpa.alloc(u8, size);
+    errdefer gpa.free(data);
+    if (abi.goss_engine_capture_frame(engine, session, data.ptr, size, &w, &h) != .ok) return error.CaptureFailed;
+    return .{ .w = w, .h = h, .data = data };
+}
+
+fn absDiff(a: i32, b: i32) i32 {
+    return if (a > b) a - b else b - a;
+}
+
+/// True when four small corner patches, well outside the face mesh, are
+/// byte-identical between two renders - so an effect confined to the face
+/// left the surround untouched.
+fn cornersUnchanged(a: Shot, b: Shot) bool {
+    const patch: usize = 12;
+    const corners = [_][2]usize{ .{ 0, 0 }, .{ a.w - patch, 0 }, .{ 0, a.h - patch }, .{ a.w - patch, a.h - patch } };
+    for (corners) |corner| {
+        var yy: usize = 0;
+        while (yy < patch) : (yy += 1) {
+            var xx: usize = 0;
+            while (xx < patch) : (xx += 1) {
+                const x = corner[0] + xx;
+                const y = corner[1] + yy;
+                if (a.r(x, y) != b.r(x, y) or a.g(x, y) != b.g(x, y) or a.b(x, y) != b.b(x, y)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn proveFaceMaterial(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // Where the tracked face sits, so the projected image can be checked
+    // against real anatomy: the nose is the facial midline the two-tone
+    // image seam should land on.
+    var nose_x: f32 = 0;
+    var frame_w: f32 = 1;
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL paint.face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        frame_w = @floatFromInt(planes.width);
+        nose_x = result.landmarks[1 * 3] / frame_w;
+    }
+
+    const mat = try captureLens(gpa, engine, ".lens-packages/face-projection", true);
+    defer gpa.free(mat.data);
+    const mat_b = try captureLens(gpa, engine, ".lens-packages/face-projection", true);
+    defer gpa.free(mat_b.data);
+    const plain = try captureLens(gpa, engine, ".lens-packages/face-projection", false);
+    defer gpa.free(plain.data);
+    const tat = try captureLens(gpa, engine, ".lens-packages/face-tattoo", true);
+    defer gpa.free(tat.data);
+    if (mat.w != plain.w or mat.h != plain.h or mat.w != tat.w or mat.h != tat.h or mat.w != mat_b.w) {
+        std.debug.print("conformance: FAIL paint.face renders differ in size\n", .{});
+        return false;
+    }
+
+    // Bit-stable across two runs, and present only with a tracked face.
+    if (!std.mem.eql(u8, mat.data, mat_b.data)) {
+        std.debug.print("conformance: FAIL the face projection is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, mat.data, plain.data)) {
+        std.debug.print("conformance: FAIL the face projection is gone with a tracked face - it never drew\n", .{});
+        return false;
+    }
+
+    const w = mat.w;
+    const h = mat.h;
+    var changed: usize = 0;
+    var tattoo_changed: usize = 0;
+    var blue_count: usize = 0;
+    var yellow_count: usize = 0;
+    var blue_sum_x: f64 = 0;
+    var yellow_sum_x: f64 = 0;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        var x: usize = 0;
+        while (x < w) : (x += 1) {
+            const pr = plain.r(x, y);
+            const pg = plain.g(x, y);
+            const pb = plain.b(x, y);
+            const mr = mat.r(x, y);
+            const mg = mat.g(x, y);
+            const mb = mat.b(x, y);
+            if (absDiff(mr, pr) + absDiff(mg, pg) + absDiff(mb, pb) > 60) {
+                changed += 1;
+                if (mb > mr + 60) {
+                    blue_count += 1;
+                    blue_sum_x += @floatFromInt(x);
+                } else if (mr > mb + 60) {
+                    yellow_count += 1;
+                    yellow_sum_x += @floatFromInt(x);
+                }
+            }
+            if (absDiff(tat.r(x, y), pr) + absDiff(tat.g(x, y), pg) + absDiff(tat.b(x, y), pb) > 60) tattoo_changed += 1;
+        }
+    }
+
+    const total: f64 = @floatFromInt(w * h);
+    if (blue_count == 0 or yellow_count == 0) {
+        std.debug.print("conformance: FAIL the projected image's own colors did not appear (blue {d} yellow {d})\n", .{ blue_count, yellow_count });
+        return false;
+    }
+    const wf: f64 = @floatFromInt(w);
+    const blue_cx = blue_sum_x / @as(f64, @floatFromInt(blue_count));
+    const yellow_cx = yellow_sum_x / @as(f64, @floatFromInt(yellow_count));
+    // The projection must clearly repaint the face region, not a stray pixel.
+    if (@as(f64, @floatFromInt(changed)) < 0.02 * total) {
+        std.debug.print("conformance: FAIL the projection barely touched the frame ({d} px)\n", .{changed});
+        return false;
+    }
+    if (@abs(blue_cx - yellow_cx) < 0.04 * wf) {
+        std.debug.print("conformance: FAIL the two-tone halves are not separated on the face ({d:.1} vs {d:.1})\n", .{ blue_cx, yellow_cx });
+        return false;
+    }
+    const seam = (blue_cx + yellow_cx) * 0.5;
+    const expected = @as(f64, nose_x) * wf;
+    if (@abs(seam - expected) > 0.15 * wf) {
+        std.debug.print("conformance: FAIL the image seam did not land on the face midline (seam {d:.1} nose {d:.1})\n", .{ seam, expected });
+        return false;
+    }
+    if (@abs(blue_cx - expected) > 0.35 * wf or @abs(yellow_cx - expected) > 0.35 * wf) {
+        std.debug.print("conformance: FAIL the projection smeared off the face\n", .{});
+        return false;
+    }
+    if (!cornersUnchanged(mat, plain)) {
+        std.debug.print("conformance: FAIL the projection changed a frame corner outside the face\n", .{});
+        return false;
+    }
+
+    // The region-masked tattoo drew, kept the corners, and covered a strictly
+    // smaller area than the whole-face projection: the contour mask confined it.
+    if (tattoo_changed == 0) {
+        std.debug.print("conformance: FAIL the region-masked tattoo drew nothing\n", .{});
+        return false;
+    }
+    if (!cornersUnchanged(tat, plain)) {
+        std.debug.print("conformance: FAIL the tattoo changed a frame corner outside the face\n", .{});
+        return false;
+    }
+    if (tattoo_changed >= changed) {
+        std.debug.print("conformance: FAIL the contour mask did not confine the tattoo below the full projection ({d} vs {d})\n", .{ tattoo_changed, changed });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF paint.face projects a lens image through the face UVs (two-tone seam at x {d:.0} lands on the nose at x {d:.0}, {d} px changed), masks it to the face (corners clean), the contour tattoo confines to {d} px, gone with no face, bit-stable\n", .{ seam, expected, changed, tattoo_changed });
+    return true;
+}
+
 fn proveGlam(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // The glam look chains three tint.pass nodes (lips, eyes, brows), each
     // reading the previous one's output, so it stacks all three regions and
@@ -11027,6 +11267,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveIris(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "foundation")) {
             if (!try proveFoundation(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "paint-face")) {
+            if (!try proveFaceMaterial(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "glam")) {
             if (!try proveGlam(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "contour-highlight")) {
@@ -11149,6 +11391,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("iris tint");
     if (!try proveFoundation(gpa, engine)) return 1;
     watchHold("foundation");
+    if (!try proveFaceMaterial(gpa, engine)) return 1;
+    watchHold("paint.face");
     if (!try proveGlam(gpa, engine)) return 1;
     watchHold("glam look");
     if (!try proveContourHighlight(gpa, engine)) return 1;

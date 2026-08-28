@@ -352,6 +352,19 @@ pub const SmoothField = struct {
     mask_channel: ?u8 = null,
 };
 
+pub const PaintField = struct {
+    /// A paint.face node lays the lens texture (assets/<id>.png) onto the
+    /// tracked face through the face mesh UVs. opacity scales how strongly it
+    /// sits on the skin.
+    opacity: f32 = 1.0,
+    /// The face region the material is confined to within the mesh; null
+    /// covers the whole face, the full-face image projection case.
+    mask_channel: ?u8 = null,
+    /// How the texture folds onto the skin: straight over, multiply for an ink
+    /// tattoo that darkens the skin, or screen for a lightening projection.
+    blend: TintBlend = .normal,
+};
+
 pub const RetouchField = struct {
     /// A retouch.pass node's selective skin filter over a masked region. blemish
     /// is a wider edge-aware smooth that evens small spots while keeping real
@@ -751,6 +764,9 @@ pub const Node = struct {
     tint: ?TintField = null,
     /// Set only on a smooth.pass node: its amount and mask channel.
     smooth: ?SmoothField = null,
+    /// Set only on a paint.face node: the opacity, face region, and blend it
+    /// lays its texture onto the face with.
+    paint: ?PaintField = null,
     /// Set only on a retouch.pass node: its selective-filter mode, amount, and
     /// mask channel.
     retouch: ?RetouchField = null,
@@ -1814,6 +1830,32 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "smooth.pass")) {
             smooth_field = .{};
         }
+        var paint_field: ?PaintField = null;
+        if (getField(object, "paint")) |pv| {
+            const paintmark = path.push("paint");
+            if (!std.mem.eql(u8, node_type, "paint.face")) {
+                try diags.add(path.slice(), "paint is a paint.face field, found it on '{s}'", .{node_type});
+            } else if (pv != .object) {
+                try diags.add(path.slice(), "paint must be an object", .{});
+            } else {
+                var field: PaintField = .{};
+                if (getField(pv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(pv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "paint mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                if (getField(pv.object, "blend")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(TintBlend, name)) |mode| field.blend = mode else try diags.add(path.slice(), "paint blend must be normal, multiply, or screen", .{});
+                    }
+                }
+                paint_field = field;
+            }
+            path.pop(paintmark);
+        } else if (std.mem.eql(u8, node_type, "paint.face")) {
+            paint_field = .{};
+        }
         var retouch_field: ?RetouchField = null;
         if (getField(object, "retouch")) |rv| {
             const retouchmark = path.push("retouch");
@@ -2613,6 +2655,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .cutout = cutout_field,
             .tint = tint_field,
             .smooth = smooth_field,
+            .paint = paint_field,
             .retouch = retouch_field,
             .matte = matte_field,
             .stylize = stylize_field,

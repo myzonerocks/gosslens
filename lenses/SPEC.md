@@ -427,6 +427,24 @@ mask channels as `tint.pass`; a retouch naming none is inert. The retouch looks
 pair it with the landmark regions below: blemish over `face_skin`, shine over
 `t_zone`.
 
+A `"paint.face"` node lays a lens image onto the tracked face. It ships its
+texture as `assets/<id>.png` and warps it over the face through the canonical
+face mesh UVs the way `mesh.face` does, so the image tracks and deforms with the
+face. It carries a `"paint": {"mask", "opacity", "blend"}` block: `opacity`
+(0..1) scales how strongly the image sits on the skin, `mask` names a face
+channel the image is confined to within the mesh (`face_skin` for paint that
+skips the eyes and lips, a face-part region like `contour` for a tighter decal),
+and `blend` folds the image onto the skin the way `tint.pass` folds a color:
+`normal` (the default) lays it straight over for face paint, `multiply` darkens
+the skin through it for an ink tattoo, and `screen` lightens through it. With no
+`mask` the image covers the whole face mesh, a full-face image projection. Where
+the image's own alpha is zero the skin shows through, so a painted design or a
+tattoo decal reads as sitting on the face rather than a flat overlay. Without a
+tracked face the node draws nothing, the standard capability degradation; a
+named region with no live data serves the zero mask, so the paint fades there.
+The `face-projection`, `war-paint`, and `face-tattoo` reference lenses show the
+whole-face projection, the skin-masked paint, and the region-masked ink.
+
 A `"matte.refine"` node refines a segmentation matte's edges against the
 frame. It carries a `"matte": {"radius", "sensitivity", "strength", "mask"}`
 block and runs a guided (joint-bilateral) filter: the frame luminance is the
@@ -630,10 +648,11 @@ passes reading `shaders/*.glsl`, the post-effect passes blur/grade/bloom/
 dof/fog/outline/tint/smooth/matte/stylize/edge/warp/trail/ssr/env, glTF model
 draws, LUT passes, compositing,
 the draw board, the layout composite, the 2D sprite, the 2D text, the
-`video.texture` node, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
+`video.texture` node, `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
 the bottom; without a tracked face the node draws nothing, the standard
-capability degradation).
+capability degradation - and `paint.face`, the same face-mesh texture warp
+masked to a face region and blended onto the skin by opacity and mode).
 Splice happens once, at lens activation, not per frame; unsplice reverses
 it exactly, freeing every resource the splice allocated. Both are edit-time
 operations on the graph's edit-time API, never touching the frame-time

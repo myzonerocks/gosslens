@@ -206,6 +206,19 @@ pub const Renderer = struct {
         _ = intensity;
     }
 
+    pub fn submitFaceMaterial(r: *Renderer, view_id: u16, background_texture: TextureHandle, material_texture: TextureHandle, mask_texture: TextureHandle, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, blend: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = background_texture;
+        _ = material_texture;
+        _ = mask_texture;
+        _ = landmarks;
+        _ = frame_width;
+        _ = frame_height;
+        _ = opacity;
+        _ = blend;
+    }
+
     pub fn clearComposite(view_id: u16, target: OffscreenTarget, width: u16, height: u16) void {
         _ = view_id;
         _ = target;

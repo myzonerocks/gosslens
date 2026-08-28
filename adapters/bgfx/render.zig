@@ -178,6 +178,7 @@ pub const Renderer = struct {
     beauty_reshape_program: c.bgfx_program_handle_t,
     reshape_bank_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
+    paint_face_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
     model_instanced_program: c.bgfx_program_handle_t,
     billboard_program: c.bgfx_program_handle_t,
@@ -259,6 +260,8 @@ pub const Renderer = struct {
     beauty_params_uniform: c.bgfx_uniform_handle_t,
     reshape_params_uniform: c.bgfx_uniform_handle_t,
     makeup_params_uniform: c.bgfx_uniform_handle_t,
+    /// paint.face's opacity and blend mode, one vec4 (x opacity, y mode).
+    paint_params_uniform: c.bgfx_uniform_handle_t,
     /// The reshape bank's sixty-six sculpt amounts, four per vec4, and its two
     /// derived anchors (forehead center xy, nose-bridge midpoint zw).
     reshape_bank_uniform: c.bgfx_uniform_handle_t,
@@ -434,6 +437,7 @@ pub const Renderer = struct {
         const beauty_reshape_program = try loadBeautyReshapeProgram();
         const reshape_bank_program = try loadReshapeBankProgram();
         const makeup_program = try loadMakeupProgram();
+        const paint_face_program = try loadPaintFaceProgram();
         const model_program = try loadModelProgram();
         const model_instanced_program = try loadModelInstancedProgram();
         const billboard_program = try loadBillboardProgram();
@@ -524,6 +528,7 @@ pub const Renderer = struct {
             .beauty_reshape_program = beauty_reshape_program,
             .reshape_bank_program = reshape_bank_program,
             .makeup_program = makeup_program,
+            .paint_face_program = paint_face_program,
             .model_program = model_program,
             .model_instanced_program = model_instanced_program,
             .billboard_program = billboard_program,
@@ -595,6 +600,7 @@ pub const Renderer = struct {
             .reshape_bank_uniform = c.bgfx_create_uniform("u_reshapeBank", c.BGFX_UNIFORM_TYPE_VEC4, face_reshape_bank_vec4_count),
             .reshape_hubs_uniform = c.bgfx_create_uniform("u_reshapeHubs", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .paint_params_uniform = c.bgfx_create_uniform("u_paintParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .particle_cool_uniform = c.bgfx_create_uniform("u_particleCool", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -998,6 +1004,19 @@ pub const Renderer = struct {
         };
     }
 
+    /// paint.face's program: the makeup mesh vertex stage paired with the
+    /// face-material fragment shader, so a lens texture warps over the tracked
+    /// face and blends onto the skin through a mask channel.
+    pub fn loadPaintFaceProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_makeup_metal, blobs.fs_paint_face_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_makeup_spirv, blobs.fs_paint_face_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_makeup_essl, blobs.fs_paint_face_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_makeup_wgsl, blobs.fs_paint_face_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// The one fixed model.gltf program every lens shares - reuses
     /// vs_lens_pass.sc (the mesh's vertex data is padded with a dummy
     /// texcoord so it fits the same interleaved POSITION+TEXCOORD0
@@ -1145,6 +1164,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.reshape_bank_uniform);
         c.bgfx_destroy_uniform(r.reshape_hubs_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
+        c.bgfx_destroy_uniform(r.paint_params_uniform);
         c.bgfx_destroy_uniform(r.face_points_uniform);
         c.bgfx_destroy_uniform(r.model_color_uniform);
         c.bgfx_destroy_uniform(r.particle_cool_uniform);
@@ -1192,6 +1212,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.beauty_reshape_program);
         c.bgfx_destroy_program(r.reshape_bank_program);
         c.bgfx_destroy_program(r.makeup_program);
+        c.bgfx_destroy_program(r.paint_face_program);
         c.bgfx_destroy_program(r.model_program);
         c.bgfx_destroy_program(r.model_instanced_program);
         c.bgfx_destroy_program(r.billboard_program);
@@ -2064,6 +2085,29 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.makeup_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.makeup_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws the lens texture onto the canonical face mesh: each vertex rides
+    /// its tracked landmark, samples the material at its face UV, keys the mask
+    /// at the screen position, and blends over the frame by opacity and mode.
+    pub fn submitFaceMaterial(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, material_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, blend: f32) void {
+        std.debug.assert(landmarks.len >= 468 * 3);
+        var positions: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+        for (face_mesh_topology.vertex_landmarks, 0..) |landmark, at| {
+            positions[at * 2] = landmarks[@as(usize, landmark) * 3] / frame_width;
+            positions[at * 2 + 1] = landmarks[@as(usize, landmark) * 3 + 1] / frame_height;
+        }
+        c.bgfx_update_dynamic_vertex_buffer(r.face_mesh_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
+        c.bgfx_set_dynamic_vertex_buffer(0, r.face_mesh_position_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_vertex_buffer(1, r.face_mesh_uv_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_index_buffer(r.face_mesh_index_buffer, 0, face_mesh_topology.triangle_indices.len);
+        c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_makeup, material_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ opacity, blend, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.paint_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.paint_face_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     pub fn makeupLipstickUvBuffer(r: *const Renderer) c.bgfx_vertex_buffer_handle_t {

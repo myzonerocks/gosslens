@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -45,6 +45,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.blusher")) return .beauty_blusher;
     if (std.mem.eql(u8, type_str, "shader.pass")) return .shader_pass;
     if (std.mem.eql(u8, type_str, "mesh.face")) return .mesh_face;
+    if (std.mem.eql(u8, type_str, "paint.face")) return .paint_face;
     if (std.mem.eql(u8, type_str, "lut.pass")) return .lut_pass;
     if (std.mem.eql(u8, type_str, "blend.pass")) return .blend_pass;
     if (std.mem.eql(u8, type_str, "blur.pass")) return .blur_pass;
@@ -95,7 +96,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .paint_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
     };
 }
 
@@ -158,6 +159,9 @@ const LensNode = struct {
     tint: ?manifest.TintField = null,
     /// .smooth_pass only: the node's amount and mask channel.
     smooth: ?manifest.SmoothField = null,
+    /// .paint_face only: the opacity, face region, and blend the node lays its
+    /// texture onto the face with.
+    paint: ?manifest.PaintField = null,
     /// .retouch_pass only: the node's selective-filter mode, amount, and channel.
     retouch: ?manifest.RetouchField = null,
     /// .matte_refine only: the node's guided edge-refinement parameters and
@@ -246,6 +250,19 @@ pub const ModelNode = struct {
 pub const MeshFaceNode = struct {
     graph_index: graph.NodeIndex,
     texture_stem: []const u8,
+};
+
+/// One paint.face node ready for the caller to load and draw - which graph
+/// node it is, the texture (assets/<stem>.png) it warps over the tracked
+/// face, and the region, opacity, and blend it lays it on the skin with.
+pub const PaintFaceNode = struct {
+    graph_index: graph.NodeIndex,
+    texture_stem: []const u8,
+    /// The face region the material is confined to, null for the whole face.
+    mask_channel: ?u8,
+    opacity: f32,
+    /// 0 blend straight over, 1 multiply (ink tattoo), 2 screen (projection).
+    blend: u8,
 };
 
 /// One sprite.2d node ready for the caller to load and draw - which graph
@@ -451,7 +468,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, draw_board, sprite };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, paint, draw_board, sprite };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -918,6 +935,22 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every paint.face node this lens spliced, in execution order, each
+    /// carrying its texture stem, face region, opacity, and blend - mirrors
+    /// the other per-kind accessors.
+    pub fn paintFaceNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]PaintFaceNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(PaintFaceNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .paint_face) continue;
+            const pf = node.paint orelse manifest.PaintField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .texture_stem = node.asset_stem.?, .mask_channel = pf.mask_channel, .opacity = pf.opacity, .blend = @intFromEnum(pf.blend) });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every sprite.2d node this lens spliced, in execution order, each
     /// carrying its image stem, screen rect, and opacity - mirrors the
     /// other per-kind accessors.
@@ -999,6 +1032,7 @@ pub const Lens = struct {
                 .env_pass => .env,
                 .model_gltf => .model,
                 .mesh_face => .mesh,
+                .paint_face => .paint,
                 .draw_board => .draw_board,
                 .sprite_2d, .text_2d, .video_texture => .sprite,
                 else => continue,
@@ -1206,7 +1240,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .graph_index = graph_index,
             .node_type = node_type,
             .asset_stem = switch (node_type) {
-                .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .sprite_2d => node.id,
+                .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .paint_face, .sprite_2d => node.id,
                 else => null,
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
@@ -1233,6 +1267,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .cutout = if (node_type == .cutout_pass) node.cutout else null,
             .tint = if (node_type == .tint_pass) node.tint else null,
             .smooth = if (node_type == .smooth_pass) node.smooth else null,
+            .paint = if (node_type == .paint_face) node.paint else null,
             .retouch = if (node_type == .retouch_pass) node.retouch else null,
             .matte = if (node_type == .matte_refine) node.matte else null,
             .stylize = if (node_type == .stylize_pass) node.stylize else null,
