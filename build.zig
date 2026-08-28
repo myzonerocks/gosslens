@@ -385,7 +385,7 @@ pub fn build(b: *std.Build) void {
     const face_mesh_topology_tests = b.addTest(.{ .root_module = face_mesh_topology_module });
     const lash_mesh_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = target, .optimize = optimize }) });
     const gesture_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/input/gesture.zig"), .target = target, .optimize = optimize }) });
-    const ml_tensor_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/ml/tensor.zig"), .target = target, .optimize = optimize }) });
+    const ml_tensor_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/ml_tensor.zig"), .target = target, .optimize = optimize }) });
     const logic_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/lens/logic.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "trigger", .module = lens_trigger_module }} }) });
     const face_geometry_tests = b.addTest(.{ .root_module = face_geometry_core_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
