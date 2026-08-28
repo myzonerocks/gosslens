@@ -104,6 +104,10 @@ void goss_script_free(GossScript *s);
 int goss_script_tick(GossScript *s,
                      const char *const *signal_names, const double *signal_values, int signal_count,
                      const char *const *param_names, double *param_values, int param_count);
+int goss_script_event(GossScript *s, const char *handler,
+                      const char *const *signal_names, const double *signal_values, int signal_count,
+                      const char *const *param_names, double *param_values, int param_count,
+                      const char *arg, size_t arg_len);
 
 // A script failure is drained to stderr so lens authors see the reason;
 // leaving it pending would also poison the next call into the context.
@@ -234,24 +238,15 @@ void goss_script_free(GossScript *s) {
     free(s);
 }
 
-// Runs update(lens) once. The host passes the current signals in and the
-// current parameter values in/out: the script reads lens.signals.<name>
-// and writes lens.params.<name>, and the written values are read back into
-// param_values. Returns 0 on success, -1 on an exception or fuel timeout.
-int goss_script_tick(GossScript *s,
-                     const char *const *signal_names, const double *signal_values, int signal_count,
-                     const char *const *param_names, double *param_values, int param_count) {
-    if (!s || !s->has_update) return -1;
+// Binds this frame's signals and params onto the cached lens object, calls fn
+// with (lens) or (lens, arg) when arg is a string, then reads back whatever
+// the script wrote to the params. Shared by the per-tick update and the event
+// handlers so both see the same lens surface. Returns 0 on success.
+static int goss_script_invoke(GossScript *s, JSValue fn, JSValue arg,
+                              const double *signal_values, int signal_count,
+                              double *param_values, int param_count, const char *where) {
     JSContext *ctx = s->ctx;
     s->budget = s->fuel_per_tick;
-
-    if (!s->cache_built || s->signal_atom_count != signal_count || s->param_atom_count != param_count) {
-        if (goss_build_cache(s, signal_names, signal_count, param_names, param_count) != 0) return -1;
-    }
-
-    // Rebind the children each tick so a script that reassigned lens.signals
-    // or lens.params sees the engine's own objects again, then write this
-    // frame's values in place through the cached atoms.
     JS_SetPropertyStr(ctx, s->lens, "signals", JS_DupValue(ctx, s->signals));
     JS_SetPropertyStr(ctx, s->lens, "params", JS_DupValue(ctx, s->params));
     for (int i = 0; i < signal_count; i++)
@@ -259,9 +254,13 @@ int goss_script_tick(GossScript *s,
     for (int i = 0; i < param_count; i++)
         JS_SetProperty(ctx, s->params, s->param_atoms[i], JS_NewFloat64(ctx, param_values[i]));
 
-    JSValue ret = JS_Call(ctx, s->update_fn, JS_UNDEFINED, 1, &s->lens);
+    JSValue argv[2];
+    argv[0] = s->lens;
+    int argc = 1;
+    if (!JS_IsUndefined(arg)) { argv[1] = arg; argc = 2; }
+    JSValue ret = JS_Call(ctx, fn, JS_UNDEFINED, argc, argv);
     int rc = JS_IsException(ret) ? -1 : 0;
-    if (rc != 0) goss_drain_exception(ctx, "update");
+    if (rc != 0) goss_drain_exception(ctx, where);
     JS_FreeValue(ctx, ret);
 
     if (rc == 0) {
@@ -278,5 +277,43 @@ int goss_script_tick(GossScript *s,
         }
         JS_FreeValue(ctx, p);
     }
+    return rc;
+}
+
+// Runs update(lens) once. The host passes the current signals in and the
+// current parameter values in/out: the script reads lens.signals.<name>
+// and writes lens.params.<name>, and the written values are read back into
+// param_values. Returns 0 on success, -1 on an exception or fuel timeout.
+int goss_script_tick(GossScript *s,
+                     const char *const *signal_names, const double *signal_values, int signal_count,
+                     const char *const *param_names, double *param_values, int param_count) {
+    if (!s || !s->has_update) return -1;
+    if (!s->cache_built || s->signal_atom_count != signal_count || s->param_atom_count != param_count) {
+        if (goss_build_cache(s, signal_names, signal_count, param_names, param_count) != 0) return -1;
+    }
+    return goss_script_invoke(s, s->update_fn, JS_UNDEFINED, signal_values, signal_count, param_values, param_count, "update");
+}
+
+// Calls a named global handler (onInit, onTap, onSwipe, onEvent and the rest)
+// when the script defines one, passing the same lens plus an optional event
+// name string. A script that does not define the handler is not an error, the
+// call just does nothing. Returns 0 on success or a no-op, -1 on a failure.
+int goss_script_event(GossScript *s, const char *handler,
+                      const char *const *signal_names, const double *signal_values, int signal_count,
+                      const char *const *param_names, double *param_values, int param_count,
+                      const char *arg, size_t arg_len) {
+    if (!s) return -1;
+    JSContext *ctx = s->ctx;
+    if (!s->cache_built || s->signal_atom_count != signal_count || s->param_atom_count != param_count) {
+        if (goss_build_cache(s, signal_names, signal_count, param_names, param_count) != 0) return -1;
+    }
+    JSValue global = JS_GetGlobalObject(ctx);
+    JSValue fn = JS_GetPropertyStr(ctx, global, handler);
+    JS_FreeValue(ctx, global);
+    if (!JS_IsFunction(ctx, fn)) { JS_FreeValue(ctx, fn); return 0; }
+    JSValue arg_val = arg ? JS_NewStringLen(ctx, arg, arg_len) : JS_UNDEFINED;
+    int rc = goss_script_invoke(s, fn, arg_val, signal_values, signal_count, param_values, param_count, handler);
+    if (arg) JS_FreeValue(ctx, arg_val);
+    JS_FreeValue(ctx, fn);
     return rc;
 }
