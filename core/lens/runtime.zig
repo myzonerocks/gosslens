@@ -21,6 +21,7 @@ const std = @import("std");
 const graph = @import("graph");
 const manifest = @import("manifest");
 const trigger = @import("trigger");
+const logic = @import("logic");
 const animation = @import("animation");
 
 /// The beauty engine's six settable effects, named independently of
@@ -77,6 +78,12 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "text.2d")) return .text_2d;
     if (std.mem.eql(u8, type_str, "video.texture")) return .video_texture;
     return null;
+}
+
+/// A behavior node drives parameters each tick and draws nothing, so it never
+/// joins the composite chain: the script and the logic graph.
+fn isBehaviorNode(type_str: []const u8) bool {
+    return std.mem.eql(u8, type_str, "script") or std.mem.eql(u8, type_str, "logic.graph");
 }
 
 const ParamSlot = struct { name: []const u8, effect: EffectSlot };
@@ -545,6 +552,14 @@ pub const AppliedEffect = struct { effect: EffectSlot, value: f32 };
 pub const HapticStyle = enum(u8) { light, medium, heavy, soft, rigid, success, warning, failure };
 pub const HapticEvent = struct { style: HapticStyle, intensity: f32 };
 
+/// A compiled logic.graph node: the evaluatable graph, the parameter its output
+/// drives each tick, and a reusable scratch buffer sized to the node count.
+pub const CompiledLogicGraph = struct {
+    graph: logic.Graph,
+    output_param: []const u8,
+    scratch: []f32,
+};
+
 fn hapticStyleFromName(name: []const u8) HapticStyle {
     return std.meta.stringToEnum(HapticStyle, name) orelse .medium;
 }
@@ -571,6 +586,13 @@ pub const Lens = struct {
     /// action changes; unlike a timer, a counter holds until an action moves it.
     counter_names: [][]u8,
     counter_values: []f64,
+    /// Compiled logic.graph nodes and the arena that owns their nodes, scratch
+    /// buffers and any signal-name slices; evaluated each tick to drive params.
+    logic_arena: std.heap.ArenaAllocator,
+    logic_graphs: []CompiledLogicGraph,
+    /// This tick's parameter values as f64, so a logic graph's param leaf reads
+    /// the live value; sized once at activation.
+    tick_param_snapshot: []f64,
     /// Microseconds since activation, advanced every tick - a free-running
     /// lens clock, the time source an animated sprite cycles its frames on.
     elapsed_us: u64 = 0,
@@ -608,6 +630,8 @@ pub const Lens = struct {
         self.gpa.free(self.counter_names);
         self.gpa.free(self.counter_values);
         self.gpa.free(self.tick_counter_values);
+        self.logic_arena.deinit();
+        self.gpa.free(self.tick_param_snapshot);
         self.gpa.free(self.tick_touched);
         self.gpa.free(self.tick_applied);
         self.gpa.free(self.tick_sounds);
@@ -1344,7 +1368,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     // splice), so size the node array to the composite nodes only.
     var composite_count: usize = 0;
     for (lens_manifest.nodes) |node| {
-        if (!std.mem.eql(u8, node.type, "script")) composite_count += 1;
+        if (!isBehaviorNode(node.type)) composite_count += 1;
     }
     const nodes = try gpa.alloc(LensNode, composite_count);
     errdefer gpa.free(nodes);
@@ -1361,7 +1385,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     for (lens_manifest.nodes) |node| {
         // A script node drives parameters each tick; it is not a composite
         // pass, so it never enters the graph. Its source is read separately.
-        if (std.mem.eql(u8, node.type, "script")) continue;
+        if (isBehaviorNode(node.type)) continue;
         const node_type = parseNodeType(node.type) orelse return error.UnsupportedNodeType;
         const graph_index = try g.addNode(.{
             .role = .transform,
@@ -1426,7 +1450,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     // the counted errdefer, which now covers every spliced node.
     var node_at: usize = 0;
     for (lens_manifest.nodes) |node| {
-        if (std.mem.eql(u8, node.type, "script")) continue;
+        if (isBehaviorNode(node.type)) continue;
         const graph_index = nodes[node_at].graph_index;
 
         for (node.inputs) |input| {
@@ -1503,6 +1527,14 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     errdefer gpa.free(tick_sounds);
     const tick_haptics = try gpa.alloc(HapticEvent, lens_manifest.triggers.len);
     errdefer gpa.free(tick_haptics);
+    const tick_param_snapshot = try gpa.alloc(f64, param_values.len);
+    errdefer gpa.free(tick_param_snapshot);
+
+    var logic_arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer logic_arena.deinit();
+    var logic_diag = std.heap.ArenaAllocator.init(gpa);
+    defer logic_diag.deinit();
+    const logic_graphs = try compileLogicGraphs(logic_arena.allocator(), logic_diag.allocator(), lens_manifest, param_names);
 
     return .{
         .gpa = gpa,
@@ -1522,7 +1554,74 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .tick_applied = tick_applied,
         .tick_sounds = tick_sounds,
         .tick_haptics = tick_haptics,
+        .logic_arena = logic_arena,
+        .logic_graphs = logic_graphs,
+        .tick_param_snapshot = tick_param_snapshot,
     };
+}
+
+/// Resolves a logic op name to its enum, accepting the friendly aliases const,
+/// and, or and not for the reserved-word ops.
+fn logicOp(name: []const u8) ?logic.Op {
+    if (std.mem.eql(u8, name, "const")) return .constant;
+    if (std.mem.eql(u8, name, "and")) return .logic_and;
+    if (std.mem.eql(u8, name, "or")) return .logic_or;
+    if (std.mem.eql(u8, name, "not")) return .logic_not;
+    return std.meta.stringToEnum(logic.Op, name);
+}
+
+/// Resolves a node-id reference among the nodes before `before`, so a wired
+/// input reads an already-evaluated node; an empty or unknown ref is a literal.
+fn resolveLogicRef(specs: []const manifest.LogicNodeSpec, ref: []const u8, before: usize) i32 {
+    if (ref.len == 0) return -1;
+    for (specs[0..before], 0..) |n, j| {
+        if (std.mem.eql(u8, n.id, ref)) return @intCast(j);
+    }
+    return -1;
+}
+
+/// Compiles every logic.graph node in the manifest into an evaluatable graph,
+/// resolving node refs to indices, signal leaves through the trigger parser,
+/// and param leaves to parameter indices; all storage lives in arena.
+fn compileLogicGraphs(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, lens_manifest: manifest.Manifest, param_names: []const []const u8) error{OutOfMemory}![]CompiledLogicGraph {
+    var out: std.ArrayList(CompiledLogicGraph) = .empty;
+    for (lens_manifest.nodes) |node| {
+        const spec = node.logic_graph orelse continue;
+        const nodes = try arena.alloc(logic.Node, spec.nodes.len);
+        for (spec.nodes, 0..) |ns, i| {
+            var ln: logic.Node = .{ .op = logicOp(ns.op) orelse .constant };
+            ln.a = resolveLogicRef(spec.nodes, ns.a_ref, i);
+            ln.a_lit = ns.a_lit;
+            ln.b = resolveLogicRef(spec.nodes, ns.b_ref, i);
+            ln.b_lit = ns.b_lit;
+            ln.c = resolveLogicRef(spec.nodes, ns.c_ref, i);
+            ln.c_lit = ns.c_lit;
+            ln.constant = ns.constant;
+            if (ln.op == .signal and ns.signal_source.len > 0) {
+                var err: ?trigger.CompileError = null;
+                if (try trigger.compileSignal(arena, diag_arena, ns.signal_source, param_names, &err)) |sig| ln.signal = sig;
+            }
+            if (ln.op == .param) {
+                for (param_names, 0..) |pn, pi| {
+                    if (std.mem.eql(u8, pn, ns.param_name)) {
+                        ln.param_index = @intCast(pi);
+                        break;
+                    }
+                }
+            }
+            nodes[i] = ln;
+        }
+        var output: usize = if (spec.nodes.len > 0) spec.nodes.len - 1 else 0;
+        for (spec.nodes, 0..) |ns, j| {
+            if (std.mem.eql(u8, ns.id, spec.output_id)) output = j;
+        }
+        try out.append(arena, .{
+            .graph = .{ .nodes = nodes, .output = output },
+            .output_param = spec.output_param,
+            .scratch = try arena.alloc(f32, spec.nodes.len),
+        });
+    }
+    return out.toOwnedSlice(arena);
 }
 
 /// Collects every distinct timer('name') a compiled trigger tree
@@ -1629,6 +1728,20 @@ pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const Appl
     @memset(touched_params, false);
     lens.tick_sound_count = 0;
     lens.tick_haptic_count = 0;
+
+    // The logic graphs run first, driving their output parameters off the live
+    // signals, so a trigger or a script this tick reads their fresh values.
+    if (lens.logic_graphs.len > 0) {
+        for (lens.param_values, 0..) |v, i| lens.tick_param_snapshot[i] = v;
+        live_signals.params = lens.tick_param_snapshot;
+        for (lens.logic_graphs) |*lg| {
+            const value = lg.graph.eval(lg.scratch, live_signals);
+            if (paramIndex(lens, lg.output_param)) |idx| {
+                lens.param_values[idx] = clampToParam(lens.manifest.parameters[idx], value);
+                touched_params[idx] = true;
+            }
+        }
+    }
 
     for (lens.compiled_triggers, 0..) |*expr, i| {
         const is_true = trigger.evaluate(expr.root, live_signals);
@@ -2303,4 +2416,29 @@ test "a haptic trigger queues a styled buzz for the host to drain" {
     // The buzz is a one-tick pulse; a quiet tick clears it.
     _ = tick(&lens, animation.fixed_step_us, .{});
     try t.expectEqual(@as(usize, 0), lens.firedHaptics().len);
+}
+
+test "a logic graph drives a parameter from the signals each tick" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const src =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "g", "type": "logic.graph", "params": {},
+        \\   "graph": {"output_param": "intensity", "output": "clamped", "nodes": [
+        \\     {"id": "px", "op": "signal", "signal": "pointer.x"},
+        \\     {"id": "scaled", "op": "mul", "a": "px", "b": 2.0},
+        \\     {"id": "clamped", "op": "clamp", "a": "scaled", "b": 0.0, "c": 1.0}]}}],
+        \\ "triggers": []}
+    ;
+    const lens_manifest = try parseTestManifest(t.allocator, src);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    _ = tick(&lens, animation.fixed_step_us, .{ .pointer_x = 0.3 });
+    try t.expectApproxEqAbs(@as(f32, 0.6), lens.paramValue("intensity").?, 1e-5);
+    _ = tick(&lens, animation.fixed_step_us, .{ .pointer_x = 0.9 });
+    try t.expectApproxEqAbs(@as(f32, 1.0), lens.paramValue("intensity").?, 1e-5);
 }

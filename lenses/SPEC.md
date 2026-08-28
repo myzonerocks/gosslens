@@ -720,6 +720,20 @@ frame to frame, so persistent local state and an ECS-style organization are a
 matter of how the script is written, not a separate engine feature. A no-code
 lens reaches for the counter actions and `counter('name')` instead.
 
+A `logic.graph` node is visual scripting over the same runtime: a small graph
+of value nodes that reads the signals and writes a parameter each tick, with no
+code. It carries a `"graph": {"nodes", "output", "output_param"}` block. Each
+node has an `"id"` and an `"op"`: a leaf reads the world with `signal` (its
+`"signal"` is any trigger signal expression, `pointer.x` or `counter('score')`)
+or `param` (its `"param"` names a parameter), or is a `const` with a `"value"`.
+The rest combine earlier nodes: `add`, `sub`, `mul`, `div`, `min`, `max`,
+`clamp`, `lerp`, `gt`, `lt`, `eq`, `and`, `or`, `not`, and `select` (a ? b : c).
+An input `"a"`, `"b"` or `"c"` is either a number literal or the id of an
+earlier node, so a graph reads only what comes before it. `"output"` names the
+node whose value flows to `"output_param"` each tick, evaluated before the
+triggers so they read its fresh value. The graph is pure and deterministic, so
+a logic-driven lens stays conformance bit-stable like a trigger or a script.
+
 Alongside `update`, a script may define event handlers the engine calls when
 a moment happens: `onInit` and `onTurnOn` once when the lens activates,
 `onTurnOff` when it deactivates, `onTap`, `onDoubleTap`, `onLongPress`,

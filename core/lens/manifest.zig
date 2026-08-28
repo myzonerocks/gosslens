@@ -793,6 +793,32 @@ pub const ModelControl = struct {
     }
 };
 
+/// One node of a logic.graph, stored raw for the runtime to compile. op is the
+/// operation name; a, b and c are either a wired input (a_ref names an earlier
+/// node) or an inline literal (a_lit). signal_source and param_name feed the
+/// leaf ops; constant is the const op's value.
+pub const LogicNodeSpec = struct {
+    id: []const u8,
+    op: []const u8,
+    a_ref: []const u8 = "",
+    a_lit: f32 = 0,
+    b_ref: []const u8 = "",
+    b_lit: f32 = 0,
+    c_ref: []const u8 = "",
+    c_lit: f32 = 0,
+    constant: f32 = 0,
+    signal_source: []const u8 = "",
+    param_name: []const u8 = "",
+};
+
+/// A logic.graph node's raw graph: its nodes, which node is the output, and the
+/// parameter the output value drives each tick.
+pub const LogicGraphSpec = struct {
+    nodes: []const LogicNodeSpec,
+    output_id: []const u8,
+    output_param: []const u8,
+};
+
 pub const Node = struct {
     id: []const u8,
     type: []const u8,
@@ -810,6 +836,8 @@ pub const Node = struct {
     world_anchor: bool = false,
     /// Set when a model.gltf node is turntable-controlled by the gestures.
     control: ?ModelControl = null,
+    /// Set on a logic.graph node: its raw graph the runtime compiles.
+    logic_graph: ?LogicGraphSpec = null,
     /// Set when the manifest gives the node a rigid body.
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
@@ -1530,6 +1558,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var skeleton_anchor = false;
         var world_anchor = false;
         var model_control: ?ModelControl = null;
+        var logic_graph_spec: ?LogicGraphSpec = null;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
         var particle_field: ?ParticleField = null;
@@ -2819,6 +2848,17 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(control_mark);
         }
+        if (getField(object, "graph")) |gv| {
+            const graph_mark = path.push("graph");
+            if (!std.mem.eql(u8, node_type, "logic.graph")) {
+                try diags.add(path.slice(), "graph is a logic.graph field, found it on '{s}'", .{node_type});
+            } else if (gv != .object) {
+                try diags.add(path.slice(), "graph must be an object", .{});
+            } else {
+                logic_graph_spec = try parseLogicGraph(diags, path, arena, gv.object);
+            }
+            path.pop(graph_mark);
+        }
 
         const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
         const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
@@ -2859,6 +2899,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
             .control = model_control,
+            .logic_graph = logic_graph_spec,
             .body_anchor = body_anchor,
             .skeleton_anchor = skeleton_anchor,
             .world_anchor = world_anchor,
@@ -2900,6 +2941,53 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         });
     }
     return try out.toOwnedSlice(arena);
+}
+
+fn parseLogicInput(object: std.json.ObjectMap, name: []const u8, ref_out: *[]const u8, lit_out: *f32, arena: std.mem.Allocator) error{OutOfMemory}!void {
+    if (getField(object, name)) |v| {
+        switch (v) {
+            .string => |s| ref_out.* = try arena.dupe(u8, s),
+            else => lit_out.* = @floatCast(numberOf(v) orelse 0),
+        }
+    }
+}
+
+fn parseLogicGraph(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?LogicGraphSpec {
+    const output_param = if (getField(object, "output_param")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const output_id = if (getField(object, "output")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const nodes_val = getField(object, "nodes") orelse {
+        try diags.add(path.slice(), "graph needs a nodes array", .{});
+        return null;
+    };
+    if (nodes_val != .array) {
+        try diags.add(path.slice(), "graph nodes must be an array", .{});
+        return null;
+    }
+    var nodes: std.ArrayList(LogicNodeSpec) = .empty;
+    for (nodes_val.array.items) |item| {
+        if (item != .object) continue;
+        const o = item.object;
+        var node: LogicNodeSpec = .{
+            .id = try arena.dupe(u8, if (getField(o, "id")) |v| (try expectString(diags, path, v) orelse "") else ""),
+            .op = try arena.dupe(u8, if (getField(o, "op")) |v| (try expectString(diags, path, v) orelse "") else ""),
+        };
+        try parseLogicInput(o, "a", &node.a_ref, &node.a_lit, arena);
+        try parseLogicInput(o, "b", &node.b_ref, &node.b_lit, arena);
+        try parseLogicInput(o, "c", &node.c_ref, &node.c_lit, arena);
+        if (getField(o, "signal")) |v| {
+            if (try expectString(diags, path, v)) |s| node.signal_source = try arena.dupe(u8, s);
+        }
+        if (getField(o, "param")) |v| {
+            if (try expectString(diags, path, v)) |s| node.param_name = try arena.dupe(u8, s);
+        }
+        if (getField(o, "value")) |v| node.constant = @floatCast(numberOf(v) orelse 0);
+        try nodes.append(arena, node);
+    }
+    return .{
+        .nodes = try nodes.toOwnedSlice(arena),
+        .output_id = try arena.dupe(u8, output_id),
+        .output_param = try arena.dupe(u8, output_param),
+    };
 }
 
 fn parseAction(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?Action {

@@ -318,6 +318,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "face", .module = face_module },
         },
     });
+    lens_runtime_module.addImport("logic", logicModule(b, target, optimize, lens_trigger_module));
     abi_module.addImport("manifest", lens_manifest_module);
     abi_module.addImport("trigger", lens_trigger_module);
     abi_module.addImport("runtime", lens_runtime_module);
@@ -1044,6 +1045,7 @@ pub fn build(b: *std.Build) void {
         });
         abi_wasm.addImport("manifest", lens_manifest_wasm);
         abi_wasm.addImport("trigger", lens_trigger_wasm);
+        lens_runtime_wasm.addImport("logic", logicModule(b, wasm_target, .ReleaseSmall, lens_trigger_wasm));
         abi_wasm.addImport("runtime", lens_runtime_wasm);
         // Neither libc nor real threads exist for wasm32-freestanding -
         // the same reason directory-based lens activation already
@@ -1571,6 +1573,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     });
     abi_android.addImport("manifest", lens_manifest_android);
     abi_android.addImport("trigger", lens_trigger_android);
+    lens_runtime_android.addImport("logic", logicModule(b, android_target, optimize, lens_trigger_android));
     abi_android.addImport("runtime", lens_runtime_android);
     const have_inference_stack = blk: {
         for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
@@ -1886,6 +1889,15 @@ fn gestureModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .root_source_file = b.path("core/input/gesture.zig"),
         .target = target,
         .optimize = optimize,
+    });
+}
+
+fn logicModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, trigger_module: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("core/lens/logic.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "trigger", .module = trigger_module }},
     });
 }
 
@@ -3610,6 +3622,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     });
     abi_ios.addImport("manifest", lens_manifest_ios);
     abi_ios.addImport("trigger", lens_trigger_ios);
+    lens_runtime_ios.addImport("logic", logicModule(b, ios_target, optimize, lens_trigger_ios));
     abi_ios.addImport("runtime", lens_runtime_ios);
     const have_inference_stack = blk: {
         for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
@@ -4181,6 +4194,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     });
     abi_em.addImport("manifest", lens_manifest_em);
     abi_em.addImport("trigger", lens_trigger_em);
+    lens_runtime_em.addImport("logic", logicModule(b, em_target, .ReleaseSmall, lens_trigger_em));
     abi_em.addImport("runtime", lens_runtime_em);
     const image_em = imageStubModule(b, em_target, .ReleaseSmall);
     abi_em.addImport("image", image_em);
