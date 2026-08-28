@@ -644,6 +644,15 @@ event the engine fires when a tap lands on the sprite, delivered to
 reacts to the object being tapped. The recognized gestures come from
 `goss_session_touch`; a sprite names only what it wants.
 
+The same block composes screen UI. A tap event makes the sprite a button. With
+`"slider_param"` the sprite becomes a slider handle: a drag runs it along a
+track from `"slider_min"` to `"slider_max"` (normalized, `"slider_vertical"`
+for a vertical track) and writes its 0..1 position to that parameter each tick.
+With `"carousel_param"` and `"carousel_count"` a swipe steps an index parameter
+over the item count, so a swipe left advances and a swipe right goes back. The
+parameters drive the rest of the lens, so a slider fades an effect or a
+carousel selects a look with no script.
+
 A `"text.2d"` node draws a line of text over the frame. It carries a `"text":
 {"content", "x", "y", "w", "h", "opacity", "color"}` block: the string to
 draw, the same normalized rect and opacity a sprite takes, and an rgb color

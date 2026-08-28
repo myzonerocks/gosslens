@@ -623,17 +623,25 @@ pub const EnvField = struct {
     intensity: f32 = 1.0,
 };
 
-/// The direct-manipulation gestures a sprite responds to. drag moves it with a
-/// finger that started on it, pinch scales it about its centre, rotate turns it
-/// two-fingered, and tap_event names an event fired on a tap. All off default.
+/// The direct-manipulation gestures and screen controls a sprite responds to.
+/// drag moves it, pinch scales it, rotate turns it, tap_event fires on a tap;
+/// slider_param runs it along a track as a slider and carousel_param steps an
+/// index on a swipe. All off by default; the spec covers the full behaviour.
 pub const Interaction = struct {
     drag: bool = false,
     pinch: bool = false,
     rotate: bool = false,
     tap_event: []const u8 = "",
+    slider_param: []const u8 = "",
+    slider_vertical: bool = false,
+    slider_min: f32 = 0.0,
+    slider_max: f32 = 1.0,
+    carousel_param: []const u8 = "",
+    carousel_count: u32 = 0,
 
     pub fn any(self: Interaction) bool {
-        return self.drag or self.pinch or self.rotate or self.tap_event.len > 0;
+        return self.drag or self.pinch or self.rotate or self.tap_event.len > 0 or
+            self.slider_param.len > 0 or self.carousel_param.len > 0;
     }
 };
 
@@ -2279,6 +2287,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         }
                         if (getField(iv.object, "tap_event")) |v| {
                             if (try expectString(diags, path, v)) |s| it.tap_event = try arena.dupe(u8, s);
+                        }
+                        if (getField(iv.object, "slider_param")) |v| {
+                            if (try expectString(diags, path, v)) |s| it.slider_param = try arena.dupe(u8, s);
+                        }
+                        if (getField(iv.object, "slider_vertical")) |b| {
+                            if (b == .bool) it.slider_vertical = b.bool;
+                        }
+                        if (getField(iv.object, "slider_min")) |v| it.slider_min = @floatCast(numberOf(v) orelse it.slider_min);
+                        if (getField(iv.object, "slider_max")) |v| it.slider_max = @floatCast(numberOf(v) orelse it.slider_max);
+                        if (getField(iv.object, "carousel_param")) |v| {
+                            if (try expectString(diags, path, v)) |s| it.carousel_param = try arena.dupe(u8, s);
+                        }
+                        if (getField(iv.object, "carousel_count")) |v| {
+                            if (v == .integer and v.integer >= 1) it.carousel_count = @intCast(v.integer);
                         }
                         field.interaction = it;
                     } else try diags.add(path.slice(), "sprite interaction must be an object", .{});

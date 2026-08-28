@@ -7920,6 +7920,7 @@ const SpriteInteraction = struct {
     rot: f32 = 0,
     rotating: bool = false,
     rot_at_start: f32 = 0,
+    carousel_index: f32 = 0,
 
     /// The current rect after the offset and centre scale, for the draw and
     /// for hit-testing a tap.
@@ -7931,17 +7932,19 @@ const SpriteInteraction = struct {
         return .{ cx - w * 0.5, cy - h * 0.5, w, h };
     }
 
-    /// Advances the transform one tick from the recognized gestures, returning
-    /// the tap event name when a tap lands on the sprite. start is where the
-    /// active finger went down, so a drag is claimed only if it began on this
-    /// sprite even after the finger has moved off it.
-    fn update(self: *SpriteInteraction, sig: *const trigger.Signals, start_x: f32, start_y: f32) ?[]const u8 {
+    /// Advances the transform one tick from the recognized gestures. start is
+    /// where the active finger went down, so a drag or a slider is claimed only
+    /// if it began on this sprite even after the finger has moved off it. The
+    /// result carries a tap event, a slider value or a carousel index to apply.
+    fn update(self: *SpriteInteraction, sig: *const trigger.Signals, start_x: f32, start_y: f32) InteractionResult {
         const px: f32 = @floatCast(sig.pointer_x);
         const py: f32 = @floatCast(sig.pointer_y);
         const r = self.rect();
-        var fired: ?[]const u8 = null;
-        if (self.cfg.tap_event.len > 0 and sig.tap and inRect(px, py, r)) fired = self.cfg.tap_event;
-        if (self.cfg.drag) {
+        var res: InteractionResult = .{};
+        if (self.cfg.tap_event.len > 0 and sig.tap and inRect(px, py, r)) res.tap_event = self.cfg.tap_event;
+        if (self.cfg.slider_param.len > 0) {
+            res.slider = self.updateSlider(sig, start_x, start_y, r);
+        } else if (self.cfg.drag) {
             if (sig.touch_drag) {
                 if (!self.dragging and inRect(start_x, start_y, r)) {
                     self.dragging = true;
@@ -7976,8 +7979,47 @@ const SpriteInteraction = struct {
                 self.rot = self.rot_at_start + rr;
             } else self.rotating = false;
         }
-        return fired;
+        if (self.cfg.carousel_param.len > 0 and self.cfg.carousel_count > 0) {
+            const max_idx: f32 = @floatFromInt(self.cfg.carousel_count - 1);
+            if (sig.touch_swipe == 1) {
+                self.carousel_index = @min(self.carousel_index + 1, max_idx);
+                res.carousel = self.carousel_index;
+            } else if (sig.touch_swipe == 2) {
+                self.carousel_index = @max(self.carousel_index - 1, 0);
+                res.carousel = self.carousel_index;
+            }
+        }
+        return res;
     }
+
+    /// Runs the sprite as a slider handle: while a drag that grabbed it is live
+    /// the handle centre follows the clamped pointer along its track, and the
+    /// 0..1 position is returned to write to the bound parameter.
+    fn updateSlider(self: *SpriteInteraction, sig: *const trigger.Signals, start_x: f32, start_y: f32, r: [4]f32) ?f32 {
+        if (!sig.touch_drag) {
+            self.dragging = false;
+            return null;
+        }
+        if (!self.dragging and inRect(start_x, start_y, r)) self.dragging = true;
+        if (!self.dragging) return null;
+        const lo = @min(self.cfg.slider_min, self.cfg.slider_max);
+        const hi = @max(self.cfg.slider_min, self.cfg.slider_max);
+        const along: f32 = if (self.cfg.slider_vertical) @floatCast(sig.pointer_y) else @floatCast(sig.pointer_x);
+        const clamped = std.math.clamp(along, lo, hi);
+        if (self.cfg.slider_vertical) {
+            self.offset_y = clamped - (self.base[1] + self.base[3] * 0.5);
+        } else {
+            self.offset_x = clamped - (self.base[0] + self.base[2] * 0.5);
+        }
+        const span = hi - lo;
+        return if (span != 0) (clamped - lo) / span else 0;
+    }
+};
+
+const InteractionResult = struct {
+    tap_event: ?[]const u8 = null,
+    slider: ?f32 = null,
+    carousel: ?f32 = null,
 };
 
 fn inRect(x: f32, y: f32, r: [4]f32) bool {
@@ -8950,9 +8992,14 @@ fn pushEvent(s: *Session, name: []const u8) void {
 /// queues a tap event for any sprite a tap landed on, so it reaches the lens
 /// like a host event this same tick.
 fn updateSpriteInteractions(s: *Session, signals: *const trigger.Signals, start_x: f32, start_y: f32) void {
-    var it = s.sprite_interactions.valueIterator();
-    while (it.next()) |si| {
-        if (si.update(signals, start_x, start_y)) |name| pushEvent(s, name);
+    const lens = if (s.active_lens) |*l| l else return;
+    var it = s.sprite_interactions.iterator();
+    while (it.next()) |entry| {
+        const cfg = entry.value_ptr.cfg;
+        const res = entry.value_ptr.update(signals, start_x, start_y);
+        if (res.tap_event) |name| pushEvent(s, name);
+        if (res.slider) |v| lens.setParam(cfg.slider_param, v);
+        if (res.carousel) |idx| lens.setParam(cfg.carousel_param, idx);
     }
 }
 
@@ -10484,9 +10531,9 @@ test "an interactive sprite drags, scales, and reports a tap on it" {
 
     // A tap inside the sprite reports its event; one outside does not.
     var sig = trigger.Signals{ .tap = true, .pointer_x = 0.5, .pointer_y = 0.5 };
-    try t.expectEqualStrings("hit", si.update(&sig, 0.5, 0.5).?);
+    try t.expectEqualStrings("hit", si.update(&sig, 0.5, 0.5).tap_event.?);
     sig = .{ .tap = true, .pointer_x = 0.95, .pointer_y = 0.95 };
-    try t.expect(si.update(&sig, 0.95, 0.95) == null);
+    try t.expect(si.update(&sig, 0.95, 0.95).tap_event == null);
 
     // A drag that began on the sprite moves it by the pointer delta.
     sig = .{ .touch_drag = true, .pointer_x = 0.7, .pointer_y = 0.5 };
@@ -10509,6 +10556,24 @@ test "an interactive sprite drags, scales, and reports a tap on it" {
     var dsig = trigger.Signals{ .touch_drag = true, .pointer_x = 0.95, .pointer_y = 0.95 };
     _ = off.update(&dsig, 0.9, 0.9);
     try t.expectApproxEqAbs(@as(f32, 0.0), off.offset_x, 1e-5);
+}
+
+test "a slider reports its track position and a carousel steps on swipe" {
+    // A horizontal track from 0.2 to 0.8, handle base centred at 0.5.
+    var sl = SpriteInteraction{ .cfg = .{ .slider_param = "v", .slider_min = 0.2, .slider_max = 0.8 }, .base = .{ 0.45, 0.5, 0.1, 0.1 } };
+    var sig = trigger.Signals{ .touch_drag = true, .pointer_x = 0.5, .pointer_y = 0.5 };
+    try t.expectApproxEqAbs(@as(f32, 0.5), sl.update(&sig, 0.5, 0.5).slider.?, 1e-5);
+    sig = .{ .touch_drag = true, .pointer_x = 0.95, .pointer_y = 0.5 };
+    try t.expectApproxEqAbs(@as(f32, 1.0), sl.update(&sig, 0.5, 0.5).slider.?, 1e-5);
+
+    // A swipe left steps the index up to the last item and holds; right steps back.
+    var car = SpriteInteraction{ .cfg = .{ .carousel_param = "i", .carousel_count = 3 }, .base = .{ 0, 0, 1, 1 } };
+    var lsig = trigger.Signals{ .touch_swipe = 1 };
+    try t.expectApproxEqAbs(@as(f32, 1.0), car.update(&lsig, 0, 0).carousel.?, 1e-5);
+    try t.expectApproxEqAbs(@as(f32, 2.0), car.update(&lsig, 0, 0).carousel.?, 1e-5);
+    try t.expectApproxEqAbs(@as(f32, 2.0), car.update(&lsig, 0, 0).carousel.?, 1e-5);
+    var rsig = trigger.Signals{ .touch_swipe = 2 };
+    try t.expectApproxEqAbs(@as(f32, 1.0), car.update(&rsig, 0, 0).carousel.?, 1e-5);
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {
