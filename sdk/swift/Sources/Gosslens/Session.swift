@@ -15,6 +15,11 @@ public struct GossSessionConfig {
 /// same reason (see GossEngine's own note).
 public final class GossSession: @unchecked Sendable {
     let handle: OpaquePointer
+    /// A live session dereferences engine state (gpa, renderer, recording)
+    /// on every call and at destroy, so it holds the engine strongly: ARC
+    /// cannot deinit the engine while any session is still alive, which
+    /// keeps goss_session_destroy ordered before goss_engine_destroy.
+    private let engine: GossEngine
     private var destroyed = false
 
     public static func create(engine: GossEngine, config: GossSessionConfig = GossSessionConfig()) throws -> GossSession {
@@ -22,10 +27,11 @@ public final class GossSession: @unchecked Sendable {
         var handle: OpaquePointer?
         try checked(goss_session_create(engine.handle, &raw, &handle))
         guard let handle else { throw GossStatus.outOfMemory }
-        return GossSession(handle: handle)
+        return GossSession(engine: engine, handle: handle)
     }
 
-    private init(handle: OpaquePointer) {
+    private init(engine: GossEngine, handle: OpaquePointer) {
+        self.engine = engine
         self.handle = handle
     }
 
@@ -68,6 +74,15 @@ public final class GossSession: @unchecked Sendable {
     public func submitFrameRgbaCopy(rgba: UnsafePointer<UInt8>, stride: UInt32, width: UInt32, height: UInt32, pixelFormat: GossPixelFormat = .rgba8, rotationDegrees: UInt32 = 0, mirrored: Bool = false, timestampUs: Int64 = 0) throws {
         var raw = GossFrameDesc(width: width, height: height, pixelFormat: pixelFormat, rotationDegrees: rotationDegrees, mirrored: mirrored, timestampUs: timestampUs).raw
         try checked(goss_session_submit_frame_rgba_copy(handle, &raw, rgba, stride))
+    }
+
+    /// Zero-copy submission of a platform hardware buffer (an AHardwareBuffer
+    /// on Android); hardwareBuffer is the opaque platform handle. False means
+    /// the buffer could not be imported, the signal to fall back to
+    /// submitFrameCopy for this stream.
+    public func submitHardwareBuffer(desc: GossFrameDesc, hardwareBuffer: UnsafeMutableRawPointer) -> Bool {
+        var raw = desc.raw
+        return goss_session_submit_hardware_buffer(handle, &raw, hardwareBuffer) == GOSS_OK
     }
 
     // MARK: - Telemetry
@@ -122,6 +137,20 @@ public final class GossSession: @unchecked Sendable {
     /// upper body; the lower-body joints (knees down) read absent.
     public func setPoseUpperBody(_ enabled: Bool) throws {
         try checked(goss_session_set_pose_upper_body(handle, enabled ? 1 : 0))
+    }
+
+    /// Stands the segmentation worker up from a raw selfie or hair segmenter
+    /// .tflite model (not bundled the way a face_landmarker.task is). The
+    /// bytes are copied; the caller may release them on return. Throws
+    /// .unsupported on builds without the inference stack.
+    public func enableSegmentation(model: Data, threads: Int32) throws {
+        try model.withUnsafeBytes { buffer in
+            try checked(goss_session_enable_segmentation(handle, buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count, threads))
+        }
+    }
+
+    public func disableSegmentation() {
+        goss_session_disable_segmentation(handle)
     }
 
     public func trackFrame(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, colorStandard: GossColorStandard = .bt709, colorRange: GossColorRange = .video, timestampUs: Int64) throws {

@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.face-symmetry",
+  "version": "1.0.0",
+  "display_name": "Face Symmetry",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "sculpt", "type": "reshape.bank", "inputs": {"frame": "camera"}, "params": {},
+     "reshape": {"face_symmetry": 0.7}}
+  ],
+  "triggers": []
+}

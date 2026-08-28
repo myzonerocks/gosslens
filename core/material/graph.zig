@@ -70,6 +70,11 @@ pub const Graph = struct {
     root: u32,
 };
 
+/// A manifest-supplied graph is untrusted; cap its node count so the
+/// bounded iterative walks below stay cheap and a giant graph is refused
+/// with a diagnostic rather than exhausting memory or time.
+pub const max_nodes = 1024;
+
 pub const Error = error{
     RootOutOfRange,
     RootNotOutput,
@@ -78,6 +83,7 @@ pub const Error = error{
     WrongInputCount,
     TypeMismatch,
     Cycle,
+    TooManyNodes,
     OutOfMemory,
 };
 
@@ -116,6 +122,7 @@ fn fixedOutput(kind: NodeKind) ?ValueType {
 pub fn validate(gpa: std.mem.Allocator, graph: Graph, out_types: []ValueType) Error!void {
     const nodes = graph.nodes;
     std.debug.assert(out_types.len == nodes.len);
+    if (nodes.len > max_nodes) return error.TooManyNodes;
     if (graph.root >= nodes.len) return error.RootOutOfRange;
     if (nodes[graph.root].kind != .output) return error.RootNotOutput;
 
@@ -127,26 +134,42 @@ pub fn validate(gpa: std.mem.Allocator, graph: Graph, out_types: []ValueType) Er
     }
     if (output_count != 1) return error.MultipleOutputs;
 
-    // A DFS from the root resolves each reachable node's output type once
-    // its inputs are known, and the on-stack mark catches any cycle.
+    // An iterative DFS from the root resolves each reachable node's output
+    // type once its inputs are known; the on-stack mark catches any cycle.
+    // Iterative (not recursive) so a long manifest node chain cannot blow
+    // the native stack.
     const state = try gpa.alloc(ResolveState, nodes.len);
     defer gpa.free(state);
     @memset(state, .unseen);
-    try resolve(graph, graph.root, state, out_types);
+    try resolve(gpa, graph, graph.root, state, out_types);
 }
 
-fn resolve(graph: Graph, index: u32, state: []ResolveState, out_types: []ValueType) Error!void {
-    switch (state[index]) {
-        .done => return,
-        .on_stack => return error.Cycle,
-        .unseen => {},
+fn resolve(gpa: std.mem.Allocator, graph: Graph, root: u32, state: []ResolveState, out_types: []ValueType) Error!void {
+    var stack: std.ArrayList(u32) = .empty;
+    defer stack.deinit(gpa);
+    try stack.append(gpa, root);
+    while (stack.items.len > 0) {
+        const index = stack.items[stack.items.len - 1];
+        switch (state[index]) {
+            .done => {
+                _ = stack.pop();
+            },
+            // Every input has resolved; type-check this node in post-order.
+            .on_stack => {
+                out_types[index] = try outputType(graph.nodes[index], out_types);
+                state[index] = .done;
+                _ = stack.pop();
+            },
+            .unseen => {
+                state[index] = .on_stack;
+                for (graph.nodes[index].inputs) |in| switch (state[in]) {
+                    .on_stack => return error.Cycle, // back edge into the current path
+                    .done => {},
+                    .unseen => try stack.append(gpa, in),
+                };
+            },
+        }
     }
-    state[index] = .on_stack;
-    const node = graph.nodes[index];
-    for (node.inputs) |in| try resolve(graph, in, state, out_types);
-
-    out_types[index] = try outputType(node, out_types);
-    state[index] = .done;
 }
 
 /// The node's output type, after type-checking its inputs against its
@@ -274,12 +297,30 @@ fn emitConstant(node: Node, writer: *std.Io.Writer) std.Io.Writer.Error!void {
 }
 
 /// Appends the nodes reachable from the root in dependency order, inputs
-/// before the nodes that read them, using the DFS post-order.
-fn topoOrder(gpa: std.mem.Allocator, graph: Graph, index: u32, seen: []bool, order: *std.ArrayList(u32)) error{OutOfMemory}!void {
-    if (seen[index]) return;
-    seen[index] = true;
-    for (graph.nodes[index].inputs) |in| try topoOrder(gpa, graph, in, seen, order);
-    try order.append(gpa, index);
+/// before the nodes that read them, using an iterative DFS post-order so a
+/// long node chain cannot blow the native stack. `state` is the same tri-state
+/// scratch validate() uses; the graph is already acyclic here.
+fn topoOrder(gpa: std.mem.Allocator, graph: Graph, root: u32, state: []ResolveState, order: *std.ArrayList(u32)) error{OutOfMemory}!void {
+    var stack: std.ArrayList(u32) = .empty;
+    defer stack.deinit(gpa);
+    try stack.append(gpa, root);
+    while (stack.items.len > 0) {
+        const index = stack.items[stack.items.len - 1];
+        switch (state[index]) {
+            .done => {
+                _ = stack.pop();
+            },
+            .on_stack => {
+                try order.append(gpa, index);
+                state[index] = .done;
+                _ = stack.pop();
+            },
+            .unseen => {
+                state[index] = .on_stack;
+                for (graph.nodes[index].inputs) |in| if (state[in] == .unseen) try stack.append(gpa, in);
+            },
+        }
+    }
 }
 
 fn emitStatement(graph: Graph, types: []const ValueType, index: u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -350,9 +391,9 @@ pub fn emitFragment(gpa: std.mem.Allocator, graph: Graph, types: []const ValueTy
     if (uses_time) writer.writeAll("uniform vec4 u_time;\n") catch return error.OutOfMemory;
 
     writer.writeAll("\nvoid main()\n{\n") catch return error.OutOfMemory;
-    const seen = try gpa.alloc(bool, graph.nodes.len);
+    const seen = try gpa.alloc(ResolveState, graph.nodes.len);
     defer gpa.free(seen);
-    @memset(seen, false);
+    @memset(seen, .unseen);
     var order: std.ArrayList(u32) = .empty;
     defer order.deinit(gpa);
     try topoOrder(gpa, graph, graph.root, seen, &order);
@@ -425,6 +466,7 @@ pub fn parse(arena: std.mem.Allocator, value: std.json.Value) ParseError!Graph {
     const nodes_val = obj.get("nodes") orelse return error.Malformed;
     if (nodes_val != .array) return error.Malformed;
     const items = nodes_val.array.items;
+    if (items.len > max_nodes) return error.Malformed;
     const nodes = try arena.alloc(Node, items.len);
     for (items, nodes) |item, *node| node.* = try parseNode(arena, item);
     const root = asU32(obj.get("output") orelse return error.Malformed) orelse return error.Malformed;
@@ -454,6 +496,33 @@ test "a texture-sampled, tinted material validates" {
         .{ .kind = .output, .inputs = &.{4} }, // 5
     };
     try expectValid(&nodes, 5);
+}
+
+test "a deep node chain resolves iteratively without a stack overflow" {
+    // A long linear chain of saturate nodes feeding the output: the old
+    // recursive resolve would recurse chain-deep and blow the stack; the
+    // iterative walk validates it as a plain acyclic graph.
+    const chain = 900;
+    // Real backing for the one-element input slices: a runtime `&.{i-1}` would
+    // point at a per-iteration stack temporary and alias across nodes.
+    var input_storage: [chain + 1]u32 = undefined;
+    for (&input_storage, 0..) |*v, i| v.* = @intCast(i);
+    var nodes: [chain + 1]Node = undefined;
+    nodes[0] = .{ .kind = .uv };
+    for (1..chain) |i| nodes[i] = .{ .kind = .saturate, .inputs = input_storage[i - 1 .. i] };
+    nodes[chain] = .{ .kind = .output, .inputs = input_storage[chain - 1 .. chain] };
+    var types: [chain + 1]ValueType = undefined;
+    // uv is vec2; saturate keeps it; output wants vec4, so this fails on type,
+    // not on a crash - proving the deep walk completed.
+    try t.expectError(error.TypeMismatch, validate(t.allocator, .{ .nodes = &nodes, .root = chain }, &types));
+}
+
+test "a graph past the node cap is refused" {
+    var nodes: [max_nodes + 2]Node = undefined;
+    for (&nodes) |*n| n.* = .{ .kind = .uv };
+    nodes[max_nodes + 1] = .{ .kind = .output, .inputs = &.{0} };
+    var types: [max_nodes + 2]ValueType = undefined;
+    try t.expectError(error.TooManyNodes, validate(t.allocator, .{ .nodes = &nodes, .root = max_nodes + 1 }, &types));
 }
 
 test "a cycle is rejected" {

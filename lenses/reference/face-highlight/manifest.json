@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.face-highlight",
+  "version": "1.0.0",
+  "display_name": "Face Highlight",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "highlight", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [1.0, 0.95, 0.9], "opacity": 0.5, "mask": "highlight", "blend": "screen"}}
+  ],
+  "triggers": []
+}

@@ -1,0 +1,21 @@
+--- a/src/utils/dispatch_queue.cc
++++ b/src/utils/dispatch_queue.cc
+@@ -54,6 +54,7 @@
+
+   // Wrap the original task to set the promise when completed
+   auto wrappedTask = [task, &promise]() {
++#if defined(__cpp_exceptions)
+     try {
+       task();
+       promise.set_value();
+@@ -64,6 +65,10 @@
+         // Ignore exceptions when the promise is already set
+       }
+     }
++#else
++    task();
++    promise.set_value();
++#endif
+   };
+
+   // Add the wrapped task to the queue

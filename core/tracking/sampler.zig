@@ -6,6 +6,10 @@
 //! frames arrive as NV12 planes on devices and as packed RGBA elsewhere;
 //! both sample directly, NV12 through the exact color conversion for the
 //! frame's standard and range.
+//!
+//! This is a fused model-input sampler, not a general pixel converter, so
+//! it stays outside adapters/image by design; the recorded exception lives
+//! in docs/ARCHITECTURE.md under Media.
 
 const std = @import("std");
 const math = @import("math");
@@ -150,14 +154,17 @@ const corner_offsets = [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 }, .{ 1, 1 } };
 
 fn sampleRgba(bytes: []const u8, width: u32, height: u32, x: f32, y: f32) [3]f32 {
     const w = bilinearWeights(x, y);
+    const wf: f32 = @floatFromInt(width);
+    const hf: f32 = @floatFromInt(height);
     var accumulated = [3]f32{ 0, 0, 0 };
     for (corner_offsets) |corner| {
         const sx = w.x0 + corner[0];
         const sy = w.y0 + corner[1];
-        if (sx < 0 or sy < 0) continue;
+        // Reject in float space, positive tests so a NaN landmark (all
+        // comparisons false) is skipped rather than trapping the cast below.
+        if (!(sx >= 0 and sx < wf) or !(sy >= 0 and sy < hf)) continue;
         const ux: u32 = @intFromFloat(sx);
         const uy: u32 = @intFromFloat(sy);
-        if (ux >= width or uy >= height) continue;
         const weight = cornerWeight(w, corner[0], corner[1]);
         const at = (@as(usize, uy) * width + ux) * 4;
         accumulated[0] += @as(f32, @floatFromInt(bytes[at])) * weight;
@@ -169,14 +176,17 @@ fn sampleRgba(bytes: []const u8, width: u32, height: u32, x: f32, y: f32) [3]f32
 
 fn samplePlane(plane: []const u8, stride: u32, width: u32, height: u32, channels: u32, channel: u32, x: f32, y: f32) f32 {
     const w = bilinearWeights(x, y);
+    const wf: f32 = @floatFromInt(width);
+    const hf: f32 = @floatFromInt(height);
     var accumulated: f32 = 0;
     for (corner_offsets) |corner| {
         const sx = w.x0 + corner[0];
         const sy = w.y0 + corner[1];
-        if (sx < 0 or sy < 0) continue;
+        // Same NaN-rejecting float bounds as sampleRgba; a non-finite sample
+        // coordinate is skipped before the cast, never trapped.
+        if (!(sx >= 0 and sx < wf) or !(sy >= 0 and sy < hf)) continue;
         const ux: u32 = @intFromFloat(sx);
         const uy: u32 = @intFromFloat(sy);
-        if (ux >= width or uy >= height) continue;
         const at = @as(usize, uy) * stride + ux * channels + channel;
         accumulated += @as(f32, @floatFromInt(plane[at])) * cornerWeight(w, corner[0], corner[1]);
     }
@@ -223,6 +233,15 @@ test "symmetric range maps black to minus one" {
     var out: [2 * 2 * 3]f32 = undefined;
     sampleRegion(frame, .{ .center_x = 2, .center_y = 2, .side = 2, .rotation = 0 }, .symmetric, 2, &out);
     try t.expectApproxEqAbs(@as(f32, -1.0), out[0], 1e-6);
+}
+
+test "a non-finite region samples black instead of trapping the cast" {
+    const pixels = solidFrame(4, 4, .{ 255, 255, 255, 255 });
+    const frame: Frame = .{ .pixels = .{ .rgba8 = &pixels }, .width = 4, .height = 4 };
+    var out: [2 * 2 * 3]f32 = undefined;
+    const nan = std.math.nan(f32);
+    sampleRegion(frame, .{ .center_x = nan, .center_y = nan, .side = 2, .rotation = 0 }, .unit, 2, &out);
+    for (out) |value| try t.expectApproxEqAbs(@as(f32, 0.0), value, 1e-6);
 }
 
 test "samples outside the frame read as black" {

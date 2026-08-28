@@ -25,6 +25,24 @@ pub const Error = error{
 /// case (today, just Convolution2DTransposeBias) needs exactly one.
 const max_custom_ops = 4;
 
+/// The reporter callback type exactly as the C API declares it on this
+/// target, so the va_list parameter keeps the platform's own ABI shape.
+const ReporterFn = @typeInfo(@TypeOf(c.TfLiteModelCreateWithErrorReporter)).@"fn".params[2].type.?;
+const VaListArg = @typeInfo(std.meta.Child(std.meta.Child(ReporterFn))).@"fn".params[2].type.?;
+
+/// Routes every model and interpreter diagnostic to stderr; without a
+/// reporter the runtime discards the vendor's reason for each failure.
+fn reportRuntimeError(user_data: ?*anyopaque, format: [*c]const u8, args: VaListArg) callconv(.c) void {
+    _ = user_data;
+    const libc = struct {
+        extern fn vsnprintf(buf: [*c]u8, size: usize, fmt: [*c]const u8, ap: VaListArg) c_int;
+    };
+    var buf: [512]u8 = undefined;
+    const wrote = libc.vsnprintf(&buf, buf.len, format, args);
+    const len: usize = if (wrote < 0) 0 else @min(@as(usize, @intCast(wrote)), buf.len - 1);
+    std.debug.print("tflite: {s}\n", .{buf[0..len]});
+}
+
 pub const Engine = struct {
     model: *c.TfLiteModel,
     options: *c.TfLiteInterpreterOptions,
@@ -51,13 +69,14 @@ pub const Engine = struct {
     /// stays the plain entry point.
     pub fn initWithCustomOps(model_bytes: []const u8, threads: i32, custom_ops: []const *const fn (*c.TfLiteInterpreterOptions) *c.TfLiteOperator) Error!Engine {
         std.debug.assert(custom_ops.len <= max_custom_ops);
-        const model = c.TfLiteModelCreate(model_bytes.ptr, model_bytes.len) orelse
+        const model = c.TfLiteModelCreateWithErrorReporter(model_bytes.ptr, model_bytes.len, reportRuntimeError, null) orelse
             return error.ModelRejected;
         errdefer c.TfLiteModelDelete(model);
 
         const options = c.TfLiteInterpreterOptionsCreate() orelse
             return error.InterpreterUnavailable;
         errdefer c.TfLiteInterpreterOptionsDelete(options);
+        c.TfLiteInterpreterOptionsSetErrorReporter(options, reportRuntimeError, null);
         c.TfLiteInterpreterOptionsSetNumThreads(options, threads);
 
         var registered: [max_custom_ops]?*c.TfLiteOperator = @splat(null);

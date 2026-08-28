@@ -48,6 +48,7 @@ export fn goss_core_smoke_render_frame(out_name: [*]u8, out_name_cap: i32) i32 {
     // shader program creates and submits without a validation error.
     const red_pixels = [_]u8{ 255, 0, 0, 255 } ** 4;
     const texture = render.Renderer.createStaticTexture(2, 2, &red_pixels);
+    defer renderer.destroyTexture(texture);
     renderer.submitPreview(0, .{ .bgra = .{ .texture = texture } }, 0, false);
     _ = c.bgfx_frame(0);
 
@@ -69,12 +70,18 @@ export fn goss_core_smoke_read_texture() i32 {
     }) catch return -1;
     defer renderer.deinit();
 
+    // A source texture is not itself read-back-capable, so the contract
+    // is: blit it into a BGFX_TEXTURE_READ_BACK target, then read that.
+    // A view id past every draw runs the blit against a finished frame.
     const red_pixels = [_]u8{ 255, 0, 0, 255 } ** 4;
-    const texture = render.Renderer.createStaticTexture(2, 2, &red_pixels);
-    _ = c.bgfx_frame(0);
+    const source = render.Renderer.createStaticTexture(2, 2, &red_pixels);
+    defer renderer.destroyTexture(source);
+    const readback = render.Renderer.createReadbackTexture(2, 2) catch return -1;
+    defer renderer.destroyTexture(readback);
 
+    render.Renderer.blitTexture(1, readback, source, 2, 2);
     var pixels: [2 * 2 * 4]u8 = undefined;
-    const ready_frame = render.Renderer.readTexture(texture, &pixels);
+    const ready_frame = render.Renderer.readTexture(readback, &pixels);
     while (c.bgfx_frame(0) < ready_frame) {}
 
     return (@as(i32, pixels[0]) << 24) | (@as(i32, pixels[1]) << 16) | (@as(i32, pixels[2]) << 8) | @as(i32, pixels[3]);

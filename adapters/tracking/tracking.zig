@@ -78,6 +78,14 @@ fn anchorTotal(engine: *const runtime.Engine) ?usize {
     return @intCast(runtime.c.TfLiteTensorDim(tensor, 1));
 }
 
+/// Float elements in an output tensor, or 0 if absent. Used to reject a model
+/// whose landmark output is shorter than the frame path reads, since the only
+/// other bound is a debug assert compiled out of a release build.
+fn outputTotal(engine: *const runtime.Engine, index: i32) usize {
+    const tensor = runtime.c.TfLiteInterpreterGetOutputTensor(engine.interpreter, index) orelse return 0;
+    return runtime.c.TfLiteTensorByteSize(tensor) / @sizeOf(f32);
+}
+
 /// Copies the bundle, stands the three engines up, and starts the worker.
 /// The thread count stays small on purpose: the render thread owns the
 /// frame budget and inference must never starve it.
@@ -112,6 +120,12 @@ pub fn create(gpa: std.mem.Allocator, task_bytes: []const u8, threads: i32) Crea
     const total = anchorTotal(&detector_engine) orelse return error.InvalidBundle;
     const plan = detector.planForModel(detector_side, total) orelse return error.InvalidBundle;
 
+    // The landmark model must emit at least the contract's landmark floats and
+    // a presence score; a short output would read out of bounds on the frame
+    // path where the decode's debug assert is compiled out of a release build.
+    if (outputTotal(&landmarks_engine, 0) < face.landmark_count * 3) return error.InvalidBundle;
+    if (outputTotal(&landmarks_engine, 1) < 1) return error.InvalidBundle;
+
     const anchors = gpa.alloc(detector.Anchor, total) catch return error.OutOfMemory;
     errdefer gpa.free(anchors);
     detector.generateAnchors(detector_side, plan, anchors);
@@ -138,6 +152,9 @@ pub fn create(gpa: std.mem.Allocator, task_bytes: []const u8, threads: i32) Crea
         .landmark_tensor = landmark_tensor,
     };
 
+    // io_state is live from the struct assignment above; a failed spawn
+    // must tear it down rather than leak its worker-pool state.
+    errdefer tracking.io_state.deinit();
     tracking.thread = std.Thread.spawn(.{}, workerMain, .{tracking}) catch return error.OutOfMemory;
     return tracking;
 }

@@ -162,6 +162,15 @@ extension GossEngine {
         return goss_engine_render_to_live_texture(handle, session.handle, native, width, height) == GOSS_OK
     }
 
+    /// Releases the persistent wrap renderToLiveTexture keeps for one
+    /// external texture, when a publish surface retires before the engine
+    /// does. Unknown handles are a no-op reported as false.
+    @discardableResult
+    public func releaseLiveTexture(texture: UnsafeMutableRawPointer) -> Bool {
+        let native = UInt64(UInt(bitPattern: texture))
+        return goss_engine_release_live_texture(handle, native) == GOSS_OK
+    }
+
     /// The composited frame as packed bytes in a WebRTC format (BGRA by
     /// default; NV12 for a hardware encoder), the supported per-frame output
     /// for a live broadcast source - feed it to a custom video source.
@@ -175,6 +184,19 @@ extension GossEngine {
             try checked(goss_engine_capture_live_frame(handle, session?.handle, format.rawValue, buffer.baseAddress, buffer.count, &outWidth, &outHeight))
         }
         return data
+    }
+
+    /// The allocation-free sibling of the returning captureLiveFrame: reads the
+    /// composited frame into a caller-owned buffer (width*height*4 for
+    /// bgra/rgba, *3/2 for nv12), so a broadcast loop reuses one buffer instead
+    /// of allocating each frame. Returns the byte count actually written.
+    @discardableResult
+    public func captureLiveFrame(session: GossSession?, format: GossPixelFormat = .bgra8, into buffer: UnsafeMutableBufferPointer<UInt8>) throws -> Int {
+        var outWidth: UInt32 = 0
+        var outHeight: UInt32 = 0
+        try checked(goss_engine_capture_live_frame(handle, session?.handle, format.rawValue, buffer.baseAddress, buffer.count, &outWidth, &outHeight))
+        let pixels = Int(outWidth) * Int(outHeight)
+        return format == .nv12 ? pixels + pixels / 2 : pixels * 4
     }
 
     /// Writes the composited frame straight into a BGRA CVPixelBuffer - the
@@ -198,11 +220,12 @@ extension GossEngine {
             try checked(goss_engine_capture_live_frame(handle, session?.handle, GossPixelFormat.bgra8.rawValue, dst, stride * height, &outWidth, &outHeight))
             return
         }
-        var scratch = [UInt8](repeating: 0, count: tight * height)
-        try scratch.withUnsafeMutableBufferPointer { buffer in
-            try checked(goss_engine_capture_live_frame(handle, session?.handle, GossPixelFormat.bgra8.rawValue, buffer.baseAddress, buffer.count, &outWidth, &outHeight))
+        let needed = tight * height
+        if liveRowScratch.count < needed { liveRowScratch = [UInt8](repeating: 0, count: needed) }
+        try liveRowScratch.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_engine_capture_live_frame(handle, session?.handle, GossPixelFormat.bgra8.rawValue, buffer.baseAddress, needed, &outWidth, &outHeight))
         }
-        scratch.withUnsafeBufferPointer { buffer in
+        liveRowScratch.withUnsafeBufferPointer { buffer in
             for row in 0..<height {
                 dst.advanced(by: row * stride).update(from: buffer.baseAddress! + row * tight, count: tight)
             }

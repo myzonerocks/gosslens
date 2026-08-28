@@ -399,6 +399,11 @@ export class GossEngine {
   /// bind one context type for its lifetime. capturePixels() branches
   /// on this: readPixels when set, goss_engine_capture_frame otherwise.
   private gl: WebGL2RenderingContext | null = null;
+  /// bgfx's HTML5 backend keeps referencing the canvas selector string
+  /// for the renderer's life, so the engine owns it and frees it in
+  /// destroy() once goss_engine_destroy has torn the renderer down.
+  private selectorPtr = 0;
+  private selectorCapacity = 0;
 
   private constructor(
     private readonly mod: EngineModule,
@@ -435,9 +440,16 @@ export class GossEngine {
   async initRenderer(canvas: HTMLCanvasElement): Promise<void> {
     if (!canvas.id) throw new Error("canvas needs a stable id for bgfx's own selector lookup");
     const mod = this.mod;
-    const selectorPtr = mod.stringToNewUTF8(`#${canvas.id}`);
+    // Encode the selector into engine-owned heap so its lifetime matches
+    // the renderer, not this call; a re-init frees the prior one first.
+    const selectorBytes = new TextEncoder().encode(`#${canvas.id}`);
+    if (this.selectorPtr !== 0) mod.ccall("goss_free", null, ["number", "number"], [this.selectorPtr, this.selectorCapacity]);
+    this.selectorCapacity = selectorBytes.length + 1;
+    this.selectorPtr = mod.ccall("goss_alloc", "number", ["number"], [this.selectorCapacity]);
+    mod.HEAPU8.set(selectorBytes, this.selectorPtr);
+    mod.HEAPU8[this.selectorPtr + selectorBytes.length] = 0;
     const rendererDescPtr = mod.ccall("goss_alloc", "number", ["number"], [12]);
-    mod.setValue(rendererDescPtr, selectorPtr, "i32");
+    mod.setValue(rendererDescPtr, this.selectorPtr, "i32");
     mod.setValue(rendererDescPtr + 4, canvas.width, "i32");
     mod.setValue(rendererDescPtr + 8, canvas.height, "i32");
     // bgfx's own HTML5 backend creates this canvas's WebGL2 context
@@ -467,6 +479,14 @@ export class GossEngine {
   /// SDK's own goss_engine_render_frame contract.
   renderFrame(session: GossSession | null): number {
     return this.mod.ccall("goss_engine_render_frame", "number", ["number", "number"], [this.handle, session?.handle ?? 0]);
+  }
+
+  /// Releases the persistent wrap the engine keeps per external live
+  /// texture handle - the pair of the native SDKs' renderToLiveTexture,
+  /// for a host retiring a publish surface before the engine goes away.
+  /// False for a handle with no live wrap.
+  releaseLiveTexture(nativeHandle: bigint): boolean {
+    return this.mod.ccall("goss_engine_release_live_texture", "number", ["number", "number"], [this.handle, nativeHandle]) === 0;
   }
 
   /// The two ways this SDK reads pixels back: bgfx's WebGL2 context
@@ -616,6 +636,70 @@ export class GossEngine {
     }
   }
 
+  /// The composited frame encoded as a deterministic PNG - the same
+  /// pixels, the same bytes - at the submitted frame's own resolution.
+  /// captureStill is the configurable superset (a chosen size, JPEG, or a
+  /// wider gamut); this is the plain PNG surface. Wasm core only.
+  async capturePhoto(session: GossSession | null): Promise<Uint8Array> {
+    return this.captureEncoded(
+      "goss_engine_capture_photo",
+      ["number", "number", "number", "number", "number", "number", "number"],
+      (dataPtr, capacity, lenPtr, widthPtr, heightPtr) => [this.handle, session?.handle ?? 0, dataPtr, capacity, lenPtr, widthPtr, heightPtr],
+    );
+  }
+
+  /// The composited frame as a platform photo: format 1 is JPEG at quality
+  /// 1..100 (the engine's own encoder, present on web too), format 2 is HEIC
+  /// (the native photo backend, GOSS_UNSUPPORTED on web). Lossy and not
+  /// bit-stable across runs, so capturePhoto stays the deterministic path.
+  async capturePhotoAs(session: GossSession | null, format: number, quality = 90): Promise<Uint8Array> {
+    return this.captureEncoded(
+      "goss_engine_capture_photo_as",
+      ["number", "number", "number", "number", "number", "number", "number", "number", "number"],
+      (dataPtr, capacity, lenPtr, widthPtr, heightPtr) => [this.handle, session?.handle ?? 0, format, quality, dataPtr, capacity, lenPtr, widthPtr, heightPtr],
+    );
+  }
+
+  /// The probe-then-capture the encoded-photo ABI ops share: render and encode
+  /// once into a one-byte buffer to learn the exact size (the encoders write
+  /// out_len before rejecting a too-small capacity), then capture into a buffer
+  /// of that size. Wasm core only, like captureStill; WebGL2 renders in JS.
+  private async captureEncoded(
+    callName: string,
+    argTypes: string[],
+    buildArgs: (dataPtr: number, capacity: number, lenPtr: number, widthPtr: number, heightPtr: number) => unknown[],
+  ): Promise<Uint8Array> {
+    if (this.gl) throw new Error(`${callName} needs the wasm renderer`);
+    const mod = this.mod;
+    const lenPtr = mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const widthPtr = mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const heightPtr = mod.ccall("goss_alloc", "number", ["number"], [4]);
+    // A one-byte buffer keeps the probe past the ABI's null-pointer guard so
+    // the encoder runs and reports the real size through lenPtr.
+    const probePtr = mod.ccall("goss_alloc", "number", ["number"], [1]);
+    let dataPtr = 0;
+    let capacity = 0;
+    this.captureInFlight = true;
+    try {
+      const probeStatus = await mod.ccall(callName, "number", argTypes, buildArgs(probePtr, 0, lenPtr, widthPtr, heightPtr), { async: true });
+      capacity = mod.getValue(lenPtr, "i32");
+      if (capacity === 0) return new Uint8Array(0);
+      if (capacity < 0) throw new Error(`${callName} probe failed: status ${probeStatus}`);
+      dataPtr = mod.ccall("goss_alloc", "number", ["number"], [capacity]);
+      const status = await mod.ccall(callName, "number", argTypes, buildArgs(dataPtr, capacity, lenPtr, widthPtr, heightPtr), { async: true });
+      if (status !== GOSS_OK) throw new Error(`${callName} failed: status ${status}`);
+      const encoded = mod.getValue(lenPtr, "i32");
+      return mod.HEAPU8.slice(dataPtr, dataPtr + encoded);
+    } finally {
+      this.captureInFlight = false;
+      mod.ccall("goss_free", null, ["number", "number"], [probePtr, 1]);
+      mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+      mod.ccall("goss_free", null, ["number", "number"], [widthPtr, 4]);
+      mod.ccall("goss_free", null, ["number", "number"], [heightPtr, 4]);
+      if (dataPtr !== 0) mod.ccall("goss_free", null, ["number", "number"], [dataPtr, capacity]);
+    }
+  }
+
   async readCenterPixel(session: GossSession | null): Promise<Uint8Array> {
     const { pixels, width, height } = await this.capturePixels(session);
     const offset = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
@@ -635,6 +719,10 @@ export class GossEngine {
 
   destroy(): void {
     this.mod.ccall("goss_engine_destroy", null, ["number"], [this.handle]);
+    // The renderer is gone now, so bgfx no longer references the selector.
+    if (this.selectorPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [this.selectorPtr, this.selectorCapacity]);
+    this.selectorPtr = 0;
+    this.selectorCapacity = 0;
   }
 }
 
@@ -700,15 +788,20 @@ export class GossSession {
   /// Reused across frames, grown on resize rather than alloc/freed every
   /// tick - the frame descriptor is a fixed 32 bytes, the pixel buffer
   /// tracks the video's current resolution.
-  private readonly frameDescPtr: number;
+  private frameDescPtr: number;
   private framePixelsPtr = 0;
   private framePixelsCapacity = 0;
   /// Fixed capacity: GOSS_FACE_LANDMARK_COUNT never changes.
-  private readonly landmarksPtr: number;
+  private landmarksPtr: number;
   /// Fixed layout, reused every tick like the frame descriptor.
-  private readonly signalsPtr: number;
+  private signalsPtr: number;
   /// Fixed capacity: the segmentation mask is always mask_side squared.
-  private readonly segmentationMaskPtr: number;
+  private segmentationMaskPtr: number;
+  /// A reusable wasm scratch the per-frame submit and readback paths slice
+  /// instead of goss_alloc/goss_free each call; grown to the largest frame,
+  /// freed in destroy() - no per-call wasm heap churn.
+  private scratchPtr = 0;
+  private scratchCapacity = 0;
 
   private constructor(
     private readonly mod: EngineModule,
@@ -718,6 +811,18 @@ export class GossSession {
     this.landmarksPtr = mod.ccall("goss_alloc", "number", ["number"], [GOSS_FACE_LANDMARK_COUNT * 3 * 4]);
     this.signalsPtr = mod.ccall("goss_alloc", "number", ["number"], [LENS_SIGNALS_BYTES]);
     this.segmentationMaskPtr = mod.ccall("goss_alloc", "number", ["number"], [GOSS_SEGMENTATION_MASK_SIDE * GOSS_SEGMENTATION_MASK_SIDE * 4]);
+  }
+
+  /// The reusable scratch grown to at least `bytes`, returning its wasm
+  /// pointer. Grows only when a larger frame arrives, so the steady path
+  /// never touches the wasm allocator.
+  private scratch(bytes: number): number {
+    if (bytes > this.scratchCapacity) {
+      if (this.scratchPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [this.scratchPtr, this.scratchCapacity]);
+      this.scratchPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+      this.scratchCapacity = bytes;
+    }
+    return this.scratchPtr;
   }
 
   static create(engine: GossEngine, config?: GossSessionConfig): GossSession {
@@ -818,6 +923,23 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [namePtr, bytes.length]);
     this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 4]);
     return value;
+  }
+
+  /// Feeds interleaved f32 PCM into the session's own level and beat
+  /// analysis, which drives the audio.level and audio.beat lens triggers.
+  /// samples holds frameCount * channels floats; timestampUs is carried for a
+  /// muxed recording track, unused by the web preview path.
+  submitAudio(samples: Float32Array, frameCount: number, sampleRate: number, channels: number, timestampUs: bigint = 0n): void {
+    const bytes = samples.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    this.mod.HEAPF32.set(samples, ptr >> 2);
+    this.mod.ccall(
+      "goss_session_submit_audio",
+      "number",
+      ["number", "number", "number", "number", "number", "number"],
+      [this.handle, ptr, frameCount, sampleRate, channels, timestampUs],
+    );
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
   /// Pulls the next block of mixed lens audio (frames interleaved s16) that
@@ -1143,6 +1265,26 @@ export class GossSession {
     this.mod.ccall("goss_session_ar_brush_clear", "number", ["number"], [this.handle]);
   }
 
+  /** Feeds one screen touch event so the engine recognizes the gestures a lens
+   * reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled; pointerId names
+   * the finger; x and y are normalized 0..1 over the frame. */
+  touch(phase: number, pointerId: number, x: number, y: number): void {
+    this.mod.ccall("goss_session_touch", "number", ["number", "number", "number", "number", "number"], [this.handle, phase, pointerId, x, y]);
+  }
+
+  /** Drains one haptic a haptic trigger queued this tick, or null when none
+   * remain. Call in a loop after tickLens and buzz the device for each. The
+   * style is 0 light..7 failure; intensity is a 0..1 hint. */
+  pullHaptic(): { style: number; intensity: number } | null {
+    const stylePtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const intensityPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const status = this.mod.ccall("goss_session_pull_haptic", "number", ["number", "number", "number"], [this.handle, stylePtr, intensityPtr]);
+    const result = status === 0 ? { style: this.mod.getValue(stylePtr, "i32"), intensity: this.mod.getValue(intensityPtr, "float") } : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [stylePtr, 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [intensityPtr, 4]);
+    return result;
+  }
+
   grab(x: number, y: number, z: number): void {
     this.mod.ccall("goss_session_grab", "number", ["number", "number", "number", "number"], [this.handle, x, y, z]);
   }
@@ -1157,6 +1299,14 @@ export class GossSession {
 
   eraseCollider(x: number, y: number, z: number, radius: number): void {
     this.mod.ccall("goss_session_erase_collider", "number", ["number", "number", "number", "number", "number"], [this.handle, x, y, z, radius]);
+  }
+
+  /// Releases one solver hair by the id the physics world assigned it,
+  /// pairing the acquire a hair lens performs at activation, so a hair
+  /// can retire mid-session without tearing the physics world down.
+  /// False with no physics world or for an unknown id.
+  physicsHairRemove(hairId: number): boolean {
+    return this.mod.ccall("goss_physics_hair_remove", "number", ["number", "number"], [this.handle, hairId]) === 0;
   }
 
   /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the
@@ -1228,7 +1378,7 @@ export class GossSession {
       return;
     }
     const bytes = faces.length * FACE_RESULT_BYTES;
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const ptr = this.scratch(bytes);
     const dv = new DataView(this.mod.HEAPU8.buffer, ptr, bytes);
     for (let i = 0; i < faces.length; i += 1) {
       const off = i * FACE_RESULT_BYTES;
@@ -1245,27 +1395,21 @@ export class GossSession {
       if (f.blendshapes) this.mod.HEAPF32.set(f.blendshapes, bsStart);
     }
     this.mod.ccall("goss_session_submit_faces", "number", ["number", "number", "number"], [this.handle, ptr, faces.length]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
   /// The number of faces the last submitFaces kept, zero to GOSS_FACE_MAX.
   faceCount(): number {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const ptr = this.scratch(4);
     this.mod.ccall("goss_session_face_count", "number", ["number", "number"], [this.handle, ptr]);
-    const count = this.mod.HEAP32[ptr >> 2]!;
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 4]);
-    return count;
+    return this.mod.HEAP32[ptr >> 2]!;
   }
 
   /// Reads the index-th submitted face, or null once index reaches faceCount,
   /// so a caller loops zero to faceCount to visit every face.
   faceResultAt(index: number): GossFaceOut | null {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [FACE_RESULT_BYTES]) as number;
+    const ptr = this.scratch(FACE_RESULT_BYTES);
     const status = this.mod.ccall("goss_session_face_result_at", "number", ["number", "number", "number"], [this.handle, index, ptr]) as number;
-    if (status !== 0) {
-      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, FACE_RESULT_BYTES]);
-      return null;
-    }
+    if (status !== 0) return null;
     const dv = new DataView(this.mod.HEAPU8.buffer, ptr, FACE_RESULT_BYTES);
     const lmStart = (ptr + 24) >> 2;
     const bsStart = lmStart + GOSS_FACE_LANDMARK_COUNT * 3;
@@ -1277,7 +1421,6 @@ export class GossSession {
       landmarks: this.mod.HEAPF32.slice(lmStart, bsStart),
       blendshapes: this.mod.HEAPF32.slice(bsStart, bsStart + GOSS_FACE_BLENDSHAPE_COUNT),
     };
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, FACE_RESULT_BYTES]);
     return out;
   }
 
@@ -1290,7 +1433,7 @@ export class GossSession {
       return;
     }
     const bytes = bodies.length * POSE_RESULT_BYTES;
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const ptr = this.scratch(bytes);
     const dv = new DataView(this.mod.HEAPU8.buffer, ptr, bytes);
     for (let i = 0; i < bodies.length; i += 1) {
       const off = i * POSE_RESULT_BYTES;
@@ -1308,7 +1451,6 @@ export class GossSession {
       if (b.presences) this.mod.HEAPF32.set(b.presences, visStart + GOSS_POSE_LANDMARK_COUNT);
     }
     this.mod.ccall("goss_session_submit_bodies", "number", ["number", "number", "number"], [this.handle, ptr, bodies.length]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
   /// Submits one frame's depth map from the host AR backend (WebXR depth-
@@ -1321,20 +1463,18 @@ export class GossSession {
       return;
     }
     const bytes = depth.length * 4;
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const ptr = this.scratch(bytes);
     this.mod.HEAPF32.set(depth, ptr >> 2);
     this.mod.ccall("goss_session_submit_depth", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, width, height, near, far]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
   /// Segments a host-provided still image through the running segmenter: rgba
   /// is width by height RGBA8 pixels, row major. The mask reaches the active
   /// lens the way a camera frame's would.
   submitSegmentationImage(rgba: Uint8Array, width: number, height: number): void {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    const ptr = this.scratch(rgba.length);
     this.mod.HEAPU8.set(rgba, ptr);
     this.mod.ccall("goss_session_submit_segmentation_image", "number", ["number", "number", "number", "number"], [this.handle, ptr, width, height]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, rgba.length]);
   }
 
   /// Samples a reference photo's makeup color per face part, so a tint.pass
@@ -1358,22 +1498,17 @@ export class GossSession {
 
   /// The number of bodies the last submitBodies kept, zero to GOSS_BODY_MAX.
   bodyCount(): number {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const ptr = this.scratch(4);
     this.mod.ccall("goss_session_body_count", "number", ["number", "number"], [this.handle, ptr]);
-    const count = this.mod.HEAP32[ptr >> 2]!;
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 4]);
-    return count;
+    return this.mod.HEAP32[ptr >> 2]!;
   }
 
   /// Reads the index-th submitted body, or null once index reaches bodyCount,
   /// so a caller loops zero to bodyCount to visit every body.
   bodyResultAt(index: number): GossPoseOut | null {
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [POSE_RESULT_BYTES]) as number;
+    const ptr = this.scratch(POSE_RESULT_BYTES);
     const status = this.mod.ccall("goss_session_body_result_at", "number", ["number", "number", "number"], [this.handle, index, ptr]) as number;
-    if (status !== 0) {
-      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, POSE_RESULT_BYTES]);
-      return null;
-    }
+    if (status !== 0) return null;
     const dv = new DataView(this.mod.HEAPU8.buffer, ptr, POSE_RESULT_BYTES);
     const lmStart = (ptr + 24) >> 2;
     const visStart = lmStart + GOSS_POSE_LANDMARK_COUNT * 3;
@@ -1387,7 +1522,6 @@ export class GossSession {
       visibilities: this.mod.HEAPF32.slice(visStart, presStart),
       presences: this.mod.HEAPF32.slice(presStart, presStart + GOSS_POSE_LANDMARK_COUNT),
     };
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, POSE_RESULT_BYTES]);
     return out;
   }
 
@@ -1649,7 +1783,32 @@ export class GossSession {
   }
 
   destroy(): void {
+    // frameDescPtr is allocated at construction and only ever nulled here,
+    // so it doubles as the guard that makes a second destroy() a no-op.
+    if (this.frameDescPtr === 0) return;
     this.mod.ccall("goss_session_destroy", null, ["number"], [this.handle]);
+    // goss_session_destroy owns only the native session; every scratch
+    // buffer the session allocated is our heap and freed here.
+    const free = (ptr: number, size: number) => {
+      if (ptr !== 0 && size !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [ptr, size]);
+    };
+    free(this.frameDescPtr, 32);
+    free(this.landmarksPtr, GOSS_FACE_LANDMARK_COUNT * 3 * 4);
+    free(this.signalsPtr, LENS_SIGNALS_BYTES);
+    free(this.segmentationMaskPtr, GOSS_SEGMENTATION_MASK_SIDE * GOSS_SEGMENTATION_MASK_SIDE * 4);
+    free(this.framePixelsPtr, this.framePixelsCapacity);
+    free(this.worldScratchPtr, this.worldScratchLen);
+    free(this.scratchPtr, this.scratchCapacity);
+    this.frameDescPtr = 0;
+    this.landmarksPtr = 0;
+    this.signalsPtr = 0;
+    this.segmentationMaskPtr = 0;
+    this.framePixelsPtr = 0;
+    this.framePixelsCapacity = 0;
+    this.worldScratchPtr = 0;
+    this.worldScratchLen = 0;
+    this.scratchPtr = 0;
+    this.scratchCapacity = 0;
   }
 }
 

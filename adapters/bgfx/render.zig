@@ -7,9 +7,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const math = @import("math");
+const image = @import("image");
 const blobs = @import("shader_blobs");
 const makeup_mesh = @import("makeup_mesh");
 const face_mesh_topology = @import("face_mesh_topology");
+const lash_mesh = @import("lash_mesh");
+
+/// How many lash strands the fragment stage combs across one eye's strip,
+/// and how soft each strand's edge is - the look shared by every lash draw.
+const lash_strand_count: f32 = 14.0;
+const lash_edge_softness: f32 = 0.35;
 
 pub const android_vk = if (builtin.os.tag == .linux and builtin.abi.isAndroid())
     @import("android_vk.zig")
@@ -27,6 +34,11 @@ pub const invalid_handle: u16 = std.math.maxInt(u16);
 /// that base range, never the five derived hub points face106.zig
 /// appends for lipstick/blush's own mesh.
 pub const face_point_vec4_count = 53;
+
+/// fs_reshape_bank.sc packs its sixty-six per-region sculpt amounts four per
+/// vec4 into u_reshapeBank, so seventeen vec4s cover them with two slots to
+/// spare, indexed only by compile-time constants for essl safety.
+pub const face_reshape_bank_vec4_count = 17;
 
 /// A named alias for bgfx's own texture handle, matching the stub
 /// module's TextureHandle - lets callers that need to name the type
@@ -46,6 +58,11 @@ pub const InitOptions = struct {
     callback: ?*c.bgfx_callback_interface_t = null,
     vsync: bool = true,
 };
+
+/// The engine-owned diagnostics interface (adapters/bgfx/callbacks.c):
+/// fatal and trace route to stderr. Installed by init whenever the host
+/// passes no callback of its own, so every production SDK gets it.
+extern fn goss_bgfx_callbacks() [*c]c.bgfx_callback_interface_t;
 
 pub const Nv12Textures = struct {
     y: c.bgfx_texture_handle_t,
@@ -90,8 +107,46 @@ const VkZeroCopy = if (is_android) struct {
     beauty_import: android_vk.BeautyImport = .{},
 } else struct {};
 
+/// A small ring of persistent CPU buffers a per-frame upload references
+/// through bgfx_make_ref: a slot is not reused until the ring cycles past
+/// it, by which point bgfx has consumed the reference. Grown on a size
+/// change; the growth lands in warm-up, never on the steady frame path.
+const UploadRing = struct {
+    slots: [3][]u8 = .{ &.{}, &.{}, &.{} },
+    capacity: usize = 0,
+    cursor: usize = 0,
+
+    fn next(self: *UploadRing, gpa: std.mem.Allocator, bytes: usize) ?[]u8 {
+        if (bytes > self.capacity) {
+            for (&self.slots) |*slot| {
+                const grown = gpa.alloc(u8, bytes) catch return null;
+                if (slot.len != 0) gpa.free(slot.*);
+                slot.* = grown;
+            }
+            self.capacity = bytes;
+        }
+        const slot = self.slots[self.cursor][0..bytes];
+        self.cursor = (self.cursor + 1) % self.slots.len;
+        return slot;
+    }
+
+    fn deinit(self: *UploadRing, gpa: std.mem.Allocator) void {
+        for (&self.slots) |*slot| if (slot.len != 0) gpa.free(slot.*);
+        self.* = .{};
+    }
+};
+
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
+    /// Reused CPU staging for dynamic-mesh uploads: positions padded to the
+    /// shared vertex layout. Grown to the largest mesh then reused every
+    /// frame, freed in deinit - the update path never allocates after warmup.
+    interleave_scratch: []f32 = &.{},
+    /// Persistent CPU rings the camera-upload paths reference through
+    /// bgfx_make_ref rather than a per-frame bgfx_alloc; each slot outlives
+    /// the frames bgfx needs it, grown on a size change, freed in deinit.
+    nv12_ring: UploadRing = .{},
+    rgba_ring: UploadRing = .{},
     zero_copy: ?VkZeroCopy = null,
     width: u32,
     height: u32,
@@ -107,7 +162,11 @@ pub const Renderer = struct {
     fog_program: c.bgfx_program_handle_t,
     outline_program: c.bgfx_program_handle_t,
     tint_program: c.bgfx_program_handle_t,
+    occluder_program: c.bgfx_program_handle_t,
+    cutout_program: c.bgfx_program_handle_t,
     smooth_program: c.bgfx_program_handle_t,
+    retouch_program: c.bgfx_program_handle_t,
+    matte_refine_program: c.bgfx_program_handle_t,
     stylize_program: c.bgfx_program_handle_t,
     edge_sobel_program: c.bgfx_program_handle_t,
     edge_nms_program: c.bgfx_program_handle_t,
@@ -123,7 +182,11 @@ pub const Renderer = struct {
     composite_program: c.bgfx_program_handle_t,
     beauty_face_program: c.bgfx_program_handle_t,
     beauty_reshape_program: c.bgfx_program_handle_t,
+    reshape_bank_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
+    paint_face_program: c.bgfx_program_handle_t,
+    face_swap_program: c.bgfx_program_handle_t,
+    lash_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
     model_instanced_program: c.bgfx_program_handle_t,
     billboard_program: c.bgfx_program_handle_t,
@@ -147,6 +210,14 @@ pub const Renderer = struct {
     face_mesh_index_buffer: c.bgfx_index_buffer_handle_t,
     face_mesh_uv_buffer: c.bgfx_vertex_buffer_handle_t,
     face_mesh_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
+    /// The face swap's per-vertex seam feather, one static stream uploaded once
+    /// from face_mesh_topology.vertex_feather, 0 on the silhouette to 1 inside.
+    face_mesh_feather_buffer: c.bgfx_vertex_buffer_handle_t,
+    /// The lash strip: fixed indices and strip UVs uploaded once, live tip
+    /// positions rebuilt from the tracked eye landmarks and streamed per draw.
+    lash_index_buffer: c.bgfx_index_buffer_handle_t,
+    lash_uv_buffer: c.bgfx_vertex_buffer_handle_t,
+    lash_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
     /// The live tracked 111-point contour, stream 0 of a makeup draw -
     /// dynamic (updated every frame submitMakeup runs), unlike every
     /// other buffer here.
@@ -175,12 +246,21 @@ pub const Renderer = struct {
     fog_uniform: c.bgfx_uniform_handle_t,
     outline_uniform: c.bgfx_uniform_handle_t,
     tint_uniform: c.bgfx_uniform_handle_t,
+    tint_mode_uniform: c.bgfx_uniform_handle_t,
+    tint_finish_uniform: c.bgfx_uniform_handle_t,
+    occluder_uniform: c.bgfx_uniform_handle_t,
+    cutout_uniform: c.bgfx_uniform_handle_t,
     smooth_uniform: c.bgfx_uniform_handle_t,
+    retouch_uniform: c.bgfx_uniform_handle_t,
+    matte_refine_uniform: c.bgfx_uniform_handle_t,
     stylize_uniform: c.bgfx_uniform_handle_t,
     edge_uniform: c.bgfx_uniform_handle_t,
     edge_texel_uniform: c.bgfx_uniform_handle_t,
     warp_uniform: c.bgfx_uniform_handle_t,
     warp_params_uniform: c.bgfx_uniform_handle_t,
+    warp_extra_uniform: c.bgfx_uniform_handle_t,
+    warp_points_uniform: c.bgfx_uniform_handle_t,
+    warp_fall_uniform: c.bgfx_uniform_handle_t,
     tex_prev: c.bgfx_uniform_handle_t,
     trail_uniform: c.bgfx_uniform_handle_t,
     ssr_uniform: c.bgfx_uniform_handle_t,
@@ -196,6 +276,18 @@ pub const Renderer = struct {
     beauty_params_uniform: c.bgfx_uniform_handle_t,
     reshape_params_uniform: c.bgfx_uniform_handle_t,
     makeup_params_uniform: c.bgfx_uniform_handle_t,
+    /// paint.face's opacity and blend mode, one vec4 (x opacity, y mode).
+    paint_params_uniform: c.bgfx_uniform_handle_t,
+    /// face.swap's opacity and seam feather width, one vec4 (x opacity, y width).
+    swap_params_uniform: c.bgfx_uniform_handle_t,
+    /// mesh.lashes' tint and opacity (u_lashColor), and its strand count and
+    /// edge softness (u_lashShape).
+    lash_color_uniform: c.bgfx_uniform_handle_t,
+    lash_shape_uniform: c.bgfx_uniform_handle_t,
+    /// The reshape bank's sixty-six sculpt amounts, four per vec4, and its two
+    /// derived anchors (forehead center xy, nose-bridge midpoint zw).
+    reshape_bank_uniform: c.bgfx_uniform_handle_t,
+    reshape_hubs_uniform: c.bgfx_uniform_handle_t,
     /// 106 tracked face points, two per vec4 (xy, zw) - matching
     /// fs_beauty_reshape.sc's own u_facePoints packing.
     face_points_uniform: c.bgfx_uniform_handle_t,
@@ -268,7 +360,7 @@ pub const Renderer = struct {
         bgfx_init.resolution.height = options.height;
         bgfx_init.resolution.reset = if (options.vsync) c.BGFX_RESET_VSYNC else c.BGFX_RESET_NONE;
         bgfx_init.platformData.nwh = options.native_window_handle;
-        bgfx_init.callback = options.callback;
+        bgfx_init.callback = options.callback orelse goss_bgfx_callbacks();
         // Calling bgfx_render_frame once on this thread before bgfx_init
         // is bgfx's own documented opt-in to single-threaded mode: this
         // thread becomes both the API thread and the render thread,
@@ -345,7 +437,11 @@ pub const Renderer = struct {
         const fog_program = try loadFogProgram();
         const outline_program = try loadOutlineProgram();
         const tint_program = try loadTintProgram();
+        const occluder_program = try loadOccluderProgram();
+        const cutout_program = try loadCutoutProgram();
         const smooth_program = try loadSmoothProgram();
+        const retouch_program = try loadRetouchProgram();
+        const matte_refine_program = try loadMatteRefineProgram();
         const stylize_program = try loadStylizeProgram();
         const edge_sobel_program = try loadEdgeSobelProgram();
         const edge_nms_program = try loadEdgeNmsProgram();
@@ -361,7 +457,11 @@ pub const Renderer = struct {
         const composite_program = try loadCompositeProgram();
         const beauty_face_program = try loadBeautyFaceProgram();
         const beauty_reshape_program = try loadBeautyReshapeProgram();
+        const reshape_bank_program = try loadReshapeBankProgram();
         const makeup_program = try loadMakeupProgram();
+        const paint_face_program = try loadPaintFaceProgram();
+        const face_swap_program = try loadFaceSwapProgram();
+        const lash_program = try loadLashProgram();
         const model_program = try loadModelProgram();
         const model_instanced_program = try loadModelInstancedProgram();
         const billboard_program = try loadBillboardProgram();
@@ -397,6 +497,21 @@ pub const Renderer = struct {
         const face_mesh_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&face_mesh_topology.vertex_uvs, @sizeOf(@TypeOf(face_mesh_topology.vertex_uvs))), &makeup_uv_layout, 0);
         const face_mesh_position_buffer = c.bgfx_create_dynamic_vertex_buffer(face_mesh_topology.vertex_count, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
 
+        var feather_layout: c.bgfx_vertex_layout_t = undefined;
+        _ = c.bgfx_vertex_layout_begin(&feather_layout, c.BGFX_RENDERER_TYPE_NOOP);
+        _ = c.bgfx_vertex_layout_add(&feather_layout, c.BGFX_ATTRIB_TEXCOORD2, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        c.bgfx_vertex_layout_end(&feather_layout);
+        var feather_pairs: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+        for (face_mesh_topology.vertex_feather, 0..) |weight, at| {
+            feather_pairs[at * 2] = weight;
+            feather_pairs[at * 2 + 1] = 0.0;
+        }
+        const face_mesh_feather_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&feather_pairs, @sizeOf(@TypeOf(feather_pairs))), &feather_layout, 0);
+
+        const lash_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&lash_mesh.triangle_indices, @sizeOf(@TypeOf(lash_mesh.triangle_indices))), 0);
+        const lash_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&lash_mesh.vertex_uvs, @sizeOf(@TypeOf(lash_mesh.vertex_uvs))), &makeup_uv_layout, 0);
+        const lash_position_buffer = c.bgfx_create_dynamic_vertex_buffer(lash_mesh.vertex_count, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
 
@@ -430,7 +545,11 @@ pub const Renderer = struct {
             .fog_program = fog_program,
             .outline_program = outline_program,
             .tint_program = tint_program,
+            .occluder_program = occluder_program,
+            .cutout_program = cutout_program,
             .smooth_program = smooth_program,
+            .retouch_program = retouch_program,
+            .matte_refine_program = matte_refine_program,
             .stylize_program = stylize_program,
             .edge_sobel_program = edge_sobel_program,
             .edge_nms_program = edge_nms_program,
@@ -446,7 +565,11 @@ pub const Renderer = struct {
             .composite_program = composite_program,
             .beauty_face_program = beauty_face_program,
             .beauty_reshape_program = beauty_reshape_program,
+            .reshape_bank_program = reshape_bank_program,
             .makeup_program = makeup_program,
+            .paint_face_program = paint_face_program,
+            .face_swap_program = face_swap_program,
+            .lash_program = lash_program,
             .model_program = model_program,
             .model_instanced_program = model_instanced_program,
             .billboard_program = billboard_program,
@@ -462,6 +585,10 @@ pub const Renderer = struct {
             .face_mesh_index_buffer = face_mesh_index_buffer,
             .face_mesh_uv_buffer = face_mesh_uv_buffer,
             .face_mesh_position_buffer = face_mesh_position_buffer,
+            .face_mesh_feather_buffer = face_mesh_feather_buffer,
+            .lash_index_buffer = lash_index_buffer,
+            .lash_uv_buffer = lash_uv_buffer,
+            .lash_position_buffer = lash_position_buffer,
             .makeup_position_buffer = makeup_position_buffer,
             .makeup_lipstick_uv_buffer = makeup_lipstick_uv_buffer,
             .makeup_blush_uv_buffer = makeup_blush_uv_buffer,
@@ -484,12 +611,23 @@ pub const Renderer = struct {
             .fog_uniform = c.bgfx_create_uniform("u_fog", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .outline_uniform = c.bgfx_create_uniform("u_outline", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tint_uniform = c.bgfx_create_uniform("u_tint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .tint_mode_uniform = c.bgfx_create_uniform("u_tintMode", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .tint_finish_uniform = c.bgfx_create_uniform("u_tintFinish", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .occluder_uniform = c.bgfx_create_uniform("u_occluder", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .cutout_uniform = c.bgfx_create_uniform("u_cutout", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .smooth_uniform = c.bgfx_create_uniform("u_smooth", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .retouch_uniform = c.bgfx_create_uniform("u_retouch", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .matte_refine_uniform = c.bgfx_create_uniform("u_matteRefine", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .stylize_uniform = c.bgfx_create_uniform("u_stylize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .edge_uniform = c.bgfx_create_uniform("u_edge", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .edge_texel_uniform = c.bgfx_create_uniform("u_edgeTexel", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .warp_uniform = c.bgfx_create_uniform("u_warp", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .warp_params_uniform = c.bgfx_create_uniform("u_warpParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            // The liquify arrays hold up to eight push points; the count must
+            // match warp_point_max in the lens core and WARP_POINTS in the shader.
+            .warp_extra_uniform = c.bgfx_create_uniform("u_warpExtra", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .warp_points_uniform = c.bgfx_create_uniform("u_warpPoints", c.BGFX_UNIFORM_TYPE_VEC4, 8),
+            .warp_fall_uniform = c.bgfx_create_uniform("u_warpFall", c.BGFX_UNIFORM_TYPE_VEC4, 8),
             .tex_prev = c.bgfx_create_uniform("s_texPrev", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .trail_uniform = c.bgfx_create_uniform("u_trail", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .ssr_uniform = c.bgfx_create_uniform("u_ssr", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -504,7 +642,13 @@ pub const Renderer = struct {
             .tex_bloom = c.bgfx_create_uniform("s_texBloom", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .beauty_params_uniform = c.bgfx_create_uniform("u_beautyParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .reshape_params_uniform = c.bgfx_create_uniform("u_reshapeParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .reshape_bank_uniform = c.bgfx_create_uniform("u_reshapeBank", c.BGFX_UNIFORM_TYPE_VEC4, face_reshape_bank_vec4_count),
+            .reshape_hubs_uniform = c.bgfx_create_uniform("u_reshapeHubs", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .paint_params_uniform = c.bgfx_create_uniform("u_paintParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .swap_params_uniform = c.bgfx_create_uniform("u_swapParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .lash_color_uniform = c.bgfx_create_uniform("u_lashColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .lash_shape_uniform = c.bgfx_create_uniform("u_lashShape", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .particle_cool_uniform = c.bgfx_create_uniform("u_particleCool", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -641,12 +785,62 @@ pub const Renderer = struct {
         };
     }
 
+    /// occluder.pass's own fixed head-occluder program: the composited frame
+    /// on unit 0, the preserved camera frame on unit 1, and the head matte on
+    /// unit 2, revealing the head over content drawn behind it.
+    pub fn loadOccluderProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_occluder_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_occluder_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_occluder_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_occluder_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// cutout.pass's own fixed program: the frame on unit 0 and the face matte
+    /// on unit 1, keeping the frame where the matte is set and replacing the
+    /// rest with a flat color, so the face reads on a plain background.
+    pub fn loadCutoutProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_cutout_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_cutout_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_cutout_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_cutout_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     pub fn loadSmoothProgram() !c.bgfx_program_handle_t {
         return switch (c.bgfx_get_renderer_type()) {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_smooth_pass_metal),
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_smooth_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_smooth_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_smooth_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// retouch.pass's own fixed program: the frame on unit 0 and its mask on
+    /// unit 1, running one of the selective skin filters its mode uniform picks.
+    pub fn loadRetouchProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_retouch_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_retouch_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_retouch_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_retouch_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// matte.refine's own fixed guided-filter program: the frame on unit 0 as
+    /// the edge guide and the matte on unit 1, refined into a crisper matte.
+    pub fn loadMatteRefineProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_matte_refine_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_matte_refine_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_matte_refine_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_matte_refine_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -832,6 +1026,19 @@ pub const Renderer = struct {
         };
     }
 
+    /// The one fixed reshape.bank program every lens shares - the sixty-six
+    /// per-region face sculpt over the shared vs_lens_pass quad, kit-authored
+    /// like loadBeautyReshapeProgram above.
+    pub fn loadReshapeBankProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_reshape_bank_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_reshape_bank_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_reshape_bank_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_reshape_bank_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// The one fixed beauty.lipstick/beauty.blusher program every lens
     /// shares - its own vertex stage (vs_makeup, not vs_lens_pass; the
     /// mesh needs two vertex attributes, not a full-screen quad).
@@ -841,6 +1048,45 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_makeup_spirv, blobs.fs_makeup_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_makeup_essl, blobs.fs_makeup_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_makeup_wgsl, blobs.fs_makeup_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// paint.face's program: the makeup mesh vertex stage paired with the
+    /// face-material fragment shader, so a lens texture warps over the tracked
+    /// face and blends onto the skin through a mask channel.
+    pub fn loadPaintFaceProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_makeup_metal, blobs.fs_paint_face_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_makeup_spirv, blobs.fs_paint_face_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_makeup_essl, blobs.fs_paint_face_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_makeup_wgsl, blobs.fs_paint_face_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// face.swap's program: its own mesh vertex stage carries the per-vertex
+    /// seam feather beside the position and UV, and the fragment stage warps
+    /// the donor face onto the tracked mesh and feathers it into the skin.
+    pub fn loadFaceSwapProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_face_swap_metal, blobs.fs_face_swap_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_face_swap_spirv, blobs.fs_face_swap_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_face_swap_essl, blobs.fs_face_swap_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_face_swap_wgsl, blobs.fs_face_swap_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// mesh.lashes' program: the makeup mesh vertex stage paired with the
+    /// lash fragment shader, so the strip's live positions draw as strands
+    /// rising off the lid in the node's tint.
+    pub fn loadLashProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_makeup_metal, blobs.fs_lashes_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_makeup_spirv, blobs.fs_lashes_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_makeup_essl, blobs.fs_lashes_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_makeup_wgsl, blobs.fs_lashes_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -919,6 +1165,10 @@ pub const Renderer = struct {
     }
 
     pub fn deinit(r: *Renderer) void {
+        // converter.deinit() wipes the converter to undefined, so the
+        // Vulkan context is copied out first and destroyed after bgfx
+        // shutdown from the saved copy, never read back from that memory.
+        var saved_vk_ctx: if (is_android) ?android_vk.Context else void = if (is_android) null else {};
         if (is_android) {
             if (r.zero_copy) |*zc| {
                 for (zc.textures) |texture| {
@@ -926,6 +1176,7 @@ pub const Renderer = struct {
                 }
                 zc.beauty_render_target.deinit(zc.converter.ctx.device);
                 zc.beauty_import.deinit(zc.converter.ctx.device);
+                saved_vk_ctx = zc.converter.ctx;
                 zc.converter.deinit();
             }
         }
@@ -957,11 +1208,19 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.dof_uniform);
         c.bgfx_destroy_uniform(r.fog_uniform);
         c.bgfx_destroy_uniform(r.outline_uniform);
+        c.bgfx_destroy_uniform(r.tint_mode_uniform);
+        c.bgfx_destroy_uniform(r.tint_finish_uniform);
+        c.bgfx_destroy_uniform(r.occluder_uniform);
+        c.bgfx_destroy_uniform(r.cutout_uniform);
+        c.bgfx_destroy_uniform(r.matte_refine_uniform);
         c.bgfx_destroy_uniform(r.stylize_uniform);
         c.bgfx_destroy_uniform(r.edge_uniform);
         c.bgfx_destroy_uniform(r.edge_texel_uniform);
         c.bgfx_destroy_uniform(r.warp_uniform);
         c.bgfx_destroy_uniform(r.warp_params_uniform);
+        c.bgfx_destroy_uniform(r.warp_extra_uniform);
+        c.bgfx_destroy_uniform(r.warp_points_uniform);
+        c.bgfx_destroy_uniform(r.warp_fall_uniform);
         c.bgfx_destroy_uniform(r.tex_prev);
         c.bgfx_destroy_uniform(r.trail_uniform);
         c.bgfx_destroy_uniform(r.ssr_uniform);
@@ -976,13 +1235,29 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_bloom);
         c.bgfx_destroy_uniform(r.beauty_params_uniform);
         c.bgfx_destroy_uniform(r.reshape_params_uniform);
+        c.bgfx_destroy_uniform(r.reshape_bank_uniform);
+        c.bgfx_destroy_uniform(r.reshape_hubs_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
+        c.bgfx_destroy_uniform(r.paint_params_uniform);
+        c.bgfx_destroy_uniform(r.swap_params_uniform);
+        c.bgfx_destroy_uniform(r.lash_color_uniform);
+        c.bgfx_destroy_uniform(r.lash_shape_uniform);
         c.bgfx_destroy_uniform(r.face_points_uniform);
         c.bgfx_destroy_uniform(r.model_color_uniform);
         c.bgfx_destroy_uniform(r.particle_cool_uniform);
         c.bgfx_destroy_uniform(r.particle_size_uniform);
         c.bgfx_destroy_uniform(r.particle_fx_uniform);
         c.bgfx_destroy_uniform(r.yuv_uniform);
+        c.bgfx_destroy_uniform(r.tint_uniform);
+        c.bgfx_destroy_uniform(r.smooth_uniform);
+        c.bgfx_destroy_uniform(r.retouch_uniform);
+        c.bgfx_destroy_uniform(r.sim_params_uniform);
+        c.bgfx_destroy_uniform(r.sim_params2_uniform);
+        c.bgfx_destroy_uniform(r.sim_params3_uniform);
+        c.bgfx_destroy_uniform(r.sim_params4_uniform);
+        c.bgfx_destroy_uniform(r.sim_params5_uniform);
+        c.bgfx_destroy_program(r.brush_program);
+        if (r.particle_compute_program) |compute_program| c.bgfx_destroy_program(compute_program);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
         c.bgfx_destroy_program(r.lut_program);
@@ -992,7 +1267,11 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.fog_program);
         c.bgfx_destroy_program(r.outline_program);
         c.bgfx_destroy_program(r.tint_program);
+        c.bgfx_destroy_program(r.occluder_program);
+        c.bgfx_destroy_program(r.cutout_program);
         c.bgfx_destroy_program(r.smooth_program);
+        c.bgfx_destroy_program(r.retouch_program);
+        c.bgfx_destroy_program(r.matte_refine_program);
         c.bgfx_destroy_program(r.stylize_program);
         c.bgfx_destroy_program(r.edge_sobel_program);
         c.bgfx_destroy_program(r.edge_nms_program);
@@ -1008,7 +1287,11 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.bloom_composite_program);
         c.bgfx_destroy_program(r.beauty_face_program);
         c.bgfx_destroy_program(r.beauty_reshape_program);
+        c.bgfx_destroy_program(r.reshape_bank_program);
         c.bgfx_destroy_program(r.makeup_program);
+        c.bgfx_destroy_program(r.paint_face_program);
+        c.bgfx_destroy_program(r.face_swap_program);
+        c.bgfx_destroy_program(r.lash_program);
         c.bgfx_destroy_program(r.model_program);
         c.bgfx_destroy_program(r.model_instanced_program);
         c.bgfx_destroy_program(r.billboard_program);
@@ -1019,12 +1302,16 @@ pub const Renderer = struct {
         c.bgfx_destroy_index_buffer(r.face_mesh_index_buffer);
         c.bgfx_destroy_vertex_buffer(r.face_mesh_uv_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.face_mesh_position_buffer);
+        c.bgfx_destroy_vertex_buffer(r.face_mesh_feather_buffer);
+        c.bgfx_destroy_index_buffer(r.lash_index_buffer);
+        c.bgfx_destroy_vertex_buffer(r.lash_uv_buffer);
+        c.bgfx_destroy_dynamic_vertex_buffer(r.lash_position_buffer);
         c.bgfx_shutdown();
+        if (r.interleave_scratch.len != 0) r.gpa.free(r.interleave_scratch);
+        r.nv12_ring.deinit(r.gpa);
+        r.rgba_ring.deinit(r.gpa);
         if (is_android) {
-            if (r.zero_copy) |*zc| {
-                var ctx = zc.converter.ctx;
-                ctx.deinit();
-            }
+            if (saved_vk_ctx) |*ctx| ctx.deinit();
         }
         r.* = undefined;
     }
@@ -1079,14 +1366,8 @@ pub const Renderer = struct {
             }
             const mem = c.bgfx_alloc(@as(u32, width) * height * 4) orelse return self.handle;
             const dst: [*]u8 = mem.*.data;
-            for (0..height) |row| {
-                const src_row = data[(height - 1 - row) * stride ..];
-                const dst_row = dst[row * width * 4 ..];
-                for (0..width) |col| {
-                    const src_col = width - 1 - col;
-                    @memcpy(dst_row[col * 4 ..][0..4], src_row[src_col * 4 ..][0..4]);
-                }
-            }
+            // Both axes reversed (a half turn) matches uploadRgba's flip.
+            image.argbRotate(data, stride, dst, @as(u32, width) * 4, width, height, .half) catch return self.handle;
             c.bgfx_update_texture_2d(self.handle, 0, 0, 0, 0, width, height, mem, std.math.maxInt(u16));
             return self.handle;
         }
@@ -1188,6 +1469,34 @@ pub const Renderer = struct {
     pub fn createMaskTexture(width: u16, height: u16, mask: []const u8) TextureHandle {
         return c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_R8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, c.bgfx_copy(mask.ptr, @intCast(mask.len)), 0);
     }
+
+    /// A single-channel R8 mask texture reused across frames: created on the
+    /// first upload and on any size change, updated in place otherwise, so a
+    /// per-frame mask never churns a GPU texture. Destroyed once at teardown.
+    pub const DynamicMask = struct {
+        handle: c.bgfx_texture_handle_t = .{ .idx = invalid_handle },
+        width: u16 = 0,
+        height: u16 = 0,
+
+        /// Replaces the mask's pixels, recreating the texture only when the
+        /// size changes; bgfx copies the bytes, so the caller may reuse them.
+        pub fn upload(self: *DynamicMask, width: u16, height: u16, mask: []const u8) TextureHandle {
+            if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
+                if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+                const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+                self.handle = c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_R8, flags, null, 0);
+                self.width = width;
+                self.height = height;
+            }
+            c.bgfx_update_texture_2d(self.handle, 0, 0, 0, 0, width, height, c.bgfx_copy(mask.ptr, @intCast(mask.len)), std.math.maxInt(u16));
+            return self.handle;
+        }
+
+        pub fn deinit(self: *DynamicMask) void {
+            if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+            self.* = .{};
+        }
+    };
 
     /// A mutable BGRA texture whose pixels are replaced each frame - a
     /// video clip's decoded frame lands here. BGRA8 matches the byte order
@@ -1432,6 +1741,51 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.composite_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Draws a sprite as a quad rotated about its centre so an interactive
+    /// sprite can be turned two-fingered. cx, cy is the centre and hw, hh the
+    /// half extents in normalized frame coordinates; rotation is radians and
+    /// aspect the output width over height, so the turn keeps the sprite shape.
+    pub fn submitSpriteRotated(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32) void {
+        var tvb: c.bgfx_transient_vertex_buffer_t = undefined;
+        var tib: c.bgfx_transient_index_buffer_t = undefined;
+        if (c.bgfx_get_avail_transient_vertex_buffer(4, &r.layout) < 4) return;
+        if (c.bgfx_get_avail_transient_index_buffer(6, false) < 6) return;
+        c.bgfx_alloc_transient_vertex_buffer(&tvb, 4, &r.layout);
+        c.bgfx_alloc_transient_index_buffer(&tib, 6, false);
+        c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
+
+        const cos_a = @cos(rotation);
+        const sin_a = @sin(rotation);
+        const corners = [4][2]f32{ .{ -hw, -hh }, .{ hw, -hh }, .{ hw, hh }, .{ -hw, hh } };
+        const uvs = [4][2]f32{ .{ 0, 1 }, .{ 1, 1 }, .{ 1, 0 }, .{ 0, 0 } };
+        const verts: [*][5]f32 = @ptrCast(@alignCast(tvb.data));
+        for (corners, 0..) |cnr, i| {
+            // Rotate in the aspect-corrected pixel space, then map the corner
+            // to clip space with the frame's own y flip.
+            const rx = cnr[0] * cos_a - cnr[1] * sin_a / aspect;
+            const ry = cnr[0] * aspect * sin_a + cnr[1] * cos_a;
+            const nx = (cx + rx) * 2.0 - 1.0;
+            const ny = 1.0 - (cy + ry) * 2.0;
+            verts[i] = .{ nx, ny, 0.0, uvs[i][0], uvs[i][1] };
+        }
+        const idx: [*]u16 = @ptrCast(@alignCast(tib.data));
+        for ([6]u16{ 0, 1, 2, 0, 2, 3 }, 0..) |v, i| idx[i] = v;
+
+        const view = math.Mat4.identity;
+        const proj = math.Mat4.ortho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, .zero_to_one);
+        c.bgfx_set_view_transform(view_id, &view.cols, &proj.cols);
+        c.bgfx_set_transient_vertex_buffer(0, &tvb, 0, 4);
+        c.bgfx_set_transient_index_buffer(&tib, 0, 6);
+        c.bgfx_set_texture(0, r.tex_color, sprite_tex, std.math.maxInt(u32));
+        const params = [4]f32{ opacity, 0, 0, 0 };
+        const chroma = [4]f32{ 0, 0, 0, 0 };
+        c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
+        c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
+        const blend = blendFunc(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA);
+        c.bgfx_set_state(@as(u64, c.BGFX_STATE_WRITE_RGB) | @as(u64, c.BGFX_STATE_WRITE_A) | blend, 0);
+        c.bgfx_submit(view_id, r.composite_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Points `view_id` at a sub-rectangle of `target` with no clear, so the
     /// caller can draw the camera preview into one composite cell via
     /// submitPreview (which fills whatever viewport is set).
@@ -1521,15 +1875,47 @@ pub const Renderer = struct {
     /// Blends a solid color into the frame masked by the texture on unit 1,
     /// scaled by the mask value and opacity, so a face-part matte reads as a
     /// soft makeup layer. mask_texture is a single-channel mask, color is rgb
-    /// 0..1, opacity 0..1.
-    pub fn submitTintPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, color: [3]f32, opacity: f32) void {
+    /// 0..1, opacity 0..1. mode picks the fold, finish the sheen.
+    pub fn submitTintPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, color: [3]f32, opacity: f32, mode: u8, finish: u8) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(1, r.tex_depth, mask_texture, std.math.maxInt(u32));
         const params = [4]f32{ color[0], color[1], color[2], opacity };
         c.bgfx_set_uniform(r.tint_uniform, &params, 1);
+        const mode_params = [4]f32{ @floatFromInt(mode), 0, 0, 0 };
+        c.bgfx_set_uniform(r.tint_mode_uniform, &mode_params, 1);
+        const finish_params = [4]f32{ @floatFromInt(finish), 0, 0, 0 };
+        c.bgfx_set_uniform(r.tint_finish_uniform, &finish_params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.tint_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Reveals the head over the frame: the composited frame on unit 0, the
+    /// preserved camera frame on unit 1, and the head matte on unit 2, mixing
+    /// the camera frame back in where the matte is set so content drawn behind
+    /// the head is hidden by it. params is (grow x, grow y, softness, 0).
+    pub fn submitOccluderPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, restore_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_background, restore_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.occluder_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.occluder_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Isolates the face into view_id: the frame on unit 0 and the face matte on
+    /// unit 1, keeping the frame where the matte is set and replacing the rest
+    /// with `color`, feathered by `softness`. mask_texture is a single-channel
+    /// matte, color rgb 0..1.
+    pub fn submitCutoutPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, color: [3]f32, softness: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ color[0], color[1], color[2], softness };
+        c.bgfx_set_uniform(r.cutout_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.cutout_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Blends the frame toward a small neighbor average, masked by the texture
@@ -1543,6 +1929,33 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.smooth_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.smooth_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Runs one selective skin filter over view_id: the frame on unit 0 and the
+    /// mask on unit 1, scaled by amount. mode 0 is a wider edge-aware smooth that
+    /// evens spots, mode 1 pulls bright pixels back toward the local mean.
+    pub fn submitRetouchPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, mode: f32, amount: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ mode, amount, 0, 0 };
+        c.bgfx_set_uniform(r.retouch_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.retouch_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Refines a matte's edges into view_id with a guided joint-bilateral
+    /// filter: the frame on unit 0 is the luma edge guide, the matte on unit 1
+    /// the signal refined. params is (radius, sensitivity, strength); the
+    /// output is the refined matte drawn as grayscale.
+    pub fn submitMatteRefinePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, matte_texture: c.bgfx_texture_handle_t, params: [3]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, matte_texture, std.math.maxInt(u32));
+        const packed_params = [4]f32{ params[0], params[1], params[2], 0 };
+        c.bgfx_set_uniform(r.matte_refine_uniform, &packed_params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.matte_refine_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws a motion-trail pass into view_id: the current frame on unit 0
@@ -1628,14 +2041,18 @@ pub const Renderer = struct {
     }
 
     /// Draws one lens warp.pass node as a full-screen pass into view_id: the
-    /// frame on unit 0, u_warp as (mode, center.x, center.y, radius) and
-    /// u_warpParams as (strength, refractive_index, aspect, 0), the one fixed
+    /// frame on unit 0, the confine mask on unit 1, then u_warp, u_warpParams and
+    /// u_warpExtra plus the liquify push points and radii, on the one fixed
     /// warp_program every node shares.
-    pub fn submitWarpPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, warp: [4]f32, params: [4]f32) void {
+    pub fn submitWarpPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, warp: [4]f32, params: [4]f32, extra: [4]f32, points: *const [8][4]f32, fall: *const [8][4]f32) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, mask_texture, std.math.maxInt(u32));
         c.bgfx_set_uniform(r.warp_uniform, &warp, 1);
         c.bgfx_set_uniform(r.warp_params_uniform, &params, 1);
+        c.bgfx_set_uniform(r.warp_extra_uniform, &extra, 1);
+        c.bgfx_set_uniform(r.warp_points_uniform, points, 8);
+        c.bgfx_set_uniform(r.warp_fall_uniform, fall, 8);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.warp_program, 0, c.BGFX_DISCARD_ALL);
     }
@@ -1736,6 +2153,24 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.beauty_reshape_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Draws one reshape.bank node as a full-screen pass into view_id. It
+    /// reuses fs_beauty_reshape.sc's u_facePoints contour and u_reshapeParams
+    /// header (aspect, presence, softness), adds the two derived anchors in
+    /// u_reshapeHubs, and the sixty-six sculpt amounts padded into u_reshapeBank.
+    pub fn submitReshapeBank(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, face_points: *const [face_point_vec4_count * 4]f32, hubs: [4]f32, bank: *const [66]f32, aspect_ratio: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        const header = [4]f32{ aspect_ratio, 1.0, 1.0, 0.0 };
+        c.bgfx_set_uniform(r.reshape_params_uniform, &header, 1);
+        c.bgfx_set_uniform(r.reshape_hubs_uniform, &hubs, 1);
+        c.bgfx_set_uniform(r.face_points_uniform, face_points, face_point_vec4_count);
+        var slots: [face_reshape_bank_vec4_count * 4]f32 = @splat(0);
+        @memcpy(slots[0..66], bank);
+        c.bgfx_set_uniform(r.reshape_bank_uniform, &slots, face_reshape_bank_vec4_count);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.reshape_bank_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Draws one beauty.lipstick or beauty.blusher node: the 176-triangle
     /// mesh over the live tracked contour, not a full-screen pass -
     /// uv_buffer picks which effect (makeupLipstickUvBuffer/
@@ -1778,6 +2213,71 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.makeup_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.makeup_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws the lens texture onto the canonical face mesh: each vertex rides
+    /// its tracked landmark, samples the material at its face UV, keys the mask
+    /// at the screen position, and blends over the frame by opacity and mode.
+    pub fn submitFaceMaterial(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, material_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, blend: f32) void {
+        std.debug.assert(landmarks.len >= 468 * 3);
+        var positions: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+        for (face_mesh_topology.vertex_landmarks, 0..) |landmark, at| {
+            positions[at * 2] = landmarks[@as(usize, landmark) * 3] / frame_width;
+            positions[at * 2 + 1] = landmarks[@as(usize, landmark) * 3 + 1] / frame_height;
+        }
+        c.bgfx_update_dynamic_vertex_buffer(r.face_mesh_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
+        c.bgfx_set_dynamic_vertex_buffer(0, r.face_mesh_position_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_vertex_buffer(1, r.face_mesh_uv_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_index_buffer(r.face_mesh_index_buffer, 0, face_mesh_topology.triangle_indices.len);
+        c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_makeup, material_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ opacity, blend, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.paint_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.paint_face_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Warps the donor face onto the tracked mesh: each vertex rides its tracked
+    /// landmark, samples the donor at its canonical face UV, keys the mask at the
+    /// screen position, and blends over the frame by opacity and the per-vertex
+    /// seam feather, so the swap fades into the surrounding skin.
+    pub fn submitFaceSwap(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, donor_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, feather: f32) void {
+        std.debug.assert(landmarks.len >= 468 * 3);
+        var positions: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+        face_mesh_topology.projectPositions(landmarks, frame_width, frame_height, &positions);
+        c.bgfx_update_dynamic_vertex_buffer(r.face_mesh_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
+        c.bgfx_set_dynamic_vertex_buffer(0, r.face_mesh_position_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_vertex_buffer(1, r.face_mesh_uv_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_vertex_buffer(2, r.face_mesh_feather_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_index_buffer(r.face_mesh_index_buffer, 0, face_mesh_topology.triangle_indices.len);
+        c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_makeup, donor_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ opacity, feather, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.swap_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.face_swap_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws the lash strip over the frame: each eye's tip row is rebuilt from
+    /// the tracked landmarks (length and curl scale off eye height), the strip
+    /// UVs comb strands in the fragment stage, and the tint composites over the
+    /// frame the same self-blend the makeup mesh uses.
+    pub fn submitLashMesh(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, color: [4]f32, length: f32, curl: f32) void {
+        std.debug.assert(landmarks.len >= 468 * 3);
+        var positions: [lash_mesh.vertex_count * 2]f32 = undefined;
+        lash_mesh.buildPositions(landmarks, frame_width, frame_height, length, curl, &positions);
+        c.bgfx_update_dynamic_vertex_buffer(r.lash_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
+        c.bgfx_set_dynamic_vertex_buffer(0, r.lash_position_buffer, 0, lash_mesh.vertex_count);
+        c.bgfx_set_vertex_buffer(1, r.lash_uv_buffer, 0, lash_mesh.vertex_count);
+        c.bgfx_set_index_buffer(r.lash_index_buffer, 0, lash_mesh.triangle_indices.len);
+        c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.lash_color_uniform, &color, 1);
+        const shape = [4]f32{ lash_strand_count, lash_edge_softness, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.lash_shape_uniform, &shape, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.lash_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     pub fn makeupLipstickUvBuffer(r: *const Renderer) c.bgfx_vertex_buffer_handle_t {
@@ -1860,13 +2360,24 @@ pub const Renderer = struct {
         return mesh;
     }
 
+    /// The reused interleave staging sized for `floats`, grown on the first
+    /// larger mesh and reused thereafter. Null only if a grow ever fails, in
+    /// which case the caller skips this update rather than allocating.
+    fn interleaveStage(r: *Renderer, floats: usize) ?[]f32 {
+        if (floats > r.interleave_scratch.len) {
+            const grown = r.gpa.alloc(f32, floats) catch return null;
+            if (r.interleave_scratch.len != 0) r.gpa.free(r.interleave_scratch);
+            r.interleave_scratch = grown;
+        }
+        return r.interleave_scratch[0..floats];
+    }
+
     /// Re-uploads deformed positions into a dynamic model mesh, padding
     /// the texcoord to zero to match r.layout. A no-op on a static mesh.
     pub fn updateModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32) void {
         if (!mesh.dynamic) return;
         const count = @min(positions.len, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
         }
@@ -1901,8 +2412,7 @@ pub const Renderer = struct {
     /// dynamic buffer, padding the texcoord to zero to match r.layout.
     pub fn updateSkinnedMesh(r: *Renderer, mesh: SkinnedMesh, positions: []const [3]f32) void {
         const count = @min(positions.len, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
         }
@@ -1950,8 +2460,7 @@ pub const Renderer = struct {
     /// into the cloth's dynamic buffer, padding the texcoord to zero.
     pub fn updateClothMesh(r: *Renderer, mesh: ClothMesh, positions: []const f32) void {
         const count = @min(positions.len / 3, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
         }
@@ -1985,8 +2494,7 @@ pub const Renderer = struct {
 
     pub fn updateHairMesh(r: *Renderer, mesh: HairMesh, positions: []const f32) void {
         const count = @min(positions.len / 3, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
         }
@@ -2049,8 +2557,7 @@ pub const Renderer = struct {
 
     pub fn updateParticleMesh(r: *Renderer, mesh: ParticleMesh, positions: []const f32) void {
         const count = @min(positions.len / 3, mesh.vertex_count);
-        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
-        defer r.gpa.free(interleaved);
+        const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
         }
@@ -2334,21 +2841,26 @@ pub const Renderer = struct {
         }
         const cache = r.upload_cache.?;
 
-        const y_mem = c.bgfx_alloc(@as(u32, width) * height) orelse return error.OutOfMemory;
-        const y_dst: [*]u8 = y_mem.*.data;
+        // One ring slot carries both planes so both references stay live
+        // until bgfx consumes them; the tightly packed copies match the old
+        // bgfx_alloc path byte for byte.
+        const uv_width: usize = width;
+        const uv_rows: usize = height / 2;
+        const y_size: usize = @as(usize, width) * height;
+        const uv_size: usize = uv_width * uv_rows;
+        const slot = r.nv12_ring.next(r.gpa, y_size + uv_size) orelse return error.OutOfMemory;
+
+        const y_dst = slot[0..y_size];
         for (0..height) |row| {
             @memcpy(y_dst[row * width ..][0..width], y[row * y_stride ..][0..width]);
         }
-        c.bgfx_update_texture_2d(cache.y, 0, 0, 0, 0, width, height, y_mem, std.math.maxInt(u16));
+        c.bgfx_update_texture_2d(cache.y, 0, 0, 0, 0, width, height, c.bgfx_make_ref(y_dst.ptr, @intCast(y_size)), std.math.maxInt(u16));
 
-        const uv_width: u32 = width;
-        const uv_rows: u32 = height / 2;
-        const uv_mem = c.bgfx_alloc(uv_width * uv_rows) orelse return error.OutOfMemory;
-        const uv_dst: [*]u8 = uv_mem.*.data;
+        const uv_dst = slot[y_size..][0..uv_size];
         for (0..uv_rows) |row| {
             @memcpy(uv_dst[row * uv_width ..][0..uv_width], uv[row * uv_stride ..][0..uv_width]);
         }
-        c.bgfx_update_texture_2d(cache.uv, 0, 0, 0, 0, width / 2, height / 2, uv_mem, std.math.maxInt(u16));
+        c.bgfx_update_texture_2d(cache.uv, 0, 0, 0, 0, width / 2, height / 2, c.bgfx_make_ref(uv_dst.ptr, @intCast(uv_size)), std.math.maxInt(u16));
 
         return .{ .y = cache.y, .uv = cache.uv };
     }
@@ -2379,18 +2891,12 @@ pub const Renderer = struct {
         const cache = r.rgba_upload_cache.?;
 
         // Both axes reversed: bgfx's HTML5/WebGL2 backend samples (0,0)
-        // as the last pixel of an uploaded 2D texture, not the first.
-        const mem = c.bgfx_alloc(@as(u32, width) * height * 4) orelse return error.OutOfMemory;
-        const dst: [*]u8 = mem.*.data;
-        for (0..height) |row| {
-            const src_row = rgba[(height - 1 - row) * stride ..];
-            const dst_row = dst[row * width * 4 ..];
-            for (0..width) |col| {
-                const src_col = width - 1 - col;
-                @memcpy(dst_row[col * 4 ..][0..4], src_row[src_col * 4 ..][0..4]);
-            }
-        }
-        c.bgfx_update_texture_2d(cache.texture, 0, 0, 0, 0, width, height, mem, std.math.maxInt(u16));
+        // as the last pixel of an uploaded 2D texture, not the first. The
+        // reversed copy lands in a ring slot referenced through make_ref.
+        const size: usize = @as(usize, width) * height * 4;
+        const dst = r.rgba_ring.next(r.gpa, size) orelse return error.OutOfMemory;
+        image.argbRotate(rgba, stride, dst.ptr, @as(u32, width) * 4, width, height, .half) catch return error.Unsupported;
+        c.bgfx_update_texture_2d(cache.texture, 0, 0, 0, 0, width, height, c.bgfx_make_ref(dst.ptr, @intCast(size)), std.math.maxInt(u16));
 
         return cache.texture;
     }

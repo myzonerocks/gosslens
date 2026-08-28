@@ -132,6 +132,9 @@ pub fn create(gpa: std.mem.Allocator, task_bytes: []const u8, threads: i32) Crea
         .landmark_tensor = landmark_tensor,
     };
 
+    // io_state is live from the struct assignment above; a failed spawn
+    // must tear it down rather than leak its worker-pool state.
+    errdefer tracking.io_state.deinit();
     tracking.thread = std.Thread.spawn(.{}, workerMain, .{tracking}) catch return error.OutOfMemory;
     return tracking;
 }

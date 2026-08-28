@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.face-tattoo",
+  "version": "1.0.0",
+  "display_name": "Face Tattoo",
+  "engine_compat": ">=0.10",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "face_tattoo", "type": "paint.face", "inputs": {"frame": "camera"}, "params": {}, "paint": {"mask": "contour", "opacity": 1.0, "blend": "multiply"}}
+  ],
+  "triggers": []
+}

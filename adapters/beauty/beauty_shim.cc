@@ -1,12 +1,12 @@
-// The C boundary around the beauty engine: one context owning the chain
-// smooth and whiten, face reshape, lipstick, blusher, fed RGBA frames and
-// the tracked contour points, answering with the processed RGBA. The
-// engine runs its own offscreen gl context per platform; everything here
-// executes on the caller's thread, one frame at a time.
+// Compiled -fno-exceptions (build.zig buildGpupixelLib sets the flag for
+// gpupixel and every beauty shim TU), so no unwind can cross the C
+// boundary. One context owns the chain: smooth and whiten, face reshape,
+// lipstick, blusher; runs on the caller's thread, one frame at a time.
 
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <vector>
 
 #include "gpupixel/gpupixel.h"
@@ -92,11 +92,21 @@ const char* kExternalRectFragmentShaderSource = R"(
 class SourceExternalTexture : public gpupixel::Source {
  public:
   static std::shared_ptr<SourceExternalTexture> Create() {
-    auto ret = std::shared_ptr<SourceExternalTexture>(new SourceExternalTexture());
+    auto ret = std::shared_ptr<SourceExternalTexture>(new (std::nothrow) SourceExternalTexture());
+    if (ret == nullptr) return nullptr;
     bool ok = true;
     gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext(
         [&] { ok = ret->Init(); });
     return ok ? ret : nullptr;
+  }
+
+  // CreateWithShaderString hands ownership to the caller; every vendor
+  // owner deletes its programs in its destructor and this class follows
+  // that contract, so a create/destroy cycle leaks no GL program. The
+  // shared_ptr in Create binds this concrete destructor at construction.
+  ~SourceExternalTexture() {
+    delete program_2d_;
+    delete program_rect_;
   }
 
   bool Init() {
@@ -110,7 +120,14 @@ class SourceExternalTexture : public gpupixel::Source {
 #if defined(GPUPIXEL_MAC)
     program_rect_ = gpupixel::GPUPixelGLProgram::CreateWithShaderString(
         kExternalVertexShaderSource, kExternalRectFragmentShaderSource);
-    return program_rect_ != nullptr;
+    if (program_rect_ == nullptr) {
+      // Still on the GL thread here; the sibling that did build goes
+      // now rather than leaking behind a failed create.
+      delete program_2d_;
+      program_2d_ = nullptr;
+      return false;
+    }
+    return true;
 #else
     return true;
 #endif
@@ -187,6 +204,10 @@ struct BeautyContext {
   std::shared_ptr<gpupixel::BlusherFilter> blusher;
   std::shared_ptr<gpupixel::SinkRawData> sink;
   std::shared_ptr<TextureTapSink> texture_tap;
+  // Landmark staging reused every tracked frame; sized once, refilled in
+  // place, so a live face never allocates two vectors per frame.
+  std::vector<float> reshape_points;
+  std::vector<float> makeup_points;
 };
 
 void ApplyLandmarks(BeautyContext* context, const float* landmarks106) {
@@ -194,11 +215,11 @@ void ApplyLandmarks(BeautyContext* context, const float* landmarks106) {
   // reshape's shader declares facePoints[106 * 2]; lipstick/blusher's
   // mesh indexes past that into the five derived hub points core/
   // tracking/face106.zig appends after the raw 106.
-  std::vector<float> reshape_points(landmarks106, landmarks106 + 106 * 2);
-  context->reshape->SetFaceLandmarks(reshape_points);
-  std::vector<float> makeup_points(landmarks106, landmarks106 + 111 * 2);
-  context->lipstick->SetFaceLandmarks(makeup_points);
-  context->blusher->SetFaceLandmarks(makeup_points);
+  context->reshape_points.assign(landmarks106, landmarks106 + 106 * 2);
+  context->reshape->SetFaceLandmarks(context->reshape_points);
+  context->makeup_points.assign(landmarks106, landmarks106 + 111 * 2);
+  context->lipstick->SetFaceLandmarks(context->makeup_points);
+  context->blusher->SetFaceLandmarks(context->makeup_points);
 }
 
 }  // namespace
@@ -221,6 +242,8 @@ void* goss_beauty_create(const char* resource_path) {
   context->blusher = gpupixel::BlusherFilter::Create();
   context->sink = gpupixel::SinkRawData::Create();
   context->texture_tap = std::make_shared<TextureTapSink>();
+  context->reshape_points.reserve(106 * 2);
+  context->makeup_points.reserve(111 * 2);
   if (!context->source || !context->source_gpu || !context->beauty ||
       !context->reshape || !context->lipstick || !context->blusher ||
       !context->sink || !context->texture_tap) {
@@ -337,13 +360,22 @@ int32_t goss_beauty_process_external_texture(void* handle,
   // output side guarantees one for goss_beauty_interop_composite - a
   // contract this function's own caller never actually honored, leaving
   // every GL call below running wherever the caller happened to be.
-  bool ran = false;
-  bool ok = true;
-  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
-    ran = true;
-    ok = context->source_gpu->RenderExternalTexture(gl_texture, sampler_kind, width, height);
+  struct ExternalCall {
+    BeautyContext* context;
+    uint32_t gl_texture;
+    int32_t sampler_kind;
+    int32_t width;
+    int32_t height;
+    bool ran;
+    bool ok;
+  } call{context, gl_texture, sampler_kind, width, height, false, true};
+  // One pointer capture keeps the task inside std::function's inline
+  // storage, so the dispatch never heap-allocates per frame.
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&call] {
+    call.ran = true;
+    call.ok = call.context->source_gpu->RenderExternalTexture(call.gl_texture, call.sampler_kind, call.width, call.height);
   });
-  return (ran && ok) ? 0 : 1;
+  return (call.ran && call.ok) ? 0 : 1;
 }
 
 // The GPU compositing bridge is platform-specific: interop_apple.mm on

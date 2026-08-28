@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.face-inset",
+  "version": "1.0.0",
+  "display_name": "Face Inset",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "inset", "type": "warp.pass", "inputs": {"frame": "camera"}, "params": {}, "warp": {"mode": "face_scale", "strength": -0.6}}
+  ],
+  "triggers": []
+}

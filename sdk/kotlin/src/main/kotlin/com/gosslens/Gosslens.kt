@@ -1,6 +1,8 @@
 package com.gosslens
 
+import android.os.Build
 import android.view.Surface
+import java.lang.ref.Cleaner
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -126,6 +128,8 @@ object Gosslens {
     internal external fun nativeArBrushUndo(session: Long): Int
     internal external fun nativeArBrushClear(session: Long): Int
     internal external fun nativeGrab(session: Long, x: Float, y: Float, z: Float): Int
+    internal external fun nativeTouch(session: Long, phase: Int, pointerId: Int, x: Float, y: Float): Int
+    internal external fun nativePullHaptic(session: Long, outBuffer: ByteBuffer): Int
     internal external fun nativeRelease(session: Long): Int
     internal external fun nativeAddCollider(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeEraseCollider(session: Long, x: Float, y: Float, z: Float, radius: Float): Int
@@ -143,12 +147,29 @@ object Gosslens {
     internal external fun nativeYuvToRgb(standard: Int, range: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeSolveTwoBoneIk(inBuffer: ByteBuffer, upperLen: Float, lowerLen: Float, outBuffer: ByteBuffer): Int
     internal external fun nativeActivateLensFromDirectory(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
+    internal external fun nativeSubmitFrame(session: Long, plane0: Long, plane1: Long, plane2: Long, planeCount: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, colorStandard: Int, colorRange: Int, timestampUs: Long): Int
+    internal external fun nativeSubmitFrameRgbaCopy(session: Long, rgba: ByteBuffer, stride: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, timestampUs: Long): Int
+    internal external fun nativeEnableSegmentation(session: Long, modelBuffer: ByteBuffer, modelLen: Int, threads: Int): Int
+    internal external fun nativeDisableSegmentation(session: Long)
+    internal external fun nativeSetFaceLandmarks(session: Long, pointsBuffer: ByteBuffer, pointCount: Int): Int
+    internal external fun nativeSetBeautyLut(session: Long, slot: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
+    internal external fun nativeSetBeautyMakeupTexture(session: Long, effect: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
+    internal external fun nativeCaptureFrame(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
+    internal external fun nativeCapturePhotoAs(engine: Long, session: Long, format: Int, quality: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
+    internal external fun nativeRenderToLiveTexture(engine: Long, session: Long, nativeHandle: Long, width: Int, height: Int): Int
+    internal external fun nativeReleaseLiveTexture(engine: Long, nativeHandle: Long): Int
+    internal external fun nativePhysicsHairRemove(session: Long, hairId: Int): Int
 
     const val COLOR_BT601 = 0
     const val COLOR_BT709 = 1
     const val COLOR_BT2020 = 2
     const val RANGE_VIDEO = 0
     const val RANGE_FULL = 1
+    const val PIXEL_NV12 = 0
+    const val PIXEL_NV21 = 1
+    const val PIXEL_I420 = 2
+    const val PIXEL_BGRA8 = 3
+    const val PIXEL_RGBA8 = 4
     const val FLAG_MIRROR = 1
     const val ROTATION_SHIFT = 8
     const val FACE_LANDMARK_COUNT = 478
@@ -292,8 +313,47 @@ data class GossCaptureUi(
     val screenFlashWarmth: Float = 0.5f,
 )
 
+/** One daemon-backed cleaner for the whole SDK. The cleaning action holds
+ * only the native handle, never the wrapper, so a dropped engine or session
+ * still frees its native side. java.lang.ref.Cleaner lands at API 33; below
+ * that the explicit close() path is the only release, so every call site
+ * guards on the level before ever touching this object. */
+internal object NativeCleaner {
+    private val cleaner: Cleaner = Cleaner.create()
+
+    fun register(owner: Any, action: Runnable): Any = cleaner.register(owner, action)
+
+    fun disarm(registration: Any) = (registration as Cleaner.Cleanable).clean()
+}
+
+/** Create/destroy/init/resize/render. Confined to the thread that creates
+ * it. Destroy sessions before the engine: nativeEngineDestroy tears down any
+ * still-live session, after which that session's own handle is stale. On the
+ * garbage-collected path a session holds its engine strongly, so a dropped
+ * pair is always cleaned session-first. */
 class GossEngine private constructor(internal val handle: Long) : AutoCloseable {
     private var closed = false
+    /** Frees the native engine if the wrapper is dropped without close();
+     * only registered on API 33+, where Cleaner exists. */
+    private val cleanable: Any? =
+        if (Build.VERSION.SDK_INT >= 33) NativeCleaner.register(this, EngineDisposer(handle)) else null
+
+    private class EngineDisposer(private val handle: Long) : Runnable {
+        override fun run() = Gosslens.nativeEngineDestroy(handle)
+    }
+
+    /** The per-frame live-broadcast readback reuses one info and one data
+     * direct buffer instead of allocating both each published frame; grown
+     * to the largest frame, dropped with the engine. */
+    private val liveInfo: ByteBuffer = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+    private var liveScratch: ByteBuffer = ByteBuffer.allocateDirect(0)
+
+    private fun liveStage(bytes: Int): ByteBuffer {
+        if (liveScratch.capacity() < bytes) liveScratch = ByteBuffer.allocateDirect(bytes)
+        liveScratch.clear()
+        liveScratch.limit(bytes)
+        return liveScratch
+    }
 
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
@@ -374,12 +434,12 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * packed frame bytes, or null when the renderer is away. */
     fun captureLiveFrame(session: GossSession?, width: Int, height: Int, format: Int = 3): ByteArray? {
         if (width <= 0 || height <= 0) return null
-        val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
         val pixels = width.toLong() * height
         val capacity = if (format == 0) pixels + pixels / 2 else pixels * 4
-        val data = ByteBuffer.allocateDirect(capacity.toInt())
-        if (Gosslens.nativeCaptureLiveFrame(handle, session?.handle ?: 0L, format, data, capacity, info) != 0) return null
+        val data = liveStage(capacity.toInt())
+        if (Gosslens.nativeCaptureLiveFrame(handle, session?.handle ?: 0L, format, data, capacity, liveInfo) != 0) return null
         val frame = ByteArray(capacity.toInt())
+        data.rewind()
         data.get(frame)
         return frame
     }
@@ -402,12 +462,60 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         return encoded
     }
 
+    /** Captures the composited frame as a platform photo (1 JPEG, 2 HEIC)
+     * at [quality] percent, sized by a probe call first. Lossy and not
+     * bit-stable across runs - the PNG [capturePhoto] stays the
+     * deterministic surface. Null when the photo backend is away. */
+    fun capturePhotoAs(session: GossSession?, format: Int, quality: Int = 0): ByteArray? {
+        val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        val probeStatus = Gosslens.nativeCapturePhotoAs(handle, session?.handle ?: 0L, format, quality, probe, 0L, info)
+        val needed = info.getLong(0)
+        if (probeStatus == 0 && needed == 0L) return ByteArray(0)
+        if (needed <= 0L) return null
+        val data = ByteBuffer.allocateDirect(needed.toInt())
+        if (Gosslens.nativeCapturePhotoAs(handle, session?.handle ?: 0L, format, quality, data, needed, info) != 0) return null
+        val encoded = ByteArray(info.getLong(0).toInt())
+        data.get(encoded)
+        return encoded
+    }
+
+    /** Debug/test tooling only. Renders like renderFrame and reads the
+     * composited output back as RGBA8, row 0 first, at the render size;
+     * [width] and [height] must be at least the render surface. Null when
+     * the renderer is unavailable. */
+    fun captureFrame(session: GossSession?, width: Int, height: Int): ByteArray? {
+        if (width <= 0 || height <= 0) return null
+        val info = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val capacity = width * height * 4
+        val data = ByteBuffer.allocateDirect(capacity)
+        if (Gosslens.nativeCaptureFrame(handle, session?.handle ?: 0L, data, capacity.toLong(), info) != 0) return null
+        val frame = ByteArray(capacity)
+        data.get(frame)
+        return frame
+    }
+
+    /** Renders the composited frame straight into a caller-supplied external
+     * texture ([nativeHandle], a platform texture object) instead of reading
+     * it back, zero-copy. False means the override is warming up (skip this
+     * frame and retry) or the path is unavailable on this backend. */
+    fun renderToLiveTexture(session: GossSession, nativeHandle: Long, width: Int, height: Int): Boolean =
+        Gosslens.nativeRenderToLiveTexture(handle, session.handle, nativeHandle, width, height) == 0
+
+    /** Releases the persistent wrap renderToLiveTexture keeps for one
+     * external texture, when a publish surface retires before the engine
+     * does. False for a handle with no live wrap. */
+    fun releaseLiveTexture(nativeHandle: Long): Boolean =
+        Gosslens.nativeReleaseLiveTexture(handle, nativeHandle) == 0
+
     // Idempotent like destroy() everywhere else - a second close() must
-    // not hand the native side an already-freed handle.
+    // not hand the native side an already-freed handle. Disarming the
+    // Cleaner runs the same disposer once; below API 33 there is no
+    // registration, so free the handle directly.
     override fun close() {
         if (closed) return
         closed = true
-        Gosslens.nativeEngineDestroy(handle)
+        if (cleanable != null) NativeCleaner.disarm(cleanable) else Gosslens.nativeEngineDestroy(handle)
     }
 }
 
@@ -537,15 +645,45 @@ class GossPoseResult {
     }
 }
 
-class GossSession private constructor(internal val handle: Long) : AutoCloseable {
+/** Per-preview runtime. Every call and the teardown dereference engine
+ * state, so the session holds its engine strongly: the engine cannot be
+ * collected while a session is live, which keeps nativeSessionDestroy
+ * ordered before nativeEngineDestroy on the garbage-collected path. */
+class GossSession private constructor(
+    private val engine: GossEngine,
+    internal val handle: Long,
+) : AutoCloseable {
     private var closed = false
+    /** Frees the native session if the wrapper is dropped without close();
+     * only registered on API 33+, where Cleaner exists. */
+    private val cleanable: Any? =
+        if (Build.VERSION.SDK_INT >= 33) NativeCleaner.register(this, SessionDisposer(handle)) else null
+
+    private class SessionDisposer(private val handle: Long) : Runnable {
+        override fun run() = Gosslens.nativeSessionDestroy(handle)
+    }
+
+    /** A per-session direct staging buffer the per-frame submit and readback
+     * paths reuse instead of allocating a fresh direct buffer each call -
+     * direct buffers are finalizer-reclaimed, the worst churn class on
+     * Android. Grown to the largest frame, dropped with the session. */
+    private var scratch: ByteBuffer = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder())
+
+    private fun stage(bytes: Int): ByteBuffer {
+        if (scratch.capacity() < bytes) {
+            scratch = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
+        }
+        scratch.clear()
+        scratch.limit(bytes)
+        return scratch
+    }
 
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
         fun create(engine: GossEngine, config: GossSessionConfig? = null): GossSession {
             val handle = Gosslens.nativeSessionCreate(engine.handle, config?.frameBudgetUs ?: -1)
             check(handle != 0L) { "session create failed" }
-            return GossSession(handle)
+            return GossSession(engine, handle)
         }
     }
 
@@ -565,6 +703,47 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         handle, y, yStride, uv, uvStride, width, height,
         Gosslens.flagsFor(rotationDegrees, mirrored),
         colorStandard, colorRange, timestampUs,
+    ) == 0
+
+    /** Zero-copy submission: up to three platform texture handles (an
+     * AHardwareBuffer-backed image or a GL texture) as opaque pointer-sized
+     * values in [planes]. The platform objects must outlive the next rendered
+     * frame; [pixelFormat] is a PIXEL_* value. Prefer this over the copy paths. */
+    fun submitFrame(
+        planes: LongArray,
+        width: Int,
+        height: Int,
+        rotationDegrees: Int,
+        mirrored: Boolean,
+        pixelFormat: Int = Gosslens.PIXEL_NV12,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
+        timestampUs: Long,
+    ): Boolean = Gosslens.nativeSubmitFrame(
+        handle,
+        if (planes.isNotEmpty()) planes[0] else 0L,
+        if (planes.size > 1) planes[1] else 0L,
+        if (planes.size > 2) planes[2] else 0L,
+        planes.size, width, height, pixelFormat,
+        Gosslens.flagsFor(rotationDegrees, mirrored),
+        colorStandard, colorRange, timestampUs,
+    ) == 0
+
+    /** The CPU-copy path for a single interleaved BGRA8/RGBA8 plane - a
+     * Bitmap or decoded video frame's own byte buffer, with no native GPU
+     * handle behind it. [pixelFormat] is PIXEL_BGRA8 or PIXEL_RGBA8. */
+    fun submitFrameRgbaCopy(
+        rgba: ByteBuffer,
+        stride: Int,
+        width: Int,
+        height: Int,
+        pixelFormat: Int = Gosslens.PIXEL_RGBA8,
+        rotationDegrees: Int = 0,
+        mirrored: Boolean = false,
+        timestampUs: Long = 0,
+    ): Boolean = Gosslens.nativeSubmitFrameRgbaCopy(
+        handle, rgba, stride, width, height, pixelFormat,
+        Gosslens.flagsFor(rotationDegrees, mirrored), timestampUs,
     ) == 0
 
     fun reportFrame(frameTimeUs: Int, thermal: Int): Int =
@@ -675,6 +854,26 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
     ) == 0
 
+    /** Stands the segmentation worker up from a raw model - a selfie or hair
+     * segmenter .tflite; [model] is a direct buffer of the model bytes. Once
+     * enabled, trackFrame feeds it the same frame it feeds the trackers. */
+    fun enableSegmentation(model: ByteBuffer, threads: Int): Boolean =
+        Gosslens.nativeEnableSegmentation(handle, model, model.remaining(), threads) == 0
+
+    fun disableSegmentation() = Gosslens.nativeDisableSegmentation(handle)
+
+    /** Feeds one frame's tracked face landmarks in directly (x, y in frame
+     * pixels, z in the same scale, three floats per point); an empty array
+     * clears them. The web-only path for the landmark-driven beauty effects;
+     * UNSUPPORTED off web, where trackFrame feeds the same effects instead. */
+    fun setFaceLandmarks(points: FloatArray): Boolean {
+        if (points.isEmpty()) return Gosslens.nativeSetFaceLandmarks(handle, stage(4), 0) == 0
+        val buf = stage(points.size * 4)
+        buf.asFloatBuffer().put(points)
+        buf.rewind()
+        return Gosslens.nativeSetFaceLandmarks(handle, buf, points.size / 3) == 0
+    }
+
     /** Stands the beauty chain up; [resourceDir] holds the effect engine's
      * shader and image assets on disk. */
     fun enableBeauty(resourceDir: String): Boolean {
@@ -700,6 +899,26 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     fun setLipstick(amount: Float) = setBeauty(4, amount)
     fun setBlush(amount: Float) = setBeauty(5, amount)
 
+    /** Web only; UNSUPPORTED on every other target, where whiten runs through
+     * the native beauty engine. Uploads one of whiten's four lookup textures
+     * (slot 0 gray, 1 origin, 2 skin, 3 custom); [rgba] is width by height
+     * RGBA8. Whiten stays inert until all four slots are loaded. */
+    fun setBeautyLut(slot: Int, rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSetBeautyLut(handle, slot, buf, width, height) == 0
+    }
+
+    /** Web only; UNSUPPORTED on every other target. Uploads lipstick's (4) or
+     * blush's (5) own source image; [rgba] is width by height RGBA8. */
+    fun setBeautyMakeupTexture(effect: Int, rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSetBeautyMakeupTexture(handle, effect, buf, width, height) == 0
+    }
+
     fun beautifyFrame(rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Boolean =
         Gosslens.nativeBeautifyFrame(handle, rgbaIn, rgbaOut, width, height) == 0
 
@@ -717,8 +936,8 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * fans out. An empty list clears the path back to the single internal
      * tracker; faces past FACE_MAX are ignored. */
     fun submitFaces(faces: List<GossFaceResult>): Boolean {
-        if (faces.isEmpty()) return Gosslens.nativeSubmitFaces(handle, ByteBuffer.allocateDirect(1), 0) == 0
-        val packed = ByteBuffer.allocateDirect(faces.size * Gosslens.FACE_RESULT_BYTES).order(ByteOrder.nativeOrder())
+        if (faces.isEmpty()) return Gosslens.nativeSubmitFaces(handle, stage(1), 0) == 0
+        val packed = stage(faces.size * Gosslens.FACE_RESULT_BYTES)
         for (f in faces) {
             f.buffer.rewind()
             packed.put(f.buffer)
@@ -742,8 +961,8 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * lens can instance effects across every body. An empty list clears the
      * path; bodies past BODY_MAX are ignored. */
     fun submitBodies(bodies: List<GossPoseResult>): Boolean {
-        if (bodies.isEmpty()) return Gosslens.nativeSubmitBodies(handle, ByteBuffer.allocateDirect(1), 0) == 0
-        val packed = ByteBuffer.allocateDirect(bodies.size * Gosslens.POSE_RESULT_BYTES).order(ByteOrder.nativeOrder())
+        if (bodies.isEmpty()) return Gosslens.nativeSubmitBodies(handle, stage(1), 0) == 0
+        val packed = stage(bodies.size * Gosslens.POSE_RESULT_BYTES)
         for (b in bodies) {
             b.buffer.rewind()
             packed.put(b.buffer)
@@ -757,8 +976,8 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * far metres that bound it. An empty array clears it. Kept for depth
      * occlusion against the rendered content. */
     fun submitDepth(depth: FloatArray, width: Int, height: Int, near: Float, far: Float): Boolean {
-        if (depth.isEmpty()) return Gosslens.nativeSubmitDepth(handle, ByteBuffer.allocateDirect(4), 0, 0, 0f, 0f) == 0
-        val buf = ByteBuffer.allocateDirect(depth.size * 4).order(ByteOrder.nativeOrder())
+        if (depth.isEmpty()) return Gosslens.nativeSubmitDepth(handle, stage(4), 0, 0, 0f, 0f) == 0
+        val buf = stage(depth.size * 4)
         buf.asFloatBuffer().put(depth)
         buf.rewind()
         return Gosslens.nativeSubmitDepth(handle, buf, width, height, near, far) == 0
@@ -768,7 +987,7 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * rgba is width by height RGBA8 pixels, row major. The mask reaches the
      * active lens the way a camera frame's would. */
     fun submitSegmentationImage(rgba: ByteArray, width: Int, height: Int): Boolean {
-        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        val buf = stage(rgba.size)
         buf.put(rgba)
         buf.rewind()
         return Gosslens.nativeSubmitSegmentationImage(handle, buf, width, height) == 0
@@ -1018,16 +1237,41 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     fun endARStroke(): Boolean = Gosslens.nativeArBrushEnd(handle) == 0
     fun undoARStroke(): Boolean = Gosslens.nativeArBrushUndo(handle) == 0
     fun clearARStrokes(): Boolean = Gosslens.nativeArBrushClear(handle) == 0
+    /// Feeds one screen touch event so the engine recognizes the gestures a
+    /// lens reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled;
+    /// pointerId names the finger; x and y are normalized 0..1 over the frame.
+    fun touch(phase: Int, pointerId: Int = 0, x: Float, y: Float): Boolean =
+        Gosslens.nativeTouch(handle, phase, pointerId, x, y) == 0
+
+    /// A device haptic a haptic trigger asked for: the style index (0 light..7
+    /// failure) and a 0..1 intensity hint.
+    data class Haptic(val style: Int, val intensity: Float)
+
+    private val hapticBuffer: ByteBuffer = ByteBuffer.allocateDirect(2 * 4).order(ByteOrder.nativeOrder())
+
+    /// Drains one haptic queued this tick, or null when none remain. Call in a
+    /// loop after tickLens and buzz the device for each.
+    fun pullHaptic(): Haptic? {
+        if (Gosslens.nativePullHaptic(handle, hapticBuffer) != 0) return null
+        hapticBuffer.rewind()
+        val fb = hapticBuffer.asFloatBuffer()
+        return Haptic(fb.get(0).toInt(), fb.get(1))
+    }
     fun grab(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeGrab(handle, x, y, z) == 0
     fun release(): Boolean = Gosslens.nativeRelease(handle) == 0
     fun addCollider(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeAddCollider(handle, x, y, z) == 0
     fun eraseCollider(x: Float, y: Float, z: Float, radius: Float): Boolean = Gosslens.nativeEraseCollider(handle, x, y, z, radius) == 0
 
+    /** Releases one solver hair by the id the physics world assigned it,
+     * pairing the acquire a hair lens performs at activation, so a hair
+     * can retire mid-session without tearing the physics world down. */
+    fun physicsHairRemove(hairId: Int): Boolean = Gosslens.nativePhysicsHairRemove(handle, hairId) == 0
+
     /** Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the renderer. */
     fun brushVertices(): FloatArray {
         val count = Gosslens.nativeBrushVertexCount(handle)
         if (count <= 0) return FloatArray(0)
-        val buffer = ByteBuffer.allocateDirect(count * 4).order(ByteOrder.nativeOrder())
+        val buffer = stage(count * 4)
         val written = Gosslens.nativeBrushVertices(handle, buffer, count)
         if (written <= 0) return FloatArray(0)
         val out = FloatArray(written)
@@ -1053,6 +1297,6 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
     override fun close() {
         if (closed) return
         closed = true
-        Gosslens.nativeSessionDestroy(handle)
+        if (cleanable != null) NativeCleaner.disarm(cleanable) else Gosslens.nativeSessionDestroy(handle)
     }
 }

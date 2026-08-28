@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.war-paint",
+  "version": "1.0.0",
+  "display_name": "War Paint",
+  "engine_compat": ">=0.10",
+  "capabilities": ["face", "segmentation"],
+  "parameters": [],
+  "nodes": [
+    {"id": "war_paint", "type": "paint.face", "inputs": {"frame": "camera"}, "params": {}, "paint": {"mask": "face_skin", "opacity": 0.85, "blend": "normal"}}
+  ],
+  "triggers": []
+}

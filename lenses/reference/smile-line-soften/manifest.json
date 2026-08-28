@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.smile-line-soften",
+  "version": "1.0.0",
+  "display_name": "Smile Line Soften",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "soften", "type": "smooth.pass", "inputs": {"frame": "camera"}, "params": {},
+     "smooth": {"amount": 0.9, "mask": "nasolabial"}}
+  ],
+  "triggers": []
+}

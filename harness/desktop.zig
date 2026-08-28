@@ -9,6 +9,7 @@ const graph = @import("graph");
 const math = @import("math");
 const gltf = @import("gltf");
 const render = @import("render");
+const image = @import("image");
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_NONE", "1");
@@ -122,9 +123,20 @@ fn buildTexturedQuadGlb(gpa: std.mem.Allocator) ![]u8 {
 }
 
 const Callbacks = struct {
+    // Trace forwards through the engine-owned C emitter (callbacks.c),
+    // where va_list formatting is portable; install() fills it in before
+    // the interface is handed to bgfx, so the leak report and driver
+    // warnings land on stderr instead of being discarded.
+    extern fn goss_bgfx_callbacks() [*c]c.bgfx_callback_interface_t;
+
+    fn install(init: *c.bgfx_init_t) void {
+        vtbl.trace_vargs = goss_bgfx_callbacks().*.vtbl.*.trace_vargs;
+        init.callback = &iface;
+    }
+
     var vtbl: c.bgfx_callback_vtbl_t = .{
         .fatal = fatal,
-        .trace_vargs = traceVargs,
+        .trace_vargs = null,
         .profiler_begin = profilerBegin,
         .profiler_begin_literal = profilerBeginLiteral,
         .profiler_end = profilerEnd,
@@ -142,7 +154,6 @@ const Callbacks = struct {
         std.debug.print("harness: bgfx fatal {d} at {s}:{d}: {s}\n", .{ code, file, line, message });
         std.process.abort();
     }
-    fn traceVargs(_: [*c]c.bgfx_callback_interface_t, _: [*c]const u8, _: u16, _: [*c]const u8, _: [*c]u8) callconv(.c) void {}
     fn profilerBegin(_: [*c]c.bgfx_callback_interface_t, _: [*c]const u8, _: u32, _: [*c]const u8, _: u16) callconv(.c) void {}
     fn profilerBeginLiteral(_: [*c]c.bgfx_callback_interface_t, _: [*c]const u8, _: u32, _: [*c]const u8, _: u16) callconv(.c) void {}
     fn profilerEnd(_: [*c]c.bgfx_callback_interface_t) callconv(.c) void {}
@@ -190,17 +201,9 @@ fn writePpm(path: []const u8, w: u32, h: u32, pitch: u32, bgra: [*]const u8, yfl
     const body = try gpa.alloc(u8, 64 + w * h * 3);
     defer gpa.free(body);
     const header = try std.fmt.bufPrint(body[0..64], "P6\n{d} {d}\n255\n", .{ w, h });
-    var len: usize = header.len;
-    for (0..h) |row_index| {
-        const source_row = if (yflip) h - 1 - row_index else row_index;
-        const row = bgra[source_row * pitch ..][0 .. w * 4];
-        for (0..w) |x| {
-            body[len] = row[x * 4 + 2];
-            body[len + 1] = row[x * 4 + 1];
-            body[len + 2] = row[x * 4];
-            len += 3;
-        }
-    }
+    // BGRA to tightly packed 24-bit RGB, flipped to match the screenshot.
+    try image.bgraToRgb(bgra, pitch, body[header.len..].ptr, w * 3, w, h, yflip);
+    const len = header.len + w * h * 3;
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = path, .data = body[0..len] });
 }
 
@@ -257,7 +260,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "gosslens harness", null, null) orelse return error.WindowCreate;
+    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "preview", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
 
     var init: c.bgfx_init_t = undefined;
@@ -267,7 +270,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     init.resolution.height = height;
     init.resolution.reset = c.BGFX_RESET_VSYNC;
     init.platformData.nwh = glfwGetCocoaWindow(window);
-    init.callback = &Callbacks.iface;
+    Callbacks.install(&init);
     if (!c.bgfx_init(&init)) return error.BgfxInit;
     defer c.bgfx_shutdown();
     std.debug.print("harness: renderer {s}\n", .{c.bgfx_get_renderer_name(c.bgfx_get_renderer_type())});
@@ -285,6 +288,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     }
     const vbh = c.bgfx_create_vertex_buffer(c.bgfx_copy(&vertex_data, @sizeOf(@TypeOf(vertex_data))), &layout, c.BGFX_BUFFER_NONE);
     const ibh = c.bgfx_create_index_buffer(c.bgfx_copy(&indices16, @sizeOf(@TypeOf(indices16))), c.BGFX_BUFFER_NONE);
+    defer c.bgfx_destroy_vertex_buffer(vbh);
+    defer c.bgfx_destroy_index_buffer(ibh);
     const texture = c.bgfx_create_texture_2d(
         @intCast(tex_w),
         @intCast(tex_h),
@@ -296,6 +301,8 @@ pub fn main(init_args: std.process.Init) !u8 {
         0,
     );
     const sampler_uniform = c.bgfx_create_uniform("s_texColor", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);
+    defer c.bgfx_destroy_texture(texture);
+    defer c.bgfx_destroy_uniform(sampler_uniform);
 
     const vs_blob = blobs.vs_preview_metal;
     const fs_blob = blobs.fs_preview_rgba_metal;
@@ -303,6 +310,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     const fsh = c.bgfx_create_shader(c.bgfx_copy(fs_blob.ptr, @intCast(fs_blob.len)));
     const program = c.bgfx_create_program(vsh, fsh, true);
     if (program.idx == std.math.maxInt(u16)) return error.ProgramCreate;
+    // Destroys vsh and fsh too, created with destroyShaders set above.
+    defer c.bgfx_destroy_program(program);
 
     var scene: Scene = .{
         .program = program,
@@ -363,13 +372,12 @@ pub fn main(init_args: std.process.Init) !u8 {
     // image already decoded above rather than a second asset, since
     // the point here is proving createStaticTexture itself, not the
     // decode path adapters/image already has its own tests for.
-    // Not explicitly destroyed, matching the checker texture above -
-    // bgfx_shutdown reclaims both when the harness exits.
     const static_texture_proof = render.Renderer.createStaticTexture(@intCast(tex_w), @intCast(tex_h), decoded[0 .. @as(usize, tex_w) * tex_h * 4]);
     if (static_texture_proof.idx == std.math.maxInt(u16)) {
         std.debug.print("harness: FAIL static texture invalid\n", .{});
         return 1;
     }
+    defer render.c.bgfx_destroy_texture(static_texture_proof);
     std.debug.print("harness: PROOF static texture created from decoded bytes (idx {d})\n", .{static_texture_proof.idx});
     std.debug.print("harness: PROOF shader-pass program created from packaged bytecode (idx {d})\n", .{shader_program.idx});
 
@@ -390,8 +398,11 @@ pub fn main(init_args: std.process.Init) !u8 {
     // runs), not whether the strip-LUT arithmetic itself is exact.
     const magenta = [_]u8{ 255, 0, 255, 255 } ** 4;
     const lut_texture = render.Renderer.createStaticTexture(2, 2, &magenta);
+    defer render.c.bgfx_destroy_texture(lut_texture);
     const lut_sampler_uniform = c.bgfx_create_uniform("s_texLut", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);
+    defer c.bgfx_destroy_uniform(lut_sampler_uniform);
     const lut_program = try render.Renderer.loadLutProgram();
+    defer render.Renderer.destroyProgram(lut_program);
     const lut_view: c.bgfx_view_id_t = 7;
     render.Renderer.setViewTarget(lut_view, null, @intCast(width), @intCast(height));
 
@@ -404,11 +415,16 @@ pub fn main(init_args: std.process.Init) !u8 {
     // ignored since mask=0 everywhere).
     const cyan = [_]u8{ 0, 255, 255, 255 } ** 4;
     const blend_background_texture = render.Renderer.createStaticTexture(2, 2, &cyan);
+    defer render.c.bgfx_destroy_texture(blend_background_texture);
     const zero_mask = [_]u8{0} ** 4;
     const blend_mask_texture = render.Renderer.createMaskTexture(2, 2, &zero_mask);
+    defer render.c.bgfx_destroy_texture(blend_mask_texture);
     const blend_background_uniform = c.bgfx_create_uniform("s_texBackground", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);
+    defer c.bgfx_destroy_uniform(blend_background_uniform);
     const blend_mask_uniform = c.bgfx_create_uniform("s_texMask", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);
+    defer c.bgfx_destroy_uniform(blend_mask_uniform);
     const blend_program = try render.Renderer.loadBlendProgram();
+    defer render.Renderer.destroyProgram(blend_program);
     const blend_view: c.bgfx_view_id_t = 8;
     render.Renderer.setViewTarget(blend_view, null, @intCast(width), @intCast(height));
 

@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.false-lashes",
+  "version": "1.0.0",
+  "display_name": "False Lashes",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "lashes", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [0.02, 0.02, 0.03], "opacity": 0.95, "mask": "lash_line", "blend": "multiply"}}
+  ],
+  "triggers": []
+}

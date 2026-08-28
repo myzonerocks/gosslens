@@ -132,8 +132,12 @@ pub const Graph = struct {
     }
 
     /// Connects an output port to an input port. Kinds must match and an
-    /// input accepts exactly one producer.
+    /// input accepts exactly one producer. Both endpoints must be live:
+    /// an edge onto a tombstoned slot would survive its reuse and rewire
+    /// whatever addNode puts there next (asserted like removeNode).
     pub fn connect(g: *Graph, from: NodeIndex, from_port: u8, to: NodeIndex, to_port: u8) EditError!void {
+        std.debug.assert(g.nodes.items[from].alive);
+        std.debug.assert(g.nodes.items[to].alive);
         const src = &g.nodes.items[from];
         const dst = &g.nodes.items[to];
         if (from_port >= src.output_count or to_port >= dst.input_count) return error.PortOutOfRange;

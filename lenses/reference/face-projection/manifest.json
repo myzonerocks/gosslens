@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.face-projection",
+  "version": "1.0.0",
+  "display_name": "Face Projection",
+  "engine_compat": ">=0.10",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "face_project", "type": "paint.face", "inputs": {"frame": "camera"}, "params": {}, "paint": {"opacity": 1.0}}
+  ],
+  "triggers": []
+}

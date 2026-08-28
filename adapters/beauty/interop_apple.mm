@@ -1,3 +1,7 @@
+// Compiled -fno-exceptions (build.zig buildGpupixelLib), so no unwind
+// crosses the C boundary; the CoreVideo, IOSurface, and EGL calls here
+// all report status instead of raising.
+//
 // The GPU-side bridge from the beauty chain's own output texture into an
 // IOSurface-backed CVPixelBuffer bgfx's Metal backend can read zero-copy
 // from that point on (CVMetalTextureCache, the same primitive capture
@@ -21,7 +25,10 @@
 // CVOpenGLESTextureCache has no real EAGLContext to bind to anymore.
 
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <new>
+#include <vector>
 
 #include <TargetConditionals.h>
 
@@ -224,14 +231,17 @@ struct AppleInterop {
       pixel_buffer = nullptr;
     }
 
-    NSDictionary* attributes = @{
-      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
-      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
-    };
-    CVReturn buffer_status = CVPixelBufferCreate(
-        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
-        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    CVReturn buffer_status;
+    @autoreleasepool {
+      NSDictionary* attributes = @{
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
+        (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+      };
+      buffer_status = CVPixelBufferCreate(
+          kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+          (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    }
     if (buffer_status != kCVReturnSuccess) return false;
 
     CVReturn texture_status = CVOpenGLTextureCacheCreateTextureFromImage(
@@ -338,13 +348,16 @@ struct AppleInterop {
     auto* ctx = gpupixel::GPUPixelContext::GetInstance();
     EGLDisplay display = ctx->GetEglDisplay();
 
-    NSDictionary* attributes = @{
-      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
-    };
-    CVReturn buffer_status = CVPixelBufferCreate(
-        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
-        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    CVReturn buffer_status;
+    @autoreleasepool {
+      NSDictionary* attributes = @{
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+      };
+      buffer_status = CVPixelBufferCreate(
+          kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+          (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    }
     if (buffer_status != kCVReturnSuccess) return false;
 
     IOSurfaceRef io_surface = CVPixelBufferGetIOSurface(pixel_buffer);
@@ -467,14 +480,17 @@ struct AppleInputSurface {
     if (metal_texture) { CFRelease(metal_texture); metal_texture = nullptr; }
     if (pixel_buffer) { CFRelease(pixel_buffer); pixel_buffer = nullptr; }
 
-    NSDictionary* attributes = @{
-      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
-      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
-    };
-    CVReturn buffer_status = CVPixelBufferCreate(
-        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
-        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    CVReturn buffer_status;
+    @autoreleasepool {
+      NSDictionary* attributes = @{
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
+        (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+      };
+      buffer_status = CVPixelBufferCreate(
+          kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+          (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    }
     if (buffer_status != kCVReturnSuccess) return false;
 
     if (metal_cache == nullptr) {
@@ -592,18 +608,29 @@ struct AppleInputSurface {
     if (device == nil) return false;
 
     if (HasGlImport()) {
-      gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { ReleaseGLImport(); });
+      bool released = false;
+      gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+        released = true;
+        ReleaseGLImport();
+      });
+      // Backgrounded: the old import stays valid, so keep it and let the
+      // caller retry the resize when active rather than orphan the surface
+      // or leave a stale texture EnsureGLImport would later trust.
+      if (!released) return false;
     }
     if (metal_texture) { CFRelease(metal_texture); metal_texture = nullptr; }
     if (pixel_buffer) { CFRelease(pixel_buffer); pixel_buffer = nullptr; }
 
-    NSDictionary* attributes = @{
-      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
-    };
-    CVReturn buffer_status = CVPixelBufferCreate(
-        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
-        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    CVReturn buffer_status;
+    @autoreleasepool {
+      NSDictionary* attributes = @{
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+      };
+      buffer_status = CVPixelBufferCreate(
+          kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+          (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    }
     if (buffer_status != kCVReturnSuccess) return false;
 
     if (metal_cache == nullptr) {
@@ -687,21 +714,60 @@ struct AppleInputSurface {
 
 #endif
 
+// Runs task on gpupixel's GL thread and reports whether it actually ran.
+// SyncRunWithContext silently skips while the app is backgrounded, so a
+// teardown that must not touch a context no thread has current here checks
+// the result and retries later instead of forcing the delete onto nothing.
+template <typename F>
+bool RunOnGlThread(F&& task) {
+  bool ran = false;
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+    ran = true;
+    task();
+  });
+  return ran;
+}
+
+// Teardowns skipped because the app was backgrounded park here rather than
+// leak; each entry releases its GL objects on a live context and frees its
+// host, and stays parked while the app is still inactive so nothing tears
+// down on a context that is not current.
+std::mutex g_deferred_teardown_mutex;
+std::vector<std::function<bool()>> g_deferred_teardown;
+
+void DrainDeferredTeardown() {
+  std::lock_guard<std::mutex> lock(g_deferred_teardown_mutex);
+  size_t kept = 0;
+  for (auto& entry : g_deferred_teardown) {
+    if (!entry()) g_deferred_teardown[kept++] = std::move(entry);
+  }
+  g_deferred_teardown.resize(kept);
+}
+
 }  // namespace
 
 extern "C" {
 
 void* goss_beauty_interop_create(void) {
+  DrainDeferredTeardown();
   return new (std::nothrow) AppleInterop();
 }
 
 void goss_beauty_interop_destroy(void* handle) {
   auto* interop = static_cast<AppleInterop*>(handle);
   if (interop == nullptr) return;
-  // GL objects die on gpupixel's own GL thread - deleted anywhere else
-  // they silently leak; the CF objects release in the destructor.
-  if (interop->HasGl()) {
-    gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { interop->ReleaseGl(); });
+  DrainDeferredTeardown();
+  // GL objects die on gpupixel's own GL thread. If the dispatch is skipped
+  // because the app is backgrounded, park the object and retry when active
+  // rather than strand its EGL surface or delete it on a dead context.
+  if (interop->HasGl() && !RunOnGlThread([&] { interop->ReleaseGl(); })) {
+    std::lock_guard<std::mutex> lock(g_deferred_teardown_mutex);
+    g_deferred_teardown.push_back([interop]() -> bool {
+      if (!RunOnGlThread([&] { interop->ReleaseGl(); })) return false;
+      delete interop;
+      return true;
+    });
+    return;
   }
   delete interop;
 }
@@ -714,37 +780,43 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
   if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
   auto* interop = static_cast<AppleInterop*>(handle);
 
-  // ran tracks whether the lambda actually executed - SyncRunWithContext
-  // silently skips it while the app isn't foreground-active, and ok alone
-  // defaults to true, which would otherwise read as a successful composite
-  // of a pixel_buffer that was never touched this call.
-  bool ran = false;
-  bool ok = true;
-  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
-    ran = true;
-    if (!interop->EnsureSurface(width, height)) {
-      ok = false;
+  // ran tracks whether the lambda actually executed - a skipped dispatch
+  // must not read as a real composite, since ok defaults true. The call
+  // state packs into one struct so the task captures a single pointer that
+  // fits std::function's inline storage, no per-frame heap allocation.
+  struct CompositeCall {
+    AppleInterop* interop;
+    uint32_t source_texture;
+    int32_t width;
+    int32_t height;
+    bool ran;
+    bool ok;
+  } call{interop, source_texture, width, height, false, true};
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&call] {
+    call.ran = true;
+    if (!call.interop->EnsureSurface(call.width, call.height)) {
+      call.ok = false;
       return;
     }
-    if (interop->blit_program == 0) {
-      interop->blit_program = LinkProgram(kBlitVertexShader, kBlitFragmentShader);
-      if (interop->blit_program == 0) {
-        ok = false;
+    if (call.interop->blit_program == 0) {
+      call.interop->blit_program = LinkProgram(kBlitVertexShader, kBlitFragmentShader);
+      if (call.interop->blit_program == 0) {
+        call.ok = false;
         return;
       }
     }
-    if (interop->fbo == 0) {
-      glGenFramebuffers(1, &interop->fbo);
+    if (call.interop->fbo == 0) {
+      glGenFramebuffers(1, &call.interop->fbo);
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, interop->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, call.interop->fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           interop->Target(), interop->Name(), 0);
+                           call.interop->Target(), call.interop->Name(), 0);
 
-    ok = DrawBlit(interop->fbo, interop->blit_program, source_texture, width, height);
+    call.ok = DrawBlit(call.interop->fbo, call.interop->blit_program, call.source_texture, call.width, call.height);
   });
 
-  return (ran && ok) ? interop->pixel_buffer : nullptr;
+  return (call.ran && call.ok) ? interop->pixel_buffer : nullptr;
 }
 
 // bgfx's Metal-side view of what goss_beauty_interop_composite just
@@ -758,14 +830,25 @@ void* goss_beauty_interop_native_texture(void* handle, void* device) {
 }
 
 void* goss_beauty_input_create(void) {
+  DrainDeferredTeardown();
   return new (std::nothrow) AppleInputSurface();
 }
 
 void goss_beauty_input_destroy(void* handle) {
   auto* input = static_cast<AppleInputSurface*>(handle);
   if (input == nullptr) return;
-  if (input->HasGlImport()) {
-    gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { input->ReleaseGLImport(); });
+  DrainDeferredTeardown();
+  // Same backgrounded-skip handling as goss_beauty_interop_destroy: a
+  // skipped release parks the object for a live retry so the EGL surface
+  // is never stranded nor torn on a context no thread has current.
+  if (input->HasGlImport() && !RunOnGlThread([&] { input->ReleaseGLImport(); })) {
+    std::lock_guard<std::mutex> lock(g_deferred_teardown_mutex);
+    g_deferred_teardown.push_back([input]() -> bool {
+      if (!RunOnGlThread([&] { input->ReleaseGLImport(); })) return false;
+      delete input;
+      return true;
+    });
+    return;
   }
   delete input;
 }
@@ -797,20 +880,28 @@ int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
 
   // Same ran tracking as goss_beauty_interop_composite: a dispatch
   // skipped while the app isn't foreground-active must not report a
-  // frame the chain never processed as success.
-  bool ran = false;
-  bool ok = true;
-  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
-    ran = true;
-    if (!input->EnsureGLImport()) {
-      ok = false;
+  // frame the chain never processed as success. The state packs into one
+  // struct so the task captures a single pointer, no per-frame heap.
+  struct InputCall {
+    AppleInputSurface* input;
+    void* beauty_handle;
+    int32_t width;
+    int32_t height;
+    const float* landmarks106;
+    bool ran;
+    bool ok;
+  } call{input, beauty_handle, width, height, landmarks106, false, true};
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&call] {
+    call.ran = true;
+    if (!call.input->EnsureGLImport()) {
+      call.ok = false;
       return;
     }
-    ok = goss_beauty_process_external_texture(
-             beauty_handle, input->GLName(), input->SamplerKind(),
-             width, height, landmarks106) == 0;
+    call.ok = goss_beauty_process_external_texture(
+                  call.beauty_handle, call.input->GLName(), call.input->SamplerKind(),
+                  call.width, call.height, call.landmarks106) == 0;
   });
-  return (ran && ok) ? 0 : 1;
+  return (call.ran && call.ok) ? 0 : 1;
 }
 
 }  // extern "C"

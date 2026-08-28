@@ -30,4 +30,23 @@ pub const Script = struct {
         _ = param_values;
         return error.ScriptUnsupported;
     }
+
+    pub fn event(
+        self: *Script,
+        handler: [*:0]const u8,
+        signal_names: []const [*:0]const u8,
+        signal_values: []const f64,
+        param_names: []const [*:0]const u8,
+        param_values: []f64,
+        arg: ?[]const u8,
+    ) !void {
+        _ = self;
+        _ = handler;
+        _ = signal_names;
+        _ = signal_values;
+        _ = param_names;
+        _ = param_values;
+        _ = arg;
+        return error.ScriptUnsupported;
+    }
 };

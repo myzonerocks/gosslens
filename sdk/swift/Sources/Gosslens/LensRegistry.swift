@@ -1,6 +1,14 @@
 import CGosslens
 import Foundation
 
+/// A device haptic a haptic trigger asked for. style is the style index (0
+/// light, 1 medium, 2 heavy, 3 soft, 4 rigid, 5 success, 6 warning, 7 failure)
+/// and intensity a 0..1 hint the platform may honor.
+public struct Haptic {
+    public let style: UInt32
+    public let intensity: Float
+}
+
 /// The live signals goss_session_tick_lens evaluates a lens's compiled
 /// triggers against. hasFace false means every face-driven signal reads
 /// as false regardless of what blendshapes holds.
@@ -305,6 +313,24 @@ extension GossSession {
         return out
     }
 
+    /// The float count the finished brush ribbon needs, so a caller can size a
+    /// buffer once for the allocation-free brushVertices(into:).
+    public func brushVertexCount() throws -> Int {
+        var count = 0
+        try checked(goss_session_brush_vertices(handle, nil, 0, &count))
+        return count
+    }
+
+    /// The allocation-free sibling of brushVertices: fills a caller-owned
+    /// buffer with the ribbon (x, y, r, g, b, a per vertex) and returns the
+    /// float count written, so a renderer reuses one buffer every frame.
+    @discardableResult
+    public func brushVertices(into buffer: UnsafeMutableBufferPointer<Float>) throws -> Int {
+        var written = 0
+        try checked(goss_session_brush_vertices(handle, buffer.baseAddress, buffer.count, &written))
+        return written
+    }
+
     /// The world-anchored brush. Points are pushed in the world frame the
     /// platform world tracking reports; the engine projects and draws them, so a
     /// stroke stays fixed in the scene.
@@ -318,8 +344,26 @@ extension GossSession {
     public func endARStroke() throws { try checked(goss_session_ar_brush_end(handle)) }
     public func undoARStroke() throws { try checked(goss_session_ar_brush_undo(handle)) }
     public func clearARStrokes() throws { try checked(goss_session_ar_brush_clear(handle)) }
+    /// Feeds one screen touch event so the engine recognizes the gestures a
+    /// lens reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled;
+    /// pointerId names the finger; x and y are normalized 0..1 over the frame.
+    public func touch(phase: UInt32, pointerId: UInt32 = 0, x: Float, y: Float) throws {
+        try checked(goss_session_touch(handle, phase, pointerId, x, y))
+    }
+    /// Drains one haptic a haptic trigger queued this tick, or nil when none
+    /// remain. Call in a loop after tickLens and buzz the device for each.
+    public func pullHaptic() -> Haptic? {
+        var style: UInt32 = 0
+        var intensity: Float = 0
+        return goss_session_pull_haptic(handle, &style, &intensity) == GOSS_OK ? Haptic(style: style, intensity: intensity) : nil
+    }
     public func grab(x: Float, y: Float, z: Float) throws { try checked(goss_session_grab(handle, x, y, z)) }
     public func release() throws { try checked(goss_session_release(handle)) }
     public func addCollider(x: Float, y: Float, z: Float) throws { try checked(goss_session_add_collider(handle, x, y, z)) }
     public func eraseCollider(x: Float, y: Float, z: Float, radius: Float) throws { try checked(goss_session_erase_collider(handle, x, y, z, radius)) }
+
+    /// Releases one solver hair by the id the physics world assigned it,
+    /// pairing the acquire a hair lens performs at activation, so a hair
+    /// can retire mid-session without tearing the physics world down.
+    public func physicsHairRemove(hairId: UInt32) throws { try checked(goss_physics_hair_remove(handle, hairId)) }
 }

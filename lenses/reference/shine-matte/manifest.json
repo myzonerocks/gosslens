@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.shine-matte",
+  "version": "1.0.0",
+  "display_name": "Shine Matte",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "matte", "type": "retouch.pass", "inputs": {"frame": "camera"}, "params": {},
+     "retouch": {"mode": "shine", "amount": 0.9, "mask": "t_zone"}}
+  ],
+  "triggers": []
+}

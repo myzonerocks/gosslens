@@ -68,7 +68,7 @@ in [docs/PARITY.md](docs/PARITY.md) in the same change.
 ## Adding a feature
 
 A capability is not one commit in one place. It reaches the core, the C ABI, the
-baseline, all three SDKs, and a proof, or it is unfinished.
+baseline, the SDKs, and a proof, or it is unfinished.
 
 1. Build it in the boundary that already owns it (see
    [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).

@@ -102,6 +102,46 @@ const verbose_comment_markers = [_][]const u8{
 // a sentence would do), not a hypothetical.
 const max_comment_block_lines: usize = 4;
 
+// W7: a signature crossing C carries at most four scalar float
+// parameters. A [3]/[4] float group crosses by pointer, since spilling
+// past the argument registers is the x86 marshalling bug that corrupts
+// the group. The fifth consecutive scalar float is the rejection line.
+const max_scalar_float_params: usize = 4;
+
+// The frozen public ABI ops that already shipped loose float spreads.
+// Conformance pins their lowering; they migrate to by-pointer groups at
+// the next ABI major, when the frozen surface may change shape.
+const frozen_float_spread = [_][]const u8{
+    "goss_session_brush_set_style",
+    "goss_session_ar_brush_set_style",
+    "goss_session_set_source_composite",
+    "goss_session_grab",
+    "goss_session_ar_brush_point",
+    "goss_session_add_collider",
+    "goss_session_erase_collider",
+};
+
+// W10: a reference-taking platform handle is acquired, released on
+// replace, and released at destroy, all on an owning instance. A
+// file-scope var holding one aliases every instance and outlives its
+// paired release, so it is banned outright.
+const platform_reference_tokens = [_][]const u8{
+    "ANativeWindow",
+    "AMediaCodec",
+    "AMediaMuxer",
+    "CVPixelBuffer",
+    "CVMetalTexture",
+    "IOSurface",
+};
+
+// W10, the paired form: a reference-taking acquire and its release live
+// in the same file, so a file that acquires without ever naming the
+// release cannot be pairing them at all.
+const platform_acquire_release = [_]struct { acquire: []const u8, release: []const u8 }{
+    .{ .acquire = "ANativeWindow_fromSurface", .release = "ANativeWindow_release" },
+    .{ .acquire = "AMediaCodec_createInputSurface", .release = "ANativeWindow_release" },
+};
+
 // A PR body is a short paragraph, not a report: what changed and why,
 // nothing about how the change was proven out. Modeled on how ghostty's
 // own PRs read - three sentences, no headers, no checklist.
@@ -226,8 +266,11 @@ const Gate = struct {
     fn checkFileProvenance(g: *Gate, paths: []const []const u8) !void {
         for (paths) |path| {
             const stat = Io.Dir.cwd().statFile(g.io, path, .{}) catch continue;
-            if (stat.size > max_file_scan_bytes) continue;
-            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            // Scan every byte the inbound cap admits: a file between the
+            // old 1MB read limit and the 4MB inbound cap used to slip
+            // provenance entirely while still entering history.
+            if (stat.size > max_staged_file_bytes) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_staged_file_bytes)) catch continue;
             if (looksBinary(content)) continue;
             if (findBannedToken(content)) |tok| {
                 try g.flag("provenance: '{s}' contains banned token '{s}'", .{ path, tok });
@@ -364,7 +407,479 @@ const Gate = struct {
             try g.checkClauseDashes(body, ctx);
         }
     }
+
+    // The exception stance is mechanical: every C++ TU build.zig compiles
+    // either carries -fno-exceptions or its file shows a guard on every
+    // extern "C" entry. Emcc-side compiles carry the flag in their own
+    // argument arrays and have no unguarded extern "C" sources.
+    fn checkBoundaryStance(g: *Gate) !void {
+        const text = Io.Dir.cwd().readFileAlloc(g.io, "build.zig", g.arena, .limited(1 << 22)) catch {
+            try g.flag("boundary: build.zig unreadable, cannot check the exception stance", .{});
+            return;
+        };
+        const scopes = try splitFnScopes(g.arena, text);
+        for (scopes) |scope| {
+            // A compile-forwarding helper takes its flags as a parameter;
+            // its stance is judged where it is called, not here.
+            const signature = scope.body[0 .. std.mem.indexOfScalar(u8, scope.body, '\n') orelse scope.body.len];
+            if (std.mem.indexOf(u8, signature, ", flags: []const []const u8") != null) continue;
+            var scope_dynamic_checked = false;
+            var search: usize = 0;
+            while (std.mem.indexOfPos(u8, scope.body, search, "addCSourceFile(")) |at| {
+                const open = at + "addCSourceFile".len;
+                const args = balancedParens(scope.body, open) orelse {
+                    search = at + 1;
+                    continue;
+                };
+                search = open + 1 + args.len;
+                const no_exceptions = try g.siteHasNoExceptions(scopes, scope, args);
+                const literals = try collectStringLiterals(g.arena, args);
+                var found_cxx = false;
+                var found_other_source = false;
+                for (literals) |lit| {
+                    if (std.mem.indexOf(u8, lit, "{s}") != null) continue;
+                    if (isExtensionToken(lit)) continue;
+                    if (isCxxSourcePath(lit)) {
+                        found_cxx = true;
+                        const path = try g.resolveCompilePath(scope, lit);
+                        if (no_exceptions) {
+                            try g.verifyNoExceptionsTu(path);
+                        } else {
+                            try g.verifyGuardedTu(path);
+                        }
+                    } else if (std.mem.lastIndexOfScalar(u8, lit, '.') != null and std.mem.indexOfScalar(u8, lit, ' ') == null) {
+                        found_other_source = true;
+                    }
+                }
+                if (!found_cxx and !found_other_source and !no_exceptions and !scope_dynamic_checked) {
+                    scope_dynamic_checked = true;
+                    try g.verifyScopeDynamic(scope);
+                }
+            }
+        }
+    }
+
+    // Stance for one addCSourceFile call: an inline flags literal decides
+    // alone; a flags-building helper the call names decides next; the
+    // enclosing function's own unconditional flag decides last.
+    fn siteHasNoExceptions(g: *Gate, scopes: []const FnScope, scope: FnScope, args: []const u8) !bool {
+        if (std.mem.indexOf(u8, args, "-fno-exceptions") != null) return true;
+        if (std.mem.indexOf(u8, args, ".flags = &.{") != null) return false;
+        for (scopes) |s| {
+            if (s.name.len == 0) continue;
+            const needle = try std.fmt.allocPrint(g.arena, "{s}(", .{s.name});
+            if (std.mem.indexOf(u8, args, needle) != null and hasUnconditionalNoExceptions(s.body)) return true;
+        }
+        return hasUnconditionalNoExceptions(scope.body);
+    }
+
+    // Relative source names sit next to a root the same scope names in a
+    // b.fmt pattern or include path; the joined path that exists wins.
+    fn resolveCompilePath(g: *Gate, scope: FnScope, lit: []const u8) ![]const u8 {
+        if (Io.Dir.cwd().statFile(g.io, lit, .{})) |_| return lit else |_| {}
+        const roots = try collectStringLiterals(g.arena, scope.body);
+        for (roots) |root_lit| {
+            if (!std.mem.startsWith(u8, root_lit, ".vendor")) continue;
+            var root = root_lit;
+            if (std.mem.indexOf(u8, root, "{s}")) |cut| root = root[0..cut];
+            root = std.mem.trimEnd(u8, root, "/");
+            const joined = try std.fmt.allocPrint(g.arena, "{s}/{s}", .{ root, lit });
+            if (Io.Dir.cwd().statFile(g.io, joined, .{})) |_| return joined else |_| {}
+        }
+        return lit;
+    }
+
+    // A dynamic compile loop without the flag: every C++ file the scope
+    // names or globs must pass the per-file guard grep. A loop over only
+    // C sources is out of scope and passes.
+    fn verifyScopeDynamic(g: *Gate, scope: FnScope) !void {
+        var found_cxx = false;
+        var found_c = false;
+        const scope_lits = try collectStringLiterals(g.arena, scope.body);
+        for (scope_lits) |lit| {
+            if (std.mem.indexOf(u8, lit, "{s}") != null) continue;
+            if (isExtensionToken(lit)) continue;
+            if (isCxxSourcePath(lit)) {
+                found_cxx = true;
+                try g.verifyGuardedTu(try g.resolveCompilePath(scope, lit));
+            } else if (std.mem.endsWith(u8, lit, ".c") or std.mem.endsWith(u8, lit, ".m") or std.mem.endsWith(u8, lit, ".S")) {
+                found_c = true;
+            }
+        }
+        inline for (.{ "listFilesRecursive(b, ", "listFiles(b, ", "addCxxDir(b, " }) |marker| {
+            const paren_at = comptime std.mem.indexOfScalar(u8, marker, '(').?;
+            var from: usize = 0;
+            while (std.mem.indexOfPos(u8, scope.body, from, marker)) |at| {
+                from = at + marker.len;
+                const call_args = balancedParens(scope.body, at + paren_at) orelse scope.body[at..@min(at + 200, scope.body.len)];
+                const lits = try collectStringLiterals(g.arena, call_args);
+                var dir: ?[]const u8 = null;
+                var ext: []const u8 = ".cpp";
+                for (lits) |lit| {
+                    if (lit.len > 0 and lit[0] == '.' and std.mem.indexOfScalar(u8, lit, '/') == null) {
+                        ext = lit;
+                    } else if (dir == null and std.mem.indexOfScalar(u8, lit, '/') != null) {
+                        dir = lit;
+                    }
+                }
+                if (!isCxxSourcePath(ext)) continue;
+                found_cxx = true;
+                const d = dir orelse {
+                    try g.flag("boundary: '{s}' compiles a C++ glob without -fno-exceptions and the directory is not a literal; add the flag", .{scope.name});
+                    continue;
+                };
+                try g.verifyGuardedTree(d, ext);
+            }
+        }
+        if (!found_cxx and !found_c) {
+            try g.flag("boundary: '{s}' has a dynamic compile without -fno-exceptions that cannot be enumerated; add the flag", .{scope.name});
+        }
+    }
+
+    fn verifyGuardedTree(g: *Gate, dir_path: []const u8, ext: []const u8) !void {
+        var dir = Io.Dir.cwd().openDir(g.io, dir_path, .{ .iterate = true }) catch {
+            try g.flag("boundary: cannot open '{s}' to check the exception stance of its compiles", .{dir_path});
+            return;
+        };
+        defer dir.close(g.io);
+        var it = dir.iterate();
+        while (try it.next(g.io)) |entry| {
+            const child = try std.fmt.allocPrint(g.arena, "{s}/{s}", .{ dir_path, entry.name });
+            switch (entry.kind) {
+                .directory => try g.verifyGuardedTree(child, ext),
+                .file => if (std.mem.endsWith(u8, entry.name, ext)) try g.verifyGuardedTu(child),
+                else => {},
+            }
+        }
+    }
+
+    // An exceptions-enabled TU with extern "C" entries: vendor files must
+    // show a catch; first-party shims must guard every entry.
+    fn verifyGuardedTu(g: *Gate, path: []const u8) !void {
+        const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("boundary: cannot read '{s}' to check guards for its exceptions-enabled compile", .{path});
+            return;
+        };
+        const entries = countLineAnchored(content, "extern \"C\"");
+        if (entries == 0) return;
+        if (std.mem.startsWith(u8, path, ".vendor/")) {
+            if (std.mem.indexOf(u8, content, "catch") == null) {
+                try g.flag("boundary: vendor TU '{s}' compiles with exceptions enabled, has extern \"C\" and no catch; give its flags -fno-exceptions", .{path});
+            }
+            return;
+        }
+        const total = std.mem.count(u8, content, "GOSS_SHIM_GUARD");
+        const defines = std.mem.count(u8, content, "#define GOSS_SHIM_GUARD");
+        const guards = total - defines;
+        if (defines == 0 or guards < entries) {
+            try g.flag("boundary: '{s}' compiles with exceptions enabled but its {d} extern \"C\" entries carry {d} GOSS_SHIM_GUARD guards; guard every entry or compile -fno-exceptions", .{ path, entries, guards });
+        }
+    }
+
+    // A first-party -fno-exceptions TU with extern "C" entries opens with
+    // the stance comment, so the file itself names what enforces it.
+    fn verifyNoExceptionsTu(g: *Gate, path: []const u8) !void {
+        if (std.mem.startsWith(u8, path, ".vendor/")) return;
+        const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch {
+            try g.flag("boundary: cannot read '{s}' to check its stance comment", .{path});
+            return;
+        };
+        if (countLineAnchored(content, "extern \"C\"") == 0) return;
+        const first_line = content[0 .. std.mem.indexOfScalar(u8, content, '\n') orelse content.len];
+        if (std.mem.indexOf(u8, first_line, "-fno-exceptions") == null) {
+            try g.flag("boundary: '{s}' compiles -fno-exceptions but its first line does not state the stance and the build.zig site that sets it", .{path});
+        }
+    }
+
+    // W7 mechanical check: no C-crossing signature carries more than four
+    // consecutive scalar floats. Covers the public header and the physics
+    // extern boundary; only the frozen public spreads are exempt.
+    fn checkFloatCap(g: *Gate) !void {
+        try g.checkFloatCapHeader("include/gosslens.h");
+        try g.checkFloatCapExterns("adapters/physics/physics.zig");
+    }
+
+    // Every goss_ prototype in the C header: the identifier before a '('
+    // names the callee, the balanced parens hold its parameters.
+    fn checkFloatCapHeader(g: *Gate, path: []const u8) !void {
+        const raw = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 20)) catch {
+            try g.flag("float-cap: cannot read '{s}' to count scalar floats per signature", .{path});
+            return;
+        };
+        const text = try stripCComments(g.arena, raw);
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            if (text[i] != '(') continue;
+            var start = i;
+            while (start > 0 and (std.ascii.isAlphanumeric(text[start - 1]) or text[start - 1] == '_')) start -= 1;
+            const name = text[start..i];
+            if (!std.mem.startsWith(u8, name, "goss_")) continue;
+            const args = balancedParens(text, i) orelse continue;
+            const run = maxConsecutiveScalarFloats(args, false);
+            if (run > max_scalar_float_params and !isFrozenSpread(name)) {
+                try g.flag("float-cap: '{s}' passes {d} consecutive scalar floats across C; pass the [3]/[4] group by pointer (const float*), the cap is {d}", .{ name, run, max_scalar_float_params });
+            }
+        }
+    }
+
+    // Every extern fn goss_ declaration in the physics shim boundary.
+    fn checkFloatCapExterns(g: *Gate, path: []const u8) !void {
+        const text = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 20)) catch {
+            try g.flag("float-cap: cannot read '{s}' to count scalar floats per extern", .{path});
+            return;
+        };
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trimStart(u8, line, " \t");
+            if (!std.mem.startsWith(u8, trimmed, "extern fn goss_")) continue;
+            const open = std.mem.indexOfScalar(u8, trimmed, '(') orelse continue;
+            const name = std.mem.trim(u8, trimmed["extern fn ".len..open], " \t");
+            const args = balancedParens(trimmed, open) orelse continue;
+            const run = maxConsecutiveScalarFloats(args, true);
+            if (run > max_scalar_float_params and !isFrozenSpread(name)) {
+                try g.flag("float-cap: extern '{s}' passes {d} consecutive scalar f32 across C; pass the [3]/[4] group as *const [N]f32, the cap is {d}", .{ name, run, max_scalar_float_params });
+            }
+        }
+    }
+
+    // W3 mechanical check: a pub export fn returning ?*T or a status
+    // cannot fail, so an errdefer in its body is dead code. The fix
+    // moves the fallible work to a private fn; any errdefer inside an
+    // export fn body across the tracked Zig sources fails here.
+    fn checkExportErrdefer(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 22)) catch continue;
+            var line_start: usize = 0;
+            while (line_start < content.len) {
+                const line_end = std.mem.indexOfScalarPos(u8, content, line_start, '\n') orelse content.len;
+                const line = content[line_start..line_end];
+                if (isExportFnSignature(line)) {
+                    if (zigFnBody(content, line_start)) |body| {
+                        if (zigCodeContainsWord(content[body.start..body.end], "errdefer")) {
+                            try g.flag("export-errdefer: '{s}' has an errdefer inside an export fn (dead code there); split the fallible body into a private fn and return it `catch null`", .{path});
+                        }
+                    }
+                }
+                line_start = line_end + 1;
+            }
+        }
+    }
+
+    // W10 mechanical check: a file-scope var holding a platform
+    // reference aliases every instance and outlives its paired release.
+    // Per-instance handles live on the instance struct; a top-level var
+    // naming one of the reference-taking platform types is banned.
+    fn checkPlatformReferences(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            const is_zig = std.mem.endsWith(u8, path, ".zig");
+            const is_objc = std.mem.endsWith(u8, path, ".mm") or std.mem.endsWith(u8, path, ".m");
+            if (!is_zig and !is_objc) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(1 << 22)) catch continue;
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0 or line[0] == ' ' or line[0] == '\t') continue;
+                if (!isFileScopeVar(line, is_zig)) continue;
+                for (platform_reference_tokens) |tok| {
+                    if (std.mem.indexOf(u8, line, tok) != null) {
+                        try g.flag("platform-ref: '{s}' holds '{s}' in a file-scope var; a platform reference lives on the owning instance, released on replace and at destroy, never in a global", .{ path, tok });
+                        break;
+                    }
+                }
+            }
+            for (platform_acquire_release) |pair| {
+                if (std.mem.indexOf(u8, content, pair.acquire) != null and std.mem.indexOf(u8, content, pair.release) == null) {
+                    try g.flag("platform-ref: '{s}' calls '{s}' but never '{s}'; the acquire and its release must both be visible in the file that owns the handle", .{ path, pair.acquire, pair.release });
+                }
+            }
+        }
+    }
 };
+
+// A column-zero export fn definition line, `export fn` or `pub export
+// fn`; an indented one is not a top-level export.
+fn isExportFnSignature(line: []const u8) bool {
+    if (line.len == 0 or line[0] == ' ' or line[0] == '\t') return false;
+    return std.mem.startsWith(u8, line, "export fn ") or std.mem.startsWith(u8, line, "pub export fn ");
+}
+
+// A file-scope variable declaration: a Zig top-level `var`/`pub var`/
+// `threadlocal var`, or an ObjC++ file-scope `static`. Const bindings
+// and extern fn decls do not hold a mutable acquired reference.
+fn isFileScopeVar(line: []const u8, is_zig: bool) bool {
+    if (is_zig) {
+        return std.mem.startsWith(u8, line, "var ") or
+            std.mem.startsWith(u8, line, "pub var ") or
+            std.mem.startsWith(u8, line, "threadlocal var ") or
+            std.mem.startsWith(u8, line, "pub threadlocal var ");
+    }
+    return std.mem.startsWith(u8, line, "static ");
+}
+
+fn isFrozenSpread(name: []const u8) bool {
+    for (frozen_float_spread) |f| {
+        if (std.mem.eql(u8, name, f)) return true;
+    }
+    return false;
+}
+
+// The longest run of adjacent scalar-float parameters in an argument
+// list. A pointer or array parameter (the by-pointer group) breaks the
+// run, as does any non-float. `zig` picks the f32 spelling.
+fn maxConsecutiveScalarFloats(args: []const u8, zig: bool) usize {
+    var best: usize = 0;
+    var cur: usize = 0;
+    var it = std.mem.splitScalar(u8, args, ',');
+    while (it.next()) |raw| {
+        const param = std.mem.trim(u8, raw, " \t\r\n");
+        if (param.len == 0) continue;
+        const scalar = if (zig) isZigScalarFloat(param) else isCScalarFloat(param);
+        if (scalar) {
+            cur += 1;
+            if (cur > best) best = cur;
+        } else {
+            cur = 0;
+        }
+    }
+    return best;
+}
+
+// A C parameter that is a bare `float`: a pointer or array is the
+// by-pointer form and does not count.
+fn isCScalarFloat(param: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, param, '*') != null) return false;
+    if (std.mem.indexOfScalar(u8, param, '[') != null) return false;
+    var toks = std.mem.tokenizeAny(u8, param, " \t");
+    while (toks.next()) |tok| {
+        if (std.mem.eql(u8, tok, "float")) return true;
+    }
+    return false;
+}
+
+// A Zig extern parameter whose type is exactly `f32`; `*const [3]f32`
+// and `[*]const f32` are the by-pointer forms and do not count.
+fn isZigScalarFloat(param: []const u8) bool {
+    const colon = std.mem.indexOfScalar(u8, param, ':') orelse return false;
+    const ty = std.mem.trim(u8, param[colon + 1 ..], " \t\r\n");
+    return std.mem.eql(u8, ty, "f32");
+}
+
+// Blanks C block and line comments so a '(' or the word float inside a
+// comment cannot be read as part of a signature.
+fn stripCComments(arena: Allocator, text: []const u8) ![]u8 {
+    const out = try arena.alloc(u8, text.len);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (i + 1 < text.len and text[i] == '/' and text[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < text.len and !(text[i] == '*' and text[i + 1] == '/')) i += 1;
+            i = @min(i + 2, text.len);
+            out[n] = ' ';
+            n += 1;
+            continue;
+        }
+        if (i + 1 < text.len and text[i] == '/' and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        out[n] = text[i];
+        n += 1;
+        i += 1;
+    }
+    return out[0..n];
+}
+
+const FnBody = struct { start: usize, end: usize };
+
+// The brace-delimited body of a fn whose signature begins at
+// `sig_start`: past its parameter parens to the opening brace, then to
+// the matching close. Null if either delimiter never resolves.
+fn zigFnBody(text: []const u8, sig_start: usize) ?FnBody {
+    const paren_open = std.mem.indexOfScalarPos(u8, text, sig_start, '(') orelse return null;
+    const params = balancedParens(text, paren_open) orelse return null;
+    const after_params = paren_open + 1 + params.len + 1;
+    const brace = std.mem.indexOfScalarPos(u8, text, after_params, '{') orelse return null;
+    const end = matchBrace(text, brace) orelse return null;
+    return .{ .start = brace, .end = end };
+}
+
+// The index just past the brace matching the one at `open`, counting
+// depth while skipping Zig strings, char literals, and comments so a
+// brace inside any of those never moves the count.
+fn matchBrace(text: []const u8, open: usize) ?usize {
+    var depth: usize = 0;
+    var i = open;
+    while (i < text.len) {
+        if (skipZigTrivia(text, i)) |next| {
+            i = next;
+            continue;
+        }
+        switch (text[i]) {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i + 1;
+            },
+            else => {},
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// True when `word` appears as a whole token in `text` outside any
+// string, char literal, or comment; keyword scans use it so a match in
+// a literal is never a hit.
+fn zigCodeContainsWord(text: []const u8, word: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) {
+        if (skipZigTrivia(text, i)) |next| {
+            i = next;
+            continue;
+        }
+        if (std.mem.startsWith(u8, text[i..], word)) {
+            const before_ok = i == 0 or !isIdentChar(text[i - 1]);
+            const after = i + word.len;
+            const after_ok = after >= text.len or !isIdentChar(text[after]);
+            if (before_ok and after_ok) return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// If `text[i]` opens a Zig line comment, multiline string, string, or
+// char literal, the index just past it; otherwise null. One skipper
+// backs both the brace matcher and the keyword scan.
+fn skipZigTrivia(text: []const u8, i: usize) ?usize {
+    const ch = text[i];
+    if (ch == '/' and i + 1 < text.len and text[i + 1] == '/') {
+        return std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+    }
+    if (ch == '\\' and i + 1 < text.len and text[i + 1] == '\\') {
+        return std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+    }
+    if (ch == '"') return scanQuoted(text, i, '"');
+    if (ch == '\'') return scanQuoted(text, i, '\'');
+    return null;
+}
+
+// The index just past a quote-delimited literal opening at `i`,
+// honoring backslash escapes.
+fn scanQuoted(text: []const u8, i: usize, quote: u8) usize {
+    var j = i + 1;
+    while (j < text.len and text[j] != quote) : (j += 1) {
+        if (text[j] == '\\') j += 1;
+    }
+    return @min(j + 1, text.len);
+}
+
+fn isIdentChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_';
+}
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
@@ -384,12 +899,20 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkFileProvenance(paths);
         try g.checkCommentHygiene(&.{"--cached"});
         try g.checkProseDashes(paths);
+        try g.checkBoundaryStance();
+        try g.checkFloatCap();
+        try g.checkExportErrdefer(paths);
+        try g.checkPlatformReferences(paths);
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
         try g.checkInbound(paths);
         try g.checkFileProvenance(paths);
         try g.checkProseDashes(paths);
+        try g.checkBoundaryStance();
+        try g.checkFloatCap();
+        try g.checkExportErrdefer(paths);
+        try g.checkPlatformReferences(paths);
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});
@@ -639,6 +1162,111 @@ fn isMarkdownDoc(path: []const u8) bool {
     return true;
 }
 
+const FnScope = struct {
+    name: []const u8,
+    body: []const u8,
+};
+
+// build.zig cut at every column-zero fn so each compile site can be
+// judged against the flags its own function builds.
+fn splitFnScopes(arena: Allocator, text: []const u8) ![]FnScope {
+    var scopes: std.ArrayList(FnScope) = .empty;
+    var name: []const u8 = "";
+    var start: usize = 0;
+    var line_start: usize = 0;
+    while (line_start < text.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, text, line_start, '\n') orelse text.len;
+        if (topLevelFnName(text[line_start..line_end])) |fn_name| {
+            try scopes.append(arena, .{ .name = name, .body = text[start..line_start] });
+            name = fn_name;
+            start = line_start;
+        }
+        line_start = line_end + 1;
+    }
+    try scopes.append(arena, .{ .name = name, .body = text[start..] });
+    return scopes.items;
+}
+
+fn topLevelFnName(line: []const u8) ?[]const u8 {
+    if (line.len == 0 or line[0] == ' ' or line[0] == '\t') return null;
+    var rest = line;
+    if (std.mem.startsWith(u8, rest, "pub ")) rest = rest["pub ".len..];
+    if (!std.mem.startsWith(u8, rest, "fn ")) return null;
+    const after = rest["fn ".len..];
+    const paren = std.mem.indexOfScalar(u8, after, '(') orelse return null;
+    return after[0..paren];
+}
+
+// True when a scope carries the flag on a line of its own, not behind a
+// per-target conditional - the wasm-only shape this check exists to ban.
+fn hasUnconditionalNoExceptions(body: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "-fno-exceptions") == null) continue;
+        if (std.mem.indexOf(u8, line, "if (") != null) continue;
+        return true;
+    }
+    return false;
+}
+
+// The text between the parens that open at `open`, or null if they
+// never close. String contents are not paren-balanced; build.zig's
+// compile-site arguments carry no parens inside their literals.
+fn balancedParens(text: []const u8, open: usize) ?[]const u8 {
+    if (open >= text.len or text[open] != '(') return null;
+    var depth: usize = 0;
+    var i = open;
+    while (i < text.len) : (i += 1) {
+        if (text[i] == '(') {
+            depth += 1;
+        } else if (text[i] == ')') {
+            if (depth == 0) return null;
+            depth -= 1;
+            if (depth == 0) return text[open + 1 .. i];
+        }
+    }
+    return null;
+}
+
+fn collectStringLiterals(arena: Allocator, text: []const u8) ![][]const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (text[i] != '"') continue;
+        var j = i + 1;
+        while (j < text.len and text[j] != '"') : (j += 1) {
+            if (text[j] == '\\') j += 1;
+        }
+        if (j >= text.len) break;
+        try out.append(arena, text[i + 1 .. j]);
+        i = j;
+    }
+    return out.items;
+}
+
+fn isCxxSourcePath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".cc") or
+        std.mem.endsWith(u8, path, ".cpp") or
+        std.mem.endsWith(u8, path, ".mm");
+}
+
+// A bare extension argument like ".cpp", as glob calls pass, never a
+// compilable path of its own.
+fn isExtensionToken(lit: []const u8) bool {
+    return lit.len > 0 and lit[0] == '.' and std.mem.indexOfScalar(u8, lit, '/') == null;
+}
+
+// Occurrences that begin a line (after indentation), so a definition
+// counts and a comment that merely mentions the phrase does not.
+fn countLineAnchored(content: []const u8, needle: []const u8) usize {
+    var n: usize = 0;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " \t"), needle)) n += 1;
+    }
+    return n;
+}
+
 test "top-level trees require their re-include line" {
     const ignore = "!core/**\n!tools/**\ndocs/private/\n";
     try std.testing.expect(hasLine(ignore, "!core/**"));
@@ -647,7 +1275,7 @@ test "top-level trees require their re-include line" {
 }
 
 test "forbidden prefixes catch force-added trees" {
-    try std.testing.expectEqualStrings("docs/private/", forbiddenPrefix("docs/private/ENGINEERING.md").?);
+    try std.testing.expectEqualStrings("docs/private/", forbiddenPrefix("docs/private/notes.md").?);
     try std.testing.expectEqualStrings(".models/", forbiddenPrefix(".models/face.task").?);
     try std.testing.expectEqualStrings("zig-out/", forbiddenPrefix("zig-out/bin/gate").?);
     try std.testing.expect(forbiddenPrefix("docs/ROADMAP.md") == null);
@@ -778,4 +1406,125 @@ test "only authored markdown prose is scanned for clause dashes" {
     try std.testing.expect(!isMarkdownDoc("docs/private/notes.md"));
     try std.testing.expect(!isMarkdownDoc("core/graph/node.zig"));
     try std.testing.expect(!isMarkdownDoc("adapters/beauty/beauty_shim.cc"));
+}
+
+test "column-zero fn lines open a scope, nested and indented ones do not" {
+    try std.testing.expectEqualStrings("buildJoltLib", topLevelFnName("fn buildJoltLib(b: *std.Build) void {").?);
+    try std.testing.expectEqualStrings("build", topLevelFnName("pub fn build(b: *std.Build) void {").?);
+    try std.testing.expect(topLevelFnName("    fn lessThan(_: void) bool {") == null);
+    try std.testing.expect(topLevelFnName("const x = fn () void;") == null);
+}
+
+test "scope splitting keeps each fn body separate" {
+    const text = "const a = 1;\nfn one(x: u32) void {\n  body1;\n}\nfn two() void {\n  body2;\n}\n";
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const scopes = try splitFnScopes(arena_state.allocator(), text);
+    try std.testing.expectEqual(@as(usize, 3), scopes.len);
+    try std.testing.expectEqualStrings("one", scopes[1].name);
+    try std.testing.expect(std.mem.indexOf(u8, scopes[1].body, "body1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scopes[1].body, "body2") == null);
+    try std.testing.expectEqualStrings("two", scopes[2].name);
+}
+
+test "the flag counts only when it sits outside a per-target conditional" {
+    try std.testing.expect(hasUnconditionalNoExceptions("flags.appendSlice(&.{ \"-std=c++17\", \"-fno-exceptions\" });"));
+    try std.testing.expect(!hasUnconditionalNoExceptions("if (target.result.cpu.arch.isWasm()) flags.append(\"-fno-exceptions\");"));
+    try std.testing.expect(!hasUnconditionalNoExceptions("flags.appendSlice(&.{ \"-std=c++17\", \"-w\" });"));
+}
+
+test "balanced parens capture one call's arguments" {
+    const text = "addCSourceFile(.{ .file = b.path(\"a.cc\"), .flags = &.{ \"-w\" } }); more()";
+    const open = std.mem.indexOfScalar(u8, text, '(').?;
+    const args = balancedParens(text, open).?;
+    try std.testing.expect(std.mem.indexOf(u8, args, "a.cc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args, "more") == null);
+}
+
+test "string literals come out of a call's arguments" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const lits = try collectStringLiterals(arena_state.allocator(), ".file = b.path(\"x.mm\"), .flags = &.{ \"-std=c++17\" }");
+    try std.testing.expectEqual(@as(usize, 2), lits.len);
+    try std.testing.expectEqualStrings("x.mm", lits[0]);
+    try std.testing.expectEqualStrings("-std=c++17", lits[1]);
+}
+
+test "C++ source extensions are recognized, C and headers are not" {
+    try std.testing.expect(isCxxSourcePath("adapters/beauty/beauty_shim.cc"));
+    try std.testing.expect(isCxxSourcePath("adapters/physics/jolt_shim.cpp"));
+    try std.testing.expect(isCxxSourcePath("adapters/media/video_apple.mm"));
+    try std.testing.expect(!isCxxSourcePath("adapters/script/qjs_shim.c"));
+    try std.testing.expect(!isCxxSourcePath("include/gosslens.h"));
+}
+
+test "consecutive scalar floats are counted, pointers and arrays break the run" {
+    // C: a by-pointer group counts as zero; a loose spread counts fully.
+    try std.testing.expectEqual(@as(usize, 5), maxConsecutiveScalarFloats("void* h, float r, float g, float b, float a, float width", false));
+    try std.testing.expectEqual(@as(usize, 0), maxConsecutiveScalarFloats("void* h, const float* pos, const float* size, uint32_t m", false));
+    try std.testing.expectEqual(@as(usize, 2), maxConsecutiveScalarFloats("const float* p, float min_distance, float max_distance", false));
+    // A uint between two floats breaks the run.
+    try std.testing.expectEqual(@as(usize, 4), maxConsecutiveScalarFloats("float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity", false));
+    // Zig: only a bare f32 counts, not *const [N]f32 or [*]const f32.
+    try std.testing.expectEqual(@as(usize, 0), maxConsecutiveScalarFloats("handle: *anyopaque, pos: *const [3]f32, size: *const [3]f32", true));
+    try std.testing.expectEqual(@as(usize, 3), maxConsecutiveScalarFloats("a: u32, rest_length: f32, frequency: f32, damping: f32", true));
+    try std.testing.expectEqual(@as(usize, 0), maxConsecutiveScalarFloats("verts: [*]const f32, count: u32", true));
+}
+
+test "the frozen public spreads are exempt, other names are not" {
+    try std.testing.expect(isFrozenSpread("goss_session_brush_set_style"));
+    try std.testing.expect(isFrozenSpread("goss_session_ar_brush_set_style"));
+    try std.testing.expect(!isFrozenSpread("goss_physics_body_add_oriented"));
+    try std.testing.expect(!isFrozenSpread("goss_physics_constrain_spring"));
+}
+
+test "C comments are blanked so a paren or float inside one is not a signature" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const cleaned = try stripCComments(arena_state.allocator(), "a /* float x( */ b // float y(\nc");
+    try std.testing.expect(std.mem.indexOf(u8, cleaned, "float") == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, cleaned, '(') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, cleaned, 'c') != null);
+}
+
+test "export fn signature lines are recognized only at column zero" {
+    try std.testing.expect(isExportFnSignature("export fn goss_x() void {"));
+    try std.testing.expect(isExportFnSignature("pub export fn goss_y(a: u32) ?*T {"));
+    try std.testing.expect(!isExportFnSignature("    export fn nested() void {"));
+    try std.testing.expect(!isExportFnSignature("fn createY() Err!*T {"));
+    try std.testing.expect(!isExportFnSignature("// export fn in a comment"));
+}
+
+test "brace matching skips braces inside strings, chars, and comments" {
+    const text = "fn f() void {\n  const s = \"}{ not a brace\";\n  const c = '}';\n  // } comment\n}\nafter";
+    const body = zigFnBody(text, 0).?;
+    try std.testing.expectEqualStrings("after", std.mem.trim(u8, text[body.end..], "\n"));
+}
+
+test "an errdefer in an export fn body is detected, one in a nested private fn is not the export's" {
+    const with = "pub export fn goss_a() ?*T {\n  const x = alloc() catch return null;\n  errdefer free(x);\n  return x;\n}\n";
+    const body = zigFnBody(with, 0).?;
+    try std.testing.expect(zigCodeContainsWord(with[body.start..body.end], "errdefer"));
+
+    const without = "pub export fn goss_b() ?*T {\n  return makeB() catch null;\n}\nfn makeB() Err!*T {\n  const x = try alloc();\n  errdefer free(x);\n  return x;\n}\n";
+    const export_body = zigFnBody(without, 0).?;
+    try std.testing.expect(!zigCodeContainsWord(without[export_body.start..export_body.end], "errdefer"));
+}
+
+test "a keyword inside a string or comment is not a code hit" {
+    try std.testing.expect(!zigCodeContainsWord("const s = \"errdefer here\";", "errdefer"));
+    try std.testing.expect(!zigCodeContainsWord("// errdefer here", "errdefer"));
+    try std.testing.expect(zigCodeContainsWord("  errdefer free(x);", "errdefer"));
+    try std.testing.expect(!zigCodeContainsWord("myerrdeferx();", "errdefer"));
+}
+
+test "file-scope var forms are recognized, const and extern decls are not" {
+    try std.testing.expect(isFileScopeVar("var w: *c.ANativeWindow = undefined;", true));
+    try std.testing.expect(isFileScopeVar("pub var g: ?*c.AMediaCodec = null;", true));
+    try std.testing.expect(!isFileScopeVar("const ANativeWindow = opaque {};", true));
+    try std.testing.expect(!isFileScopeVar("extern fn ANativeWindow_release(w: ?*anyopaque) void;", true));
+    try std.testing.expect(isFileScopeVar("static AMediaCodec *g_codec;", false));
+    // Shape only; a plain var is a file-scope var, and carries no
+    // platform token for checkPlatformReferences to flag.
+    try std.testing.expect(isFileScopeVar("var harness_io: std.Io = undefined;", true));
 }

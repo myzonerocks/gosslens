@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.eyeliner",
+  "version": "1.0.0",
+  "display_name": "Eyeliner",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "liner", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [0.05, 0.04, 0.06], "opacity": 0.6, "mask": "lash_line", "blend": "multiply"}}
+  ],
+  "triggers": []
+}

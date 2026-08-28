@@ -1,0 +1,16 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.eye-bag-soften",
+  "version": "1.0.0",
+  "display_name": "Eye Bag Soften",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "soften", "type": "smooth.pass", "inputs": {"frame": "camera"}, "params": {},
+     "smooth": {"amount": 0.9, "mask": "under_eye"}},
+    {"id": "lift", "type": "tint.pass", "inputs": {"frame": "soften"}, "params": {},
+     "tint": {"color": [1.0, 0.96, 0.93], "opacity": 0.18, "mask": "under_eye", "blend": "screen"}}
+  ],
+  "triggers": []
+}

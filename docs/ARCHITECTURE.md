@@ -1,15 +1,18 @@
 # Architecture
 
-Gosslens is one Zig camera engine with three thin SDKs: Swift for iOS,
-Kotlin for Android, TypeScript for the web. The core owns portable engine
-behavior. Platform code owns only what the platform has to own.
+Gosslens is one Zig camera engine with five thin bindings over a single
+frozen C ABI: Swift for iOS, Kotlin for Android, TypeScript for the web, a C
+SDK for any host with a C FFI, and the JNI bridge the Kotlin path rides. The
+core owns portable engine behavior. Platform code owns only what the platform
+has to own.
 
 It is a full camera and AR engine: camera manipulation, face/hand/body
 understanding, segmentation, world anchoring, physics-driven and scripted
-lens content, and a portable media rail, all behind one frozen C ABI. Capability growth reuses the rails below: the
-tracking module's model path, the lens format's nodes and triggers, the
-bgfx graph. A new capability is a new model or node on an existing
-seam, not new machinery.
+lens content, beauty and makeup, capture and recording, a deterministic audio
+mixer, and multi-source compositing, all behind that one ABI. Capability
+growth reuses the rails below: the tracking module's model path, the lens
+format's nodes and triggers, the bgfx graph. A new capability is a new model
+or node on an existing seam, not new machinery.
 
 The checked-out repository is the structural source of truth. New work extends
 an existing boundary where one already exists. It does not move working code
@@ -23,25 +26,36 @@ into a cleaner-looking tree for its own sake.
       abi/                      C ABI exports
       graph/                    frame graph, scheduling, pools, degradation
       lens/                     .glens parsing, triggers, animation, runtime
+      material/                 node-based material graph lowered to shaders
       math/                     vectors, matrices, poses, color math
       tracking/                 engine-owned tracking models and logic
-      media/                    media contracts and orchestration; additive
+      particles/                GPU particles and SPH fluids
+      nav/                      navmesh build and pathfinding
+      stroke/                   screen brush and world-anchored AR brush
+      composite/                multi-source layout and screen-share geometry
+      geo/                      geofence membership math
+      text/                     built-in bitmap font and rasterizer
+      media/                    image codecs, audio mix and analysis, media contracts
 
     adapters/
-      android/                  existing Android/JNI bridge
+      android/                  Android/JNI bridge
       angle/                    ANGLE integration and support
       asset/                    asset boundary
+      audio/                    miniaudio playback backend
       beauty/                   GPUPixel and beauty interop
       bgfx/                     rendering backend and shader plumbing
       gltf/                     cgltf asset loading
-      image/                    image operations; libyuv's planned home
+      image/                    CPU image operations over vendored libyuv
+      media/                    portable codec/container and recording backends
+      physics/                  Jolt rigid bodies, cloth, and hair behind a C shim
+      script/                   sandboxed QuickJS lens scripting
       tracking/                 tracking/inference vendor boundary
-      media/                    portable codec/container backends; additive
 
     sdk/
       swift/                    iOS API and platform-only backends
       kotlin/                   Android API and platform-only backends
       ts/                       web API and platform-only backends
+      c/                        libgosslens and the C ABI header, full parity
 
     lenses/
       reference/                reference .glens bundles
@@ -56,18 +70,21 @@ into a cleaner-looking tree for its own sake.
       API.md                    canonical public SDK naming/shape contract
     docs/private/               local-only engineering material; never tracked
 
-The media work is additive. It does not rename or relocate `adapters/image`,
+The media rail landed additively. It did not rename or relocate `adapters/image`,
 `adapters/tracking`, `adapters/beauty`, `adapters/bgfx`, `core/tracking`,
-`lenses/shaders`, or any other established subsystem.
+`lenses/shaders`, or any other established subsystem, and the physics, script,
+audio, composite, geo, stroke, and text subsystems followed the same rule.
 
 ## Ownership
 
 The Zig core owns the frame graph, lens runtime, media model, scheduling,
 resource lifetime, capability selection, degradation policy, timestamps,
-packet descriptions, synchronization policy, and portable behavior.
+packet descriptions, synchronization policy, the physics, audio, and composite
+math, and portable behavior.
 
 The SDKs own capture ingress, native GPU handles, native hardware media APIs,
-world-tracking APIs, and the idiomatic Swift/Kotlin/TypeScript surface. A
+platform world-tracking APIs, and the idiomatic Swift, Kotlin, and TypeScript
+surfaces; the C SDK adds the direct ABI binding with no wrapper of its own. A
 feature that can live in Zig does not belong in an SDK.
 
 Vendor libraries are implementation details. Their types, allocators, threads,
@@ -80,12 +97,13 @@ Gosslens owns its media contract. It does not wrap a general multimedia
 framework.
 
 `core/media/` owns Gosslens video/audio codec descriptions, packets, timebases,
-timestamps, mux/demux contracts, backend selection, A/V synchronization, and
-capture-output orchestration.
+timestamps, mux/demux contracts, backend selection, A/V synchronization,
+capture-output orchestration, the still-image codecs (PNG, JPEG, GIF), and the
+deterministic audio mix and analysis math.
 
-`adapters/media/` owns portable codec and container bindings. Platform-native
-media implementations stay under the existing SDK trees. Targets link only the
-backends they require.
+`adapters/media/` owns portable codec and container bindings and the platform
+recording and video-decode backends. Camera capture ingress stays under the SDK
+trees. Targets link only the backends they require.
 
 The preferred path is native and zero-copy:
 
@@ -95,36 +113,67 @@ CPU materialization is a fallback:
 
     camera/native buffer -> adapters/image -> libyuv -> CPU consumer
 
-libyuv, once vendored as part of the media rail, is the single CPU
+libyuv, vendored as part of the media rail, is the single CPU
 image-conversion authority. CPU YUV/RGB conversion, scaling, and rotation go
 through the existing `adapters/image/` boundary. Code must not grow a second
 private converter in tracking, media, capture, or an SDK.
 "Central" means one CPU conversion path. It does not mean every frame is copied
 through libyuv.
 
+The one deliberate exception is the tracking module's tensor sampler in
+`core/tracking/sampler.zig`. It is a fused model-input sampler, not a general
+pixel converter: it inverse-maps each output tensor pixel back into the source
+and samples NV12 or RGBA bilinearly with rotation, letterboxing, and range
+scaling in one pass that reads the frame once and allocates nothing. libyuv
+cannot emit that shape, the sampler's color matrices come from
+`core/math/color.zig`, and every tracking pipeline shares it. Routing it through
+`adapters/image/` would force a full-frame conversion and copy onto the
+per-frame path for no fidelity gain, so it stays separate by design.
+
 ## Capability rails
 
-The AR capability plan rides existing seams; each component below is
-planned, arrives pinned under `third_party/` with license metadata like
-every other dependency, and stays behind its adapter:
+These capabilities ride existing seams rather than new machinery. Vendored
+components ship pinned under `third_party/` with license metadata like every
+other dependency and stay behind their adapters; engine-owned ones live in
+`core/` behind the same lens nodes and ABI:
 
-- Hand, body-pose, and segmentation models run on the tracking module's
-  existing inference rail, the same way the face pipeline already does.
-  Creator-supplied models use that rail's model-loading contract too.
-- Face-mesh effects (makeup, masks, face paint) build on the canonical
-  face topology over landmarks the engine already tracks.
-- World tracking is platform-owned: ARKit, ARCore, and WebXR behind one
-  engine seam. Open SLAM stacks are copyleft-licensed and do not enter
-  the dependency graph.
-- Physics for lens content is a vendored permissive engine behind an
-  adapter; cloth and hair follow rigid bodies.
-- Lens scripting is a sandboxed embedded engine whose API is the lens
-  format's trigger and parameter surface, with a determinism contract
-  and no ambient I/O. Lenses remain untrusted content.
-- Audio playback and analysis feed level and beat signals into the lens
-  trigger system.
-- Particles and post effects are engine-owned bgfx passes, not a
-  dependency.
+- Hand, body-pose, segmentation, and gesture models run on the tracking
+  module's inference rail, the same one the face pipeline uses. Creator
+  models load through that rail's model-loading contract.
+- Face-mesh effects (beauty, makeup, masks, face paint) build on the
+  canonical face topology over the landmarks the engine tracks and render
+  through the lens runtime's beauty and mesh nodes.
+- World tracking is platform-owned: the SDKs feed ARKit, ARCore, and WebXR
+  state, planes, anchors, and lighting through one engine seam, and lens
+  content anchors to it. Open SLAM stacks are copyleft-licensed and do not
+  enter the dependency graph.
+- Physics for lens content is Jolt behind a C shim: rigid bodies stepped at
+  a fixed rate for determinism, plus cloth and simulated hair that follow the
+  bodies. SPH fluids, a navmesh with pathfinding, and analytic two-bone IK
+  ride the same tick.
+- Lens scripting is a sandboxed QuickJS engine whose API is the lens format's
+  trigger and parameter surface. Each tick a script reads signals and writes
+  params under a fuel limit, with no clock, RNG, or ambient I/O, so lenses
+  stay deterministic untrusted content.
+- Audio plays lens sound through miniaudio, mixes a lens's track into the
+  caller's outgoing call or live audio deterministically, and feeds level and
+  beat analysis into the lens trigger system.
+- Particles and post effects are engine-owned bgfx passes, not a dependency.
+- Capture and recording produce a photo, an HD still with supersample and
+  tiling, a GIF, or an H.264 or HEVC recording from the same composited frame
+  the screen shows, through platform encoders behind `adapters/media/`.
+- Multi-source compositing places the camera plus up to fifteen guests, a
+  Duet or Stitch pairing, or a shared screen into deterministic layout
+  geometry that the engine composites the handed-in frames into.
+- Geofencing tests a submitted location against a lens's circle, box, or
+  polygon on-device; only the boolean crosses into a trigger, so the location
+  never leaves the process.
+- The brush draws 2D screen strokes, world-anchored AR strokes, and a
+  persistent world board through one ribbon path with pen, highlighter,
+  marker, and neon modes.
+- The material graph wires typed nodes into a DAG that lowers to shader
+  source, glTF models render through cgltf, and a built-in bitmap font draws
+  lens text with no font file.
 
 Portable codec/container libraries, when required by a target, live behind
 `adapters/media/`. The intended stack includes narrowly scoped backends such as
@@ -157,9 +206,11 @@ Allowed without a separate policy change:
 Explicitly approved exceptions, recorded per component under `third_party/`
 and enforced by the vendor sync's license check: Eigen under MPL-2.0
 (file-level copyleft on Eigen's own files only, consumed unmodified),
-fft2d under the Ooura permission notice, and the Emscripten Python
-runtime under PSF-2.0. Each was reviewed against the proprietary-use
-posture above; an exception here never widens the general allowlist.
+fft2d under the Ooura permission notice, the Emscripten Python
+runtime under PSF-2.0, and miniaudio under MIT-0 (public-domain-style
+permissive, no attribution required). Each was reviewed against the
+proprietary-use posture above; an exception here never widens the
+general allowlist.
 
 Blocked:
 
@@ -195,8 +246,8 @@ the same core compiled to wasm. `sdk/c` packages the same header and a linkable
 No C++ type crosses it. No vendor type crosses it. No platform object crosses
 it except as an opaque platform handle described by the ABI contract.
 
-ABI changes are additive within a major version and are checked against all
-three SDKs.
+ABI changes are additive within a major version and are checked against every
+binding.
 
 ## Public API contract
 
@@ -204,16 +255,17 @@ three SDKs.
 contract that maps ABI operations to SDK operation names, parameter shapes,
 ownership, and platform scope.
 
-Swift, Kotlin, and TypeScript do not independently invent names for the same
-engine operation. The canonical operation identity is decided once in
+Swift, Kotlin, TypeScript, and the C SDK do not independently invent names for
+the same engine operation; the C SDK is the ABI names themselves, and the
+wrappers map onto them. The canonical operation identity is decided once in
 `docs/API.md`; wrappers implement that decision. A new public `goss_*` ABI
 operation and its API entry land together. A wrapper with an unresolved or
 different parameter shape does not ship.
 
-Future SDKs derive names mechanically from the same canonical operation rather
-than reopening the naming decision. Platform idiom may change async syntax or a
-narrow lifecycle spelling where `docs/API.md` explicitly permits it; operation
-meaning and parameter semantics do not drift.
+A further binding derives names mechanically from the same canonical operation
+rather than reopening the naming decision. Platform idiom may change async
+syntax or a narrow lifecycle spelling where `docs/API.md` explicitly permits it;
+operation meaning and parameter semantics do not drift.
 
 Public code and CI never depend on `docs/private/`. Private conformance material
 may audit implementation status in more detail, but the tracked public contract
@@ -240,12 +292,11 @@ Do not rename or relocate working subsystems as part of unrelated work. A
 structural migration is its own change, preserves behavior through the move,
 and passes every affected gate.
 
-The media rail adds only what the current tree does not already have:
+The media rail landed as additions the earlier tree did not have:
 
-    core/media/
-    adapters/media/
-    adapters/image/libyuv.zig
-    harness/media.zig
+    core/media/               image codecs, audio mix and analysis
+    adapters/media/           portable codec/container and recording backends
+    adapters/image/           CPU image conversion over vendored libyuv
     media vendor entries under third_party/
     platform-media implementation files under sdk/swift, sdk/kotlin, sdk/ts
 

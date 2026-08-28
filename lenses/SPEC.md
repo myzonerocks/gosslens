@@ -135,6 +135,18 @@ other nodes in the same list by their `id`:
 }
 ```
 
+The beauty node types run the engine's built-in landmark retouch and makeup.
+A `beauty.face` node softens skin with a `smooth` param (0..1) and brightens
+teeth with a `whiten` param (0..1). A `beauty.reshape` node reshapes the face
+by landmark: `thin_face` (0..1) narrows the jaw, `big_eye` (0..1) enlarges the
+eyes. A `beauty.lipstick` node tints the lips and a `beauty.blusher` node
+warms the cheeks, each driven by a single `blend` param (0..1) that fades the
+effect in. All four read the tracked face landmarks, so they declare the
+`face` capability and pass the frame through untouched without a tracked face,
+the standard capability degradation. They carry no mask field: the makeup
+region comes from the landmarks, not a named channel, which is what separates
+them from the mask-keyed `tint.pass` and `smooth.pass` passes below.
+
 A `model.gltf` node may add `"anchor": "face"`, pinning the model to the
 tracked head: the runtime fits the canonical face's metric geometry to
 the live landmarks and poses the model with that transform, so model
@@ -173,6 +185,15 @@ per-vertex deltas, the weights taken from the named parameters' live values,
 so ramping a weight opens a blendshape (a smile, a blink). Each name must be
 a declared parameter, a target past the list contributes nothing, and with
 no `morph_weights` the mesh draws unmorphed.
+
+A `model.gltf` node may add `"control": {"orbit", "dolly", "roll"}`, a
+turntable the recognized gestures steer: `orbit` spins the model with a drag
+(yaw from the horizontal, pitch from the vertical), `dolly` scales it with a
+pinch, and `roll` turns it with a two-finger twist. The accumulated transform
+multiplies onto the model's pose in its own local frame, before any anchor
+places it, so a lens lets a viewer turn a character in the frame. The gestures
+are the same `goss_session_touch` input the touch signals read, so a control
+and a script can share one input stream.
 
 A `model.gltf` node may instead carry `"physics"`: a rigid body whose
 pose drives the model matrix once simulation starts. `body` is `box`,
@@ -335,20 +356,158 @@ outline while flat regions stay untouched. With no `mask` it reads the host's
 depth and holds the frame through when none is submitted. It ships no asset
 and defaults its fields.
 
+An `"occluder.pass"` node is a head occluder for 3D content. It carries an
+`"occluder": {"mask", "expand", "softness"}` block: where a named `mask` channel
+marks the subject (the `head` matte by default, from the face landmarks) it
+reveals the camera frame back over the composited image, so model, particle,
+and brush content drawn earlier in the chain reads as sitting behind the head
+and is hidden by it, while content after the occluder sits in front and shows.
+`expand` grows the revealed silhouette a little (0..0.2 in frame fractions) to
+cover content peeking past the matte edge, and `softness` feathers that edge
+(0..0.5). The pass adds no color of its own; it only reveals the frame. With no
+face the head matte is the zero mask, so it holds the composited frame through.
+The engine has no depth attachment on its composite targets and draws 3D
+content without a depth test, so occlusion is this screen-space reveal keyed to
+the landmark matte, ordered by the chain, rather than a depth-buffer cull.
+
+A `"cutout.pass"` node isolates the face onto a plain background. It carries a
+`"cutout": {"color", "mask", "softness"}` block: where a named `mask` channel
+marks the subject (the `head` matte by default, from the face landmarks) it
+keeps the camera frame through, and everywhere else it replaces the frame with
+the flat `color` (three 0..1 numbers), so the face reads on a solid background
+of the lens author's choosing. `softness` (0..0.5) feathers the matte edge so
+the cut is not jagged. It is the face-matte sibling of `blend.pass`, which swaps
+a background image behind the segmented person; a cutout swaps a flat color
+behind the landmark face. With no face the matte is the zero mask, so the pass
+is not ready and holds the frame through rather than flooding the flat color.
+
 A `"tint.pass"` node is a masked color layer. It carries a `"tint": {"color",
-"opacity", "mask", "source"}` block: it blends `color` (three 0..1 numbers)
-into the region a named `mask` channel marks, scaled by the mask and
-`opacity` (0..1), so a face-part matte or a segmentation class reads as soft
-makeup. With `"source": "reference"` the color comes from the makeup
-reference set through the ABI for that channel instead of the static rgb. A
-tint naming no mask, or a channel the running lens never fills, serves the
-zero mask and draws nothing.
+"opacity", "mask", "source", "blend", "finish"}` block: it folds `color` (three
+0..1 numbers) into the region a named `mask` channel marks, scaled by the mask
+and `opacity` (0..1), so a face-part matte or a segmentation class reads as soft
+makeup. `blend` picks how the color folds in: `normal` (the default) blends
+straight toward the color for flat makeup, `multiply` darkens through it for a
+contour shadow, and `screen` lightens through it for a highlight, the two
+folds keeping the skin texture a flat blend would wash out. With
+`"source": "reference"` the color comes from the makeup reference set through
+the ABI for that channel instead of the static rgb. The reference samples the
+lips, eyes, brows, and a cheek-and-forehead skin patch, so a foundation over
+`face_skin` matches the reference's skin tone. A tint naming no mask, or
+a channel the running lens never fills, serves the zero mask and draws
+nothing.
+
+`finish` sets the surface the layer wears within the mask. A 2D camera makeup
+has no per-pixel face normal, so the finish reads its light from the frame's own
+highlights inside the region. `matte` (the default) is the flat blend above,
+byte-for-byte the plain tint. `gloss` lifts the region's existing highlights
+into a soft specular sheen, so a lit lip catches more light. `shimmer` adds a
+stable, screen-locked micro-glint that sparkles the highlights, deterministic
+across frames and runs with no runtime randomness. `metallic` drives a stronger
+contrast and chroma boost with a harder specular follow for a metallic read.
+Every finish scales with the mask, so it fades to nothing where the region does,
+and `matte` leaves the flat layer untouched. `none` is accepted as a synonym for
+`matte`.
+
+The eye makeup keyed to `eyes` is eyeshadow, filling the whole lid. Eyeliner,
+mascara, and false lashes instead key `lash_line`, the thin band each eye's
+upper lid arc rises into just above the lash line, derived from the eye contour
+landmarks. One band serves all three: they are the same masked tint at
+increasing weight, an eyeliner a light dark line, mascara a heavier darkening,
+false lashes the densest, so the band shape stays fixed and the tint color and
+opacity set the look. The `eyeliner`, `mascara`, and `false-lashes` reference
+lenses each multiply a near-black into that band. A denser 3D lash mesh pinned
+to the eye landmarks is a separate mesh form, not this masked tint.
 
 A `"smooth.pass"` node is a masked detail pass. It carries a `"smooth":
 {"amount", "mask"}` block: it mixes the masked region toward a small neighbor
 average by `amount`, so a positive amount blurs (skin smoothing) and a
 negative one (down to -1) sharpens. It keys the same mask channels as
-`tint.pass`; a smooth naming none is inert.
+`tint.pass`; a smooth naming none is inert. Keyed to `body_skin` or `person` it
+evens body skin without touching the background, the retouch companion to the
+mask-gated body reshape above.
+
+A `"retouch.pass"` node is a masked selective skin filter, a stronger companion
+to `smooth.pass`. It carries a `"retouch": {"mode", "amount", "mask"}` block.
+`mode` is `blemish`, a wider edge-aware average that evens small spots while a
+real edge (a lid, a brow) keeps its own tone so skin texture survives, or
+`shine`, which pulls pixels brighter than their local mean back toward it to
+matte a specular highlight. `amount` (0..1) scales the effect. It keys the same
+mask channels as `tint.pass`; a retouch naming none is inert. The retouch looks
+pair it with the landmark regions below: blemish over `face_skin`, shine over
+`t_zone`.
+
+A `"paint.face"` node lays a lens image onto the tracked face. It ships its
+texture as `assets/<id>.png` and warps it over the face through the canonical
+face mesh UVs the way `mesh.face` does, so the image tracks and deforms with the
+face. It carries a `"paint": {"mask", "opacity", "blend"}` block: `opacity`
+(0..1) scales how strongly the image sits on the skin, `mask` names a face
+channel the image is confined to within the mesh (`face_skin` for paint that
+skips the eyes and lips, a face-part region like `contour` for a tighter decal),
+and `blend` folds the image onto the skin the way `tint.pass` folds a color:
+`normal` (the default) lays it straight over for face paint, `multiply` darkens
+the skin through it for an ink tattoo, and `screen` lightens through it. With no
+`mask` the image covers the whole face mesh, a full-face image projection. Where
+the image's own alpha is zero the skin shows through, so a painted design or a
+tattoo decal reads as sitting on the face rather than a flat overlay. Without a
+tracked face the node draws nothing, the standard capability degradation; a
+named region with no live data serves the zero mask, so the paint fades there.
+The `face-projection`, `war-paint`, and `face-tattoo` reference lenses show the
+whole-face projection, the skin-masked paint, and the region-masked ink.
+
+A `"face.swap"` node warps a donor face onto the tracked face. It ships the
+donor as `assets/<id>.png`, a face baked into the canonical face-mesh UV layout
+the same way `paint.face` and `mesh.face` read their textures, so the donor
+samples through the mesh and tracks and deforms with the live face. It carries a
+`"swap": {"opacity", "feather", "mask"}` block: `opacity` (0..1) scales the swap
+strength, `feather` (0.02..1) sets the seam softness, and `mask` optionally
+names a face channel the swap is further confined to within the mesh. The engine
+carries a per-vertex seam weight that is zero on the face silhouette and rises to
+one in the interior; the fragment stage ramps the swap alpha over the `feather`
+band of that weight, so the donor fades into the surrounding skin at the boundary
+instead of ending on a hard mesh edge. With no `mask` the face mesh and its
+feather define the region, and where the donor's own alpha is zero the live skin
+shows through. Without a tracked face the node draws nothing, the standard
+capability degradation. The `face-swap` reference lens shows the feathered swap
+on a tracked face.
+
+A `"mesh.lashes"` node rises a 3D lash strip off each eye's upper lid, the mesh
+sibling of the flat mascara and false-lash tints. It ships no asset: the strip
+is a thin ribbon whose base pins to the upper lash-line landmarks and whose tip
+row is rebuilt from the tracked eye landmarks each frame, so the lashes track
+and deform with the eye. It carries a `"lashes": {"color", "opacity", "length",
+"curl"}` block: `color` (rgb, 0..1) and `opacity` (0..1) tint how the strands
+blend over the frame, `length` (0..2) is how far each strand rises off the lid
+and `curl` (-1..1) how far its tip sweeps toward the outer corner, both as
+fractions of the eye's own height so the strip scales with the face. The
+fragment stage combs the ribbon into individual strands that narrow to a point
+at the tip. Without a tracked face the node draws nothing, the standard
+capability degradation. The `lashes-3d` reference lens shows the strip on a
+tracked face.
+
+A `"matte.refine"` node refines a segmentation matte's edges against the
+frame. It carries a `"matte": {"radius", "sensitivity", "strength", "mask"}`
+block and runs a guided (joint-bilateral) filter: the frame luminance is the
+edge guide, so where the frame has a strong luma edge the matte's alpha snaps
+to it, and in flat regions the matte is smoothed. `radius` (0.5..6) sets the
+neighborhood reach, `sensitivity` how hard a guide difference rejects a
+neighbor across an edge, and `strength` (0..1) how far the output moves from
+the input matte toward the refined one. `mask` picks the channel it refines -
+`hair` lifts a coarse hair matte toward the crisp strand boundary the frame
+carries; a node naming no channel refines the submitted depth instead. The
+output is the refined matte as grayscale.
+
+A `"matte.hair"` node is a dedicated high-resolution hair matte source. It draws
+nothing itself and passes the frame through; each frame it refines the coarse
+`hair` segmentation class against the camera luminance through the same guided
+joint-bilateral filter `matte.refine` uses, then publishes the result as the
+`hair_matte` channel. A hair effect keys `hair_matte` for a soft, strand-level
+alpha with a feathered edge instead of the hard coarse `hair` bit. It carries a
+`"hair_matte": {"radius", "sensitivity", "strength"}` block with the same
+guided-filter meaning `matte.refine` gives them, all optional with engine
+defaults. Without the coarse `hair` class (no segmentation, or a model without
+the class) the published channel is the zero mask, so a hair pass keyed to it
+fades to nothing, the standard capability degradation. The `hair-matte` reference
+lens recolors hair through the refined channel.
 
 A `"stylize.pass"` node is a single-pass artistic filter over the whole
 frame. It carries a `"stylize": {"mode", "strength", "threshold", "levels"}`
@@ -370,16 +529,66 @@ It reads no host input, ships no asset, and is always ready.
 
 A `"warp.pass"` node is a geometric distortion over the whole frame, radial
 around a center within a radius. It carries a `"warp": {"mode", "center_x",
-"center_y", "radius", "strength", "refractive_index", "aspect_auto"}` block.
-`mode` is `glass_sphere` (a glass lens that refracts the frame through a sphere
-and lets the surround through), `sphere_refraction` (the same refraction but the
-classic crystal ball, black outside the sphere), `bulge` (magnify toward the
-center), `pinch` (pull the image inward) or `swirl` (twist about the center).
-`center_x` and `center_y` place the distortion, `radius` sizes it, and
-`strength` scales how hard it pushes, with zero an identity. `refractive_index`
-is the glass index the two sphere modes bend the view ray by; the three UV warps
-ignore it. `aspect_auto` keeps the region circular on screen by correcting for
-the frame's aspect. It reads no host input, ships no asset, and is always ready.
+"center_y", "radius", "strength", "refractive_index", "aspect_auto", "symmetry",
+"symmetry_x", "points", "mask"}` block. `mode` is `glass_sphere` (a glass lens that
+refracts the frame through a sphere and lets the surround through),
+`sphere_refraction` (the same refraction but the classic crystal ball, black
+outside the sphere), `bulge` (magnify toward the center), `pinch` (pull the
+image inward), `swirl` (twist about the center), `liquify` (freeform
+multi-point push/pull), or `face_scale` (scale the whole tracked face about its
+own center). `center_x` and `center_y` place the distortion, `radius`
+sizes it, and `strength` scales how hard it pushes, with zero an identity.
+
+`face_scale` is a landmark-anchored transform: it ignores the static center and
+radius and takes both from the tracked face each frame, then scales the face
+region about its own centroid. `strength` reads as a signed scale here, so a
+positive value enlarges the face (a stretch) and a negative one shrinks it (an
+inset), easing to identity by the region's rim so the surround is untouched. It
+needs a tracked face like `reshape.bank`; with no face it holds the frame
+through. The `face-inset`, `face-stretch`, and `face-cutout` reference lenses
+show the three landmark-anchored face transforms.
+`refractive_index` is the glass index the two sphere modes bend the view ray by;
+the displacement modes ignore it. `aspect_auto` keeps the region circular on
+screen by correcting for the frame's aspect.
+
+`symmetry` mirrors the displacement across the vertical axis at `symmetry_x`, so
+an off-center warp reshapes both sides at once; it applies to the bulge, pinch,
+swirl and liquify modes, not the sphere refractions. `liquify` reads a `points`
+array of up to eight push points, each `{"x", "y", "dx", "dy", "radius"}`: `x`
+and `y` place it, `dx` and `dy` are the push direction scaled by magnitude, and
+`radius` is the falloff the push fades to zero at. The pushes sum with a smooth
+falloff, so several local points reshape freeform rather than around one radial
+center. It reads no host input, ships no asset, and is always ready.
+
+`mask` names a segmentation class the displacement is confined to. Only pixels
+the mask marks move; the rest stay exactly where they were, so a body-slim (a
+`person` or `body_skin` pinch over the torso) narrows the subject and leaves the
+background behind them undistorted. Named but with no live class the warp moves
+nothing; omitted, it warps the whole frame, byte for byte as before. It keys the
+same channels as the masked color and retouch passes below.
+
+A `"reshape.bank"` node is a landmark-driven face sculpt: sixty-six per-region
+deformations that warp the frame around the tracked face and decay to identity
+away from each region, so one bank never bleeds into another. It carries a
+`"reshape"` block whose fields each take a value in `[-1,1]` with `0` the
+identity, grouped by region: nose (`nose_width`, `nose_bridge_width`,
+`nose_bridge_height`, `nose_tip_size`, `nose_tip_height`, `nose_length`,
+`nostril_size`, `nose_scale`), jaw (`jaw_width`, `jaw_slim`, `jaw_left`,
+`jaw_right`, `jaw_angle`, `jaw_height`, `jaw_v_line`), chin (`chin_length`,
+`chin_width`, `chin_point`, `chin_height`, `chin_forward`, `chin_size`), lip
+(`lip_size`, `lip_width`, `lip_height`, `lip_upper`, `lip_lower`,
+`mouth_position`, `mouth_corner`, `cupid_bow`, `philtrum_length`), cheek
+(`cheek_fullness_l`, `cheek_fullness_r`, `cheek_slim_l`, `cheek_slim_r`,
+`cheekbone_height`, `cheekbone_width`, `cheek_lower_slim`, `cheek_scale`), brow
+(`brow_height_l`, `brow_height_r`, `brow_tilt`, `brow_thickness`,
+`brow_distance`, `brow_peak`), forehead (`forehead_height`, `forehead_width`,
+`forehead_round`, `forehead_size`), eye (`eye_size_l`, `eye_size_r`,
+`eye_width`, `eye_height`, `eye_distance`, `eye_tilt`, `eye_inner_corner`,
+`eye_outer_corner`, `eye_lower`, `eye_scale`) and whole face (`face_slim`,
+`face_width`, `face_length`, `face_v_shape`, `temple_width`, `face_scale`,
+`face_symmetry`, `face_overall`). Every field is optional and defaults to zero.
+It reads the tracked face landmarks, so it declares the `face` capability and
+holds the frame through untouched without a tracked face, and it ships no asset.
 
 A `"trail.pass"` node is a motion-trail post-effect. It carries a `"trail":
 {"amount"}` block: `amount` (0..1) is how much of the previous frame the
@@ -435,6 +644,24 @@ sticker animates without a param or a frame count. Until its image decodes
 (all frames, for an animated sprite) the node holds the frame through, never
 blocking the chain.
 
+A sprite carries an optional `"interaction"` block so a finger can move it:
+`{"drag", "pinch", "rotate", "tap_event"}`. With `"drag"` a single finger that
+goes down on the sprite slides it, with `"pinch"` two fingers scale it about
+its centre, with `"rotate"` two fingers turn it, and `"tap_event"` names an
+event the engine fires when a tap lands on the sprite, delivered to
+`event('name')` triggers and the script's `onEvent` the same tick, so a lens
+reacts to the object being tapped. The recognized gestures come from
+`goss_session_touch`; a sprite names only what it wants.
+
+The same block composes screen UI. A tap event makes the sprite a button. With
+`"slider_param"` the sprite becomes a slider handle: a drag runs it along a
+track from `"slider_min"` to `"slider_max"` (normalized, `"slider_vertical"`
+for a vertical track) and writes its 0..1 position to that parameter each tick.
+With `"carousel_param"` and `"carousel_count"` a swipe steps an index parameter
+over the item count, so a swipe left advances and a swipe right goes back. The
+parameters drive the rest of the lens, so a slider fades an effect or a
+carousel selects a look with no script.
+
 A `"text.2d"` node draws a line of text over the frame. It carries a `"text":
 {"content", "x", "y", "w", "h", "opacity", "color"}` block: the string to
 draw, the same normalized rect and opacity a sprite takes, and an rgb color
@@ -473,8 +700,10 @@ defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
 and ramps, exposing the current signals as `lens.signals.<name>` (read) and
 the lens parameters as `lens.params.<name>` (read and write). The signal
-surface is the six live signals (`face_present`, `hands_present`,
-`audio_level`, `audio_beat`, `world_tracking_state`, `tap`) plus every ARKit
+surface is the live signals (`face_present`, `hands_present`, `audio_level`,
+`audio_beat`, `world_tracking_state`, `tap`), the screen gestures
+(`touch_double_tap`, `touch_long_press`, `touch_swipe`, `touch_drag`,
+`touch_pinch`, `touch_rotate`, `pointer_x`, `pointer_y`), and every ARKit
 blendshape by name (`lens.signals.jawOpen`, `mouthSmileLeft`, and the rest),
 so a script reacts to an expression the way a trigger reads `jawOpen.blendshape`. Whatever it
 writes to a parameter flows into that tick like any other parameter change.
@@ -484,16 +713,52 @@ each tick is bounded by a fuel limit, so a script can neither reach outside
 the lens nor hang the frame. The same inputs always produce the same writes,
 which is what lets a scripted lens be conformance bit-stable.
 
+The script's own top-level state persists across ticks, since the context
+lives for the life of the lens. A script keeps counters, ring buffers of past
+values, or entity-and-component tables in ordinary globals and carries them
+frame to frame, so persistent local state and an ECS-style organization are a
+matter of how the script is written, not a separate engine feature. A no-code
+lens reaches for the counter actions and `counter('name')` instead.
+
+A `logic.graph` node is visual scripting over the same runtime: a small graph
+of value nodes that reads the signals and writes a parameter each tick, with no
+code. It carries a `"graph": {"nodes", "output", "output_param"}` block. Each
+node has an `"id"` and an `"op"`: a leaf reads the world with `signal` (its
+`"signal"` is any trigger signal expression, `pointer.x` or `counter('score')`)
+or `param` (its `"param"` names a parameter), or is a `const` with a `"value"`.
+The rest combine earlier nodes: `add`, `sub`, `mul`, `div`, `min`, `max`,
+`clamp`, `lerp`, `gt`, `lt`, `eq`, `and`, `or`, `not`, and `select` (a ? b : c).
+An input `"a"`, `"b"` or `"c"` is either a number literal or the id of an
+earlier node, so a graph reads only what comes before it. `"output"` names the
+node whose value flows to `"output_param"` each tick, evaluated before the
+triggers so they read its fresh value. The graph is pure and deterministic, so
+a logic-driven lens stays conformance bit-stable like a trigger or a script.
+
+Alongside `update`, a script may define event handlers the engine calls when
+a moment happens: `onInit` and `onTurnOn` once when the lens activates,
+`onTurnOff` when it deactivates, `onTap`, `onDoubleTap`, `onLongPress`,
+`onSwipe`, `onPinch` and `onRotate` when the matching screen gesture is
+recognized, and `onEvent(lens, name)` for each host event fired that tick
+(the same names `event('name')` triggers read). Every handler receives the
+same `lens` with its signals and params, and a handler the script omits is
+simply not called, so a lens wires only the moments it cares about.
+
 The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
-compose the runtime's built-in ones (capture input, beauty filters, shader
+compose the runtime's built-in ones (capture input, the beauty nodes, shader
 passes reading `shaders/*.glsl`, the post-effect passes blur/grade/bloom/
-dof/fog/outline/trail/ssr/env, glTF model draws, LUT passes, compositing,
+dof/fog/outline/tint/smooth/matte/stylize/edge/warp/trail/ssr/env, the
+`matte.hair` hair matte source, glTF model
+draws, LUT passes, compositing,
 the draw board, the layout composite, the 2D sprite, the 2D text, the
-`video.texture` node, and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
+`video.texture` node, `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
 the bottom; without a tracked face the node draws nothing, the standard
-capability degradation).
+capability degradation - `paint.face`, the same face-mesh texture warp
+masked to a face region and blended onto the skin by opacity and mode,
+`face.swap`, a donor face warped through the mesh and feathered into the
+surrounding skin at the silhouette, and
+`mesh.lashes`, a 3D lash strip rising off each tracked upper lid).
 Splice happens once, at lens activation, not per frame; unsplice reverses
 it exactly, freeing every resource the splice allocated. Both are edit-time
 operations on the graph's edit-time API, never touching the frame-time
@@ -544,7 +809,14 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `device.in_volume` (true while the
   tracked device is inside the lens's `volume` region, see below), `tap`,
-  `param('name')`.
+  `touch.doubleTap` / `touch.longPress` (true for one tick when the screen
+  gesture completes), `touch.swipe('left')` (true for one tick on a swipe in
+  the named direction: left, right, up, down), `touch.drag` (true while one
+  finger slides), `touch.pinch` (the two-finger spread over the spread at
+  gesture start, one at rest), `touch.rotate` (two-finger twist in radians),
+  `pointer.x` / `pointer.y` (the primary finger's last position, 0 to 1),
+  `counter('name')` (a persistent counter's value, stepped by the counter
+  actions below), `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
   numeric or boolean literal.
 - Boolean combinators: `&&`, `||`, `!`, grouped with parens.
@@ -568,7 +840,13 @@ curve primitives in 6.3), `param_set` (immediate), `play_animation` (a
 named glTF animation clip), `play_sound` (start a voice for the sound at
 the bundle-relative path in `target`, decoded from `sounds/` and mixed into
 the audio the host pulls out), `reset_timer` (name a timer signal back to
-zero). Reserved, accepted by the validator but not yet executed by the
+zero), the counter actions `increment_counter`, `reset_counter` and
+`set_counter` (step a named counter that `counter('name')` reads and that
+persists across ticks, so a no-code lens keeps a score or a step index with no
+script; `set_counter` writes `to`), and `haptic` (buzz the device: `target`
+names the style, one of light, medium, heavy, soft, rigid, success, warning,
+failure, and `to` is a 0..1 intensity hint the host drains through
+`goss_session_pull_haptic`). Reserved, accepted by the validator but not yet executed by the
 runtime: `show` / `hide` (a node by id) and `swap_subgraph` (splice a
 different set of this lens's own nodes in place of a named group -
 edit-time, deferred to the next frame boundary so it never tears a
@@ -599,14 +877,36 @@ shared by every lens shader pass: `a_position`/`a_texcoord0` in,
 fragment shader is GLSL source written to that contract (bgfx's shader
 dialect: `$input v_texcoord0`, `#include <bgfx_shader.sh>`).
 
-A `shader.pass` node may also name a segmentation mask channel with a
-`mask` field: `person`, `background`, `hair`, `body_skin`, `face_skin`,
-`clothes`, or `others`. The shader then reads it through
-`SAMPLER2D(s_texMask, 2)` beside the frame's own `s_texColor`. When the
-running session cannot provide the channel (segmentation disabled, or a
-single-class model without it), the sampler serves the all-foreground
-default, the same degradation rule every capability follows. An unknown
-channel name fails validation.
+A `shader.pass` node may also name a mask channel with a `mask` field. The
+valid channel names are the same set every mask-keyed node draws from
+(`tint.pass`, `smooth.pass`, `retouch.pass`, `matte.refine`, `outline.pass`,
+`occluder.pass`).
+Seven come from the segmentation model: `person`, `background`, `hair`,
+`body_skin`, `face_skin`, `clothes`, `others`. The rest ride the face and hand
+landmarks rather than a segmentation model: `head` and `hand` follow the tracked
+head and hand, `lips`, `eyes`, `brows`, `iris`, and `teeth` are the face parts,
+`contour` and `highlight` are clustered face regions (contour the cheekbone
+hollows, nose sides, and jaw; highlight the cheekbone tops, brow bones, nose
+bridge, cupid's bow, and chin), and `lash_line` is the upper lash-line band
+each eye's upper lid arc rises into. Four more mark the retouch regions:
+`under_eye` the band below each eye, `nasolabial` the smile-line fold, `sclera`
+the eye-white inside the eye contour with the iris punched out, and `t_zone` the
+forehead and nose bridge. A makeup or retouch lens keys those directly. One more
+is derived on the GPU: `hair_matte` is the strand-level hair alpha a `matte.hair`
+source refines from the coarse `hair` class against the camera luma, a soft
+feathered edge a hair effect keys in place of the hard `hair` bit; with no
+`matte.hair` source in the lens it serves the zero mask. Three name the scene
+around the subject: `sky`, `ground`, and `building` come from a scene-parse
+segmentation model. No such model is wired in yet, so a lens may key these today
+and they serve the zero mask until one fills the scene slot. The
+shader reads the channel through `SAMPLER2D(s_texMask, 2)` beside the frame's
+own `s_texColor`. When a named channel has no live data (segmentation
+disabled, a single-class model without it, or no face or hand tracked for a
+landmark channel), the sampler serves the zero mask so the masked effect draws
+nothing, the same degradation rule every capability follows. A `shader.pass`
+that names no channel at all samples the all-foreground default instead, so a
+shader that reads `s_texMask` without keying a channel still runs over the
+whole frame. An unknown channel name fails validation.
 
 Compilation happens at package time, not on the device: the engine's pinned
 shader toolchain runs wherever a bundle is built or validated, producing
@@ -708,12 +1008,13 @@ never through code.**
 
 ## 9. Conformance
 
-The reference set (`lenses/reference/`) has 115 lens bundles, at least one
+The reference set (`lenses/reference/`) carries at least one bundle
 per node type and capability class the format defines: shader passes, the
-beauty nodes, `mesh.face`, glTF models and the face, body, skeleton, and
-world anchors, physics bodies with joints and jiggle, cloth, strand hair,
-CPU and GPU particles, material graphs, the post-effect passes, and the
-sprite, text, video, script, and audio-playback paths. The validator runs
+beauty nodes and the masked makeup passes, `mesh.face`, glTF models and the
+face, body, skeleton, and world anchors, physics bodies with joints and
+jiggle, cloth, strand hair, CPU and GPU particles, material graphs, the
+post-effect passes, and the sprite, text, video, script, and audio-playback
+paths. The validator runs
 against every one in CI (`lens-validate-reference`). A core subset also
 runs end to end through the production ABI in the pixel-hash conformance
 harness: shader-tint (no capabilities), beauty-baseline (face),

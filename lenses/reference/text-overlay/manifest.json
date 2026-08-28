@@ -7,7 +7,7 @@
   "capabilities": [],
   "parameters": [],
   "nodes": [
-    {"id": "label", "type": "text.2d", "inputs": {"frame": "camera"}, "params": {}, "text": {"content": "GOSSLENS", "x": 0.15, "y": 0.45, "w": 0.7, "h": 0.12, "color": [1.0, 1.0, 0.0]}}
+    {"id": "label", "type": "text.2d", "inputs": {"frame": "camera"}, "params": {}, "text": {"content": "SPECIMEN", "x": 0.15, "y": 0.45, "w": 0.7, "h": 0.12, "color": [1.0, 1.0, 0.0]}}
   ],
   "triggers": []
 }

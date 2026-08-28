@@ -9,7 +9,26 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <new>
+
+// This TU keeps exceptions enabled: AVFoundation raises NSException on
+// reader misuse, and the modern ObjC runtime unwinds those as C++
+// exceptions regardless of the C++ flag. Every extern "C" entry is a
+// guard mapping any unwind to its failure value, never into Zig.
+#define GOSS_SHIM_GUARD(ret_type, failure_value, call)                        \
+  try {                                                                       \
+    @try {                                                                    \
+      return (call);                                                          \
+    } @catch (NSException* e) {                                               \
+      fprintf(stderr, "gosslens video: %s: %s\n", e.name.UTF8String,          \
+              e.reason ? e.reason.UTF8String : "");                           \
+      return (failure_value);                                                 \
+    }                                                                         \
+  } catch (...) {                                                             \
+    return (failure_value);                                                   \
+  }
 
 namespace {
 
@@ -45,10 +64,8 @@ bool startReader(VideoDecoder* d) {
   return true;
 }
 
-}  // namespace
-
-extern "C" void* goss_video_open(const uint8_t* path, size_t path_len,
-                                 uint32_t* out_width, uint32_t* out_height) {
+void* video_open_impl(const uint8_t* path, size_t path_len,
+                      uint32_t* out_width, uint32_t* out_height) {
   if (path == nullptr || path_len == 0) return nullptr;
   @autoreleasepool {
     NSString* ns_path = [[NSString alloc] initWithBytes:path
@@ -66,7 +83,8 @@ extern "C" void* goss_video_open(const uint8_t* path, size_t path_len,
     dispatch_semaphore_wait(loaded, DISPATCH_TIME_FOREVER);
     if (tracks.count == 0) return nullptr;
 
-    auto* d = new VideoDecoder();
+    auto* d = new (std::nothrow) VideoDecoder();
+    if (d == nullptr) return nullptr;
     d->asset = asset;
     d->track = tracks.firstObject;
     d->width = (uint32_t)d->track.naturalSize.width;
@@ -81,11 +99,8 @@ extern "C" void* goss_video_open(const uint8_t* path, size_t path_len,
   }
 }
 
-// Copies the next decoded frame's BGRA pixels into the caller's buffer.
-// Returns 0 on a frame, 1 at end of stream (caller loops via reset), -1
-// on error.
-extern "C" int32_t goss_video_read(void* handle, uint8_t* out_bgra, size_t capacity,
-                                   uint32_t* out_width, uint32_t* out_height) {
+int32_t video_read_impl(void* handle, uint8_t* out_bgra, size_t capacity,
+                        uint32_t* out_width, uint32_t* out_height) {
   auto* d = static_cast<VideoDecoder*>(handle);
   if (d == nullptr || d->output == nullptr || out_bgra == nullptr) return -1;
   @autoreleasepool {
@@ -119,7 +134,7 @@ extern "C" int32_t goss_video_read(void* handle, uint8_t* out_bgra, size_t capac
   }
 }
 
-extern "C" int32_t goss_video_reset(void* handle) {
+int32_t video_reset_impl(void* handle) {
   auto* d = static_cast<VideoDecoder*>(handle);
   if (d == nullptr) return -1;
   @autoreleasepool {
@@ -127,11 +142,52 @@ extern "C" int32_t goss_video_reset(void* handle) {
   }
 }
 
-extern "C" void goss_video_close(void* handle) {
+void video_close_impl(void* handle) {
   auto* d = static_cast<VideoDecoder*>(handle);
   if (d == nullptr) return;
   @autoreleasepool {
     if (d->reader) [d->reader cancelReading];
   }
   delete d;
+}
+
+// The boundary proof's throw site: mode 0 raises an NSException, mode 1
+// throws a C++ exception. Reached only by the guard test.
+int32_t media_boundary_probe_impl(uint32_t mode) {
+  if (mode == 0) {
+    [NSException raise:@"GossBoundaryProbe" format:@"deliberate objc raise"];
+  }
+  if (mode == 1) {
+    throw std::bad_alloc();
+  }
+  return 0;
+}
+
+}  // namespace
+
+extern "C" void* goss_video_open(const uint8_t* path, size_t path_len,
+                                 uint32_t* out_width, uint32_t* out_height) {
+  GOSS_SHIM_GUARD(void*, nullptr, video_open_impl(path, path_len, out_width, out_height))
+}
+
+// Copies the next decoded frame's BGRA pixels into the caller's buffer.
+// Returns 0 on a frame, 1 at end of stream (caller loops via reset), -1
+// on error.
+extern "C" int32_t goss_video_read(void* handle, uint8_t* out_bgra, size_t capacity,
+                                   uint32_t* out_width, uint32_t* out_height) {
+  GOSS_SHIM_GUARD(int32_t, -1, video_read_impl(handle, out_bgra, capacity, out_width, out_height))
+}
+
+extern "C" int32_t goss_video_reset(void* handle) {
+  GOSS_SHIM_GUARD(int32_t, -1, video_reset_impl(handle))
+}
+
+extern "C" void goss_video_close(void* handle) {
+  GOSS_SHIM_GUARD(void, (void)0, video_close_impl(handle))
+}
+
+// Proves a throw behind this boundary surfaces as a status, never a
+// crash: -1 for either exception flavor, 0 when nothing throws.
+extern "C" int32_t goss_media_boundary_probe(uint32_t mode) {
+  GOSS_SHIM_GUARD(int32_t, -1, media_boundary_probe_impl(mode))
 }

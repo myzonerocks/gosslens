@@ -96,10 +96,16 @@ pub const Pool = struct {
         return slot;
     }
 
-    /// Frame-time: constant time, no allocation.
+    /// Frame-time: constant time, no allocation. In safe builds a slot
+    /// already on the free stack trips the assert: a double release would
+    /// hand the same resource to two live acquirers next.
     pub fn release(p: *Pool, bin_index: BinIndex, slot: SlotIndex) void {
         const bin = &p.bins.items[bin_index];
         std.debug.assert(bin.free_count < bin.capacity);
+        std.debug.assert(slot < bin.capacity);
+        if (std.debug.runtime_safety) {
+            for (bin.free_stack[0..bin.free_count]) |already_free| std.debug.assert(already_free != slot);
+        }
         bin.free_stack[bin.free_count] = slot;
         bin.free_count += 1;
     }

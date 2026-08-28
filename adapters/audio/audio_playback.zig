@@ -51,9 +51,12 @@ pub const Mixer = struct {
     }
 
     /// Mixes active voices into out (frames * channels, s16), advancing them.
+    /// Bounds the frame count to what `out` holds and to the c_int the shim
+    /// takes, so an oversized request cannot wrap negative into its memset.
     pub fn pull(self: *Mixer, out: []i16, frames: u32) void {
-        std.debug.assert(out.len >= frames * self.channels);
-        goss_mixer_pull(self.handle, out.ptr, @intCast(frames));
+        const by_buffer: u32 = @intCast(@min(out.len / @max(self.channels, 1), std.math.maxInt(u32)));
+        const bounded: u32 = @min(frames, @min(by_buffer, @as(u32, std.math.maxInt(c_int))));
+        goss_mixer_pull(self.handle, out.ptr, @intCast(bounded));
     }
 };
 

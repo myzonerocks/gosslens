@@ -14,6 +14,9 @@ pub const max_parameters = 256;
 pub const max_nodes = 128;
 pub const max_triggers = 256;
 pub const max_when_bytes = 1024;
+/// A ramp holds its duration in microseconds (u32), so a millisecond
+/// duration is bounded to keep ms*1000 inside that width (about 71 minutes).
+pub const max_duration_ms: f64 = std.math.maxInt(u32) / 1000;
 
 pub const Capability = enum {
     face,
@@ -55,9 +58,11 @@ pub const NodeParam = struct { name: []const u8, binding: ParamBinding };
 /// lens-format vocabulary; a running session without the class serves
 /// the zero mask, so the effect draws nothing rather than everywhere.
 pub const mask_channels = [_][]const u8{
-    "person",  "background", "hair", "body_skin", "face_skin",
-    "clothes", "others",     "head", "hand",      "lips",
-    "eyes",    "brows",      "iris", "teeth",
+    "person",  "background", "hair",    "body_skin", "face_skin",
+    "clothes", "others",     "head",    "hand",      "lips",
+    "eyes",    "brows",      "iris",    "teeth",     "contour",
+    "highlight", "lash_line", "under_eye", "nasolabial", "sclera",
+    "t_zone",  "hair_matte", "sky",     "ground",    "building",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -65,6 +70,12 @@ pub const mask_channels = [_][]const u8{
 /// the model-class mapping must not reach them. head, hand and the face parts
 /// ride the face and hand landmarks, not a segmentation model.
 pub const model_class_end = 7;
+/// hair is segmenter class 2; a coarse channel a matte.hair source lifts into
+/// the strand-level hair_matte channel below.
+pub const hair_channel = 2;
+/// face_skin is segmenter class 4; a foundation tint keys its mask and a
+/// reference photo can fill its color, so name the channel for both.
+pub const skin_channel = 4;
 pub const head_channel = 7;
 pub const hand_channel = 8;
 pub const lips_channel = 9;
@@ -72,6 +83,33 @@ pub const eyes_channel = 10;
 pub const brows_channel = 11;
 pub const iris_channel = 12;
 pub const teeth_channel = 13;
+/// Contour and highlight ride clustered face landmarks, not the segmenter:
+/// contour darkens the cheekbone hollows, nose sides and jaw, highlight
+/// lightens the cheekbone tops, brow bones, nose bridge, cupid's bow and chin.
+pub const contour_channel = 14;
+pub const highlight_channel = 15;
+/// The upper lash line rides the eye landmarks: each eye's upper lid arc rises
+/// into a thin band an eyeliner, mascara, or false-lash tint paints. One band
+/// serves all three, which differ by tint color and opacity, not by shape.
+pub const lash_line_channel = 16;
+/// The retouch regions ride clustered face landmarks: under_eye the band below
+/// each eye a soften eases, nasolabial the smile-line fold, sclera the eye-white
+/// inside the eye contour minus the iris a lighten brightens, and t_zone the
+/// forehead and nose bridge a shine-matte pulls back toward the local mean.
+pub const under_eye_channel = 17;
+pub const nasolabial_channel = 18;
+pub const sclera_channel = 19;
+pub const t_zone_channel = 20;
+/// A strand-level hair alpha a matte.hair source derives each frame by refining
+/// the coarse hair class against the camera luma; hair effects key this channel
+/// for a soft feathered edge instead of the hard coarse hair bit.
+pub const hair_matte_channel = 21;
+/// Scene-parse classes a scene-segmentation model supplies: the sky, the ground
+/// plane, and buildings. No scene model is wired in yet, so a lens keying these
+/// serves the zero mask and draws nothing until one fills the scene slot.
+pub const sky_channel = 22;
+pub const ground_channel = 23;
+pub const building_channel = 24;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {
@@ -264,6 +302,40 @@ pub const OutlineField = struct {
     mask_channel: ?u8 = null,
 };
 
+pub const OccluderField = struct {
+    /// An occluder.pass node reveals the head over the composited frame so 3D
+    /// content drawn behind it is hidden by the head. expand grows the
+    /// silhouette (frame fractions), softness feathers its edge, and mask names
+    /// the landmark matte channel it reveals, the head by default.
+    expand: f32 = 0.0,
+    softness: f32 = 0.02,
+    mask_channel: u8 = head_channel,
+};
+
+pub const CutoutField = struct {
+    /// A cutout.pass node isolates the face: the matte keys the camera frame
+    /// through, and the rest of the frame is replaced by a flat color. color is
+    /// that background (rgb, 0..1), softness feathers the matte edge, and mask
+    /// names the matte channel it keeps, the head by default.
+    r: f32 = 0.0,
+    g: f32 = 0.0,
+    b: f32 = 0.0,
+    softness: f32 = 0.02,
+    mask_channel: u8 = head_channel,
+};
+
+/// How a tint.pass folds its color into the masked region. normal blends
+/// straight toward the color (the makeup default); multiply darkens through it
+/// for a contour shadow; screen lightens through it for a highlight, each
+/// keeping the underlying skin texture the flat blend would wash out.
+pub const TintBlend = enum { normal, multiply, screen };
+
+/// The surface finish a tint.pass layer takes on within its mask, derived
+/// from the frame's own highlights since a 2D camera makeup has no per-pixel
+/// normal. matte is the flat blend today's tint already draws; gloss, shimmer,
+/// and metallic each add a sheen on top of it.
+pub const TintFinish = enum { matte, gloss, shimmer, metallic };
+
 pub const TintField = struct {
     /// A tint.pass node's color (rgb, 0..1) and the opacity it blends into
     /// the masked region, so a face-part matte reads as a soft makeup layer.
@@ -276,6 +348,12 @@ pub const TintField = struct {
     /// When set by "source": "reference", the color comes from the makeup
     /// reference sampled for this channel, not the static rgb above.
     from_reference: bool = false,
+    /// How the color folds into the region: straight blend, darken, or lighten.
+    blend: TintBlend = .normal,
+    /// The finish the layer wears: matte is the flat default, gloss lifts the
+    /// region's real highlights, shimmer adds a stable micro-glint, metallic
+    /// drives a stronger sheen with a contrast boost.
+    finish: TintFinish = .matte,
 };
 
 pub const SmoothField = struct {
@@ -285,6 +363,79 @@ pub const SmoothField = struct {
     amount: f32 = 0.5,
     /// The mask channel the smooth acts on; a smooth naming none is inert.
     mask_channel: ?u8 = null,
+};
+
+pub const PaintField = struct {
+    /// A paint.face node lays the lens texture (assets/<id>.png) onto the
+    /// tracked face through the face mesh UVs. opacity scales how strongly it
+    /// sits on the skin.
+    opacity: f32 = 1.0,
+    /// The face region the material is confined to within the mesh; null
+    /// covers the whole face, the full-face image projection case.
+    mask_channel: ?u8 = null,
+    /// How the texture folds onto the skin: straight over, multiply for an ink
+    /// tattoo that darkens the skin, or screen for a lightening projection.
+    blend: TintBlend = .normal,
+};
+
+pub const SwapField = struct {
+    /// A face.swap node warps a donor face (assets/<id>.png, baked in the
+    /// canonical face-mesh UVs) onto the live tracked mesh, blending it inside
+    /// the face with a feathered seam. opacity scales the swap strength.
+    opacity: f32 = 1.0,
+    /// The seam softness: how much of the silhouette-to-interior ramp the blend
+    /// fades over, so the donor meets the surrounding skin without a hard edge.
+    feather: f32 = 0.5,
+    /// An optional face region the swap is further confined to within the mesh;
+    /// null lets the face mesh and its feather define the region.
+    mask_channel: ?u8 = null,
+};
+
+pub const LashField = struct {
+    /// A mesh.lashes node's lash strip: a tint colour (rgb, 0..1) and the
+    /// opacity it blends over the frame. length is how far each strand rises
+    /// off the lid, curl how far its tip sweeps, both as fractions of eye
+    /// height, so the strip scales with the tracked face.
+    r: f32 = 0.02,
+    g: f32 = 0.02,
+    b: f32 = 0.03,
+    opacity: f32 = 1.0,
+    length: f32 = 0.6,
+    curl: f32 = 0.25,
+};
+
+pub const RetouchField = struct {
+    /// A retouch.pass node's selective skin filter over a masked region. blemish
+    /// is a wider edge-aware smooth that evens small spots while keeping real
+    /// edges and skin texture; shine pulls bright pixels back toward the local
+    /// mean to matte a specular highlight. amount (0..1) scales the effect.
+    mode: enum { blemish, shine } = .blemish,
+    amount: f32 = 0.5,
+    /// The mask channel the retouch acts on; a retouch naming none is inert.
+    mask_channel: ?u8 = null,
+};
+
+pub const MatteField = struct {
+    /// A matte.refine node's guided edge refinement: frame luminance guides where
+    /// the matte alpha snaps to a real image edge versus where it smooths, lifting
+    /// a coarse matte toward the crisp hair and fur boundary the frame carries.
+    /// radius is reach in texels, sensitivity the edge rejection, strength the mix.
+    radius: f32 = 2.0,
+    sensitivity: f32 = 8.0,
+    strength: f32 = 1.0,
+    /// The mask channel this refines (hair by default use); null refines the
+    /// submitted depth instead, so the pass has a source with no segmenter.
+    mask_channel: ?u8 = null,
+};
+
+pub const HairMatteField = struct {
+    /// A matte.hair source's guided refinement of the coarse hair class against
+    /// the camera luma, so the published hair_matte channel carries a soft
+    /// strand alpha, not the hard hair bit. radius is reach in texels,
+    /// sensitivity the edge rejection, strength the mix toward the refined.
+    radius: f32 = 2.5,
+    sensitivity: f32 = 12.0,
+    strength: f32 = 1.0,
 };
 
 pub const StylizeField = struct {
@@ -315,26 +466,135 @@ pub const EdgeField = struct {
     invert: bool = false,
 };
 
+/// The most local push/pull points a liquify warp sums in one pass.
+pub const warp_point_max = 8;
+
+/// The flat float layout a warp.pass node packs for the renderer: a ten-float
+/// header, then warp_point_max points as (x, y, dx, dy), then their radii.
+pub const warp_params_len = 10 + warp_point_max * 5;
+
+pub const LiquifyPoint = struct {
+    /// One liquify push point: a position that pulls nearby pixels along its
+    /// direction, the pull fading smoothly to nothing by its falloff radius.
+    x: f32 = 0.5,
+    y: f32 = 0.5,
+    /// Push direction scaled by magnitude, in normalized uv.
+    dx: f32 = 0,
+    dy: f32 = 0,
+    /// The falloff radius the push fades to zero at.
+    radius: f32 = 0.1,
+};
+
 pub const WarpField = struct {
     /// A warp.pass node's geometric distortion, all radial around a center
-    /// within a radius. glass_sphere and sphere_refraction bend the frame
-    /// through a glass ball - one keeps the surround, the other blackens it -
-    /// while bulge magnifies, pinch shrinks, and swirl twists.
-    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl } = .glass_sphere,
+    /// within a radius: the two sphere modes bend the frame through glass,
+    /// bulge, pinch and swirl displace it, liquify sums push points, and
+    /// face_scale scales the whole tracked face about its own center.
+    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl, liquify, face_scale } = .glass_sphere,
     /// The distortion center in normalized frame coordinates.
     center_x: f32 = 0.5,
     center_y: f32 = 0.5,
     /// The distortion radius (0..1). A pixel beyond it passes through, or for
     /// sphere_refraction goes black.
     radius: f32 = 0.25,
-    /// How hard the warp pushes: the displacement scale for bulge, pinch and
-    /// swirl and the refraction blend for the two sphere modes. Zero is identity.
+    /// How hard the warp pushes: the displacement scale for bulge, pinch,
+    /// swirl and liquify, the refraction blend for the two sphere modes, and
+    /// the signed face scale for face_scale (positive enlarges, negative
+    /// shrinks). Zero is identity.
     strength: f32 = 1.0,
     /// The glass index of refraction the two sphere modes bend the view ray by.
     refractive_index: f32 = 0.71,
     /// Correct the radius for the frame's own aspect so the region stays a
     /// circle on screen; off treats the frame as square.
     aspect_auto: bool = true,
+    /// Mirror the displacement across a vertical axis so the warp reshapes
+    /// both sides at once. Off leaves it one-sided. Applies to the bulge,
+    /// pinch, swirl and liquify displacement modes, not the sphere refractions.
+    symmetry: bool = false,
+    /// The vertical mirror axis in normalized x when symmetry is on.
+    symmetry_x: f32 = 0.5,
+    /// liquify only: local push/pull points summed with smooth falloff, each
+    /// pulling nearby pixels along its direction. Slots past point_count stay
+    /// zeroed and contribute nothing.
+    points: [warp_point_max]LiquifyPoint = [_]LiquifyPoint{.{}} ** warp_point_max,
+    point_count: usize = 0,
+    /// The mask channel the displacement is confined to: only pixels the mask
+    /// marks move, the rest stay put, so a body-slim reshapes the person and
+    /// leaves the background behind them untouched. Null warps the whole frame.
+    mask_channel: ?u8 = null,
+};
+
+pub const ReshapeField = struct {
+    /// A reshape.bank node's per-region face sculpt: sixty-six landmark
+    /// driven deformations, each in [-1,1] with 0 the identity. Every field
+    /// warps the frame around one facial region and decays to identity away
+    /// from it, so the banks compose without a global resample.
+    nose_width: f32 = 0,
+    nose_bridge_width: f32 = 0,
+    nose_bridge_height: f32 = 0,
+    nose_tip_size: f32 = 0,
+    nose_tip_height: f32 = 0,
+    nose_length: f32 = 0,
+    nostril_size: f32 = 0,
+    nose_scale: f32 = 0,
+    jaw_width: f32 = 0,
+    jaw_slim: f32 = 0,
+    jaw_left: f32 = 0,
+    jaw_right: f32 = 0,
+    jaw_angle: f32 = 0,
+    jaw_height: f32 = 0,
+    jaw_v_line: f32 = 0,
+    chin_length: f32 = 0,
+    chin_width: f32 = 0,
+    chin_point: f32 = 0,
+    chin_height: f32 = 0,
+    chin_forward: f32 = 0,
+    chin_size: f32 = 0,
+    lip_size: f32 = 0,
+    lip_width: f32 = 0,
+    lip_height: f32 = 0,
+    lip_upper: f32 = 0,
+    lip_lower: f32 = 0,
+    mouth_position: f32 = 0,
+    mouth_corner: f32 = 0,
+    cupid_bow: f32 = 0,
+    philtrum_length: f32 = 0,
+    cheek_fullness_l: f32 = 0,
+    cheek_fullness_r: f32 = 0,
+    cheek_slim_l: f32 = 0,
+    cheek_slim_r: f32 = 0,
+    cheekbone_height: f32 = 0,
+    cheekbone_width: f32 = 0,
+    cheek_lower_slim: f32 = 0,
+    cheek_scale: f32 = 0,
+    brow_height_l: f32 = 0,
+    brow_height_r: f32 = 0,
+    brow_tilt: f32 = 0,
+    brow_thickness: f32 = 0,
+    brow_distance: f32 = 0,
+    brow_peak: f32 = 0,
+    forehead_height: f32 = 0,
+    forehead_width: f32 = 0,
+    forehead_round: f32 = 0,
+    forehead_size: f32 = 0,
+    eye_size_l: f32 = 0,
+    eye_size_r: f32 = 0,
+    eye_width: f32 = 0,
+    eye_height: f32 = 0,
+    eye_distance: f32 = 0,
+    eye_tilt: f32 = 0,
+    eye_inner_corner: f32 = 0,
+    eye_outer_corner: f32 = 0,
+    eye_lower: f32 = 0,
+    eye_scale: f32 = 0,
+    face_slim: f32 = 0,
+    face_width: f32 = 0,
+    face_length: f32 = 0,
+    face_v_shape: f32 = 0,
+    temple_width: f32 = 0,
+    face_scale: f32 = 0,
+    face_symmetry: f32 = 0,
+    face_overall: f32 = 0,
 };
 
 pub const TrailField = struct {
@@ -363,6 +623,28 @@ pub const EnvField = struct {
     intensity: f32 = 1.0,
 };
 
+/// The direct-manipulation gestures and screen controls a sprite responds to.
+/// drag moves it, pinch scales it, rotate turns it, tap_event fires on a tap;
+/// slider_param runs it along a track as a slider and carousel_param steps an
+/// index on a swipe. All off by default; the spec covers the full behaviour.
+pub const Interaction = struct {
+    drag: bool = false,
+    pinch: bool = false,
+    rotate: bool = false,
+    tap_event: []const u8 = "",
+    slider_param: []const u8 = "",
+    slider_vertical: bool = false,
+    slider_min: f32 = 0.0,
+    slider_max: f32 = 1.0,
+    carousel_param: []const u8 = "",
+    carousel_count: u32 = 0,
+
+    pub fn any(self: Interaction) bool {
+        return self.drag or self.pinch or self.rotate or self.tap_event.len > 0 or
+            self.slider_param.len > 0 or self.carousel_param.len > 0;
+    }
+};
+
 pub const SpriteField = struct {
     /// A sprite.2d node's screen rect in normalized coordinates (origin
     /// top-left, 0..1 across the frame) and its draw opacity. The default
@@ -372,6 +654,8 @@ pub const SpriteField = struct {
     w: f32 = 1.0,
     h: f32 = 1.0,
     opacity: f32 = 1.0,
+    /// The gestures that directly manipulate this sprite, off unless named.
+    interaction: Interaction = .{},
     /// A parameter name whose live value overrides `opacity` each frame, so
     /// a param_ramp can fade the sprite or a beat trigger pulse it. Empty
     /// leaves the static opacity in force.
@@ -496,6 +780,45 @@ pub const PhysicsBody = struct {
     jiggle_damping: f32 = 0.3,
 };
 
+/// How a model.gltf node is steered by the recognized gestures, a turntable
+/// input scheme: orbit spins it with a drag, dolly scales it with a pinch, and
+/// roll turns it with a two-finger twist. All off unless named.
+pub const ModelControl = struct {
+    orbit: bool = false,
+    dolly: bool = false,
+    roll: bool = false,
+
+    pub fn any(self: ModelControl) bool {
+        return self.orbit or self.dolly or self.roll;
+    }
+};
+
+/// One node of a logic.graph, stored raw for the runtime to compile. op is the
+/// operation name; a, b and c are either a wired input (a_ref names an earlier
+/// node) or an inline literal (a_lit). signal_source and param_name feed the
+/// leaf ops; constant is the const op's value.
+pub const LogicNodeSpec = struct {
+    id: []const u8,
+    op: []const u8,
+    a_ref: []const u8 = "",
+    a_lit: f32 = 0,
+    b_ref: []const u8 = "",
+    b_lit: f32 = 0,
+    c_ref: []const u8 = "",
+    c_lit: f32 = 0,
+    constant: f32 = 0,
+    signal_source: []const u8 = "",
+    param_name: []const u8 = "",
+};
+
+/// A logic.graph node's raw graph: its nodes, which node is the output, and the
+/// parameter the output value drives each tick.
+pub const LogicGraphSpec = struct {
+    nodes: []const LogicNodeSpec,
+    output_id: []const u8,
+    output_param: []const u8,
+};
+
 pub const Node = struct {
     id: []const u8,
     type: []const u8,
@@ -511,6 +834,10 @@ pub const Node = struct {
     skeleton_anchor: bool = false,
     /// True when a model.gltf node anchors to the tracked world.
     world_anchor: bool = false,
+    /// Set when a model.gltf node is turntable-controlled by the gestures.
+    control: ?ModelControl = null,
+    /// Set on a logic.graph node: its raw graph the runtime compiles.
+    logic_graph: ?LogicGraphSpec = null,
     /// Set when the manifest gives the node a rigid body.
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
@@ -543,16 +870,43 @@ pub const Node = struct {
     fog: ?FogField = null,
     /// Set only on an outline.pass node: its line color and depth threshold.
     outline: ?OutlineField = null,
+    /// Set only on an occluder.pass node: its silhouette expand, edge softness,
+    /// and the head-matte channel it reveals.
+    occluder: ?OccluderField = null,
+    /// Set only on a cutout.pass node: its background color, edge softness, and
+    /// the face-matte channel it keeps.
+    cutout: ?CutoutField = null,
     /// Set only on a tint.pass node: its color, opacity, and mask channel.
     tint: ?TintField = null,
     /// Set only on a smooth.pass node: its amount and mask channel.
     smooth: ?SmoothField = null,
+    /// Set only on a paint.face node: the opacity, face region, and blend it
+    /// lays its texture onto the face with.
+    paint: ?PaintField = null,
+    /// Set only on a face.swap node: the opacity, seam feather, and optional
+    /// region the donor face is warped onto the tracked face with.
+    swap: ?SwapField = null,
+    /// Set only on a mesh.lashes node: the colour, opacity, length, and curl
+    /// of the lash strip it rises off the upper lid.
+    lashes: ?LashField = null,
+    /// Set only on a retouch.pass node: its selective-filter mode, amount, and
+    /// mask channel.
+    retouch: ?RetouchField = null,
+    /// Set only on a matte.refine node: its guided edge-refinement parameters
+    /// and the mask channel (or depth) it refines.
+    matte: ?MatteField = null,
+    /// Set only on a matte.hair node: the guided-refinement parameters it lifts
+    /// the coarse hair class into the strand-level hair_matte channel with.
+    hair_matte: ?HairMatteField = null,
     /// Set only on a stylize.pass node: its artistic mode and parameters.
     stylize: ?StylizeField = null,
     /// Set only on an edge.pass node: its detector mode and parameters.
     edge: ?EdgeField = null,
     /// Set only on a warp.pass node: its distortion mode and parameters.
     warp: ?WarpField = null,
+    /// Set only on a reshape.bank node: its sixty-six per-region face sculpt
+    /// amounts.
+    reshape: ?ReshapeField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -585,6 +939,12 @@ pub const ActionKind = enum {
     reset_timer,
     /// Plays a sound: target is the bundle-relative sound path.
     play_sound,
+    /// Counter changes: target names the counter, to is the set value.
+    increment_counter,
+    reset_counter,
+    set_counter,
+    /// Device haptic: target names the style, to is the 0..1 intensity.
+    haptic,
 };
 
 pub const Curve = enum { linear, ease_in_quad, ease_out_quad, ease_in_out_quad, ease_in_out_cubic, ease_in_out_sine, spring };
@@ -727,37 +1087,19 @@ fn jsonDepth(value: std.json.Value) usize {
 
 fn readVec3(value: std.json.Value, out: *[3]f32) bool {
     if (value != .array or value.array.items.len != 3) return false;
-    for (value.array.items, 0..) |item, i| {
-        out[i] = switch (item) {
-            .float => |f| @floatCast(f),
-            .integer => |n| @floatFromInt(n),
-            else => return false,
-        };
-    }
+    for (value.array.items, 0..) |item, i| out[i] = @floatCast(numberOf(item) orelse return false);
     return true;
 }
 
 fn readVec4(value: std.json.Value, out: *[4]f32) bool {
     if (value != .array or value.array.items.len != 4) return false;
-    for (value.array.items, 0..) |item, i| {
-        out[i] = switch (item) {
-            .float => |f| @floatCast(f),
-            .integer => |n| @floatFromInt(n),
-            else => return false,
-        };
-    }
+    for (value.array.items, 0..) |item, i| out[i] = @floatCast(numberOf(item) orelse return false);
     return true;
 }
 
 fn readVec6(value: std.json.Value, out: *[6]f32) bool {
     if (value != .array or value.array.items.len != 6) return false;
-    for (value.array.items, 0..) |item, i| {
-        out[i] = switch (item) {
-            .float => |f| @floatCast(f),
-            .integer => |n| @floatFromInt(n),
-            else => return false,
-        };
-    }
+    for (value.array.items, 0..) |item, i| out[i] = @floatCast(numberOf(item) orelse return false);
     return true;
 }
 
@@ -824,12 +1166,23 @@ fn keyModeValue(s: []const u8) u8 {
     return 0;
 }
 
+/// The finite f64 range that still narrows to a finite f32. Every numeric
+/// field a lens carries is an f32 descriptor; a JSON 1e300 would otherwise
+/// cast to inf and feed a body or particle born non-finite.
+const f32_limit: f64 = std.math.floatMax(f32);
+
+/// Reads a JSON number, rejecting anything that would not survive the f32
+/// narrowing every consumer performs: NaN, inf, or a magnitude past f32's
+/// range. Out-of-range reads fall back to the caller's default or diagnostic.
 fn numberOf(value: std.json.Value) ?f64 {
-    return switch (value) {
+    const n: f64 = switch (value) {
         .integer => |i| @floatFromInt(i),
         .float => |f| f,
-        else => null,
+        else => return null,
     };
+    // Written as a positive test so NaN (all comparisons false) is rejected.
+    if (!(n >= -f32_limit and n <= f32_limit)) return null;
+    return n;
 }
 
 /// Parses "major.minor" strictly: two decimal runs separated by one dot,
@@ -939,6 +1292,14 @@ fn parseParamValue(diags: *Diagnostics, path: *PathStack, param_type: ParamType,
                 try diags.add(path.slice(), "expected a number", .{});
                 return null;
             };
+            // Guard the i32 narrowing: a 1e10 default would trap the cast in a
+            // safe build and go UB in release. Positive test rejects NaN too.
+            const i32_min: f64 = std.math.minInt(i32);
+            const i32_max: f64 = std.math.maxInt(i32);
+            if (!(n >= i32_min and n <= i32_max)) {
+                try diags.add(path.slice(), "int is out of range", .{});
+                return null;
+            }
             return .{ .int = @intFromFloat(n) };
         },
         .bool => {
@@ -1067,7 +1428,10 @@ fn parseBinding(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         },
         .bool => |b| return .{ .literal_bool = b },
         .integer, .float => {
-            const n = numberOf(value).?;
+            const n = numberOf(value) orelse {
+                try diags.add(path.slice(), "number is out of range", .{});
+                return null;
+            };
             return .{ .literal_float = @floatCast(n) };
         },
         else => {
@@ -1193,6 +1557,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var body_anchor = false;
         var skeleton_anchor = false;
         var world_anchor = false;
+        var model_control: ?ModelControl = null;
+        var logic_graph_spec: ?LogicGraphSpec = null;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
         var particle_field: ?ParticleField = null;
@@ -1473,6 +1839,57 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "outline.pass")) {
             outline_field = .{};
         }
+        var occluder_field: ?OccluderField = null;
+        if (getField(object, "occluder")) |ov| {
+            const omark = path.push("occluder");
+            if (!std.mem.eql(u8, node_type, "occluder.pass")) {
+                try diags.add(path.slice(), "occluder is an occluder.pass field, found it on '{s}'", .{node_type});
+            } else if (ov != .object) {
+                try diags.add(path.slice(), "occluder must be an object", .{});
+            } else {
+                var field: OccluderField = .{};
+                if (getField(ov.object, "expand")) |v| field.expand = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.expand)), 0.0, 0.2);
+                if (getField(ov.object, "softness")) |v| field.softness = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.softness)), 0.0, 0.5);
+                if (getField(ov.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "occluder mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                occluder_field = field;
+            }
+            path.pop(omark);
+        } else if (std.mem.eql(u8, node_type, "occluder.pass")) {
+            occluder_field = .{};
+        }
+        var cutout_field: ?CutoutField = null;
+        if (getField(object, "cutout")) |cv| {
+            const cmark = path.push("cutout");
+            if (!std.mem.eql(u8, node_type, "cutout.pass")) {
+                try diags.add(path.slice(), "cutout is a cutout.pass field, found it on '{s}'", .{node_type});
+            } else if (cv != .object) {
+                try diags.add(path.slice(), "cutout must be an object", .{});
+            } else {
+                var field: CutoutField = .{};
+                if (getField(cv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "cutout color must be three numbers", .{});
+                }
+                if (getField(cv.object, "softness")) |v| field.softness = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.softness)), 0.0, 0.5);
+                if (getField(cv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "cutout mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                cutout_field = field;
+            }
+            path.pop(cmark);
+        } else if (std.mem.eql(u8, node_type, "cutout.pass")) {
+            cutout_field = .{};
+        }
         var tint_field: ?TintField = null;
         if (getField(object, "tint")) |tv| {
             const tintmark = path.push("tint");
@@ -1505,6 +1922,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         }
                     }
                 }
+                if (getField(tv.object, "blend")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(TintBlend, name)) |mode| field.blend = mode else try diags.add(path.slice(), "tint blend must be normal, multiply, or screen", .{});
+                    }
+                }
+                if (getField(tv.object, "finish")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.mem.eql(u8, name, "none")) {
+                            field.finish = .matte;
+                        } else if (std.meta.stringToEnum(TintFinish, name)) |mode| {
+                            field.finish = mode;
+                        } else try diags.add(path.slice(), "tint finish must be matte, gloss, shimmer, or metallic", .{});
+                    }
+                }
                 tint_field = field;
             }
             path.pop(tintmark);
@@ -1531,6 +1962,147 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             path.pop(smoothmark);
         } else if (std.mem.eql(u8, node_type, "smooth.pass")) {
             smooth_field = .{};
+        }
+        var paint_field: ?PaintField = null;
+        if (getField(object, "paint")) |pv| {
+            const paintmark = path.push("paint");
+            if (!std.mem.eql(u8, node_type, "paint.face")) {
+                try diags.add(path.slice(), "paint is a paint.face field, found it on '{s}'", .{node_type});
+            } else if (pv != .object) {
+                try diags.add(path.slice(), "paint must be an object", .{});
+            } else {
+                var field: PaintField = .{};
+                if (getField(pv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(pv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "paint mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                if (getField(pv.object, "blend")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(TintBlend, name)) |mode| field.blend = mode else try diags.add(path.slice(), "paint blend must be normal, multiply, or screen", .{});
+                    }
+                }
+                paint_field = field;
+            }
+            path.pop(paintmark);
+        } else if (std.mem.eql(u8, node_type, "paint.face")) {
+            paint_field = .{};
+        }
+        var swap_field: ?SwapField = null;
+        if (getField(object, "swap")) |sv| {
+            const swapmark = path.push("swap");
+            if (!std.mem.eql(u8, node_type, "face.swap")) {
+                try diags.add(path.slice(), "swap is a face.swap field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "swap must be an object", .{});
+            } else {
+                var field: SwapField = .{};
+                if (getField(sv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(sv.object, "feather")) |v| field.feather = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.feather)), 0.02, 1.0);
+                if (getField(sv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "swap mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                swap_field = field;
+            }
+            path.pop(swapmark);
+        } else if (std.mem.eql(u8, node_type, "face.swap")) {
+            swap_field = .{};
+        }
+        var lash_field: ?LashField = null;
+        if (getField(object, "lashes")) |lv| {
+            const lashmark = path.push("lashes");
+            if (!std.mem.eql(u8, node_type, "mesh.lashes")) {
+                try diags.add(path.slice(), "lashes is a mesh.lashes field, found it on '{s}'", .{node_type});
+            } else if (lv != .object) {
+                try diags.add(path.slice(), "lashes must be an object", .{});
+            } else {
+                var field: LashField = .{};
+                if (getField(lv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "lashes color must be three numbers", .{});
+                }
+                if (getField(lv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(lv.object, "length")) |v| field.length = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.length)), 0.0, 2.0);
+                if (getField(lv.object, "curl")) |v| field.curl = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.curl)), -1.0, 1.0);
+                lash_field = field;
+            }
+            path.pop(lashmark);
+        } else if (std.mem.eql(u8, node_type, "mesh.lashes")) {
+            lash_field = .{};
+        }
+        var retouch_field: ?RetouchField = null;
+        if (getField(object, "retouch")) |rv| {
+            const retouchmark = path.push("retouch");
+            if (!std.mem.eql(u8, node_type, "retouch.pass")) {
+                try diags.add(path.slice(), "retouch is a retouch.pass field, found it on '{s}'", .{node_type});
+            } else if (rv != .object) {
+                try diags.add(path.slice(), "retouch must be an object", .{});
+            } else {
+                var field: RetouchField = .{};
+                if (getField(rv.object, "mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "retouch mode must be blemish or shine", .{});
+                    }
+                }
+                if (getField(rv.object, "amount")) |v| field.amount = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.amount)), 0.0, 1.0);
+                if (getField(rv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "retouch mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                retouch_field = field;
+            }
+            path.pop(retouchmark);
+        } else if (std.mem.eql(u8, node_type, "retouch.pass")) {
+            retouch_field = .{};
+        }
+        var matte_field: ?MatteField = null;
+        if (getField(object, "matte")) |mv| {
+            const mattemark = path.push("matte");
+            if (!std.mem.eql(u8, node_type, "matte.refine")) {
+                try diags.add(path.slice(), "matte is a matte.refine field, found it on '{s}'", .{node_type});
+            } else if (mv != .object) {
+                try diags.add(path.slice(), "matte must be an object", .{});
+            } else {
+                var field: MatteField = .{};
+                if (getField(mv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0.5, 6.0);
+                if (getField(mv.object, "sensitivity")) |v| field.sensitivity = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.sensitivity)));
+                if (getField(mv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 1.0);
+                if (getField(mv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "matte mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                matte_field = field;
+            }
+            path.pop(mattemark);
+        } else if (std.mem.eql(u8, node_type, "matte.refine")) {
+            matte_field = .{};
+        }
+        var hair_matte_field: ?HairMatteField = null;
+        if (getField(object, "hair_matte")) |hv| {
+            const hairmark = path.push("hair_matte");
+            if (!std.mem.eql(u8, node_type, "matte.hair")) {
+                try diags.add(path.slice(), "hair_matte is a matte.hair field, found it on '{s}'", .{node_type});
+            } else if (hv != .object) {
+                try diags.add(path.slice(), "hair_matte must be an object", .{});
+            } else {
+                var field: HairMatteField = .{};
+                if (getField(hv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0.5, 6.0);
+                if (getField(hv.object, "sensitivity")) |v| field.sensitivity = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.sensitivity)));
+                if (getField(hv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 1.0);
+                hair_matte_field = field;
+            }
+            path.pop(hairmark);
+        } else if (std.mem.eql(u8, node_type, "matte.hair")) {
+            hair_matte_field = .{};
         }
         var stylize_field: ?StylizeField = null;
         if (getField(object, "stylize")) |yv| {
@@ -1599,16 +2171,70 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(wv.object, "center_x")) |v| field.center_x = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.center_x)), 0.0, 1.0);
                 if (getField(wv.object, "center_y")) |v| field.center_y = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.center_y)), 0.0, 1.0);
                 if (getField(wv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0.01, 1.0);
-                if (getField(wv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 4.0);
+                // face_scale reads strength as a signed scale, so it allows a
+                // negative shrink; every other mode keeps the positive range.
+                if (getField(wv.object, "strength")) |v| {
+                    const lo: f32 = if (field.mode == .face_scale) -4.0 else 0.0;
+                    field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), lo, 4.0);
+                }
                 if (getField(wv.object, "refractive_index")) |v| field.refractive_index = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.refractive_index)), 0.1, 1.0);
                 if (getField(wv.object, "aspect_auto")) |v| {
                     if (v == .bool) field.aspect_auto = v.bool;
+                }
+                if (getField(wv.object, "symmetry")) |v| {
+                    if (v == .bool) field.symmetry = v.bool;
+                }
+                if (getField(wv.object, "symmetry_x")) |v| field.symmetry_x = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.symmetry_x)), 0.0, 1.0);
+                if (getField(wv.object, "points")) |v| {
+                    if (v == .array and v.array.items.len <= warp_point_max) {
+                        var n: usize = 0;
+                        for (v.array.items) |pv| {
+                            if (pv != .object) {
+                                try diags.add(path.slice(), "each warp point must be an object", .{});
+                                continue;
+                            }
+                            var p: LiquifyPoint = .{};
+                            if (getField(pv.object, "x")) |xv| p.x = std.math.clamp(@as(f32, @floatCast(numberOf(xv) orelse p.x)), 0.0, 1.0);
+                            if (getField(pv.object, "y")) |yv| p.y = std.math.clamp(@as(f32, @floatCast(numberOf(yv) orelse p.y)), 0.0, 1.0);
+                            if (getField(pv.object, "dx")) |dxv| p.dx = std.math.clamp(@as(f32, @floatCast(numberOf(dxv) orelse p.dx)), -1.0, 1.0);
+                            if (getField(pv.object, "dy")) |dyv| p.dy = std.math.clamp(@as(f32, @floatCast(numberOf(dyv) orelse p.dy)), -1.0, 1.0);
+                            if (getField(pv.object, "radius")) |rv| p.radius = std.math.clamp(@as(f32, @floatCast(numberOf(rv) orelse p.radius)), 0.01, 1.0);
+                            field.points[n] = p;
+                            n += 1;
+                        }
+                        field.point_count = n;
+                    } else try diags.add(path.slice(), "warp points must be an array of up to eight push points", .{});
+                }
+                if (getField(wv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "warp mask names an unknown channel '{s}'", .{name});
+                    }
                 }
                 warp_field = field;
             }
             path.pop(wmark);
         } else if (std.mem.eql(u8, node_type, "warp.pass")) {
             warp_field = .{};
+        }
+        var reshape_field: ?ReshapeField = null;
+        if (getField(object, "reshape")) |rv| {
+            const rmark = path.push("reshape");
+            if (!std.mem.eql(u8, node_type, "reshape.bank")) {
+                try diags.add(path.slice(), "reshape is a reshape.bank field, found it on '{s}'", .{node_type});
+            } else if (rv != .object) {
+                try diags.add(path.slice(), "reshape must be an object", .{});
+            } else {
+                var field: ReshapeField = .{};
+                inline for (std.meta.fields(ReshapeField)) |f| {
+                    if (getField(rv.object, f.name)) |v| {
+                        @field(field, f.name) = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse @field(field, f.name))), -1.0, 1.0);
+                    }
+                }
+                reshape_field = field;
+            }
+            path.pop(rmark);
+        } else if (std.mem.eql(u8, node_type, "reshape.bank")) {
+            reshape_field = .{};
         }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
@@ -1698,6 +2324,38 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     } else try diags.add(path.slice(), "sprite frames must be an integer 1..{d}", .{max_sprite_frames});
                 }
                 if (getField(sv.object, "fps")) |v| field.fps = @floatCast(numberOf(v) orelse field.fps);
+                if (getField(sv.object, "interaction")) |iv| {
+                    if (iv == .object) {
+                        var it: Interaction = .{};
+                        if (getField(iv.object, "drag")) |b| {
+                            if (b == .bool) it.drag = b.bool;
+                        }
+                        if (getField(iv.object, "pinch")) |b| {
+                            if (b == .bool) it.pinch = b.bool;
+                        }
+                        if (getField(iv.object, "rotate")) |b| {
+                            if (b == .bool) it.rotate = b.bool;
+                        }
+                        if (getField(iv.object, "tap_event")) |v| {
+                            if (try expectString(diags, path, v)) |s| it.tap_event = try arena.dupe(u8, s);
+                        }
+                        if (getField(iv.object, "slider_param")) |v| {
+                            if (try expectString(diags, path, v)) |s| it.slider_param = try arena.dupe(u8, s);
+                        }
+                        if (getField(iv.object, "slider_vertical")) |b| {
+                            if (b == .bool) it.slider_vertical = b.bool;
+                        }
+                        if (getField(iv.object, "slider_min")) |v| it.slider_min = @floatCast(numberOf(v) orelse it.slider_min);
+                        if (getField(iv.object, "slider_max")) |v| it.slider_max = @floatCast(numberOf(v) orelse it.slider_max);
+                        if (getField(iv.object, "carousel_param")) |v| {
+                            if (try expectString(diags, path, v)) |s| it.carousel_param = try arena.dupe(u8, s);
+                        }
+                        if (getField(iv.object, "carousel_count")) |v| {
+                            if (v == .integer and v.integer >= 1) it.carousel_count = @intCast(v.integer);
+                        }
+                        field.interaction = it;
+                    } else try diags.add(path.slice(), "sprite interaction must be an object", .{});
+                }
                 sprite_field = field;
             }
             path.pop(smark);
@@ -2008,7 +2666,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         for (indices_value.array.items) |index_value| {
                             switch (index_value) {
                                 .integer => |n| {
-                                    if (n < 0) {
+                                    if (n < 0 or n > std.math.maxInt(u32)) {
                                         idx_ok = false;
                                     } else {
                                         idx[ii] = @intCast(n);
@@ -2124,7 +2782,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                             } else {
                                 if (getField(jiggle_value.object, "segments")) |seg_value| {
                                     switch (seg_value) {
-                                        .integer => |n| body.jiggle_segments = if (n > 0) @intCast(n) else 0,
+                                        .integer => |n| body.jiggle_segments = if (n > 0) @intCast(@min(n, 128)) else 0,
                                         else => try diags.add(path.slice(), "physics chain jiggle segments must be a whole number", .{}),
                                     }
                                 }
@@ -2169,6 +2827,38 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(anchor_mark);
         }
+        if (getField(object, "control")) |cv| {
+            const control_mark = path.push("control");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "control is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (cv != .object) {
+                try diags.add(path.slice(), "control must be an object", .{});
+            } else {
+                var mc: ModelControl = .{};
+                if (getField(cv.object, "orbit")) |b| {
+                    if (b == .bool) mc.orbit = b.bool;
+                }
+                if (getField(cv.object, "dolly")) |b| {
+                    if (b == .bool) mc.dolly = b.bool;
+                }
+                if (getField(cv.object, "roll")) |b| {
+                    if (b == .bool) mc.roll = b.bool;
+                }
+                model_control = mc;
+            }
+            path.pop(control_mark);
+        }
+        if (getField(object, "graph")) |gv| {
+            const graph_mark = path.push("graph");
+            if (!std.mem.eql(u8, node_type, "logic.graph")) {
+                try diags.add(path.slice(), "graph is a logic.graph field, found it on '{s}'", .{node_type});
+            } else if (gv != .object) {
+                try diags.add(path.slice(), "graph must be an object", .{});
+            } else {
+                logic_graph_spec = try parseLogicGraph(diags, path, arena, gv.object);
+            }
+            path.pop(graph_mark);
+        }
 
         const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
         const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
@@ -2208,6 +2898,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .params = try params.toOwnedSlice(arena),
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
+            .control = model_control,
+            .logic_graph = logic_graph_spec,
             .body_anchor = body_anchor,
             .skeleton_anchor = skeleton_anchor,
             .world_anchor = world_anchor,
@@ -2224,11 +2916,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .dof = dof_field,
             .fog = fog_field,
             .outline = outline_field,
+            .occluder = occluder_field,
+            .cutout = cutout_field,
             .tint = tint_field,
             .smooth = smooth_field,
+            .paint = paint_field,
+            .swap = swap_field,
+            .lashes = lash_field,
+            .retouch = retouch_field,
+            .matte = matte_field,
+            .hair_matte = hair_matte_field,
             .stylize = stylize_field,
             .edge = edge_field,
             .warp = warp_field,
+            .reshape = reshape_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,
@@ -2240,6 +2941,53 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         });
     }
     return try out.toOwnedSlice(arena);
+}
+
+fn parseLogicInput(object: std.json.ObjectMap, name: []const u8, ref_out: *[]const u8, lit_out: *f32, arena: std.mem.Allocator) error{OutOfMemory}!void {
+    if (getField(object, name)) |v| {
+        switch (v) {
+            .string => |s| ref_out.* = try arena.dupe(u8, s),
+            else => lit_out.* = @floatCast(numberOf(v) orelse 0),
+        }
+    }
+}
+
+fn parseLogicGraph(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?LogicGraphSpec {
+    const output_param = if (getField(object, "output_param")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const output_id = if (getField(object, "output")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const nodes_val = getField(object, "nodes") orelse {
+        try diags.add(path.slice(), "graph needs a nodes array", .{});
+        return null;
+    };
+    if (nodes_val != .array) {
+        try diags.add(path.slice(), "graph nodes must be an array", .{});
+        return null;
+    }
+    var nodes: std.ArrayList(LogicNodeSpec) = .empty;
+    for (nodes_val.array.items) |item| {
+        if (item != .object) continue;
+        const o = item.object;
+        var node: LogicNodeSpec = .{
+            .id = try arena.dupe(u8, if (getField(o, "id")) |v| (try expectString(diags, path, v) orelse "") else ""),
+            .op = try arena.dupe(u8, if (getField(o, "op")) |v| (try expectString(diags, path, v) orelse "") else ""),
+        };
+        try parseLogicInput(o, "a", &node.a_ref, &node.a_lit, arena);
+        try parseLogicInput(o, "b", &node.b_ref, &node.b_lit, arena);
+        try parseLogicInput(o, "c", &node.c_ref, &node.c_lit, arena);
+        if (getField(o, "signal")) |v| {
+            if (try expectString(diags, path, v)) |s| node.signal_source = try arena.dupe(u8, s);
+        }
+        if (getField(o, "param")) |v| {
+            if (try expectString(diags, path, v)) |s| node.param_name = try arena.dupe(u8, s);
+        }
+        if (getField(o, "value")) |v| node.constant = @floatCast(numberOf(v) orelse 0);
+        try nodes.append(arena, node);
+    }
+    return .{
+        .nodes = try nodes.toOwnedSlice(arena),
+        .output_id = try arena.dupe(u8, output_id),
+        .output_param = try arena.dupe(u8, output_param),
+    };
 }
 
 fn parseAction(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?Action {
@@ -2282,7 +3030,16 @@ fn parseAction(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, 
             path.pop(mark);
             break :blk 0;
         };
-        action.duration_ms = @intFromFloat(@max(0, n));
+        // Bound the ms so the ramp's ms*1000 microsecond math stays inside u32;
+        // an out-of-range duration is a diagnostic and holds at zero.
+        if (!(n >= 0 and n <= max_duration_ms)) {
+            const mark = path.push("duration_ms");
+            try diags.add(path.slice(), "duration is out of range", .{});
+            path.pop(mark);
+            action.duration_ms = 0;
+        } else {
+            action.duration_ms = @intFromFloat(n);
+        }
     }
     if (getField(object, "curve")) |v| {
         const s = switch (v) {
@@ -2797,6 +3554,22 @@ test "a physics body parses on a model node" {
     try t.expect(body.dynamic);
 }
 
+test "a physics chain jiggle count past a sane cap is clamped, not a crash" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "anchor", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+        \\    "physics": {"body": "box", "motion": "kinematic"}},
+        \\   {"id": "bead", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+        \\    "physics": {"body": "sphere", "motion": "dynamic",
+        \\     "chain": {"to": "anchor", "length": 0.4, "jiggle": {"segments": 4294967296}}}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expect(manifest.nodes[1].physics.?.jiggle_segments <= 128);
+}
+
 test "physics on a non-model node is rejected" {
     const source =
         \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
@@ -2986,6 +3759,40 @@ test "a sprite.2d node parses its rect and opacity" {
     try t.expectApproxEqAbs(@as(f32, 0.8), sp.opacity, 0.001);
 }
 
+test "a sprite.2d node parses its interaction block" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {},
+        \\    "sprite": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2, "interaction": {"drag": true, "pinch": true, "rotate": true, "tap_event": "hit"}}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
+    try t.expect(sp.interaction.drag);
+    try t.expect(sp.interaction.pinch);
+    try t.expect(sp.interaction.rotate);
+    try t.expectEqualStrings("hit", sp.interaction.tap_event);
+    try t.expect(sp.interaction.any());
+}
+
+test "a model.gltf node parses its turntable control block" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "figure", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "control": {"orbit": true, "dolly": true, "roll": true}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const control = manifest.nodes[0].control orelse return error.TestUnexpectedResult;
+    try t.expect(control.orbit);
+    try t.expect(control.dolly);
+    try t.expect(control.roll);
+    try t.expect(control.any());
+}
+
 test "a sprite.2d node with no sprite block defaults to full frame" {
     const source =
         \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
@@ -3163,4 +3970,17 @@ test "engine_compat range boundaries are exact" {
     try t.expect(range.contains(0, 9));
     try t.expect(!range.contains(0, 4));
     try t.expect(!range.contains(1, 0));
+}
+
+test "scene classes append at the frozen mask-channel tail" {
+    // The tail indices the scene slot and its proof pin. Existing channels keep
+    // their numbers; the scene classes only extend the vocabulary.
+    try t.expectEqual(@as(?u8, 21), maskChannelIndex("hair_matte"));
+    try t.expectEqual(@as(?u8, 22), maskChannelIndex("sky"));
+    try t.expectEqual(@as(?u8, 23), maskChannelIndex("ground"));
+    try t.expectEqual(@as(?u8, 24), maskChannelIndex("building"));
+    try t.expectEqual(sky_channel, maskChannelIndex("sky").?);
+    try t.expectEqual(ground_channel, maskChannelIndex("ground").?);
+    try t.expectEqual(building_channel, maskChannelIndex("building").?);
+    try t.expectEqual(@as(usize, 25), mask_channels.len);
 }

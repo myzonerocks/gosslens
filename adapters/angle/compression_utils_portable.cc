@@ -1,3 +1,5 @@
+// Compiled -fno-exceptions (build.zig buildAngleLib), matching the rest
+// of the ANGLE tree this file rides along with; zlib reports status.
 #include "compression_utils_portable.h"
 
 namespace zlib_internal {

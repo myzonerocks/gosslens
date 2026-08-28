@@ -21,6 +21,7 @@ const std = @import("std");
 const graph = @import("graph");
 const manifest = @import("manifest");
 const trigger = @import("trigger");
+const logic = @import("logic");
 const animation = @import("animation");
 
 /// The beauty engine's six settable effects, named independently of
@@ -36,7 +37,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, tint_pass, smooth_pass, stylize_pass, edge_pass, warp_pass, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -45,6 +46,9 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.blusher")) return .beauty_blusher;
     if (std.mem.eql(u8, type_str, "shader.pass")) return .shader_pass;
     if (std.mem.eql(u8, type_str, "mesh.face")) return .mesh_face;
+    if (std.mem.eql(u8, type_str, "mesh.lashes")) return .mesh_lashes;
+    if (std.mem.eql(u8, type_str, "paint.face")) return .paint_face;
+    if (std.mem.eql(u8, type_str, "face.swap")) return .face_swap;
     if (std.mem.eql(u8, type_str, "lut.pass")) return .lut_pass;
     if (std.mem.eql(u8, type_str, "blend.pass")) return .blend_pass;
     if (std.mem.eql(u8, type_str, "blur.pass")) return .blur_pass;
@@ -53,11 +57,17 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "dof.pass")) return .dof_pass;
     if (std.mem.eql(u8, type_str, "fog.pass")) return .fog_pass;
     if (std.mem.eql(u8, type_str, "outline.pass")) return .outline_pass;
+    if (std.mem.eql(u8, type_str, "occluder.pass")) return .occluder_pass;
+    if (std.mem.eql(u8, type_str, "cutout.pass")) return .cutout_pass;
     if (std.mem.eql(u8, type_str, "tint.pass")) return .tint_pass;
     if (std.mem.eql(u8, type_str, "smooth.pass")) return .smooth_pass;
+    if (std.mem.eql(u8, type_str, "retouch.pass")) return .retouch_pass;
+    if (std.mem.eql(u8, type_str, "matte.refine")) return .matte_refine;
+    if (std.mem.eql(u8, type_str, "matte.hair")) return .matte_hair;
     if (std.mem.eql(u8, type_str, "stylize.pass")) return .stylize_pass;
     if (std.mem.eql(u8, type_str, "edge.pass")) return .edge_pass;
     if (std.mem.eql(u8, type_str, "warp.pass")) return .warp_pass;
+    if (std.mem.eql(u8, type_str, "reshape.bank")) return .reshape_bank;
     if (std.mem.eql(u8, type_str, "trail.pass")) return .trail_pass;
     if (std.mem.eql(u8, type_str, "ssr.pass")) return .ssr_pass;
     if (std.mem.eql(u8, type_str, "env.pass")) return .env_pass;
@@ -68,6 +78,12 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "text.2d")) return .text_2d;
     if (std.mem.eql(u8, type_str, "video.texture")) return .video_texture;
     return null;
+}
+
+/// A behavior node drives parameters each tick and draws nothing, so it never
+/// joins the composite chain: the script and the logic graph.
+fn isBehaviorNode(type_str: []const u8) bool {
+    return std.mem.eql(u8, type_str, "script") or std.mem.eql(u8, type_str, "logic.graph");
 }
 
 const ParamSlot = struct { name: []const u8, effect: EffectSlot };
@@ -90,7 +106,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .tint_pass, .smooth_pass, .stylize_pass, .edge_pass, .warp_pass, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
     };
 }
 
@@ -125,6 +141,8 @@ const LensNode = struct {
     balloon: ?manifest.BalloonField = null,
     hair: ?manifest.HairField = null,
     particles: ?manifest.ParticleField = null,
+    /// .model_gltf only: the turntable gesture control, when the node declares one.
+    control: ?manifest.ModelControl = null,
     /// .model_gltf only: a parameter name per animation clip whose live
     /// value is that clip's blend weight; empty plays the first clip.
     /// Slices into the retained manifest arena, not separately owned.
@@ -143,16 +161,41 @@ const LensNode = struct {
     fog: ?manifest.FogField = null,
     /// .outline_pass only: the node's line color and depth threshold.
     outline: ?manifest.OutlineField = null,
+    /// .occluder_pass only: the node's silhouette expand, edge softness, and
+    /// the head-matte channel it reveals.
+    occluder: ?manifest.OccluderField = null,
+    /// .cutout_pass only: the node's background color, edge softness, and the
+    /// face-matte channel it keeps.
+    cutout: ?manifest.CutoutField = null,
     /// .tint_pass only: the node's color, opacity, and mask channel.
     tint: ?manifest.TintField = null,
     /// .smooth_pass only: the node's amount and mask channel.
     smooth: ?manifest.SmoothField = null,
+    /// .paint_face only: the opacity, face region, and blend the node lays its
+    /// texture onto the face with.
+    paint: ?manifest.PaintField = null,
+    /// .face_swap only: the opacity, seam feather, and optional region the donor
+    /// face is warped onto the tracked face with.
+    swap: ?manifest.SwapField = null,
+    /// .mesh_lashes only: the colour, opacity, length, and curl of the lash
+    /// strip the node rises off the upper lid.
+    lashes: ?manifest.LashField = null,
+    /// .retouch_pass only: the node's selective-filter mode, amount, and channel.
+    retouch: ?manifest.RetouchField = null,
+    /// .matte_refine only: the node's guided edge-refinement parameters and
+    /// the mask channel (or depth) it refines.
+    matte: ?manifest.MatteField = null,
+    /// .matte_hair only: the guided-refinement parameters the source lifts the
+    /// coarse hair class into the hair_matte channel with.
+    hair_matte: ?manifest.HairMatteField = null,
     /// .stylize_pass only: the node's artistic mode and parameters.
     stylize: ?manifest.StylizeField = null,
     /// .edge_pass only: the node's detector mode and parameters.
     edge: ?manifest.EdgeField = null,
     /// .warp_pass only: the node's distortion mode and parameters.
     warp: ?manifest.WarpField = null,
+    /// .reshape_bank only: the node's sixty-six per-region face sculpt amounts.
+    reshape: ?manifest.ReshapeField = null,
     /// .trail_pass only: the node's motion-trail echo amount.
     trail: ?manifest.TrailField = null,
     /// .ssr_pass only: the node's reflection strength and floor plane.
@@ -220,6 +263,7 @@ pub const ModelNode = struct {
     balloon: ?manifest.BalloonField = null,
     hair: ?manifest.HairField = null,
     particles: ?manifest.ParticleField = null,
+    control: ?manifest.ModelControl = null,
 };
 
 /// One mesh.face node ready for the caller to load and draw - which
@@ -228,6 +272,43 @@ pub const ModelNode = struct {
 pub const MeshFaceNode = struct {
     graph_index: graph.NodeIndex,
     texture_stem: []const u8,
+};
+
+/// One mesh.lashes node ready for the caller to draw - which graph node it
+/// is, and the lash strip's colour (rgb, opacity), length, and curl. It ships
+/// no asset; the strip is built from the tracked eye landmarks each frame.
+pub const LashNode = struct {
+    graph_index: graph.NodeIndex,
+    color: [4]f32,
+    length: f32,
+    curl: f32,
+};
+
+/// One paint.face node ready for the caller to load and draw - which graph
+/// node it is, the texture (assets/<stem>.png) it warps over the tracked
+/// face, and the region, opacity, and blend it lays it on the skin with.
+pub const PaintFaceNode = struct {
+    graph_index: graph.NodeIndex,
+    texture_stem: []const u8,
+    /// The face region the material is confined to, null for the whole face.
+    mask_channel: ?u8,
+    opacity: f32,
+    /// 0 blend straight over, 1 multiply (ink tattoo), 2 screen (projection).
+    blend: u8,
+};
+
+/// One face.swap node ready for the caller to load and draw - which graph node
+/// it is, the donor face (assets/<stem>.png, in canonical face-mesh UVs) it
+/// warps onto the tracked face, and the opacity, seam feather, and optional
+/// region it blends the donor in with.
+pub const FaceSwapNode = struct {
+    graph_index: graph.NodeIndex,
+    donor_stem: []const u8,
+    /// An optional face region the swap is further confined to, null for the
+    /// whole face mesh.
+    mask_channel: ?u8,
+    opacity: f32,
+    feather: f32,
 };
 
 /// One sprite.2d node ready for the caller to load and draw - which graph
@@ -244,6 +325,8 @@ pub const SpriteNode = struct {
     /// Frame count and rate for an animated sprite; frames == 1 is static.
     frames: u32,
     fps: f32,
+    /// The direct-manipulation gestures this sprite responds to.
+    interaction: manifest.Interaction,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -315,6 +398,24 @@ pub const OutlinePassNode = struct {
     mask_channel: ?u8,
 };
 
+/// One occluder.pass node ready to draw - which graph node it is, its
+/// silhouette expand and edge softness packed for u_occluder, and the head
+/// matte channel it reveals over content drawn behind it.
+pub const OccluderPassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [2]f32,
+    mask_channel: u8,
+};
+
+/// One cutout.pass node ready to draw - which graph node it is, its background
+/// color packed with the edge softness for u_cutout, and the face-matte channel
+/// it keeps the frame through.
+pub const CutoutPassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [4]f32,
+    mask_channel: u8,
+};
+
 pub const TintPassNode = struct {
     graph_index: graph.NodeIndex,
     color: [3]f32,
@@ -323,12 +424,36 @@ pub const TintPassNode = struct {
     mask_channel: ?u8,
     /// Color comes from the makeup reference, not the static rgb.
     from_reference: bool,
+    /// How the color folds in: 0 blend, 1 multiply (darken), 2 screen (lighten).
+    blend: u8,
+    /// The finish: 0 matte (flat), 1 gloss, 2 shimmer, 3 metallic.
+    finish: u8,
 };
 
 pub const SmoothPassNode = struct {
     graph_index: graph.NodeIndex,
     amount: f32,
     /// The mask channel the smooth acts on, null when the node named none.
+    mask_channel: ?u8,
+};
+
+/// One retouch.pass node ready for the caller to draw - which graph node it is,
+/// its filter packed for u_retouch (mode index then amount), and the mask
+/// channel it acts on. mode 0 blemish (edge-aware smooth), 1 shine (highlight
+/// suppression).
+pub const RetouchPassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [2]f32,
+    mask_channel: ?u8,
+};
+
+/// One matte.refine node ready for the caller to draw - which graph node it
+/// is, its guided-filter parameters packed for u_matteRefine (radius,
+/// sensitivity, strength), and the mask channel it refines (null refines the
+/// submitted depth instead).
+pub const MattePassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [3]f32,
     mask_channel: ?u8,
 };
 
@@ -349,12 +474,25 @@ pub const EdgePassNode = struct {
 };
 
 /// One warp.pass node ready for the caller to draw - which graph node it is,
-/// and its distortion packed as (mode, center_x, center_y, radius, strength,
-/// refractive_index, aspect_auto, unused). mode 0 glass_sphere, 1
-/// sphere_refraction, 2 bulge, 3 pinch, 4 swirl.
+/// and its distortion flat-packed: a header (mode, center_x, center_y, radius,
+/// strength, refractive_index, aspect_auto, symmetry, symmetry_x, point_count)
+/// then the liquify points as (x, y, dx, dy) and their falloff radii. mode 0
+/// glass_sphere, 1 sphere_refraction, 2 bulge, 3 pinch, 4 swirl, 5 liquify.
 pub const WarpPassNode = struct {
     graph_index: graph.NodeIndex,
-    params: [8]f32,
+    params: [manifest.warp_params_len]f32,
+    /// The mask channel the displacement is confined to, null when the node
+    /// named none and the warp acts on the whole frame.
+    mask_channel: ?u8,
+};
+
+/// One reshape.bank node ready for the caller to draw: which graph node it
+/// is, and its sixty-six per-region sculpt amounts in the ReshapeField field
+/// order, each in [-1,1] with 0 the identity. The caller pairs these with the
+/// live tracked contour and submits them into the shared reshape bank shader.
+pub const ReshapePassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [66]f32,
 };
 
 pub const TrailPassNode = struct {
@@ -378,7 +516,16 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, tint, smooth, stylize, edge, warp, trail, ssr, env, model, mesh, draw_board, sprite };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap };
+
+/// One matte.hair source node ready for the caller to draw - which graph node
+/// it is, and its guided-filter parameters packed for the refine pass (radius,
+/// sensitivity, strength). The source refines the coarse hair class against the
+/// camera luma and publishes the result as the hair_matte channel.
+pub const HairMattePassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [3]f32,
+};
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -399,6 +546,24 @@ pub const ActivateError = error{
 /// returns these instead of touching an engine directly.
 pub const AppliedEffect = struct { effect: EffectSlot, value: f32 };
 
+/// The device haptic a lens asks for. The style names the feel; the host maps
+/// it to the platform's own haptic vocabulary. Intensity is 0..1, a hint the
+/// host may honor where the platform allows it.
+pub const HapticStyle = enum(u8) { light, medium, heavy, soft, rigid, success, warning, failure };
+pub const HapticEvent = struct { style: HapticStyle, intensity: f32 };
+
+/// A compiled logic.graph node: the evaluatable graph, the parameter its output
+/// drives each tick, and a reusable scratch buffer sized to the node count.
+pub const CompiledLogicGraph = struct {
+    graph: logic.Graph,
+    output_param: []const u8,
+    scratch: []f32,
+};
+
+fn hapticStyleFromName(name: []const u8) HapticStyle {
+    return std.meta.stringToEnum(HapticStyle, name) orelse .medium;
+}
+
 pub const Lens = struct {
     gpa: std.mem.Allocator,
     manifest: manifest.Manifest,
@@ -416,6 +581,18 @@ pub const Lens = struct {
     /// reads, not a value a trigger's action starts).
     timer_names: [][]u8,
     timer_elapsed_us: []u64,
+    /// The lens's counters, each individually owned. counter_values is a
+    /// parallel array of persistent values a trigger's increment, reset, or set
+    /// action changes; unlike a timer, a counter holds until an action moves it.
+    counter_names: [][]u8,
+    counter_values: []f64,
+    /// Compiled logic.graph nodes and the arena that owns their nodes, scratch
+    /// buffers and any signal-name slices; evaluated each tick to drive params.
+    logic_arena: std.heap.ArenaAllocator,
+    logic_graphs: []CompiledLogicGraph,
+    /// This tick's parameter values as f64, so a logic graph's param leaf reads
+    /// the live value; sized once at activation.
+    tick_param_snapshot: []f64,
     /// Microseconds since activation, advanced every tick - a free-running
     /// lens clock, the time source an animated sprite cycles its frames on.
     elapsed_us: u64 = 0,
@@ -423,6 +600,7 @@ pub const Lens = struct {
     /// the per-frame path allocates nothing: timer snapshot, per-param
     /// touch flags, and room for every parameter-bound effect at once.
     tick_timer_values: []trigger.TimerValue,
+    tick_counter_values: []trigger.CounterValue,
     tick_touched: []bool,
     tick_applied: []AppliedEffect,
     /// Bundle-relative paths of sounds a play_sound trigger fired this tick;
@@ -430,6 +608,11 @@ pub const Lens = struct {
     /// frame path never allocates.
     tick_sounds: [][]const u8,
     tick_sound_count: usize = 0,
+    /// Haptics a haptic trigger fired this tick; the host drains them each
+    /// frame and buzzes the device. Sized to the trigger count, so the frame
+    /// path never allocates.
+    tick_haptics: []HapticEvent,
+    tick_haptic_count: usize = 0,
 
     pub fn deinit(self: *Lens, g: *graph.Graph) void {
         for (self.nodes) |n| g.removeNode(n.graph_index);
@@ -443,9 +626,16 @@ pub const Lens = struct {
         self.gpa.free(self.timer_names);
         self.gpa.free(self.timer_elapsed_us);
         self.gpa.free(self.tick_timer_values);
+        for (self.counter_names) |name| self.gpa.free(name);
+        self.gpa.free(self.counter_names);
+        self.gpa.free(self.counter_values);
+        self.gpa.free(self.tick_counter_values);
+        self.logic_arena.deinit();
+        self.gpa.free(self.tick_param_snapshot);
         self.gpa.free(self.tick_touched);
         self.gpa.free(self.tick_applied);
         self.gpa.free(self.tick_sounds);
+        self.gpa.free(self.tick_haptics);
         self.manifest.deinit();
         self.* = undefined;
     }
@@ -587,6 +777,36 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every occluder.pass node this lens spliced, in execution order, each
+    /// carrying its silhouette expand and edge softness and the head channel.
+    pub fn occluderPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]OccluderPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(OccluderPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .occluder_pass) continue;
+            const o = node.occluder orelse manifest.OccluderField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ o.expand, o.softness }, .mask_channel = o.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every cutout.pass node this lens spliced, in execution order, each
+    /// carrying its background color, edge softness, and face-matte channel.
+    pub fn cutoutPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]CutoutPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(CutoutPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .cutout_pass) continue;
+            const cf = node.cutout orelse manifest.CutoutField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ cf.r, cf.g, cf.b, cf.softness }, .mask_channel = cf.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every tint.pass node this lens spliced, in execution order, each
     /// carrying its color, opacity, and mask channel.
     pub fn tintPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]TintPassNode {
@@ -597,7 +817,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .tint_pass) continue;
             const tf = node.tint orelse manifest.TintField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ tf.r, tf.g, tf.b }, .opacity = tf.opacity, .mask_channel = tf.mask_channel, .from_reference = tf.from_reference });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ tf.r, tf.g, tf.b }, .opacity = tf.opacity, .mask_channel = tf.mask_channel, .from_reference = tf.from_reference, .blend = @intFromEnum(tf.blend), .finish = @intFromEnum(tf.finish) });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -613,6 +833,52 @@ pub const Lens = struct {
             if (node.node_type != .smooth_pass) continue;
             const sf = node.smooth orelse manifest.SmoothField{};
             try out.append(gpa, .{ .graph_index = node.graph_index, .amount = sf.amount, .mask_channel = sf.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every retouch.pass node this lens spliced, in execution order, each
+    /// carrying its packed filter (mode index then amount) and mask channel.
+    pub fn retouchPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]RetouchPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(RetouchPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .retouch_pass) continue;
+            const rf = node.retouch orelse manifest.RetouchField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(rf.mode)), rf.amount }, .mask_channel = rf.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every matte.refine node this lens spliced, in execution order, each
+    /// carrying its guided-filter parameters and the mask channel it refines.
+    pub fn matteRefinePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]MattePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(MattePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .matte_refine) continue;
+            const mf = node.matte orelse manifest.MatteField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ mf.radius, mf.sensitivity, mf.strength }, .mask_channel = mf.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every matte.hair source this lens spliced, in execution order, each
+    /// carrying the guided-filter parameters it refines the coarse hair class
+    /// into the hair_matte channel with.
+    pub fn hairMattePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]HairMattePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(HairMattePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .matte_hair) continue;
+            const hf = node.hair_matte orelse manifest.HairMatteField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ hf.radius, hf.sensitivity, hf.strength } });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -650,8 +916,8 @@ pub const Lens = struct {
     }
 
     /// Every warp.pass node this lens spliced, in execution order, each
-    /// carrying its distortion packed as (mode, center_x, center_y, radius,
-    /// strength, refractive_index, aspect_auto, unused).
+    /// carrying its distortion flat-packed for the shader: the ten-float
+    /// header, then the liquify points as (x, y, dx, dy), then their radii.
     pub fn warpPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]WarpPassNode {
         const order = try g.executionOrder();
         var out: std.ArrayList(WarpPassNode) = .empty;
@@ -660,7 +926,47 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .warp_pass) continue;
             const wf = node.warp orelse manifest.WarpField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(wf.mode)), wf.center_x, wf.center_y, wf.radius, wf.strength, wf.refractive_index, if (wf.aspect_auto) 1 else 0, 0 } });
+            var params = [_]f32{0} ** manifest.warp_params_len;
+            params[0] = @floatFromInt(@intFromEnum(wf.mode));
+            params[1] = wf.center_x;
+            params[2] = wf.center_y;
+            params[3] = wf.radius;
+            params[4] = wf.strength;
+            params[5] = wf.refractive_index;
+            params[6] = if (wf.aspect_auto) 1 else 0;
+            params[7] = if (wf.symmetry) 1 else 0;
+            params[8] = wf.symmetry_x;
+            params[9] = @floatFromInt(wf.point_count);
+            var i: usize = 0;
+            while (i < wf.point_count) : (i += 1) {
+                const pt = wf.points[i];
+                params[10 + i * 4 + 0] = pt.x;
+                params[10 + i * 4 + 1] = pt.y;
+                params[10 + i * 4 + 2] = pt.dx;
+                params[10 + i * 4 + 3] = pt.dy;
+                params[10 + manifest.warp_point_max * 4 + i] = pt.radius;
+            }
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = params, .mask_channel = wf.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every reshape.bank node this lens spliced, in execution order, each
+    /// carrying its sixty-six per-region sculpt amounts flattened in the
+    /// ReshapeField declaration order.
+    pub fn reshapePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]ReshapePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(ReshapePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .reshape_bank) continue;
+            const rf = node.reshape orelse manifest.ReshapeField{};
+            var params: [66]f32 = undefined;
+            inline for (std.meta.fields(manifest.ReshapeField), 0..) |f, i| {
+                params[i] = @field(rf, f.name);
+            }
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = params });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -726,7 +1032,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .model_gltf) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles, .control = node.control });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -745,6 +1051,54 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every mesh.lashes node this lens spliced, in execution order, each
+    /// carrying its lash strip's colour, length, and curl - mirrors the other
+    /// per-kind accessors.
+    pub fn lashNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]LashNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(LashNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .mesh_lashes) continue;
+            const lf = node.lashes orelse manifest.LashField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .color = .{ lf.r, lf.g, lf.b, lf.opacity }, .length = lf.length, .curl = lf.curl });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every paint.face node this lens spliced, in execution order, each
+    /// carrying its texture stem, face region, opacity, and blend - mirrors
+    /// the other per-kind accessors.
+    pub fn paintFaceNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]PaintFaceNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(PaintFaceNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .paint_face) continue;
+            const pf = node.paint orelse manifest.PaintField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .texture_stem = node.asset_stem.?, .mask_channel = pf.mask_channel, .opacity = pf.opacity, .blend = @intFromEnum(pf.blend) });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every face.swap node this lens spliced, in execution order, each carrying
+    /// its donor stem, optional region, opacity, and seam feather - mirrors the
+    /// other per-kind accessors.
+    pub fn faceSwapNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]FaceSwapNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(FaceSwapNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .face_swap) continue;
+            const sf = node.swap orelse manifest.SwapField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .donor_stem = node.asset_stem.?, .mask_channel = sf.mask_channel, .opacity = sf.opacity, .feather = sf.feather });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every sprite.2d node this lens spliced, in execution order, each
     /// carrying its image stem, screen rect, and opacity - mirrors the
     /// other per-kind accessors.
@@ -756,7 +1110,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .frames = sp.frames, .fps = sp.fps });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -811,16 +1165,25 @@ pub const Lens = struct {
                 .dof_pass => .dof,
                 .fog_pass => .fog,
                 .outline_pass => .outline,
+                .occluder_pass => .occluder,
+                .cutout_pass => .cutout,
                 .tint_pass => .tint,
                 .smooth_pass => .smooth,
+                .retouch_pass => .retouch,
+                .matte_refine => .matte,
+                .matte_hair => .hair_matte,
                 .stylize_pass => .stylize,
                 .edge_pass => .edge,
                 .warp_pass => .warp,
+                .reshape_bank => .reshape,
                 .trail_pass => .trail,
                 .ssr_pass => .ssr,
                 .env_pass => .env,
                 .model_gltf => .model,
                 .mesh_face => .mesh,
+                .mesh_lashes => .lashes,
+                .paint_face => .paint,
+                .face_swap => .face_swap,
                 .draw_board => .draw_board,
                 .sprite_2d, .text_2d, .video_texture => .sprite,
                 else => continue,
@@ -916,6 +1279,12 @@ pub const Lens = struct {
         return self.tick_sounds[0..self.tick_sound_count];
     }
 
+    /// The haptics a haptic trigger fired on the last tick, for the host to
+    /// buzz the device with.
+    pub fn firedHaptics(self: *const Lens) []const HapticEvent {
+        return self.tick_haptics[0..self.tick_haptic_count];
+    }
+
     /// Whether this lens spliced any beauty.* node - what gates whether
     /// the live preview needs the GPU beauty compositing bridge running
     /// at all. A lens with no beauty node still lets a session enable
@@ -999,7 +1368,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     // splice), so size the node array to the composite nodes only.
     var composite_count: usize = 0;
     for (lens_manifest.nodes) |node| {
-        if (!std.mem.eql(u8, node.type, "script")) composite_count += 1;
+        if (!isBehaviorNode(node.type)) composite_count += 1;
     }
     const nodes = try gpa.alloc(LensNode, composite_count);
     errdefer gpa.free(nodes);
@@ -1009,21 +1378,26 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     var id_to_index = std.StringHashMap(graph.NodeIndex).init(gpa);
     defer id_to_index.deinit();
 
+    // First pass: splice every composite node and register its id, so an
+    // input can name a node declared later in the manifest. Connections
+    // and bindings follow in the second pass once every id is known; the
+    // errdefer owns the fresh node until the counted one takes over.
     for (lens_manifest.nodes) |node| {
         // A script node drives parameters each tick; it is not a composite
         // pass, so it never enters the graph. Its source is read separately.
-        if (std.mem.eql(u8, node.type, "script")) continue;
+        if (isBehaviorNode(node.type)) continue;
         const node_type = parseNodeType(node.type) orelse return error.UnsupportedNodeType;
         const graph_index = try g.addNode(.{
             .role = .transform,
             .inputs = &.{.{ .kind = .texture }},
             .outputs = &.{.{ .kind = .texture }},
         });
+        errdefer g.removeNode(graph_index);
         nodes[spliced_count] = .{
             .graph_index = graph_index,
             .node_type = node_type,
             .asset_stem = switch (node_type) {
-                .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .sprite_2d => node.id,
+                .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .paint_face, .face_swap, .sprite_2d => node.id,
                 else => null,
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
@@ -1036,6 +1410,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .balloon = if (node_type == .model_gltf) node.balloon else null,
             .hair = if (node_type == .model_gltf) node.hair else null,
             .particles = if (node_type == .model_gltf) node.particles else null,
+            .control = if (node_type == .model_gltf) node.control else null,
             .clip_weights = if (node_type == .model_gltf) node.clip_weights else &.{},
             .morph_weights = if (node_type == .model_gltf) node.morph_weights else &.{},
             .sprite = if (node_type == .sprite_2d) node.sprite else null,
@@ -1046,16 +1421,37 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .dof = if (node_type == .dof_pass) node.dof else null,
             .fog = if (node_type == .fog_pass) node.fog else null,
             .outline = if (node_type == .outline_pass) node.outline else null,
+            .occluder = if (node_type == .occluder_pass) node.occluder else null,
+            .cutout = if (node_type == .cutout_pass) node.cutout else null,
             .tint = if (node_type == .tint_pass) node.tint else null,
             .smooth = if (node_type == .smooth_pass) node.smooth else null,
+            .paint = if (node_type == .paint_face) node.paint else null,
+            .swap = if (node_type == .face_swap) node.swap else null,
+            .lashes = if (node_type == .mesh_lashes) node.lashes else null,
+            .retouch = if (node_type == .retouch_pass) node.retouch else null,
+            .matte = if (node_type == .matte_refine) node.matte else null,
+            .hair_matte = if (node_type == .matte_hair) node.hair_matte else null,
             .stylize = if (node_type == .stylize_pass) node.stylize else null,
             .edge = if (node_type == .edge_pass) node.edge else null,
             .warp = if (node_type == .warp_pass) node.warp else null,
+            .reshape = if (node_type == .reshape_bank) node.reshape else null,
             .trail = if (node_type == .trail_pass) node.trail else null,
             .ssr = if (node_type == .ssr_pass) node.ssr else null,
             .env = if (node_type == .env_pass) node.env else null,
             .layout = if (node_type == .layout_composite) node.layout else null,
         };
+
+        try id_to_index.put(node.id, graph_index);
+        spliced_count += 1;
+    }
+
+    // Second pass: connect inputs and bind parameters. A failure here
+    // (unknown id, cycle-closing edge, unknown parameter) unwinds through
+    // the counted errdefer, which now covers every spliced node.
+    var node_at: usize = 0;
+    for (lens_manifest.nodes) |node| {
+        if (isBehaviorNode(node.type)) continue;
+        const graph_index = nodes[node_at].graph_index;
 
         for (node.inputs) |input| {
             const source_index = if (std.mem.eql(u8, input.source, "camera"))
@@ -1065,11 +1461,11 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             try g.connect(source_index, 0, graph_index, 0);
         }
 
-        const slots = paramSlotsFor(node_type);
+        const slots = paramSlotsFor(nodes[node_at].node_type);
         for (node.params) |p| {
             for (slots) |slot| {
                 if (!std.mem.eql(u8, p.name, slot.name)) continue;
-                nodes[spliced_count].bindings[@intFromEnum(slot.effect)] = switch (p.binding) {
+                nodes[node_at].bindings[@intFromEnum(slot.effect)] = switch (p.binding) {
                     .literal_float => |v| .{ .literal = v },
                     .literal_bool => |v| .{ .literal = if (v) 1 else 0 },
                     .literal_int => |v| .{ .literal = @floatFromInt(v) },
@@ -1082,9 +1478,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
                 };
             }
         }
-
-        try id_to_index.put(node.id, graph_index);
-        spliced_count += 1;
+        node_at += 1;
     }
 
     var timer_names: std.ArrayList([]u8) = .empty;
@@ -1099,6 +1493,25 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
 
     const tick_timer_values = try gpa.alloc(trigger.TimerValue, timer_names.items.len);
     errdefer gpa.free(tick_timer_values);
+
+    var counter_names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (counter_names.items) |name| gpa.free(name);
+        counter_names.deinit(gpa);
+    }
+    for (compiled_triggers) |*expr| try collectCounterNames(gpa, expr.root, &counter_names);
+    for (lens_manifest.triggers) |trig| {
+        switch (trig.action.kind) {
+            .increment_counter, .reset_counter, .set_counter => try addCounterName(gpa, &counter_names, trig.action.target),
+            else => {},
+        }
+    }
+    const counter_values = try gpa.alloc(f64, counter_names.items.len);
+    errdefer gpa.free(counter_values);
+    @memset(counter_values, 0);
+    const tick_counter_values = try gpa.alloc(trigger.CounterValue, counter_names.items.len);
+    errdefer gpa.free(tick_counter_values);
+
     const tick_touched = try gpa.alloc(bool, param_values.len);
     errdefer gpa.free(tick_touched);
     var bound_count: usize = 0;
@@ -1112,6 +1525,16 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     errdefer gpa.free(tick_applied);
     const tick_sounds = try gpa.alloc([]const u8, lens_manifest.triggers.len);
     errdefer gpa.free(tick_sounds);
+    const tick_haptics = try gpa.alloc(HapticEvent, lens_manifest.triggers.len);
+    errdefer gpa.free(tick_haptics);
+    const tick_param_snapshot = try gpa.alloc(f64, param_values.len);
+    errdefer gpa.free(tick_param_snapshot);
+
+    var logic_arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer logic_arena.deinit();
+    var logic_diag = std.heap.ArenaAllocator.init(gpa);
+    defer logic_diag.deinit();
+    const logic_graphs = try compileLogicGraphs(logic_arena.allocator(), logic_diag.allocator(), lens_manifest, param_names);
 
     return .{
         .gpa = gpa,
@@ -1124,10 +1547,81 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .timer_names = try timer_names.toOwnedSlice(gpa),
         .timer_elapsed_us = timer_elapsed_us,
         .tick_timer_values = tick_timer_values,
+        .counter_names = try counter_names.toOwnedSlice(gpa),
+        .counter_values = counter_values,
+        .tick_counter_values = tick_counter_values,
         .tick_touched = tick_touched,
         .tick_applied = tick_applied,
         .tick_sounds = tick_sounds,
+        .tick_haptics = tick_haptics,
+        .logic_arena = logic_arena,
+        .logic_graphs = logic_graphs,
+        .tick_param_snapshot = tick_param_snapshot,
     };
+}
+
+/// Resolves a logic op name to its enum, accepting the friendly aliases const,
+/// and, or and not for the reserved-word ops.
+fn logicOp(name: []const u8) ?logic.Op {
+    if (std.mem.eql(u8, name, "const")) return .constant;
+    if (std.mem.eql(u8, name, "and")) return .logic_and;
+    if (std.mem.eql(u8, name, "or")) return .logic_or;
+    if (std.mem.eql(u8, name, "not")) return .logic_not;
+    return std.meta.stringToEnum(logic.Op, name);
+}
+
+/// Resolves a node-id reference among the nodes before `before`, so a wired
+/// input reads an already-evaluated node; an empty or unknown ref is a literal.
+fn resolveLogicRef(specs: []const manifest.LogicNodeSpec, ref: []const u8, before: usize) i32 {
+    if (ref.len == 0) return -1;
+    for (specs[0..before], 0..) |n, j| {
+        if (std.mem.eql(u8, n.id, ref)) return @intCast(j);
+    }
+    return -1;
+}
+
+/// Compiles every logic.graph node in the manifest into an evaluatable graph,
+/// resolving node refs to indices, signal leaves through the trigger parser,
+/// and param leaves to parameter indices; all storage lives in arena.
+fn compileLogicGraphs(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, lens_manifest: manifest.Manifest, param_names: []const []const u8) error{OutOfMemory}![]CompiledLogicGraph {
+    var out: std.ArrayList(CompiledLogicGraph) = .empty;
+    for (lens_manifest.nodes) |node| {
+        const spec = node.logic_graph orelse continue;
+        const nodes = try arena.alloc(logic.Node, spec.nodes.len);
+        for (spec.nodes, 0..) |ns, i| {
+            var ln: logic.Node = .{ .op = logicOp(ns.op) orelse .constant };
+            ln.a = resolveLogicRef(spec.nodes, ns.a_ref, i);
+            ln.a_lit = ns.a_lit;
+            ln.b = resolveLogicRef(spec.nodes, ns.b_ref, i);
+            ln.b_lit = ns.b_lit;
+            ln.c = resolveLogicRef(spec.nodes, ns.c_ref, i);
+            ln.c_lit = ns.c_lit;
+            ln.constant = ns.constant;
+            if (ln.op == .signal and ns.signal_source.len > 0) {
+                var err: ?trigger.CompileError = null;
+                if (try trigger.compileSignal(arena, diag_arena, ns.signal_source, param_names, &err)) |sig| ln.signal = sig;
+            }
+            if (ln.op == .param) {
+                for (param_names, 0..) |pn, pi| {
+                    if (std.mem.eql(u8, pn, ns.param_name)) {
+                        ln.param_index = @intCast(pi);
+                        break;
+                    }
+                }
+            }
+            nodes[i] = ln;
+        }
+        var output: usize = if (spec.nodes.len > 0) spec.nodes.len - 1 else 0;
+        for (spec.nodes, 0..) |ns, j| {
+            if (std.mem.eql(u8, ns.id, spec.output_id)) output = j;
+        }
+        try out.append(arena, .{
+            .graph = .{ .nodes = nodes, .output = output },
+            .output_param = spec.output_param,
+            .scratch = try arena.alloc(f32, spec.nodes.len),
+        });
+    }
+    return out.toOwnedSlice(arena);
 }
 
 /// Collects every distinct timer('name') a compiled trigger tree
@@ -1150,6 +1644,40 @@ fn collectTimerNames(gpa: std.mem.Allocator, node: *const trigger.Node, names: *
             try collectTimerNames(gpa, combine.rhs, names);
         },
     }
+}
+
+/// Adds a counter name to the deduped set, each individually owned, skipping an
+/// empty name so an action with no target adds nothing.
+fn addCounterName(gpa: std.mem.Allocator, names: *std.ArrayList([]u8), name: []const u8) std.mem.Allocator.Error!void {
+    if (name.len == 0) return;
+    for (names.items) |existing| {
+        if (std.mem.eql(u8, existing, name)) return;
+    }
+    try names.append(gpa, try gpa.dupe(u8, name));
+}
+
+/// Collects every counter('name') a compiled trigger tree reads, so a counter
+/// referenced only in a condition still gets a slot; action targets are added
+/// separately at construction.
+fn collectCounterNames(gpa: std.mem.Allocator, node: *const trigger.Node, names: *std.ArrayList([]u8)) std.mem.Allocator.Error!void {
+    switch (node.*) {
+        .signal_bool => {},
+        .compare => |c| {
+            if (c.signal.kind == .counter) try addCounterName(gpa, names, c.signal.counter_name);
+        },
+        .not => |inner| try collectCounterNames(gpa, inner, names),
+        .and_, .or_ => |combine| {
+            try collectCounterNames(gpa, combine.lhs, names);
+            try collectCounterNames(gpa, combine.rhs, names);
+        },
+    }
+}
+
+fn counterIndex(lens: *const Lens, name: []const u8) ?usize {
+    for (lens.counter_names, 0..) |existing, i| {
+        if (std.mem.eql(u8, existing, name)) return i;
+    }
+    return null;
 }
 
 fn paramIndex(lens: *const Lens, name: []const u8) ?u16 {
@@ -1189,12 +1717,31 @@ pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const Appl
     for (lens.timer_names, lens.timer_elapsed_us, 0..) |name, elapsed_us, i| {
         lens.tick_timer_values[i] = .{ .name = name, .seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0 };
     }
+    for (lens.counter_names, lens.counter_values, 0..) |name, value, i| {
+        lens.tick_counter_values[i] = .{ .name = name, .value = value };
+    }
     var live_signals = signals;
     live_signals.timers = lens.tick_timer_values;
+    live_signals.counters = lens.tick_counter_values;
 
     const touched_params = lens.tick_touched;
     @memset(touched_params, false);
     lens.tick_sound_count = 0;
+    lens.tick_haptic_count = 0;
+
+    // The logic graphs run first, driving their output parameters off the live
+    // signals, so a trigger or a script this tick reads their fresh values.
+    if (lens.logic_graphs.len > 0) {
+        for (lens.param_values, 0..) |v, i| lens.tick_param_snapshot[i] = v;
+        live_signals.params = lens.tick_param_snapshot;
+        for (lens.logic_graphs) |*lg| {
+            const value = lg.graph.eval(lg.scratch, live_signals);
+            if (paramIndex(lens, lg.output_param)) |idx| {
+                lens.param_values[idx] = clampToParam(lens.manifest.parameters[idx], value);
+                touched_params[idx] = true;
+            }
+        }
+    }
 
     for (lens.compiled_triggers, 0..) |*expr, i| {
         const is_true = trigger.evaluate(expr.root, live_signals);
@@ -1265,6 +1812,21 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
             if (lens.tick_sound_count < lens.tick_sounds.len) {
                 lens.tick_sounds[lens.tick_sound_count] = action.target;
                 lens.tick_sound_count += 1;
+            }
+        },
+        .increment_counter => {
+            if (counterIndex(lens, action.target)) |idx| lens.counter_values[idx] += 1;
+        },
+        .reset_counter => {
+            if (counterIndex(lens, action.target)) |idx| lens.counter_values[idx] = 0;
+        },
+        .set_counter => {
+            if (counterIndex(lens, action.target)) |idx| lens.counter_values[idx] = action.to;
+        },
+        .haptic => {
+            if (lens.tick_haptic_count < lens.tick_haptics.len) {
+                lens.tick_haptics[lens.tick_haptic_count] = .{ .style = hapticStyleFromName(action.target), .intensity = action.to };
+                lens.tick_haptic_count += 1;
             }
         },
         .show, .hide, .swap_subgraph => {},
@@ -1490,6 +2052,38 @@ test "shaderPassNodes orders a multi-pass chain by real graph dependency, not de
     try t.expectEqualStrings("warm", passes[0].shader_stem);
     try t.expectEqualStrings("vignette", passes[1].shader_stem);
     try t.expectEqualStrings("grain", passes[2].shader_stem);
+}
+
+const forward_reference_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.forwardref", "version": "1.0.0", "display_name": "Forward Ref",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "vignette", "type": "shader.pass", "inputs": {"frame": "warm"}, "params": {}},
+    \\    {"id": "warm", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a node may reference one declared later in the manifest" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    // vignette reads warm, which the manifest declares after it. The
+    // two-pass activation registers every id before wiring inputs, so the
+    // forward reference resolves and the chain orders warm then vignette.
+    const lens_manifest = try parseTestManifest(t.allocator, forward_reference_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 2), passes.len);
+    try t.expectEqualStrings("warm", passes[0].shader_stem);
+    try t.expectEqualStrings("vignette", passes[1].shader_stem);
 }
 
 const lut_pass_manifest =
@@ -1768,4 +2362,83 @@ test "a trigger firing on the rising edge starts a ramp that settles, does not r
     // Falling edge resets the trigger's own state, ready to fire again.
     _ = tick(&lens, animation.fixed_step_us, signals_closed);
     try t.expect(!lens.trigger_was_true[0]);
+}
+
+test "a counter increments on an event, persists, and drives a trigger at its threshold" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const src =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "win", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "s", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}}],
+        \\ "triggers": [
+        \\   {"when": "event('hit')", "action": {"kind": "increment_counter", "target": "score"}},
+        \\   {"when": "counter('score') >= 1", "action": {"kind": "param_set", "target": "win", "to": 1.0}}]}
+    ;
+    const lens_manifest = try parseTestManifest(t.allocator, src);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    // The event steps the counter to one, which persists on the lens.
+    const hit = [_][]const u8{"hit"};
+    _ = tick(&lens, animation.fixed_step_us, .{ .events = &hit });
+    try t.expectEqual(@as(usize, 1), lens.counter_names.len);
+    try t.expectApproxEqAbs(@as(f64, 1.0), lens.counter_values[0], 1e-9);
+
+    // The next tick sees the counter at its threshold and fires the trigger.
+    _ = tick(&lens, animation.fixed_step_us, .{});
+    try t.expectApproxEqAbs(@as(f32, 1.0), lens.paramValue("win").?, 1e-6);
+}
+
+test "a haptic trigger queues a styled buzz for the host to drain" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const src =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [{"id": "s", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}}],
+        \\ "triggers": [{"when": "event('buzz')", "action": {"kind": "haptic", "target": "success", "to": 0.8}}]}
+    ;
+    const lens_manifest = try parseTestManifest(t.allocator, src);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const buzz = [_][]const u8{"buzz"};
+    _ = tick(&lens, animation.fixed_step_us, .{ .events = &buzz });
+    const fired = lens.firedHaptics();
+    try t.expectEqual(@as(usize, 1), fired.len);
+    try t.expectEqual(HapticStyle.success, fired[0].style);
+    try t.expectApproxEqAbs(@as(f32, 0.8), fired[0].intensity, 1e-6);
+
+    // The buzz is a one-tick pulse; a quiet tick clears it.
+    _ = tick(&lens, animation.fixed_step_us, .{});
+    try t.expectEqual(@as(usize, 0), lens.firedHaptics().len);
+}
+
+test "a logic graph drives a parameter from the signals each tick" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const src =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "g", "type": "logic.graph", "params": {},
+        \\   "graph": {"output_param": "intensity", "output": "clamped", "nodes": [
+        \\     {"id": "px", "op": "signal", "signal": "pointer.x"},
+        \\     {"id": "scaled", "op": "mul", "a": "px", "b": 2.0},
+        \\     {"id": "clamped", "op": "clamp", "a": "scaled", "b": 0.0, "c": 1.0}]}}],
+        \\ "triggers": []}
+    ;
+    const lens_manifest = try parseTestManifest(t.allocator, src);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    _ = tick(&lens, animation.fixed_step_us, .{ .pointer_x = 0.3 });
+    try t.expectApproxEqAbs(@as(f32, 0.6), lens.paramValue("intensity").?, 1e-5);
+    _ = tick(&lens, animation.fixed_step_us, .{ .pointer_x = 0.9 });
+    try t.expectApproxEqAbs(@as(f32, 1.0), lens.paramValue("intensity").?, 1e-5);
 }

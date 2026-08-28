@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.matte-refine",
+  "version": "1.0.0",
+  "display_name": "Matte Refine",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "refine", "type": "matte.refine", "inputs": {"frame": "camera"}, "params": {},
+     "matte": {"radius": 3.5, "sensitivity": 12.0, "strength": 1.0}}
+  ],
+  "triggers": []
+}

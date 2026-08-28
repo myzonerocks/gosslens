@@ -89,14 +89,15 @@ public final class GossWorldSource: NSObject, ARSessionDelegate {
         }
     }
 
+    /// simd_float4x4 already stores its columns contiguously in the same
+    /// column-major order the C matrix wants, so the copy is a byte move with
+    /// no per-frame scratch array.
     private func copyColumns<T>(_ matrix: simd_float4x4, into out: inout T) {
+        var source = matrix
         withUnsafeMutableBytes(of: &out) { raw in
-            var flat: [Float] = []
-            flat.reserveCapacity(16)
-            for column in [matrix.columns.0, matrix.columns.1, matrix.columns.2, matrix.columns.3] {
-                flat.append(contentsOf: [column.x, column.y, column.z, column.w])
+            withUnsafeBytes(of: &source) { src in
+                raw.copyBytes(from: src)
             }
-            raw.copyBytes(from: flat.withUnsafeBytes { $0 })
         }
     }
 }

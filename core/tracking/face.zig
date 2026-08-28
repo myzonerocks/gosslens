@@ -146,6 +146,57 @@ pub const right_eye_loop = [_]u16{
     133, 173, 157, 158, 159, 160, 161, 246,
 };
 
+/// The band scale shaping the lash line: the ribbon rises off the upper lid by
+/// this fraction of the eye's own height. One channel then serves the eyeliner,
+/// mascara, and false-lash looks, which differ by tint weight, not band shape.
+pub const lash_band_scale = 0.6;
+
+/// The upper eyelid arc of an eye loop, outer corner to inner corner over the
+/// top lid. A loop is [outer, seven lower-lid, inner, seven upper-lid], so the
+/// arc is the outer corner, the upper-lid run reversed, then the inner corner:
+/// the lash-line contour an eyeliner, mascara, or lash tint hugs.
+pub fn upperLashArc(loop: []const u16, out: *[9]u16) []const u16 {
+    out[0] = loop[0];
+    var i: usize = 0;
+    while (i < 7) : (i += 1) out[1 + i] = loop[loop.len - 1 - i];
+    out[8] = loop[8];
+    return out[0..9];
+}
+
+/// The upper lash-line band polygon for one eye: its upper arc as the inner
+/// edge, then that arc pushed off the eye centroid by the band height as the
+/// outer edge, a closed ribbon hugging and rising above the lash line. points
+/// is one (x, y) per landmark in any single space; out holds the ring.
+pub fn lashLineBand(points: *const [landmark_count][2]f32, loop: []const u16, out: *[18][2]f32) []const [2]f32 {
+    var sum: [2]f32 = .{ 0, 0 };
+    var min_y = points[loop[0]][1];
+    var max_y = min_y;
+    for (loop) |idx| {
+        sum[0] += points[idx][0];
+        sum[1] += points[idx][1];
+        min_y = @min(min_y, points[idx][1]);
+        max_y = @max(max_y, points[idx][1]);
+    }
+    const n: f32 = @floatFromInt(loop.len);
+    const centroid = [2]f32{ sum[0] / n, sum[1] / n };
+    const height = (max_y - min_y) * lash_band_scale;
+    var arc_buf: [9]u16 = undefined;
+    const arc = upperLashArc(loop, &arc_buf);
+    for (arc, 0..) |idx, i| {
+        const p = points[idx];
+        var dx = p[0] - centroid[0];
+        var dy = p[1] - centroid[1];
+        const d = @sqrt(dx * dx + dy * dy);
+        if (d > 1e-6) {
+            dx /= d;
+            dy /= d;
+        }
+        out[i] = p;
+        out[2 * arc.len - 1 - i] = .{ p[0] + dx * height, p[1] + dy * height };
+    }
+    return out[0 .. 2 * arc.len];
+}
+
 /// Each eyebrow as a closed ring: the lower edge lateral to medial, then the
 /// upper edge medial back to lateral, so the ring traces the brow perimeter
 /// without self-intersecting when it fills.
@@ -157,6 +208,69 @@ pub const right_brow_loop = [_]u16{ 46, 53, 52, 65, 55, 107, 66, 105, 63, 70 };
 /// contact. Present only when the model refines iris landmarks.
 pub const left_iris_loop = [_]u16{ 474, 475, 476, 477 };
 pub const right_iris_loop = [_]u16{ 469, 470, 471, 472 };
+
+/// Contour shadow regions, each a cluster of mesh landmarks whose convex hull
+/// covers a hollow the face reads as depth: the cheekbone hollows, the nose
+/// sides, and the jaw and temple. A face-part matte fills each hull and unions
+/// them, so a tint darkening this channel sculpts the face from tracking.
+pub const contour_regions = [_][]const u16{
+    &.{ 116, 123, 205, 36, 142 },
+    &.{ 345, 352, 425, 266, 371 },
+    &.{ 129, 98, 49, 45 },
+    &.{ 358, 327, 279, 275 },
+    &.{ 127, 234, 93, 132 },
+    &.{ 356, 454, 323, 361 },
+};
+
+/// Highlight regions, each a cluster whose convex hull covers a plane the face
+/// reads as raised: the cheekbone tops, the brow bones, the nose bridge, the
+/// cupid's bow, and the chin. A face-part matte fills each hull and unions
+/// them, so a tint lightening this channel lifts the face from tracking.
+pub const highlight_regions = [_][]const u16{
+    &.{ 117, 118, 50, 101 },
+    &.{ 346, 347, 280, 330 },
+    &.{ 105, 66, 107, 55 },
+    &.{ 334, 296, 336, 285 },
+    &.{ 6, 197, 195, 122, 351 },
+    &.{ 0, 37, 267, 164 },
+    &.{ 152, 199, 148, 377 },
+};
+
+/// Under-eye regions, each a cluster just below one eye's lower lid and above
+/// the cheekbone, clear of the lid itself. A face-part matte fills each hull and
+/// unions them, so a smooth softening this channel eases the eye bag and a light
+/// screen tint lifts the shadow, both keyed to the face.
+pub const under_eye_regions = [_][]const u16{
+    &.{ 229, 230, 231, 232, 118, 119, 120, 121 },
+    &.{ 449, 450, 451, 452, 347, 348, 349, 350 },
+};
+
+/// Nasolabial regions, each a cluster tracing one smile-line fold from the nose
+/// ala down beside the mouth corner. A face-part matte fills each hull and
+/// unions them, so a smooth softening this channel eases the fold, keyed to the
+/// face.
+pub const nasolabial_regions = [_][]const u16{
+    &.{ 129, 203, 206, 186, 57, 92 },
+    &.{ 358, 423, 426, 410, 287, 322 },
+};
+
+/// T-zone regions: the central forehead and the nose bridge, the two planes a
+/// face lights specular. A face-part matte fills each hull and unions them into
+/// a T, so a shine-matte pass suppresses the highlights there, keyed to the face.
+pub const t_zone_regions = [_][]const u16{
+    &.{ 10, 151, 9, 108, 337, 107, 336 },
+    &.{ 168, 6, 197, 195, 5, 122, 351 },
+};
+
+/// A stable skin patch for reading skin tone from a reference photo: mid-cheek
+/// and mid-forehead landmarks, clear of the lips, eyes, brows, and hairline, so
+/// a reference-driven foundation samples skin, not a feature. averageLoopColor
+/// reads these points the same way it reads the face-part loops.
+pub const skin_patch = [_]u16{
+    117, 118, 50,  101, 205,
+    346, 347, 280, 330, 425,
+    151, 108, 337,
+};
 
 /// The tracked point for a region: x, y in frame pixels and z in the same
 /// scale, read straight from the mesh. landmarks is a result's flat array.
@@ -189,6 +303,45 @@ test "every region maps to an in-range landmark and reads its point" {
     }
     try t.expectEqual(Region.nose_tip, Region.fromU32(2).?);
     try t.expectEqual(@as(?Region, null), Region.fromU32(99));
+}
+
+test "the upper lash arc spans the top lid and the band rises above the eye" {
+    var arc_buf: [9]u16 = undefined;
+    const arc = upperLashArc(&left_eye_loop, &arc_buf);
+    try t.expectEqual(@as(u16, 263), arc[0]);
+    try t.expectEqual(@as(u16, 466), arc[1]);
+    try t.expectEqual(@as(u16, 362), arc[8]);
+
+    var points: [landmark_count][2]f32 = undefined;
+    for (&points) |*p| p.* = .{ 0, 0 };
+    const upper = [_]u16{ 466, 388, 387, 386, 385, 384, 398 };
+    const lower = [_]u16{ 249, 390, 373, 374, 380, 381, 382 };
+    for (upper, 0..) |idx, i| points[idx] = .{ @floatFromInt(i), -1 };
+    for (lower, 0..) |idx, i| points[idx] = .{ @floatFromInt(i), 1 };
+    points[263] = .{ -1, 0 };
+    points[362] = .{ 7, 0 };
+
+    var eye_cy: f32 = 0;
+    for (left_eye_loop) |idx| eye_cy += points[idx][1];
+    eye_cy /= @floatFromInt(left_eye_loop.len);
+
+    var band: [18][2]f32 = undefined;
+    const ring = lashLineBand(&points, &left_eye_loop, &band);
+    try t.expectEqual(@as(usize, 18), ring.len);
+    var band_cy: f32 = 0;
+    for (ring) |p| band_cy += p[1];
+    band_cy /= @floatFromInt(ring.len);
+    try t.expect(band_cy < eye_cy);
+}
+
+test "the retouch region clusters name in-range landmarks" {
+    const groups = [_][]const []const u16{ &under_eye_regions, &nasolabial_regions, &t_zone_regions };
+    for (groups) |group| {
+        for (group) |region| {
+            try t.expect(region.len >= 3);
+            for (region) |idx| try t.expect(idx < landmark_count);
+        }
+    }
 }
 
 /// Indices of the landmarks the blendshape model consumes, in its input

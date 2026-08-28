@@ -309,7 +309,10 @@ pub fn extrudeMesh(gpa: std.mem.Allocator, text: []const u8, depth: f32) !Mesh {
         }
         col += 1;
     }
-    return .{ .positions = try pos.toOwnedSlice(gpa), .indices = try idx.toOwnedSlice(gpa) };
+    const positions = try pos.toOwnedSlice(gpa);
+    errdefer gpa.free(positions);
+    const indices = try idx.toOwnedSlice(gpa);
+    return .{ .positions = positions, .indices = indices };
 }
 
 const t = std.testing;

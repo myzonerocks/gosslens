@@ -286,6 +286,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
+    abi_module.addImport("face106", face106_module);
 
     const lens_manifest_module = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
@@ -317,9 +318,11 @@ pub fn build(b: *std.Build) void {
             .{ .name = "face", .module = face_module },
         },
     });
+    lens_runtime_module.addImport("logic", logicModule(b, target, optimize, lens_trigger_module));
     abi_module.addImport("manifest", lens_manifest_module);
     abi_module.addImport("trigger", lens_trigger_module);
     abi_module.addImport("runtime", lens_runtime_module);
+    abi_module.addImport("gesture", gestureModule(b, target, optimize));
 
     const lens_validator_module = b.createModule(.{
         .root_source_file = b.path("lenses/validator/main.zig"),
@@ -380,6 +383,9 @@ pub fn build(b: *std.Build) void {
     const face_tests = b.addTest(.{ .root_module = face_module });
     const pose_tests = b.addTest(.{ .root_module = pose_core_module });
     const face_mesh_topology_tests = b.addTest(.{ .root_module = face_mesh_topology_module });
+    const lash_mesh_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = target, .optimize = optimize }) });
+    const gesture_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/input/gesture.zig"), .target = target, .optimize = optimize }) });
+    const logic_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/lens/logic.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "trigger", .module = lens_trigger_module }} }) });
     const face_geometry_tests = b.addTest(.{ .root_module = face_geometry_core_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
     const face106_tests = b.addTest(.{ .root_module = face106_module });
@@ -418,6 +424,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(face_tests).step);
     test_step.dependOn(&b.addRunArtifact(pose_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_mesh_topology_tests).step);
+    test_step.dependOn(&b.addRunArtifact(lash_mesh_tests).step);
+    test_step.dependOn(&b.addRunArtifact(gesture_tests).step);
+    test_step.dependOn(&b.addRunArtifact(logic_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
@@ -452,8 +461,22 @@ pub fn build(b: *std.Build) void {
         const audio_playback_tests = b.addTest(.{ .root_module = audioPlaybackModule(b, target, optimize, true) });
         test_step.dependOn(&b.addRunArtifact(audio_playback_tests).step);
     }
+    // On apple hosts this runs the media shim's boundary-guard proof: a
+    // deliberate throw behind the C surface must land as a status.
+    const media_video_tests = b.addTest(.{ .root_module = mediaVideoModule(b, target, optimize) });
+    test_step.dependOn(&b.addRunArtifact(media_video_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
+    // The target-independent headless leak gate rides `zig build ci` on
+    // every platform, so the session lifecycle proof runs where no GPU
+    // or render stack exists, not only on the macOS conformance host.
+    const lifecycle_proof_module = b.createModule(.{
+        .root_source_file = b.path("harness/lifecycle_proof.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "abi", .module = abi_module }},
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lifecycle_proof_module })).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
     test_step.dependOn(&b.addRunArtifact(vendor_sync_tests).step);
     test_step.dependOn(&b.addRunArtifact(fetch_models_tests).step);
@@ -756,9 +779,11 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("world_board", worldBoardModule(b, target, optimize));
         abi_tracking_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_tracking_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
+        abi_tracking_module.addImport("gesture", gestureModule(b, target, optimize));
         abi_tracking_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_tracking_module.addImport("particles", particlesModule(b, target, optimize));
         abi_tracking_module.addImport("sph", sphModule(b, target, optimize));
+        abi_tracking_module.addImport("face106", face106_module);
         if (target.result.os.tag == .macos) {
             abi_tracking_module.addImport("beauty", beauty_real_module);
         } else {
@@ -976,9 +1001,16 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("world_board", worldBoardModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
+    abi_wasm.addImport("gesture", gestureModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("particles", particlesModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("sph", sphModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("face106", b.createModule(.{
+            .root_source_file = b.path("core/tracking/face106.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{.{ .name = "face", .module = tracking_cores_wasm.face }},
+        }));
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
@@ -1013,6 +1045,7 @@ pub fn build(b: *std.Build) void {
         });
         abi_wasm.addImport("manifest", lens_manifest_wasm);
         abi_wasm.addImport("trigger", lens_trigger_wasm);
+        lens_runtime_wasm.addImport("logic", logicModule(b, wasm_target, .ReleaseSmall, lens_trigger_wasm));
         abi_wasm.addImport("runtime", lens_runtime_wasm);
         // Neither libc nor real threads exist for wasm32-freestanding -
         // the same reason directory-based lens activation already
@@ -1029,6 +1062,9 @@ pub fn build(b: *std.Build) void {
         gosslens_wasm.rdynamic = true;
         wasm_step.dependOn(&b.addInstallArtifact(gosslens_wasm, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
     }
+    // The wasm core rides the local gate so a stub that drifts out of lockstep
+    // with the real gltf/asset signatures fails here, not on the web later.
+    ci_step.dependOn(wasm_step);
 
     // The render-capable half of the web core, real bgfx underneath
     // instead of render_stub.zig - separate from wasm_step above (which
@@ -1063,6 +1099,7 @@ pub fn build(b: *std.Build) void {
         // module instance for the host target, sharing the same
         // shader_blobs the harness module below already builds.
         const makeup_mesh_module = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = target, .optimize = optimize });
+        const lash_mesh_module = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = target, .optimize = optimize });
         const render_module = b.createModule(.{
             .root_source_file = b.path("adapters/bgfx/render.zig"),
             .target = target,
@@ -1071,12 +1108,15 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
                 .{ .name = "makeup_mesh", .module = makeup_mesh_module },
                 .{ .name = "face_mesh_topology", .module = face_mesh_topology_module },
+                .{ .name = "lash_mesh", .module = lash_mesh_module },
             },
         });
         render_module.addIncludePath(b.path(".vendor/bgfx/include"));
         render_module.addIncludePath(b.path(".vendor/bx/include"));
         render_module.link_libc = true;
+        addBgfxCallbacks(b, render_module);
         if (shader_blobs_module) |sb| render_module.addImport("shader_blobs", sb);
+        if (host_asset) |am| render_module.addImport("image", am.image) else render_module.addImport("image", imageStubModule(b, target, optimize));
 
         const harness_module = b.createModule(.{
             .root_source_file = b.path("harness/desktop.zig"),
@@ -1095,10 +1135,17 @@ pub fn build(b: *std.Build) void {
         harness_module.link_libc = true;
         if (shader_blobs_module) |sb| harness_module.addImport("shader_blobs", sb);
         harness_module.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
-        harness_module.addCSourceFile(.{
-            .file = b.path("harness/lodepng_impl.c"),
-            .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
-        });
+        if (host_asset) |am| {
+            // The real image adapter already compiles lodepng; importing it
+            // here is the one provider, so the decoder is not double-linked.
+            harness_module.addImport("image", am.image);
+        } else {
+            harness_module.addImport("image", imageStubModule(b, target, optimize));
+            harness_module.addCSourceFile(.{
+                .file = b.path("harness/lodepng_impl.c"),
+                .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+            });
+        }
         const harness_exe = b.addExecutable(.{
             .name = "harness",
             .root_module = harness_module,
@@ -1158,9 +1205,11 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("world_board", worldBoardModule(b, target, optimize));
         abi_conformance_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_conformance_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
+        abi_conformance_module.addImport("gesture", gestureModule(b, target, optimize));
         abi_conformance_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         abi_conformance_module.addImport("particles", particlesModule(b, target, optimize));
         abi_conformance_module.addImport("sph", sphModule(b, target, optimize));
+        abi_conformance_module.addImport("face106", face106_module);
         if (host_asset) |am| {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
@@ -1263,6 +1312,16 @@ pub fn build(b: *std.Build) void {
         conformance_module.addImport("gif", gifModule(b, target, optimize));
         conformance_module.addImport("jpeg", conformance_jpeg_module);
         conformance_module.addImport("color", conformance_color_module);
+        // The hostile-input tripwire drives the untrusted parsers directly.
+        conformance_module.addImport("manifest", lens_manifest_module);
+        conformance_module.addImport("material", material_module);
+        // The same module instance the render backend imports: one file, one
+        // module, so the strip geometry the proof checks is the one drawn.
+        conformance_module.addImport("lash_mesh", lash_mesh_module);
+        // The face mesh topology the swap proof reads: the same feather and
+        // landmark projection the renderer draws with.
+        conformance_module.addImport("face_mesh_topology", face_mesh_topology_module);
+        if (gltf_module) |gm| conformance_module.addImport("gltf", gm);
         const world_replay_module = b.createModule(.{
             .root_source_file = b.path("harness/world_replay.zig"),
             .target = target,
@@ -1314,6 +1373,11 @@ pub fn build(b: *std.Build) void {
         run_conformance.step.dependOn(lens_package_reference_step);
         if (b.args) |args| run_conformance.addArgs(args);
         conformance_step.dependOn(&run_conformance.step);
+        // The leak gates ride the merge bar where the render stack exists:
+        // on macOS `zig build ci` runs the full conformance, submit and
+        // render and capture and record and loaders included. Non-GPU
+        // hosts still run the headless lifecycle proof through test_step.
+        ci_step.dependOn(conformance_step);
     } else {
         const missing = b.addFail("gosslens: harness needs macos and synced render vendors, run zig build vendor-sync");
         harness_step.dependOn(&missing.step);
@@ -1419,6 +1483,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     const graph_android = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = android_target, .optimize = optimize });
     const makeup_mesh_android = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = android_target, .optimize = optimize });
     const face_mesh_topology_android = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = android_target, .optimize = optimize });
+    const lash_mesh_android = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = android_target, .optimize = optimize });
     const render_android = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = android_target,
@@ -1427,6 +1492,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
             .{ .name = "math", .module = math_android },
             .{ .name = "makeup_mesh", .module = makeup_mesh_android },
             .{ .name = "face_mesh_topology", .module = face_mesh_topology_android },
+            .{ .name = "lash_mesh", .module = lash_mesh_android },
         },
     });
     render_android.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -1437,6 +1503,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     // translate-c rejects; neutralizing them costs only the annotations.
     render_android.addCMacro("_Nonnull", "");
     render_android.addCMacro("_Nullable", "");
+    addBgfxCallbacks(b, render_android);
     render_android.addImport("shader_blobs", addShaderBlobs(b, shaderc_tool, android_target, optimize));
     const abi_android = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
@@ -1471,6 +1538,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("world_board", worldBoardModule(b, android_target, optimize));
     abi_android.addImport("physics", physicsModule(b, android_target, optimize, true));
     abi_android.addImport("script", scriptModule(b, android_target, optimize, true));
+    abi_android.addImport("gesture", gestureModule(b, android_target, optimize));
     abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, true));
     abi_android.addImport("particles", particlesModule(b, android_target, optimize));
     abi_android.addImport("sph", sphModule(b, android_target, optimize));
@@ -1505,6 +1573,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     });
     abi_android.addImport("manifest", lens_manifest_android);
     abi_android.addImport("trigger", lens_trigger_android);
+    lens_runtime_android.addImport("logic", logicModule(b, android_target, optimize, lens_trigger_android));
     abi_android.addImport("runtime", lens_runtime_android);
     const have_inference_stack = blk: {
         for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
@@ -1586,6 +1655,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
             .optimize = optimize,
             .imports = &.{.{ .name = "face", .module = tracking_cores_android.face }},
         });
+        abi_android.addImport("face106", face106_android);
         const beauty_android_module = b.createModule(.{
             .root_source_file = b.path("adapters/beauty/beauty.zig"),
             .target = android_target,
@@ -1608,6 +1678,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     const gltf_android = if (have_cgltf_android) gltfModule(b, android_target, optimize, math_android) else null;
     const android_asset = realAssetModules(b, android_target, optimize, gltf_android);
     abi_android.addImport("image", android_asset.image);
+    render_android.addImport("image", android_asset.image);
     abi_android.addImport("asset", android_asset.asset);
     if (gltf_android) |gm| abi_android.addImport("gltf", gm);
     const jni_module = b.createModule(.{
@@ -1810,6 +1881,23 @@ fn particlesModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         .root_source_file = b.path("core/particles/particles.zig"),
         .target = target,
         .optimize = optimize,
+    });
+}
+
+fn gestureModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("core/input/gesture.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn logicModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, trigger_module: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("core/lens/logic.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "trigger", .module = trigger_module }},
     });
 }
 
@@ -2169,10 +2257,7 @@ fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         }
     }.lessThan);
     var flags: std.ArrayList([]const u8) = .empty;
-    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
-    // Exception paths become traps on the web target; nothing catches in
-    // this module.
-    if (target.result.cpu.arch.isWasm()) flags.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     // The container internals include the bmi2 intrinsics header directly,
     // which this compiler only accepts by way of immintrin.
     if (target.result.cpu.arch == .x86_64) {
@@ -2276,8 +2361,7 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     module.addIncludePath(b.path(".vendor/ruy"));
     module.addIncludePath(b.path(".vendor/cpuinfo/include"));
     var ruy_flags: std.ArrayList([]const u8) = .empty;
-    ruy_flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
-    if (target.result.cpu.arch.isWasm()) ruy_flags.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    ruy_flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     const flags = ruy_flags.items;
     var sources: std.ArrayList([]const u8) = .empty;
     listFilesRecursive(b, ".vendor/ruy/ruy", ".cc", &.{
@@ -2331,7 +2415,7 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     module.addCMacro("ANGLE_UTIL_EXPORT", "");
     module.addCMacro("ANGLE_CAPTURE_ENABLED", "0");
 
-    const flags = [_][]const u8{ "-std=c++20", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" };
+    const flags = [_][]const u8{ "-std=c++20", "-fno-exceptions", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" };
 
     // Backends and features this scope has no use for: other GPU APIs
     // (D3D/Vulkan/WGPU/desktop-GL/null, plus the DXGI/SPIR-V/Vulkan
@@ -2443,7 +2527,7 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     module.addCMacro(platform_define, "1");
 
     var flags: std.ArrayList([]const u8) = .empty;
-    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     // The gl include header imports the apple ui frameworks, so every
     // translation unit on those targets is objective c++.
     if (os == .macos or os == .ios) {
@@ -2578,7 +2662,7 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // single-thread std threading stubs ahead of its headers.
 fn joltFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const u8 {
     var flags: std.ArrayList([]const u8) = .empty;
-    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE" }) catch @panic("OOM");
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE" }) catch @panic("OOM");
     if (target.result.os.tag == .emscripten) {
         flags.append(b.allocator, "-include") catch @panic("OOM");
         flags.append(b.allocator, b.pathFromRoot("adapters/physics/em_thread_stub.h")) catch @panic("OOM");
@@ -2636,7 +2720,7 @@ fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         }
     }.lessThan);
     const yuv_flags = [_][]const u8{
-        "-std=c++17",           "-fno-sanitize=undefined", "-w",
+        "-std=c++17",           "-fno-exceptions",         "-fno-sanitize=undefined", "-w",
         "-DLIBYUV_DISABLE_SVE", "-DLIBYUV_DISABLE_SME",
     };
     for (yuv_sources.items) |file| {
@@ -2656,10 +2740,7 @@ fn buildFlatbuffersLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     module.addIncludePath(b.path(".vendor/flatbuffers/include"));
     module.addCSourceFile(.{
         .file = b.path(".vendor/flatbuffers/src/util.cpp"),
-        .flags = if (target.result.cpu.arch.isWasm())
-            &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-fno-exceptions" }
-        else
-            &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" },
+        .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" },
     });
     const lib = b.addLibrary(.{ .name = "flatbuffers", .linkage = .static, .root_module = module });
     if (libc) |file| lib.setLibCFile(file);
@@ -2674,7 +2755,7 @@ fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     module.addIncludePath(b.path(".vendor/farmhash/src"));
     module.addCSourceFile(.{
         .file = b.path(".vendor/farmhash/src/farmhash.cc"),
-        .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" },
+        .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" },
     });
     const lib = b.addLibrary(.{ .name = "farmhash", .linkage = .static, .root_module = module });
     if (libc) |file| lib.setLibCFile(file);
@@ -2873,8 +2954,7 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     }
     const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
     var xnn_cxx: std.ArrayList([]const u8) = .empty;
-    xnn_cxx.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
-    if (is_wasm_arch(target)) xnn_cxx.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    xnn_cxx.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     const cxx_flags = xnn_cxx.items;
     var seen = std.StringHashMap(void).init(b.allocator);
     for (shared.items) |file| {
@@ -3160,8 +3240,7 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     }.lessThan);
     const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
     var cxx_flags: std.ArrayList([]const u8) = .empty;
-    cxx_flags.appendSlice(b.allocator, &.{ "-std=c++20", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
-    if (target.result.cpu.arch.isWasm()) cxx_flags.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    cxx_flags.appendSlice(b.allocator, &.{ "-std=c++20", "-fno-exceptions", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
     cxx_flags.appendSlice(b.allocator, wasm_compat_flags) catch @panic("oom");
     if (target.result.cpu.arch == .x86_64) {
         cxx_flags.appendSlice(b.allocator, &.{ "-include", immintrinPath(b) }) catch @panic("oom");
@@ -3173,7 +3252,7 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     if (os == .ios) {
         module.addCSourceFile(.{
             .file = b.path(".vendor/litert/tflite/profiling/signpost_profiler.mm"),
-            .flags = &.{ "-std=c++20", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" },
+            .flags = &.{ "-std=c++20", "-fno-exceptions", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" },
         });
     }
     const lib = b.addLibrary(.{ .name = "tflite", .linkage = .static, .root_module = module });
@@ -3189,7 +3268,7 @@ fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
     module.addIncludePath(b.path(".vendor/flatbuffers/include"));
     module.addIncludePath(b.path(".vendor/flatbuffers"));
     module.addIncludePath(b.path(".vendor/flatbuffers/grpc"));
-    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    const flags = [_][]const u8{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" };
     const sources = [_][]const u8{
         "src/idl_parser.cpp",          "src/idl_gen_text.cpp",     "src/reflection.cpp",
         "src/util.cpp",                "src/idl_gen_binary.cpp",   "src/idl_gen_cpp.cpp",
@@ -3439,6 +3518,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .optimize = optimize,
     });
     const face_mesh_topology_ios = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = ios_target, .optimize = optimize });
+    const lash_mesh_ios = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = ios_target, .optimize = optimize });
     const render_ios = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = ios_target,
@@ -3447,12 +3527,14 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             .{ .name = "math", .module = math_ios },
             .{ .name = "makeup_mesh", .module = makeup_mesh_ios },
             .{ .name = "face_mesh_topology", .module = face_mesh_topology_ios },
+            .{ .name = "lash_mesh", .module = lash_mesh_ios },
         },
     });
     render_ios.addIncludePath(b.path(".vendor/bgfx/include"));
     render_ios.addIncludePath(b.path(".vendor/bx/include"));
     render_ios.link_libc = true;
     addAppleSdkPaths(b, render_ios);
+    addBgfxCallbacks(b, render_ios);
     render_ios.addImport("shader_blobs", addShaderBlobs(b, shaderc_tool, ios_target, optimize));
     const abi_ios = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
@@ -3505,6 +3587,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     };
     abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, have_jolt_ios));
     abi_ios.addImport("script", scriptModule(b, ios_target, optimize, have_quickjs_ios));
+    abi_ios.addImport("gesture", gestureModule(b, ios_target, optimize));
     abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, have_miniaudio_ios));
     abi_ios.addImport("particles", particlesModule(b, ios_target, optimize));
     abi_ios.addImport("sph", sphModule(b, ios_target, optimize));
@@ -3539,6 +3622,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     });
     abi_ios.addImport("manifest", lens_manifest_ios);
     abi_ios.addImport("trigger", lens_trigger_ios);
+    lens_runtime_ios.addImport("logic", logicModule(b, ios_target, optimize, lens_trigger_ios));
     abi_ios.addImport("runtime", lens_runtime_ios);
     const have_inference_stack = blk: {
         for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
@@ -3619,6 +3703,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             .optimize = optimize,
             .imports = &.{.{ .name = "face", .module = tracking_cores_ios.face }},
         });
+        abi_ios.addImport("face106", face106_ios);
         const beauty_ios_module = b.createModule(.{
             .root_source_file = b.path("adapters/beauty/beauty.zig"),
             .target = ios_target,
@@ -3662,6 +3747,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     const gltf_ios = if (have_cgltf_ios) gltfModule(b, ios_target, optimize, math_ios) else null;
     const ios_asset = realAssetModules(b, ios_target, optimize, gltf_ios);
     abi_ios.addImport("image", ios_asset.image);
+    render_ios.addImport("image", ios_asset.image);
     abi_ios.addImport("asset", ios_asset.asset);
     if (gltf_ios) |gm| abi_ios.addImport("gltf", gm);
     const gosslens_ios = b.addLibrary(.{
@@ -3715,7 +3801,7 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     // build provides (shaderc_dxil.cpp then reaches for <unknwnbase.h>,
     // a Windows SDK header, and fails outright on Linux). We only ever
     // emit metal/spirv/essl, never DXIL/D3D12, so it's a straight cut.
-    const cxx17 = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-sanitize=undefined", "-w", "-DBX_CONFIG_DEBUG=0", "-D__STDC_FORMAT_MACROS", "-DSHADERC_CONFIG_HAS_DXC=0" };
+    const cxx17 = [_][]const u8{ "-std=c++20", "-fno-exceptions", "-fno-strict-aliasing", "-fno-sanitize=undefined", "-w", "-DBX_CONFIG_DEBUG=0", "-D__STDC_FORMAT_MACROS", "-DSHADERC_CONFIG_HAS_DXC=0" };
     const c_flags = [_][]const u8{ "-fno-sanitize=undefined", "-w" };
 
     const spirv_opt_module = b.createModule(.{ .target = target, .optimize = opt });
@@ -4013,6 +4099,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     const shader_blobs_em = addShaderBlobs(b, shaderc_exe.?, em_target, .ReleaseSmall);
     const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const lash_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const render_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = em_target,
@@ -4022,11 +4109,13 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
             .{ .name = "shader_blobs", .module = shader_blobs_em },
             .{ .name = "makeup_mesh", .module = makeup_mesh_em },
             .{ .name = "face_mesh_topology", .module = face_mesh_topology_em },
+            .{ .name = "lash_mesh", .module = lash_mesh_em },
         },
     });
     render_em.addIncludePath(b.path(".vendor/bgfx/include"));
     render_em.addIncludePath(b.path(".vendor/bx/include"));
     render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+    addBgfxCallbacks(b, render_em);
 
     const abi_em = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
@@ -4064,6 +4153,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("world_board", worldBoardModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, true));
+    abi_em.addImport("gesture", gestureModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("particles", particlesModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("sph", sphModule(b, em_target, .ReleaseSmall));
@@ -4104,9 +4194,11 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     });
     abi_em.addImport("manifest", lens_manifest_em);
     abi_em.addImport("trigger", lens_trigger_em);
+    lens_runtime_em.addImport("logic", logicModule(b, em_target, .ReleaseSmall, lens_trigger_em));
     abi_em.addImport("runtime", lens_runtime_em);
     const image_em = imageStubModule(b, em_target, .ReleaseSmall);
     abi_em.addImport("image", image_em);
+    render_em.addImport("image", image_em);
     const gltf_stub_em = gltfStubModule(b, em_target, .ReleaseSmall, math_em);
     abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em, gltf_stub_em));
     abi_em.addImport("gltf", gltf_stub_em);
@@ -4262,6 +4354,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     const shader_blobs_em = addShaderBlobs(b, shaderc_tool, em_target, .ReleaseSmall);
     const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const lash_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const render_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = em_target,
@@ -4271,6 +4364,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
             .{ .name = "shader_blobs", .module = shader_blobs_em },
             .{ .name = "makeup_mesh", .module = makeup_mesh_em },
             .{ .name = "face_mesh_topology", .module = face_mesh_topology_em },
+            .{ .name = "lash_mesh", .module = lash_mesh_em },
         },
     });
     render_em.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -4281,6 +4375,8 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     // on the search path, not Zig's own (nonexistent, for this target)
     // libc linkage.
     render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+    render_em.addImport("image", imageStubModule(b, em_target, .ReleaseSmall));
+    addBgfxCallbacks(b, render_em);
 
     const driver_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/wasm_emscripten_core_smoke.zig"),
@@ -4355,7 +4451,20 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         .{ .name = "fs_fog_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_outline_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_tint_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // occluder.pass's own fixed head-occluder shader, same kit-authored
+        // reasoning as fs_smooth_pass below.
+        .{ .name = "fs_occluder_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // cutout.pass's own fixed face-isolation shader: the face matte keys the
+        // frame through, the rest goes flat color, same reasoning as fs_smooth.
+        .{ .name = "fs_cutout_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_smooth_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // retouch.pass's own fixed fragment shader: a mode-branched selective
+        // skin filter (edge-aware blemish smooth or T-zone shine matte), same
+        // kit-authored reasoning as fs_smooth_pass above.
+        .{ .name = "fs_retouch_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // matte.refine's own fixed guided-filter fragment shader, same
+        // kit-authored reasoning as fs_smooth_pass above.
+        .{ .name = "fs_matte_refine", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_stylize_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // edge.pass's three fixed fragment shaders: a grayscale-and-sobel
         // stage (single-pass magnitude or canny's directional variant), then
@@ -4390,6 +4499,9 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // beauty.reshape's own fixed fragment shader: thin_face and
         // big_eye, same reasoning as fs_lut_pass above.
         .{ .name = "fs_beauty_reshape", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // reshape.bank's own fixed fragment shader: the sixty-six per-region
+        // face sculpt, same reasoning as fs_lut_pass above.
+        .{ .name = "fs_reshape_bank", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // beauty.lipstick/beauty.blusher's own mesh vertex stage - its
         // own varying def, a_position is vec2 here, not the vec3 every
         // other vertex contract in this project shares.
@@ -4397,6 +4509,20 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // beauty.lipstick/beauty.blusher's own fixed fragment shader,
         // same reasoning as fs_lut_pass above.
         .{ .name = "fs_makeup", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
+        // paint.face's own fixed fragment shader: the lens texture laid onto
+        // the tracked face through the makeup mesh UVs, masked to a channel
+        // and blended over the skin. Shares vs_makeup's vec2 vertex contract.
+        .{ .name = "fs_paint_face", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
+        // face.swap's own vertex and fragment stages: the mesh vertex stage
+        // carries a third stream, the per-vertex seam feather, beside the
+        // position and canonical UV, and the fragment stage warps the donor
+        // face onto the tracked mesh and feathers it into the surrounding skin.
+        .{ .name = "vs_face_swap", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_face_swap.def.sc" },
+        .{ .name = "fs_face_swap", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_face_swap.def.sc" },
+        // mesh.lashes' own fixed fragment shader: the lash strip combed into
+        // strands and blended over the frame in its tint. Shares vs_makeup's
+        // vec2 vertex contract, the strip's live positions in screen UV.
+        .{ .name = "fs_lashes", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
         // model.gltf's own fixed fragment shader: a flat material-tint
         // fill, same reasoning as fs_lut_pass above - pairs with the
         // shared vs_lens_pass.sc vertex contract, not its own stage.
@@ -4475,6 +4601,15 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
     }
     const root = wf.add("shader_blobs.zig", source.items);
     return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize });
+}
+
+// The engine-owned bgfx diagnostics callbacks ride with every module that
+// compiles render.zig; plain C so va_list handling stays portable.
+fn addBgfxCallbacks(b: *std.Build, module: *std.Build.Module) void {
+    module.addCSourceFile(.{
+        .file = b.path("adapters/bgfx/callbacks.c"),
+        .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+    });
 }
 
 fn addCxxDir(b: *std.Build, module: *std.Build.Module, dir: []const u8, flags: []const []const u8, exclude: []const []const u8) void {

@@ -152,6 +152,23 @@ pub const Renderer = struct {
         return .{};
     }
 
+    pub const DynamicMask = struct {
+        handle: TextureHandle = .{},
+        width: u16 = 0,
+        height: u16 = 0,
+
+        pub fn upload(self: *DynamicMask, width: u16, height: u16, mask: []const u8) TextureHandle {
+            _ = mask;
+            self.width = width;
+            self.height = height;
+            return self.handle;
+        }
+
+        pub fn deinit(self: *DynamicMask) void {
+            self.* = .{};
+        }
+    };
+
     pub fn createDynamicBgraTexture(width: u16, height: u16) TextureHandle {
         _ = width;
         _ = height;
@@ -187,6 +204,44 @@ pub const Renderer = struct {
         _ = frame_width;
         _ = frame_height;
         _ = intensity;
+    }
+
+    pub fn submitFaceMaterial(r: *Renderer, view_id: u16, background_texture: TextureHandle, material_texture: TextureHandle, mask_texture: TextureHandle, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, blend: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = background_texture;
+        _ = material_texture;
+        _ = mask_texture;
+        _ = landmarks;
+        _ = frame_width;
+        _ = frame_height;
+        _ = opacity;
+        _ = blend;
+    }
+
+    pub fn submitFaceSwap(r: *Renderer, view_id: u16, background_texture: TextureHandle, donor_texture: TextureHandle, mask_texture: TextureHandle, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, feather: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = background_texture;
+        _ = donor_texture;
+        _ = mask_texture;
+        _ = landmarks;
+        _ = frame_width;
+        _ = frame_height;
+        _ = opacity;
+        _ = feather;
+    }
+
+    pub fn submitLashMesh(r: *Renderer, view_id: u16, background_texture: TextureHandle, landmarks: []const f32, frame_width: f32, frame_height: f32, color: [4]f32, length: f32, curl: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = background_texture;
+        _ = landmarks;
+        _ = frame_width;
+        _ = frame_height;
+        _ = color;
+        _ = length;
+        _ = curl;
     }
 
     pub fn clearComposite(view_id: u16, target: OffscreenTarget, width: u16, height: u16) void {
@@ -228,6 +283,19 @@ pub const Renderer = struct {
         _ = dy;
         _ = dw;
         _ = dh;
+        _ = opacity;
+    }
+
+    pub fn submitSpriteRotated(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = sprite_tex;
+        _ = cx;
+        _ = cy;
+        _ = hw;
+        _ = hh;
+        _ = rotation;
+        _ = aspect;
         _ = opacity;
     }
 
@@ -305,13 +373,15 @@ pub const Renderer = struct {
         _ = threshold;
     }
 
-    pub fn submitTintPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, color: [3]f32, opacity: f32) void {
+    pub fn submitTintPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, color: [3]f32, opacity: f32, mode: u8, finish: u8) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
         _ = mask_texture;
         _ = color;
         _ = opacity;
+        _ = mode;
+        _ = finish;
     }
 
     pub fn submitSmoothPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, amount: f32) void {
@@ -320,6 +390,41 @@ pub const Renderer = struct {
         _ = input_texture;
         _ = mask_texture;
         _ = amount;
+    }
+
+    pub fn submitOccluderPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, restore_texture: TextureHandle, mask_texture: TextureHandle, params: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = restore_texture;
+        _ = mask_texture;
+        _ = params;
+    }
+
+    pub fn submitCutoutPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, color: [3]f32, softness: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = color;
+        _ = softness;
+    }
+
+    pub fn submitRetouchPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, mode: f32, amount: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = mode;
+        _ = amount;
+    }
+
+    pub fn submitMatteRefinePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, matte_texture: TextureHandle, params: [3]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = matte_texture;
+        _ = params;
     }
 
     pub fn submitTrailPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, prev_texture: TextureHandle, amount: f32) void {
@@ -376,12 +481,16 @@ pub const Renderer = struct {
         _ = params;
     }
 
-    pub fn submitWarpPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, warp: [4]f32, params: [4]f32) void {
+    pub fn submitWarpPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, warp: [4]f32, params: [4]f32, extra: [4]f32, points: *const [8][4]f32, fall: *const [8][4]f32) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
+        _ = mask_texture;
         _ = warp;
         _ = params;
+        _ = extra;
+        _ = points;
+        _ = fall;
     }
 
     pub fn submitEdgeSobel(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32, texel: [2]f32) void {
@@ -444,6 +553,16 @@ pub const Renderer = struct {
         _ = aspect_ratio;
         _ = thin_face_amount;
         _ = big_eye_amount;
+    }
+
+    pub fn submitReshapeBank(r: *Renderer, view_id: u16, input_texture: TextureHandle, face_points: *const [face_point_vec4_count * 4]f32, hubs: [4]f32, bank: *const [66]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = face_points;
+        _ = hubs;
+        _ = bank;
+        _ = aspect_ratio;
     }
 
     // 111 tracked points, two floats each - makeup_mesh.canonical_uv.len
@@ -889,6 +1008,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadBeautyReshapeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadReshapeBankProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

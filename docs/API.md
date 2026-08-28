@@ -1,14 +1,16 @@
 # API
 
-Gosslens has one C ABI and three public SDKs: Swift, Kotlin, and TypeScript.
-The ABI is the engine contract. This file is the public SDK naming and shape
-contract built on top of it.
+Gosslens has one C ABI and SDKs on top of it: Swift, Kotlin, TypeScript,
+C, and the Android JNI binding. The ABI is the engine contract. This file is
+the public SDK naming and shape contract built on top of it.
 
-The ABI is also consumable directly. [sdk/c](../sdk/c) packages
-[include/gosslens.h](../include/gosslens.h) as a linkable library, so any
-language with a C FFI reaches the engine through the `goss_*` functions as they
-are spelled here. The C surface uses those names unchanged; the naming rules
-below govern the wrappers that rename them for a host language.
+The C SDK is the ABI packaged as a first-class SDK of its own.
+[sdk/c](../sdk/c) builds [include/gosslens.h](../include/gosslens.h) into a
+linkable library - a static archive and a shared object from `zig build c`,
+with a README, a runnable demo, and a CMake import - so any language with a C
+FFI reaches every `goss_*` operation through the header as it is spelled
+here. The C surface uses those names unchanged; the naming rules below govern
+the wrappers that rename them for a host language.
 
 A developer who learns one Gosslens SDK should not have to relearn the same
 operation on another platform.
@@ -157,6 +159,7 @@ file must move together.
 | `goss_engine_capture_frame` | `captureFrame()`, returning pixels plus the renderer's real width and height | supported SDKs |
 | `goss_engine_capture_live_frame` | `captureLiveFrame(format)`, the supported per-frame composited output for a live broadcast source, in a WebRTC format (RGBA8, BGRA8, or NV12 for a hardware encoder) with no consumer conversion | supported SDKs |
 | `goss_engine_render_to_live_texture` | `renderToLiveTexture(session, texture, width, height)`, the zero-copy live output rendering the composite straight into a caller's external texture; Swift's `GossLiveOutput` wraps it with a pixel-buffer pool | Apple (Metal) |
+| `goss_engine_release_live_texture` | `releaseLiveTexture(texture)`, releasing the persistent wrap the engine keeps per live-output texture when a publish surface retires before the engine does; Swift's `GossLiveOutput` calls it for every texture it published when the broadcast ends | all SDKs |
 | `goss_engine_capture_photo` | `capturePhoto()`, returning deterministic PNG bytes of the composited frame, sized by a probe call | supported SDKs |
 | `goss_engine_capture_photo_as` | `capturePhoto(as:quality:)`, JPEG from the engine's own encoder on every target, HEIC from the platform | all SDKs for JPEG; HEIC where the platform backend exists |
 | `goss_engine_capture_still` | `captureStill(session, config)`, the composited still at its own or a requested resolution, decoupled from the preview swap chain, optionally supersampled (rendered larger then box-downsampled) for photo-grade edges; a still past the GPU's texture-size ceiling is composited in tiles and stitched. The config also carries the color space (sRGB, Display-P3, Rec2020 - tagged as PNG cHRM/gAMA or a JPEG ICC) and the bit depth (8, or a 16-bit PNG container) | all SDKs (web reaches the wasm core; the pure WebGL path has no core encoder) |
@@ -214,7 +217,7 @@ file must move together.
 | `goss_session_body_result_at` | `bodyResultAt(index, result)`, reads the index-th submitted body; a caller loops zero to the count to visit every body | native tracking path |
 | `goss_session_submit_depth` | `submitDepth(depth, width, height, near, far)`, submits one frame's depth map (metres per pixel, row major) from the host AR backend (ARKit scene depth, ARCore Depth API, WebXR depth-sensing); an empty map clears it, kept for depth occlusion | native + web depth path |
 | `goss_session_submit_segmentation_image` | `submitSegmentationImage(rgba, width, height)`, segments a host-provided still RGBA image (row major) through the running segmenter, so a gallery photo gets a mask without a camera frame; again with no segmenter enabled | native + web segmentation |
-| `goss_session_set_makeup_reference` | `setMakeupReference(rgba, width, height, landmarks)`, samples a reference photo's makeup color per face part (the caller passes the reference face's 478 landmarks), so a `tint.pass` with `"source": "reference"` paints the live face in that color; empty landmarks clears it | native + web makeup |
+| `goss_session_set_makeup_reference` | `setMakeupReference(rgba, width, height, landmarks)`, samples a reference photo's makeup color per face part: lips, eyes, brows, and a cheek-and-forehead skin patch (the caller passes the reference face's 478 landmarks), so a `tint.pass` with `"source": "reference"` paints the live face in that color and a foundation over `face_skin` matches the reference's skin tone; empty landmarks clears it | native + web makeup |
 | `goss_session_face_region` | `faceRegion(region, outXyz)`, the newest tracked face's named attach point (x, y in frame pixels, z in the same scale) so a lens pins content to the forehead, glabella, nose tip, chin, an eye, a cheek, an ear, or the mouth centre/corner; see the `GOSS_FACE_REGION_*` points | native tracking path |
 | `goss_session_set_face_landmarks` | `setFaceLandmarks(points)`; web adds `sourceWidth, sourceHeight` since its analysis resolution is decoupled from the rendered frame's | Web analysis-producer path |
 | `goss_session_set_segmentation_mask` | `setSegmentationMask(mask)`, a mask_side x mask_side float mask the web tracking module produced, uploaded as the subject texture | Web analysis-producer path |
@@ -311,8 +314,48 @@ ribbon for the renderer to draw.
 | `goss_session_ar_brush_set_style` / `_set_mode` | `arBrushSetStyle(r, g, b, a, width)` / `arBrushSetMode(mode)`, the world-anchored brush's style and preset | world-tracking SDKs |
 | `goss_session_ar_brush_begin` / `_point` / `_end` | `arBrushBegin()` / `arBrushPoint(x, y, z)` / `arBrushEnd()`, a stroke in the world frame the platform reports poses in; nothing draws without live world tracking | world-tracking SDKs |
 | `goss_session_ar_brush_undo` / `_clear` | `arBrushUndo()` / `arBrushClear()`, the world-brush stacks | world-tracking SDKs |
+| `goss_session_touch` | `touch(phase, pointerId, x, y)` feeds one screen touch event per finger (phase 0 began, 1 moved, 2 ended, 3 cancelled; x and y normalized 0..1) so the engine recognizes the gestures a lens reacts to (tap, double tap, long press, swipe, pinch, rotate, drag) and the pointer position, delivered to the lens at the next `tickLens` | all SDKs |
+| `goss_session_pull_haptic` | `pullHaptic()` drains one haptic a `haptic` trigger queued this tick (a style index 0 light..7 failure and a 0..1 intensity), reporting none-left so the host loops it after `tickLens` and buzzes the device; the engine names the buzz, the platform makes it | all SDKs |
 | `goss_session_grab` / `_release` | `grab(x, y, z)` grabs the nearest dynamic physics body to a world point and drags it there, driving it kinematically so it gathers throw velocity; `release()` lets it fly off dynamic again | all SDKs |
 | `goss_session_add_collider` / `_erase_collider` | `addCollider(x, y, z)` drops a static sphere collider at a world point that content lands on live; `eraseCollider(x, y, z, radius)` removes every live collider within radius - drawing and erasing a 2D collider world | all SDKs |
+| `goss_physics_hair_remove` | `physicsHairRemove(hairId)`, releasing one solver hair by the id the physics world assigned it - the pair of the acquire a hair lens performs at activation, so a hair retires mid-session without tearing the physics world down | all SDKs |
+
+## Lens graph vocabulary
+
+`activateLens` takes a manifest whose render graph is built from a fixed set of
+node and pass types, and whose segmentation-driven passes name a fixed set of
+mask channels. These names are the manifest contract, not `goss_*` operations,
+so they live in the engine rather than the table above; they are listed here so
+an SDK author knows what a lens can ask for.
+
+The node and pass types (`NodeType` in
+[core/lens/runtime.zig](../core/lens/runtime.zig)) are `beauty.face`,
+`beauty.reshape`, `beauty.lipstick`, `beauty.blusher`, `shader.pass`,
+`lut.pass`, `blend.pass`, `blur.pass`, `grade.pass`, `bloom.pass`, `dof.pass`,
+`fog.pass`, `outline.pass`, `tint.pass`, `smooth.pass`, `retouch.pass`,
+`matte.refine`, `stylize.pass`, `edge.pass`, `warp.pass`, `reshape.bank`,
+`trail.pass`, `ssr.pass`, `env.pass`,
+`model.gltf`, `mesh.face`, `draw.board`, `layout.composite`, `sprite.2d`,
+`text.2d`, and `video.texture`. A `tint.pass` carries a `normal`, `multiply`,
+or `screen` blend mode.
+
+A `shader.pass` node's fragment shader can itself be a material graph whose ops
+(`NodeKind` in [core/material/graph.zig](../core/material/graph.zig)) are the
+sources `uv`, `time`, `constant`, `uniform`, `texture`; `sample`; the maths
+`add`, `subtract`, `multiply`, `divide`, `power`, `min`, `max`, `atan2`, `dot`,
+`distance`, `normalize`, `length`, `saturate`, `abs`, `floor`, `fract`, `sin`,
+`cos`, `sqrt`, `clamp`, `refract`, `step`, `smoothstep`, `mod`, `mix`; the
+vector ops `split`, `combine3`, `combine4`, `colormatrix`; the shading
+`lambert`, `fresnel`; and the graph root `output`.
+
+The mask channels a pass can name, which `segmentationChannels()` reports a
+bitmask over (`mask_channels` in
+[core/lens/manifest.zig](../core/lens/manifest.zig)), are `person`,
+`background`, `hair`, `body_skin`, `face_skin`, `clothes`, `others`, `head`,
+`hand`, `lips`, `eyes`, `brows`, `iris`, `teeth`, `contour`, `highlight`,
+`lash_line`, `under_eye`, `nasolabial`, `sclera`, and `t_zone`. The person and
+multiclass channels ride the segmenter; the rest ride the face and hand
+landmarks instead.
 
 ## Web tracking module
 
