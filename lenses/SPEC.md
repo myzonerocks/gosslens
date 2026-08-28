@@ -704,6 +704,13 @@ each tick is bounded by a fuel limit, so a script can neither reach outside
 the lens nor hang the frame. The same inputs always produce the same writes,
 which is what lets a scripted lens be conformance bit-stable.
 
+The script's own top-level state persists across ticks, since the context
+lives for the life of the lens. A script keeps counters, ring buffers of past
+values, or entity-and-component tables in ordinary globals and carries them
+frame to frame, so persistent local state and an ECS-style organization are a
+matter of how the script is written, not a separate engine feature. A no-code
+lens reaches for the counter actions and `counter('name')` instead.
+
 Alongside `update`, a script may define event handlers the engine calls when
 a moment happens: `onInit` and `onTurnOn` once when the lens activates,
 `onTurnOff` when it deactivates, `onTap`, `onDoubleTap`, `onLongPress`,
@@ -785,7 +792,8 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   finger slides), `touch.pinch` (the two-finger spread over the spread at
   gesture start, one at rest), `touch.rotate` (two-finger twist in radians),
   `pointer.x` / `pointer.y` (the primary finger's last position, 0 to 1),
-  `param('name')`.
+  `counter('name')` (a persistent counter's value, stepped by the counter
+  actions below), `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
   numeric or boolean literal.
 - Boolean combinators: `&&`, `||`, `!`, grouped with parens.
@@ -809,7 +817,10 @@ curve primitives in 6.3), `param_set` (immediate), `play_animation` (a
 named glTF animation clip), `play_sound` (start a voice for the sound at
 the bundle-relative path in `target`, decoded from `sounds/` and mixed into
 the audio the host pulls out), `reset_timer` (name a timer signal back to
-zero). Reserved, accepted by the validator but not yet executed by the
+zero), and the counter actions `increment_counter`, `reset_counter` and
+`set_counter` (step a named counter that `counter('name')` reads and that
+persists across ticks, so a no-code lens keeps a score or a step index with no
+script; `set_counter` writes `to`). Reserved, accepted by the validator but not yet executed by the
 runtime: `show` / `hide` (a node by id) and `swap_subgraph` (splice a
 different set of this lens's own nodes in place of a named group -
 edit-time, deferred to the next frame boundary so it never tears a

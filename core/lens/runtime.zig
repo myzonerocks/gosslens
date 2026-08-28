@@ -553,6 +553,11 @@ pub const Lens = struct {
     /// reads, not a value a trigger's action starts).
     timer_names: [][]u8,
     timer_elapsed_us: []u64,
+    /// The lens's counters, each individually owned. counter_values is a
+    /// parallel array of persistent values a trigger's increment, reset, or set
+    /// action changes; unlike a timer, a counter holds until an action moves it.
+    counter_names: [][]u8,
+    counter_values: []f64,
     /// Microseconds since activation, advanced every tick - a free-running
     /// lens clock, the time source an animated sprite cycles its frames on.
     elapsed_us: u64 = 0,
@@ -560,6 +565,7 @@ pub const Lens = struct {
     /// the per-frame path allocates nothing: timer snapshot, per-param
     /// touch flags, and room for every parameter-bound effect at once.
     tick_timer_values: []trigger.TimerValue,
+    tick_counter_values: []trigger.CounterValue,
     tick_touched: []bool,
     tick_applied: []AppliedEffect,
     /// Bundle-relative paths of sounds a play_sound trigger fired this tick;
@@ -580,6 +586,10 @@ pub const Lens = struct {
         self.gpa.free(self.timer_names);
         self.gpa.free(self.timer_elapsed_us);
         self.gpa.free(self.tick_timer_values);
+        for (self.counter_names) |name| self.gpa.free(name);
+        self.gpa.free(self.counter_names);
+        self.gpa.free(self.counter_values);
+        self.gpa.free(self.tick_counter_values);
         self.gpa.free(self.tick_touched);
         self.gpa.free(self.tick_applied);
         self.gpa.free(self.tick_sounds);
@@ -1433,6 +1443,25 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
 
     const tick_timer_values = try gpa.alloc(trigger.TimerValue, timer_names.items.len);
     errdefer gpa.free(tick_timer_values);
+
+    var counter_names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (counter_names.items) |name| gpa.free(name);
+        counter_names.deinit(gpa);
+    }
+    for (compiled_triggers) |*expr| try collectCounterNames(gpa, expr.root, &counter_names);
+    for (lens_manifest.triggers) |trig| {
+        switch (trig.action.kind) {
+            .increment_counter, .reset_counter, .set_counter => try addCounterName(gpa, &counter_names, trig.action.target),
+            else => {},
+        }
+    }
+    const counter_values = try gpa.alloc(f64, counter_names.items.len);
+    errdefer gpa.free(counter_values);
+    @memset(counter_values, 0);
+    const tick_counter_values = try gpa.alloc(trigger.CounterValue, counter_names.items.len);
+    errdefer gpa.free(tick_counter_values);
+
     const tick_touched = try gpa.alloc(bool, param_values.len);
     errdefer gpa.free(tick_touched);
     var bound_count: usize = 0;
@@ -1458,6 +1487,9 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .timer_names = try timer_names.toOwnedSlice(gpa),
         .timer_elapsed_us = timer_elapsed_us,
         .tick_timer_values = tick_timer_values,
+        .counter_names = try counter_names.toOwnedSlice(gpa),
+        .counter_values = counter_values,
+        .tick_counter_values = tick_counter_values,
         .tick_touched = tick_touched,
         .tick_applied = tick_applied,
         .tick_sounds = tick_sounds,
@@ -1484,6 +1516,40 @@ fn collectTimerNames(gpa: std.mem.Allocator, node: *const trigger.Node, names: *
             try collectTimerNames(gpa, combine.rhs, names);
         },
     }
+}
+
+/// Adds a counter name to the deduped set, each individually owned, skipping an
+/// empty name so an action with no target adds nothing.
+fn addCounterName(gpa: std.mem.Allocator, names: *std.ArrayList([]u8), name: []const u8) std.mem.Allocator.Error!void {
+    if (name.len == 0) return;
+    for (names.items) |existing| {
+        if (std.mem.eql(u8, existing, name)) return;
+    }
+    try names.append(gpa, try gpa.dupe(u8, name));
+}
+
+/// Collects every counter('name') a compiled trigger tree reads, so a counter
+/// referenced only in a condition still gets a slot; action targets are added
+/// separately at construction.
+fn collectCounterNames(gpa: std.mem.Allocator, node: *const trigger.Node, names: *std.ArrayList([]u8)) std.mem.Allocator.Error!void {
+    switch (node.*) {
+        .signal_bool => {},
+        .compare => |c| {
+            if (c.signal.kind == .counter) try addCounterName(gpa, names, c.signal.counter_name);
+        },
+        .not => |inner| try collectCounterNames(gpa, inner, names),
+        .and_, .or_ => |combine| {
+            try collectCounterNames(gpa, combine.lhs, names);
+            try collectCounterNames(gpa, combine.rhs, names);
+        },
+    }
+}
+
+fn counterIndex(lens: *const Lens, name: []const u8) ?usize {
+    for (lens.counter_names, 0..) |existing, i| {
+        if (std.mem.eql(u8, existing, name)) return i;
+    }
+    return null;
 }
 
 fn paramIndex(lens: *const Lens, name: []const u8) ?u16 {
@@ -1523,8 +1589,12 @@ pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const Appl
     for (lens.timer_names, lens.timer_elapsed_us, 0..) |name, elapsed_us, i| {
         lens.tick_timer_values[i] = .{ .name = name, .seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0 };
     }
+    for (lens.counter_names, lens.counter_values, 0..) |name, value, i| {
+        lens.tick_counter_values[i] = .{ .name = name, .value = value };
+    }
     var live_signals = signals;
     live_signals.timers = lens.tick_timer_values;
+    live_signals.counters = lens.tick_counter_values;
 
     const touched_params = lens.tick_touched;
     @memset(touched_params, false);
@@ -1600,6 +1670,15 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
                 lens.tick_sounds[lens.tick_sound_count] = action.target;
                 lens.tick_sound_count += 1;
             }
+        },
+        .increment_counter => {
+            if (counterIndex(lens, action.target)) |idx| lens.counter_values[idx] += 1;
+        },
+        .reset_counter => {
+            if (counterIndex(lens, action.target)) |idx| lens.counter_values[idx] = 0;
+        },
+        .set_counter => {
+            if (counterIndex(lens, action.target)) |idx| lens.counter_values[idx] = action.to;
         },
         .show, .hide, .swap_subgraph => {},
     }
@@ -2134,4 +2213,32 @@ test "a trigger firing on the rising edge starts a ramp that settles, does not r
     // Falling edge resets the trigger's own state, ready to fire again.
     _ = tick(&lens, animation.fixed_step_us, signals_closed);
     try t.expect(!lens.trigger_was_true[0]);
+}
+
+test "a counter increments on an event, persists, and drives a trigger at its threshold" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const src =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "win", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "s", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}}],
+        \\ "triggers": [
+        \\   {"when": "event('hit')", "action": {"kind": "increment_counter", "target": "score"}},
+        \\   {"when": "counter('score') >= 1", "action": {"kind": "param_set", "target": "win", "to": 1.0}}]}
+    ;
+    const lens_manifest = try parseTestManifest(t.allocator, src);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    // The event steps the counter to one, which persists on the lens.
+    const hit = [_][]const u8{"hit"};
+    _ = tick(&lens, animation.fixed_step_us, .{ .events = &hit });
+    try t.expectEqual(@as(usize, 1), lens.counter_names.len);
+    try t.expectApproxEqAbs(@as(f64, 1.0), lens.counter_values[0], 1e-9);
+
+    // The next tick sees the counter at its threshold and fires the trigger.
+    _ = tick(&lens, animation.fixed_step_us, .{});
+    try t.expectApproxEqAbs(@as(f32, 1.0), lens.paramValue("win").?, 1e-6);
 }

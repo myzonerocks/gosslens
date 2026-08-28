@@ -49,12 +49,13 @@ pub const SignalKind = enum {
     touch_rotate,
     pointer_x,
     pointer_y,
+    counter,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
         .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
-        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y => false,
+        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
     };
 }
 
@@ -78,6 +79,7 @@ pub const Signal = struct {
     param_index: u16 = 0,
     timer_name: []const u8 = "",
     event_name: []const u8 = "",
+    counter_name: []const u8 = "",
 };
 
 pub const CompareOp = enum { gt, lt, ge, le, eq, ne };
@@ -109,6 +111,7 @@ pub const Expression = struct {
 };
 
 pub const TimerValue = struct { name: []const u8, seconds: f32 };
+pub const CounterValue = struct { name: []const u8, value: f64 };
 
 /// The live values a compiled expression reads at evaluation time. params
 /// mirrors the manifest's parameter list by index, numeric-cast (a bool
@@ -124,6 +127,9 @@ pub const Signals = struct {
     blendshapes: ?*const [face.blendshape_count]f32 = null,
     params: []const f64 = &.{},
     timers: []const TimerValue = &.{},
+    /// The lens's counters, each a value that persists across ticks and changes
+    /// only when a trigger increments, resets, or sets it. Read as counter('name').
+    counters: []const CounterValue = &.{},
     /// The event names the host fired this tick (goss_session_fire_event). An
     /// event is present only for the tick it is fired, so an edge-triggered
     /// action fires exactly once.
@@ -269,6 +275,12 @@ fn readNumber(s: Signal, signals: Signals) f64 {
         .timer => blk: {
             for (signals.timers) |tv| {
                 if (std.mem.eql(u8, tv.name, s.timer_name)) break :blk tv.seconds;
+            }
+            break :blk 0;
+        },
+        .counter => blk: {
+            for (signals.counters) |cv| {
+                if (std.mem.eql(u8, cv.name, s.counter_name)) break :blk cv.value;
             }
             break :blk 0;
         },
@@ -607,6 +619,10 @@ const Parser = struct {
             const name = try self.parseCall();
             return .{ .kind = .timer, .timer_name = try self.arena.dupe(u8, name) };
         }
+        if (std.mem.eql(u8, head, "counter")) {
+            const name = try self.parseCall();
+            return .{ .kind = .counter, .counter_name = try self.arena.dupe(u8, name) };
+        }
         if (std.mem.eql(u8, head, "param")) {
             const name = try self.parseCall();
             for (self.param_names, 0..) |candidate, i| {
@@ -919,6 +935,17 @@ test "touch pinch, rotate and pointer read as levels" {
     defer px.deinit();
     try t.expect(evaluate(px.root, .{ .pointer_x = 0.7 }));
     try t.expect(!evaluate(px.root, .{ .pointer_x = 0.2 }));
+}
+
+test "counter reads the fed counter value by name" {
+    var expr = try compileOk("counter('score') >= 3");
+    defer expr.deinit();
+    const low = [_]CounterValue{.{ .name = "score", .value = 2 }};
+    try t.expect(!evaluate(expr.root, .{ .counters = &low }));
+    const hi = [_]CounterValue{.{ .name = "score", .value = 3 }};
+    try t.expect(evaluate(expr.root, .{ .counters = &hi }));
+    // An unknown counter reads zero.
+    try t.expect(!evaluate(expr.root, .{}));
 }
 
 test "body.bone_angle compares the fed bend of a named bone" {

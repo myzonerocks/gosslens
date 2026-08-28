@@ -896,6 +896,10 @@ pub const ActionKind = enum {
     reset_timer,
     /// Plays a sound: target is the bundle-relative sound path.
     play_sound,
+    /// Counter changes: target names the counter, to is the set value.
+    increment_counter,
+    reset_counter,
+    set_counter,
 };
 
 pub const Curve = enum { linear, ease_in_quad, ease_out_quad, ease_in_out_quad, ease_in_out_cubic, ease_in_out_sine, spring };
