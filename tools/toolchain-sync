@@ -30,7 +30,9 @@ current="$root/.local/zig/current"
 # where a symlink needs a privilege a plain checkout does not have.
 link_current() {
   if [ "$os" = windows ]; then
-    if [ -d "$current" ]; then
+    # -d is false for a junction left dangling by a moved checkout, which
+    # is still there and still in mklink's way; -L catches that one.
+    if [ -d "$current" ] || [ -L "$current" ]; then
       cmd //c rmdir "$(cygpath -w "$current")" >/dev/null 2>&1 || {
         echo "toolchain-sync: $current is not a junction; remove it and retry" >&2
         exit 1
