@@ -381,6 +381,7 @@ pub fn build(b: *std.Build) void {
     const face_tests = b.addTest(.{ .root_module = face_module });
     const pose_tests = b.addTest(.{ .root_module = pose_core_module });
     const face_mesh_topology_tests = b.addTest(.{ .root_module = face_mesh_topology_module });
+    const lash_mesh_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = target, .optimize = optimize }) });
     const face_geometry_tests = b.addTest(.{ .root_module = face_geometry_core_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
     const face106_tests = b.addTest(.{ .root_module = face106_module });
@@ -419,6 +420,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(face_tests).step);
     test_step.dependOn(&b.addRunArtifact(pose_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_mesh_topology_tests).step);
+    test_step.dependOn(&b.addRunArtifact(lash_mesh_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
@@ -1088,6 +1090,7 @@ pub fn build(b: *std.Build) void {
         // module instance for the host target, sharing the same
         // shader_blobs the harness module below already builds.
         const makeup_mesh_module = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = target, .optimize = optimize });
+        const lash_mesh_module = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = target, .optimize = optimize });
         const render_module = b.createModule(.{
             .root_source_file = b.path("adapters/bgfx/render.zig"),
             .target = target,
@@ -1096,6 +1099,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
                 .{ .name = "makeup_mesh", .module = makeup_mesh_module },
                 .{ .name = "face_mesh_topology", .module = face_mesh_topology_module },
+                .{ .name = "lash_mesh", .module = lash_mesh_module },
             },
         });
         render_module.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -1301,6 +1305,9 @@ pub fn build(b: *std.Build) void {
         // The hostile-input tripwire drives the untrusted parsers directly.
         conformance_module.addImport("manifest", lens_manifest_module);
         conformance_module.addImport("material", material_module);
+        // The same module instance the render backend imports: one file, one
+        // module, so the strip geometry the proof checks is the one drawn.
+        conformance_module.addImport("lash_mesh", lash_mesh_module);
         if (gltf_module) |gm| conformance_module.addImport("gltf", gm);
         const world_replay_module = b.createModule(.{
             .root_source_file = b.path("harness/world_replay.zig"),
@@ -1463,6 +1470,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     const graph_android = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = android_target, .optimize = optimize });
     const makeup_mesh_android = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = android_target, .optimize = optimize });
     const face_mesh_topology_android = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = android_target, .optimize = optimize });
+    const lash_mesh_android = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = android_target, .optimize = optimize });
     const render_android = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = android_target,
@@ -1471,6 +1479,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
             .{ .name = "math", .module = math_android },
             .{ .name = "makeup_mesh", .module = makeup_mesh_android },
             .{ .name = "face_mesh_topology", .module = face_mesh_topology_android },
+            .{ .name = "lash_mesh", .module = lash_mesh_android },
         },
     });
     render_android.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -3477,6 +3486,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .optimize = optimize,
     });
     const face_mesh_topology_ios = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = ios_target, .optimize = optimize });
+    const lash_mesh_ios = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = ios_target, .optimize = optimize });
     const render_ios = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = ios_target,
@@ -3485,6 +3495,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             .{ .name = "math", .module = math_ios },
             .{ .name = "makeup_mesh", .module = makeup_mesh_ios },
             .{ .name = "face_mesh_topology", .module = face_mesh_topology_ios },
+            .{ .name = "lash_mesh", .module = lash_mesh_ios },
         },
     });
     render_ios.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -4054,6 +4065,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     const shader_blobs_em = addShaderBlobs(b, shaderc_exe.?, em_target, .ReleaseSmall);
     const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const lash_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const render_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = em_target,
@@ -4063,6 +4075,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
             .{ .name = "shader_blobs", .module = shader_blobs_em },
             .{ .name = "makeup_mesh", .module = makeup_mesh_em },
             .{ .name = "face_mesh_topology", .module = face_mesh_topology_em },
+            .{ .name = "lash_mesh", .module = lash_mesh_em },
         },
     });
     render_em.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -4305,6 +4318,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     const shader_blobs_em = addShaderBlobs(b, shaderc_tool, em_target, .ReleaseSmall);
     const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const lash_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const render_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = em_target,
@@ -4314,6 +4328,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
             .{ .name = "shader_blobs", .module = shader_blobs_em },
             .{ .name = "makeup_mesh", .module = makeup_mesh_em },
             .{ .name = "face_mesh_topology", .module = face_mesh_topology_em },
+            .{ .name = "lash_mesh", .module = lash_mesh_em },
         },
     });
     render_em.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -4462,6 +4477,10 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // the tracked face through the makeup mesh UVs, masked to a channel
         // and blended over the skin. Shares vs_makeup's vec2 vertex contract.
         .{ .name = "fs_paint_face", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
+        // mesh.lashes' own fixed fragment shader: the lash strip combed into
+        // strands and blended over the frame in its tint. Shares vs_makeup's
+        // vec2 vertex contract, the strip's live positions in screen UV.
+        .{ .name = "fs_lashes", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
         // model.gltf's own fixed fragment shader: a flat material-tint
         // fill, same reasoning as fs_lut_pass above - pairs with the
         // shared vs_lens_pass.sc vertex contract, not its own stage.

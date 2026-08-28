@@ -989,6 +989,10 @@ pub const Session = struct {
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     mesh_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// mesh.lashes nodes: the lash strip's {r, g, b, opacity, length, curl},
+    /// resolved once at activation. It ships no asset and runs no loader; the
+    /// strip is rebuilt from the tracked eye landmarks each frame.
+    lash_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [6]f32) = .empty,
     /// paint.face nodes: the texture load in flight and its resolved texture,
     /// the face region each is masked to (absent means the whole face), and
     /// its {opacity, blend mode} laid onto the skin.
@@ -1850,6 +1854,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Like blend's mask: the face is a capability input whose
             // absence degrades (no draw), never blocks the chain.
             .mesh => s.mesh_face_textures.contains(entry.graph_index),
+            // The lash strip ships no asset; its params resolve at activation
+            // and it rides the tracked face, so it holds the frame through
+            // with no face rather than blocking the chain.
+            .lashes => s.lash_params.contains(entry.graph_index),
             // Ready once its texture has decoded; a named region with no live
             // data serves the zero mask, so the paint fades to nothing there
             // rather than blocking the chain, and no face means no draw.
@@ -2517,6 +2525,29 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     var tracked: face.Result = undefined;
                     if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
                         r.submitFaceMesh(view_id, input_texture, mesh_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), 1.0);
+                    }
+                }
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .lashes => {
+                const params = s.lash_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The frame passes through whole; the lash strip then rises off
+                // each tracked upper lid over it. No tracked face means no draw,
+                // the capability's defined degradation.
+                r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                if (s.face_tracking) |worker| {
+                    var tracked: face.Result = undefined;
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                        r.submitLashMesh(view_id, input_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), .{ params[0], params[1], params[2], params[3] }, params[4], params[5]);
                     }
                 }
                 if (output) |target| {
@@ -3375,6 +3406,7 @@ pub fn destroySession(session: *Session) void {
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
+    session.lash_params.deinit(session.engine.gpa);
     session.paint_face_loaders.deinit(session.engine.gpa);
     session.paint_face_textures.deinit(session.engine.gpa);
     session.paint_face_masks.deinit(session.engine.gpa);
@@ -4289,7 +4321,7 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     // sub-frustum crop; the screen-space face-mesh overlay and rotated or
     // mirrored plain frames stay single-target under the cap.
     const tile_cap: u32 = if (s.capture_tile_cap != 0) s.capture_tile_cap else 16384;
-    const has_screenspace_mesh = s.mesh_face_textures.count() > 0 or s.paint_face_textures.count() > 0;
+    const has_screenspace_mesh = s.mesh_face_textures.count() > 0 or s.paint_face_textures.count() > 0 or s.lash_params.count() > 0;
     const rot = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
     const upright = rot == 0 and (current.desc.flags & frame_flag_mirror) == 0;
     const tileable = !has_screenspace_mesh and upright;
@@ -6744,6 +6776,8 @@ fn destroyMeshFaceState(session: *Session) void {
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
     }
     session.mesh_face_textures.clearRetainingCapacity();
+    // The lash strip holds only plain params, nothing to free.
+    session.lash_params.clearRetainingCapacity();
 
     var paint_loader_it = session.paint_face_loaders.valueIterator();
     while (paint_loader_it.next()) |loader| loader.*.deinit();
@@ -7046,6 +7080,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // activated from raw json, as on the web, gets its post-effects. Nodes
     // that need packaged assets stay not-ready until a directory load.
     createGradeParams(s, gpa) catch {};
+    createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
     createFogParams(s, gpa) catch {};
@@ -7112,6 +7147,18 @@ fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(grades);
     for (grades) |g| {
         session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
+    }
+}
+
+/// Resolves every spliced mesh.lashes node's lash strip into
+/// session.lash_params, once at activation - mirrors createGradeParams, no
+/// asset or loader, the strip built from the tracked landmarks each frame.
+fn createLashParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const lashes = try lens.lashNodes(gpa, &session.lens_graph);
+    defer gpa.free(lashes);
+    for (lashes) |ln| {
+        session.lash_params.put(gpa, ln.graph_index, .{ ln.color[0], ln.color[1], ln.color[2], ln.color[3], ln.length, ln.curl }) catch {};
     }
 }
 
@@ -8339,6 +8386,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
+    try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);
     try createFogParams(session, gpa);

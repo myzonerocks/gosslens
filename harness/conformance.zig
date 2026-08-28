@@ -17,6 +17,7 @@ const png = @import("png");
 const world_replay = @import("world_replay");
 const math = @import("math");
 const lens_manifest = @import("manifest");
+const lash_mesh = @import("lash_mesh");
 const material = @import("material");
 const gltf = @import("gltf");
 
@@ -8614,6 +8615,150 @@ fn proveEyeMakeup(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Width, height, and bytes per pixel read from a TGA's 18-byte header.
+const TgaDims = struct { w: usize, h: usize, bpp: usize };
+fn tgaDims(tga: []const u8) TgaDims {
+    const w = @as(usize, tga[12]) | (@as(usize, tga[13]) << 8);
+    const h = @as(usize, tga[14]) | (@as(usize, tga[15]) << 8);
+    return .{ .w = w, .h = h, .bpp = @as(usize, tga[16]) / 8 };
+}
+
+/// The centroid (x, y) of one eye's lash tip row in the built strip, so a
+/// proof can place the strip's tips against the eye it rises from.
+fn lashTipCentroid(pos: *const [lash_mesh.vertex_count * 2]f32, eye: usize) [2]f32 {
+    const off = (eye * lash_mesh.points_per_eye * 2 + lash_mesh.points_per_eye) * 2;
+    var cx: f32 = 0;
+    var cy: f32 = 0;
+    for (0..lash_mesh.points_per_eye) |i| {
+        cx += pos[off + i * 2];
+        cy += pos[off + i * 2 + 1];
+    }
+    const n: f32 = @floatFromInt(lash_mesh.points_per_eye);
+    return .{ cx / n, cy / n };
+}
+
+fn proveLashMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // First prove the strip geometry the renderer draws: on a real tracked
+    // face each eye's tip row rises above that eye's centre and the two rows
+    // flank the nose, and shifting the face carries the whole strip with it.
+    var nose_x_n: f32 = 0.5;
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL lash-mesh face tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        // Build the strip in frame pixels (frame size one) so the tips compare
+        // against the eye centres and nose the tracker reports in pixels.
+        var pos: [lash_mesh.vertex_count * 2]f32 = undefined;
+        lash_mesh.buildPositions(lm, 1.0, 1.0, 0.7, 0.3, &pos);
+        const left_tip = lashTipCentroid(&pos, 0);
+        const right_tip = lashTipCentroid(&pos, 1);
+        const left_eye = ringCentroid(lm, &abi.left_eye_loop);
+        const right_eye = ringCentroid(lm, &abi.right_eye_loop);
+        if (!(left_tip[1] < left_eye[1] and right_tip[1] < right_eye[1])) {
+            std.debug.print("conformance: FAIL a lash tip row not above its eye centre (y tipL {d:.1} eyeL {d:.1} tipR {d:.1} eyeR {d:.1})\n", .{ left_tip[1], left_eye[1], right_tip[1], right_eye[1] });
+            return false;
+        }
+        const nose_x = lm[1 * 3];
+        if ((left_tip[0] > nose_x) == (right_tip[0] > nose_x)) {
+            std.debug.print("conformance: FAIL the lash tip rows not on opposite sides of the nose (x L {d:.1} R {d:.1} nose {d:.1})\n", .{ left_tip[0], right_tip[0], nose_x });
+            return false;
+        }
+        // Shift every landmark right and rebuild: the whole strip follows, so
+        // the tips move by the same shift the face did.
+        const shift: f32 = 40.0;
+        var shifted_lm: [abi.face_landmark_count * 3]f32 = undefined;
+        for (0..abi.face_landmark_count) |i| {
+            shifted_lm[i * 3] = lm[i * 3] + shift;
+            shifted_lm[i * 3 + 1] = lm[i * 3 + 1];
+            shifted_lm[i * 3 + 2] = lm[i * 3 + 2];
+        }
+        var shifted_pos: [lash_mesh.vertex_count * 2]f32 = undefined;
+        lash_mesh.buildPositions(&shifted_lm, 1.0, 1.0, 0.7, 0.3, &shifted_pos);
+        const moved_tip = lashTipCentroid(&shifted_pos, 0);
+        if (@abs((moved_tip[0] - left_tip[0]) - shift) > 1.0) {
+            std.debug.print("conformance: FAIL the lash strip did not track the shifted face (dx {d:.1} shift {d:.1})\n", .{ moved_tip[0] - left_tip[0], shift });
+            return false;
+        }
+        nose_x_n = nose_x / @as(f32, @floatFromInt(planes.width));
+    }
+
+    // Then prove the render: the strip draws over a tracked face, its lit
+    // pixels flank the nose, it is gone with no face, and bit-stable twice.
+    // Segmentation is enabled at the session level (the lens never reads it)
+    // so the harness settles the mask before it captures the screenshot.
+    try renderOnceWith(gpa, engine, ".lens-packages/lashes-3d", "zig-out/conformance-lashes-a", .{ .segmentation_model = single_class_model_path });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lashes-3d", "zig-out/conformance-lashes-b", .{ .segmentation_model = single_class_model_path });
+    settle(engine);
+    try renderOnceWith(gpa, engine, ".lens-packages/lashes-3d", "zig-out/conformance-lashes-noface", .{ .segmentation_model = single_class_model_path, .face = false });
+    settle(engine);
+    const a = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-lashes-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(a);
+    const b = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-lashes-b.tga", gpa, .limited(8 << 20));
+    defer gpa.free(b);
+    const noface = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-lashes-noface.tga", gpa, .limited(8 << 20));
+    defer gpa.free(noface);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL the lash mesh is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, a, noface)) {
+        std.debug.print("conformance: FAIL the lash mesh drew nothing, or drew without a face\n", .{});
+        return false;
+    }
+    // The lit pixels flank the nose: the strip draws on both sides, one lash
+    // set per eye, so the change against the no-face frame lands left and right.
+    if (a.len != noface.len or a.len <= 18) {
+        std.debug.print("conformance: FAIL the lash renders are not comparable frames\n", .{});
+        return false;
+    }
+    const dims = tgaDims(a);
+    const split = @as(usize, @intFromFloat(nose_x_n * @as(f32, @floatFromInt(dims.w))));
+    const px_a = a[18..];
+    const px_c = noface[18..];
+    var left_changed: usize = 0;
+    var right_changed: usize = 0;
+    var i: usize = 0;
+    while (i < dims.w * dims.h and (i + 1) * dims.bpp <= px_a.len) : (i += 1) {
+        const off = i * dims.bpp;
+        var changed = false;
+        var k: usize = 0;
+        while (k < dims.bpp) : (k += 1) {
+            if (px_a[off + k] != px_c[off + k]) changed = true;
+        }
+        if (!changed) continue;
+        if (i % dims.w < split) left_changed += 1 else right_changed += 1;
+    }
+    if (!(left_changed > 0 and right_changed > 0)) {
+        std.debug.print("conformance: FAIL the lash pixels did not flank the nose (left {d} right {d} split {d})\n", .{ left_changed, right_changed, split });
+        return false;
+    }
+    std.debug.print("conformance: PROOF the lash mesh rises off each tracked upper lid above the eye and flanking the nose, tracks the shifted face, is gone with no face, bit-stable\n", .{});
+    return true;
+}
+
 /// The summed per-pixel colorfulness (brightest channel minus darkest) after
 /// the 18-byte TGA header, a proxy for contrast and chroma: a boost that pushes
 /// a pixel's channels apart around its mid raises it, while a flat uniform lift
@@ -11271,6 +11416,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveContourHighlight(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "eye-makeup")) {
             if (!try proveEyeMakeup(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "lash-mesh")) {
+            if (!try proveLashMesh(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "makeup-finish")) {
             if (!try proveMakeupFinish(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "depth-matting")) {
@@ -11395,6 +11542,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("contour highlight");
     if (!try proveEyeMakeup(gpa, engine)) return 1;
     watchHold("eye makeup");
+    if (!try proveLashMesh(gpa, engine)) return 1;
+    watchHold("lash mesh");
     if (!try proveMakeupFinish(gpa, engine)) return 1;
     watchHold("makeup finish");
     if (!try proveDepthMatting(gpa, engine)) return 1;

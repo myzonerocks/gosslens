@@ -445,6 +445,20 @@ named region with no live data serves the zero mask, so the paint fades there.
 The `face-projection`, `war-paint`, and `face-tattoo` reference lenses show the
 whole-face projection, the skin-masked paint, and the region-masked ink.
 
+A `"mesh.lashes"` node rises a 3D lash strip off each eye's upper lid, the mesh
+sibling of the flat mascara and false-lash tints. It ships no asset: the strip
+is a thin ribbon whose base pins to the upper lash-line landmarks and whose tip
+row is rebuilt from the tracked eye landmarks each frame, so the lashes track
+and deform with the eye. It carries a `"lashes": {"color", "opacity", "length",
+"curl"}` block: `color` (rgb, 0..1) and `opacity` (0..1) tint how the strands
+blend over the frame, `length` (0..2) is how far each strand rises off the lid
+and `curl` (-1..1) how far its tip sweeps toward the outer corner, both as
+fractions of the eye's own height so the strip scales with the face. The
+fragment stage combs the ribbon into individual strands that narrow to a point
+at the tip. Without a tracked face the node draws nothing, the standard
+capability degradation. The `lashes-3d` reference lens shows the strip on a
+tracked face.
+
 A `"matte.refine"` node refines a segmentation matte's edges against the
 frame. It carries a `"matte": {"radius", "sensitivity", "strength", "mask"}`
 block and runs a guided (joint-bilateral) filter: the frame luminance is the
@@ -651,8 +665,9 @@ the draw board, the layout composite, the 2D sprite, the 2D text, the
 `video.texture` node, `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
 the bottom; without a tracked face the node draws nothing, the standard
-capability degradation - and `paint.face`, the same face-mesh texture warp
-masked to a face region and blended onto the skin by opacity and mode).
+capability degradation - `paint.face`, the same face-mesh texture warp
+masked to a face region and blended onto the skin by opacity and mode, and
+`mesh.lashes`, a 3D lash strip rising off each tracked upper lid).
 Splice happens once, at lens activation, not per frame; unsplice reverses
 it exactly, freeing every resource the splice allocated. Both are edit-time
 operations on the graph's edit-time API, never touching the frame-time

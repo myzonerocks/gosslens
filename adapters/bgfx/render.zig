@@ -11,6 +11,12 @@ const image = @import("image");
 const blobs = @import("shader_blobs");
 const makeup_mesh = @import("makeup_mesh");
 const face_mesh_topology = @import("face_mesh_topology");
+const lash_mesh = @import("lash_mesh");
+
+/// How many lash strands the fragment stage combs across one eye's strip,
+/// and how soft each strand's edge is - the look shared by every lash draw.
+const lash_strand_count: f32 = 14.0;
+const lash_edge_softness: f32 = 0.35;
 
 pub const android_vk = if (builtin.os.tag == .linux and builtin.abi.isAndroid())
     @import("android_vk.zig")
@@ -179,6 +185,7 @@ pub const Renderer = struct {
     reshape_bank_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
     paint_face_program: c.bgfx_program_handle_t,
+    lash_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
     model_instanced_program: c.bgfx_program_handle_t,
     billboard_program: c.bgfx_program_handle_t,
@@ -202,6 +209,11 @@ pub const Renderer = struct {
     face_mesh_index_buffer: c.bgfx_index_buffer_handle_t,
     face_mesh_uv_buffer: c.bgfx_vertex_buffer_handle_t,
     face_mesh_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
+    /// The lash strip: fixed indices and strip UVs uploaded once, live tip
+    /// positions rebuilt from the tracked eye landmarks and streamed per draw.
+    lash_index_buffer: c.bgfx_index_buffer_handle_t,
+    lash_uv_buffer: c.bgfx_vertex_buffer_handle_t,
+    lash_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
     /// The live tracked 111-point contour, stream 0 of a makeup draw -
     /// dynamic (updated every frame submitMakeup runs), unlike every
     /// other buffer here.
@@ -262,6 +274,10 @@ pub const Renderer = struct {
     makeup_params_uniform: c.bgfx_uniform_handle_t,
     /// paint.face's opacity and blend mode, one vec4 (x opacity, y mode).
     paint_params_uniform: c.bgfx_uniform_handle_t,
+    /// mesh.lashes' tint and opacity (u_lashColor), and its strand count and
+    /// edge softness (u_lashShape).
+    lash_color_uniform: c.bgfx_uniform_handle_t,
+    lash_shape_uniform: c.bgfx_uniform_handle_t,
     /// The reshape bank's sixty-six sculpt amounts, four per vec4, and its two
     /// derived anchors (forehead center xy, nose-bridge midpoint zw).
     reshape_bank_uniform: c.bgfx_uniform_handle_t,
@@ -438,6 +454,7 @@ pub const Renderer = struct {
         const reshape_bank_program = try loadReshapeBankProgram();
         const makeup_program = try loadMakeupProgram();
         const paint_face_program = try loadPaintFaceProgram();
+        const lash_program = try loadLashProgram();
         const model_program = try loadModelProgram();
         const model_instanced_program = try loadModelInstancedProgram();
         const billboard_program = try loadBillboardProgram();
@@ -472,6 +489,10 @@ pub const Renderer = struct {
         const face_mesh_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&face_mesh_topology.triangle_indices, @sizeOf(@TypeOf(face_mesh_topology.triangle_indices))), 0);
         const face_mesh_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&face_mesh_topology.vertex_uvs, @sizeOf(@TypeOf(face_mesh_topology.vertex_uvs))), &makeup_uv_layout, 0);
         const face_mesh_position_buffer = c.bgfx_create_dynamic_vertex_buffer(face_mesh_topology.vertex_count, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+
+        const lash_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&lash_mesh.triangle_indices, @sizeOf(@TypeOf(lash_mesh.triangle_indices))), 0);
+        const lash_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&lash_mesh.vertex_uvs, @sizeOf(@TypeOf(lash_mesh.vertex_uvs))), &makeup_uv_layout, 0);
+        const lash_position_buffer = c.bgfx_create_dynamic_vertex_buffer(lash_mesh.vertex_count, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
 
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
@@ -529,6 +550,7 @@ pub const Renderer = struct {
             .reshape_bank_program = reshape_bank_program,
             .makeup_program = makeup_program,
             .paint_face_program = paint_face_program,
+            .lash_program = lash_program,
             .model_program = model_program,
             .model_instanced_program = model_instanced_program,
             .billboard_program = billboard_program,
@@ -544,6 +566,9 @@ pub const Renderer = struct {
             .face_mesh_index_buffer = face_mesh_index_buffer,
             .face_mesh_uv_buffer = face_mesh_uv_buffer,
             .face_mesh_position_buffer = face_mesh_position_buffer,
+            .lash_index_buffer = lash_index_buffer,
+            .lash_uv_buffer = lash_uv_buffer,
+            .lash_position_buffer = lash_position_buffer,
             .makeup_position_buffer = makeup_position_buffer,
             .makeup_lipstick_uv_buffer = makeup_lipstick_uv_buffer,
             .makeup_blush_uv_buffer = makeup_blush_uv_buffer,
@@ -601,6 +626,8 @@ pub const Renderer = struct {
             .reshape_hubs_uniform = c.bgfx_create_uniform("u_reshapeHubs", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .paint_params_uniform = c.bgfx_create_uniform("u_paintParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .lash_color_uniform = c.bgfx_create_uniform("u_lashColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .lash_shape_uniform = c.bgfx_create_uniform("u_lashShape", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .particle_cool_uniform = c.bgfx_create_uniform("u_particleCool", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -1017,6 +1044,19 @@ pub const Renderer = struct {
         };
     }
 
+    /// mesh.lashes' program: the makeup mesh vertex stage paired with the
+    /// lash fragment shader, so the strip's live positions draw as strands
+    /// rising off the lid in the node's tint.
+    pub fn loadLashProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_makeup_metal, blobs.fs_lashes_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_makeup_spirv, blobs.fs_lashes_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_makeup_essl, blobs.fs_lashes_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_makeup_wgsl, blobs.fs_lashes_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// The one fixed model.gltf program every lens shares - reuses
     /// vs_lens_pass.sc (the mesh's vertex data is padded with a dummy
     /// texcoord so it fits the same interleaved POSITION+TEXCOORD0
@@ -1165,6 +1205,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.reshape_hubs_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
         c.bgfx_destroy_uniform(r.paint_params_uniform);
+        c.bgfx_destroy_uniform(r.lash_color_uniform);
+        c.bgfx_destroy_uniform(r.lash_shape_uniform);
         c.bgfx_destroy_uniform(r.face_points_uniform);
         c.bgfx_destroy_uniform(r.model_color_uniform);
         c.bgfx_destroy_uniform(r.particle_cool_uniform);
@@ -1213,6 +1255,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.reshape_bank_program);
         c.bgfx_destroy_program(r.makeup_program);
         c.bgfx_destroy_program(r.paint_face_program);
+        c.bgfx_destroy_program(r.lash_program);
         c.bgfx_destroy_program(r.model_program);
         c.bgfx_destroy_program(r.model_instanced_program);
         c.bgfx_destroy_program(r.billboard_program);
@@ -1223,6 +1266,9 @@ pub const Renderer = struct {
         c.bgfx_destroy_index_buffer(r.face_mesh_index_buffer);
         c.bgfx_destroy_vertex_buffer(r.face_mesh_uv_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.face_mesh_position_buffer);
+        c.bgfx_destroy_index_buffer(r.lash_index_buffer);
+        c.bgfx_destroy_vertex_buffer(r.lash_uv_buffer);
+        c.bgfx_destroy_dynamic_vertex_buffer(r.lash_position_buffer);
         c.bgfx_shutdown();
         if (r.interleave_scratch.len != 0) r.gpa.free(r.interleave_scratch);
         r.nv12_ring.deinit(r.gpa);
@@ -2108,6 +2154,26 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.paint_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.paint_face_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws the lash strip over the frame: each eye's tip row is rebuilt from
+    /// the tracked landmarks (length and curl scale off eye height), the strip
+    /// UVs comb strands in the fragment stage, and the tint composites over the
+    /// frame the same self-blend the makeup mesh uses.
+    pub fn submitLashMesh(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, color: [4]f32, length: f32, curl: f32) void {
+        std.debug.assert(landmarks.len >= 468 * 3);
+        var positions: [lash_mesh.vertex_count * 2]f32 = undefined;
+        lash_mesh.buildPositions(landmarks, frame_width, frame_height, length, curl, &positions);
+        c.bgfx_update_dynamic_vertex_buffer(r.lash_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
+        c.bgfx_set_dynamic_vertex_buffer(0, r.lash_position_buffer, 0, lash_mesh.vertex_count);
+        c.bgfx_set_vertex_buffer(1, r.lash_uv_buffer, 0, lash_mesh.vertex_count);
+        c.bgfx_set_index_buffer(r.lash_index_buffer, 0, lash_mesh.triangle_indices.len);
+        c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.lash_color_uniform, &color, 1);
+        const shape = [4]f32{ lash_strand_count, lash_edge_softness, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.lash_shape_uniform, &shape, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.lash_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     pub fn makeupLipstickUvBuffer(r: *const Renderer) c.bgfx_vertex_buffer_handle_t {

@@ -219,6 +219,18 @@ pub const Renderer = struct {
         _ = blend;
     }
 
+    pub fn submitLashMesh(r: *Renderer, view_id: u16, background_texture: TextureHandle, landmarks: []const f32, frame_width: f32, frame_height: f32, color: [4]f32, length: f32, curl: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = background_texture;
+        _ = landmarks;
+        _ = frame_width;
+        _ = frame_height;
+        _ = color;
+        _ = length;
+        _ = curl;
+    }
+
     pub fn clearComposite(view_id: u16, target: OffscreenTarget, width: u16, height: u16) void {
         _ = view_id;
         _ = target;

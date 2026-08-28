@@ -365,6 +365,19 @@ pub const PaintField = struct {
     blend: TintBlend = .normal,
 };
 
+pub const LashField = struct {
+    /// A mesh.lashes node's lash strip: a tint colour (rgb, 0..1) and the
+    /// opacity it blends over the frame. length is how far each strand rises
+    /// off the lid, curl how far its tip sweeps, both as fractions of eye
+    /// height, so the strip scales with the tracked face.
+    r: f32 = 0.02,
+    g: f32 = 0.02,
+    b: f32 = 0.03,
+    opacity: f32 = 1.0,
+    length: f32 = 0.6,
+    curl: f32 = 0.25,
+};
+
 pub const RetouchField = struct {
     /// A retouch.pass node's selective skin filter over a masked region. blemish
     /// is a wider edge-aware smooth that evens small spots while keeping real
@@ -767,6 +780,9 @@ pub const Node = struct {
     /// Set only on a paint.face node: the opacity, face region, and blend it
     /// lays its texture onto the face with.
     paint: ?PaintField = null,
+    /// Set only on a mesh.lashes node: the colour, opacity, length, and curl
+    /// of the lash strip it rises off the upper lid.
+    lashes: ?LashField = null,
     /// Set only on a retouch.pass node: its selective-filter mode, amount, and
     /// mask channel.
     retouch: ?RetouchField = null,
@@ -1856,6 +1872,32 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "paint.face")) {
             paint_field = .{};
         }
+        var lash_field: ?LashField = null;
+        if (getField(object, "lashes")) |lv| {
+            const lashmark = path.push("lashes");
+            if (!std.mem.eql(u8, node_type, "mesh.lashes")) {
+                try diags.add(path.slice(), "lashes is a mesh.lashes field, found it on '{s}'", .{node_type});
+            } else if (lv != .object) {
+                try diags.add(path.slice(), "lashes must be an object", .{});
+            } else {
+                var field: LashField = .{};
+                if (getField(lv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "lashes color must be three numbers", .{});
+                }
+                if (getField(lv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(lv.object, "length")) |v| field.length = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.length)), 0.0, 2.0);
+                if (getField(lv.object, "curl")) |v| field.curl = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.curl)), -1.0, 1.0);
+                lash_field = field;
+            }
+            path.pop(lashmark);
+        } else if (std.mem.eql(u8, node_type, "mesh.lashes")) {
+            lash_field = .{};
+        }
         var retouch_field: ?RetouchField = null;
         if (getField(object, "retouch")) |rv| {
             const retouchmark = path.push("retouch");
@@ -2656,6 +2698,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .tint = tint_field,
             .smooth = smooth_field,
             .paint = paint_field,
+            .lashes = lash_field,
             .retouch = retouch_field,
             .matte = matte_field,
             .stylize = stylize_field,
