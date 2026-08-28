@@ -819,6 +819,24 @@ pub const LogicGraphSpec = struct {
     output_param: []const u8,
 };
 
+/// One output binding of an ml.infer node: the element at index of the model's
+/// output tensor drives the named parameter each inference.
+pub const MlOutput = struct {
+    tensor: u32 = 0,
+    index: u32 = 0,
+    param: []const u8,
+};
+
+/// An ml.infer node's model slot: the bundle-relative model file, the size the
+/// camera frame is resized to before inference (zero keeps the model's own
+/// input size), and the output-to-parameter bindings a lens reads.
+pub const MlField = struct {
+    model: []const u8,
+    input_width: u32 = 0,
+    input_height: u32 = 0,
+    outputs: []const MlOutput,
+};
+
 pub const Node = struct {
     id: []const u8,
     type: []const u8,
@@ -838,6 +856,8 @@ pub const Node = struct {
     control: ?ModelControl = null,
     /// Set on a logic.graph node: its raw graph the runtime compiles.
     logic_graph: ?LogicGraphSpec = null,
+    /// Set on an ml.infer node: the bring-your-own model slot.
+    ml: ?MlField = null,
     /// Set when the manifest gives the node a rigid body.
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
@@ -1559,6 +1579,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var world_anchor = false;
         var model_control: ?ModelControl = null;
         var logic_graph_spec: ?LogicGraphSpec = null;
+        var ml_field: ?MlField = null;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
         var particle_field: ?ParticleField = null;
@@ -2859,6 +2880,17 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(graph_mark);
         }
+        if (getField(object, "ml")) |mv| {
+            const ml_mark = path.push("ml");
+            if (!std.mem.eql(u8, node_type, "ml.infer")) {
+                try diags.add(path.slice(), "ml is an ml.infer field, found it on '{s}'", .{node_type});
+            } else if (mv != .object) {
+                try diags.add(path.slice(), "ml must be an object", .{});
+            } else {
+                ml_field = try parseMlField(diags, path, arena, mv.object);
+            }
+            path.pop(ml_mark);
+        }
 
         const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
         const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
@@ -2900,6 +2932,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .face_anchor = face_anchor,
             .control = model_control,
             .logic_graph = logic_graph_spec,
+            .ml = ml_field,
             .body_anchor = body_anchor,
             .skeleton_anchor = skeleton_anchor,
             .world_anchor = world_anchor,
@@ -2987,6 +3020,47 @@ fn parseLogicGraph(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         .nodes = try nodes.toOwnedSlice(arena),
         .output_id = try arena.dupe(u8, output_id),
         .output_param = try arena.dupe(u8, output_param),
+    };
+}
+
+fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?MlField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "ml needs a model file", .{});
+        return null;
+    }
+    var input_width: u32 = 0;
+    var input_height: u32 = 0;
+    if (getField(object, "input_width")) |v| {
+        if (v == .integer and v.integer >= 0) input_width = @intCast(v.integer);
+    }
+    if (getField(object, "input_height")) |v| {
+        if (v == .integer and v.integer >= 0) input_height = @intCast(v.integer);
+    }
+    var outputs: std.ArrayList(MlOutput) = .empty;
+    if (getField(object, "outputs")) |ov| {
+        if (ov == .array) {
+            for (ov.array.items) |item| {
+                if (item != .object) continue;
+                const o = item.object;
+                const param = if (getField(o, "param")) |v| (try expectString(diags, path, v) orelse "") else "";
+                if (param.len == 0) continue;
+                var out: MlOutput = .{ .param = try arena.dupe(u8, param) };
+                if (getField(o, "tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) out.tensor = @intCast(v.integer);
+                }
+                if (getField(o, "index")) |v| {
+                    if (v == .integer and v.integer >= 0) out.index = @intCast(v.integer);
+                }
+                try outputs.append(arena, out);
+            }
+        }
+    }
+    return .{
+        .model = try arena.dupe(u8, model),
+        .input_width = input_width,
+        .input_height = input_height,
+        .outputs = try outputs.toOwnedSlice(arena),
     };
 }
 
@@ -3791,6 +3865,25 @@ test "a model.gltf node parses its turntable control block" {
     try t.expect(control.dolly);
     try t.expect(control.roll);
     try t.expect(control.any());
+}
+
+test "an ml.infer node parses its model slot and output bindings" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "classifier", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "model.tflite", "input_width": 224, "input_height": 224,
+        \\      "outputs": [{"tensor": 0, "index": 5, "param": "cat_score"}]}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const ml = manifest.nodes[0].ml orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings("model.tflite", ml.model);
+    try t.expectEqual(@as(u32, 224), ml.input_width);
+    try t.expectEqual(@as(usize, 1), ml.outputs.len);
+    try t.expectEqual(@as(u32, 5), ml.outputs[0].index);
+    try t.expectEqualStrings("cat_score", ml.outputs[0].param);
 }
 
 test "a sprite.2d node with no sprite block defaults to full frame" {
