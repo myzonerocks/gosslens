@@ -686,6 +686,15 @@ each tick is bounded by a fuel limit, so a script can neither reach outside
 the lens nor hang the frame. The same inputs always produce the same writes,
 which is what lets a scripted lens be conformance bit-stable.
 
+Alongside `update`, a script may define event handlers the engine calls when
+a moment happens: `onInit` and `onTurnOn` once when the lens activates,
+`onTurnOff` when it deactivates, `onTap`, `onDoubleTap`, `onLongPress`,
+`onSwipe`, `onPinch` and `onRotate` when the matching screen gesture is
+recognized, and `onEvent(lens, name)` for each host event fired that tick
+(the same names `event('name')` triggers read). Every handler receives the
+same `lens` with its signals and params, and a handler the script omits is
+simply not called, so a lens wires only the moments it cares about.
+
 The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, the beauty nodes, shader

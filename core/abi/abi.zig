@@ -861,6 +861,9 @@ pub const Session = struct {
     /// at activation and torn down at deactivation, never per frame.
     script_engine: ?script.Script = null,
     script_param_names: []const [:0]const u8 = &.{},
+    /// Whether the script has had its onInit and onTurnOn handlers called yet,
+    /// so those fire exactly once on the first tick after activation.
+    script_inited: bool = false,
     /// The lens's sound mixer and the mixer id each play_sound path resolves
     /// to, built from the bundle at activation. Playback is pulled out by the
     /// SDK; the engine only decodes and mixes.
@@ -7105,11 +7108,33 @@ const script_fuel_per_tick: u32 = 2_000_000;
 /// Frees the active script driver and its parameter-name table. Safe to
 /// call when there is no script; leaves the fields empty.
 fn teardownScript(s: *Session) void {
-    if (s.script_engine) |*e| e.destroy();
+    if (s.script_engine) |*e| {
+        if (s.script_inited) fireScriptEvent(s, e, "onTurnOff", null, null);
+        e.destroy();
+    }
     s.script_engine = null;
+    s.script_inited = false;
     for (s.script_param_names) |n| s.engine.gpa.free(n);
     s.engine.gpa.free(s.script_param_names);
     s.script_param_names = &.{};
+}
+
+/// Fires one named script handler outside the per-tick path, used for the
+/// lifecycle events. signals is null for a zeroed signal set; the current
+/// lens parameters go in and whatever the handler writes flows back.
+fn fireScriptEvent(s: *Session, engine: *script.Script, handler: [*:0]const u8, signals: ?*const trigger.Signals, arg: ?[]const u8) void {
+    var sig_values: [script_signal_names.len]f64 = undefined;
+    fillScriptSignals(&sig_values, signals);
+    const lens = if (s.active_lens) |*l| l else return;
+    const n = @min(s.script_param_names.len, 256);
+    var name_ptrs: [256][*:0]const u8 = undefined;
+    var values: [256]f64 = undefined;
+    for (0..n) |i| {
+        name_ptrs[i] = s.script_param_names[i].ptr;
+        values[i] = lens.param_values[i];
+    }
+    engine.event(handler, &script_signal_names, &sig_values, name_ptrs[0..n], values[0..n], arg) catch return;
+    for (0..n) |i| lens.setParam(s.script_param_names[i], @floatCast(values[i]));
 }
 
 /// Builds the script driver for the just-activated lens, if it carries a
@@ -7136,6 +7161,7 @@ fn setupScript(s: *Session) void {
     }
     s.script_engine = engine;
     s.script_param_names = names;
+    s.script_inited = false;
 }
 
 /// Runs the lens script's update(lens) once, exposing the current signals
@@ -7153,27 +7179,37 @@ const script_signal_names = blk: {
     break :blk arr;
 };
 
+/// Fills the script's signal-value array from the live signals, or zeroes it
+/// when there are none (a lifecycle event fires outside a tick).
+fn fillScriptSignals(out: *[script_signal_names.len]f64, signals: ?*const trigger.Signals) void {
+    const sig = signals orelse {
+        @memset(out, 0);
+        return;
+    };
+    out[0] = if (sig.face_present) 1.0 else 0.0;
+    out[1] = if (sig.hands_present) 1.0 else 0.0;
+    out[2] = sig.audio_level;
+    out[3] = if (sig.audio_beat) 1.0 else 0.0;
+    out[4] = sig.world_tracking_state;
+    out[5] = if (sig.tap) 1.0 else 0.0;
+    out[6] = if (sig.touch_double_tap) 1.0 else 0.0;
+    out[7] = if (sig.touch_long_press) 1.0 else 0.0;
+    out[8] = @floatFromInt(sig.touch_swipe);
+    out[9] = if (sig.touch_drag) 1.0 else 0.0;
+    out[10] = sig.touch_pinch;
+    out[11] = sig.touch_rotate;
+    out[12] = sig.pointer_x;
+    out[13] = sig.pointer_y;
+    for (0..face.blendshape_count) |i| {
+        out[base_signal_names.len + i] = if (sig.blendshapes) |bs| bs[i] else 0.0;
+    }
+}
+
 fn runScript(s: *Session, signals: *const trigger.Signals) void {
     const engine = if (s.script_engine) |*e| e else return;
     const lens = if (s.active_lens) |*l| l else return;
     var sig_values: [script_signal_names.len]f64 = undefined;
-    sig_values[0] = if (signals.face_present) 1.0 else 0.0;
-    sig_values[1] = if (signals.hands_present) 1.0 else 0.0;
-    sig_values[2] = signals.audio_level;
-    sig_values[3] = if (signals.audio_beat) 1.0 else 0.0;
-    sig_values[4] = signals.world_tracking_state;
-    sig_values[5] = if (signals.tap) 1.0 else 0.0;
-    sig_values[6] = if (signals.touch_double_tap) 1.0 else 0.0;
-    sig_values[7] = if (signals.touch_long_press) 1.0 else 0.0;
-    sig_values[8] = @floatFromInt(signals.touch_swipe);
-    sig_values[9] = if (signals.touch_drag) 1.0 else 0.0;
-    sig_values[10] = signals.touch_pinch;
-    sig_values[11] = signals.touch_rotate;
-    sig_values[12] = signals.pointer_x;
-    sig_values[13] = signals.pointer_y;
-    for (0..face.blendshape_count) |i| {
-        sig_values[base_signal_names.len + i] = if (signals.blendshapes) |bs| bs[i] else 0.0;
-    }
+    fillScriptSignals(&sig_values, signals);
     const n = @min(s.script_param_names.len, 256);
     var name_ptrs: [256][*:0]const u8 = undefined;
     var values: [256]f64 = undefined;
@@ -7181,8 +7217,27 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
         name_ptrs[i] = s.script_param_names[i].ptr;
         values[i] = lens.param_values[i];
     }
-    engine.tick(&script_signal_names, &sig_values, name_ptrs[0..n], values[0..n]) catch return;
-    for (0..n) |i| lens.setParam(s.script_param_names[i], @floatCast(values[i]));
+    const names = name_ptrs[0..n];
+    const vals = values[0..n];
+
+    // The lifecycle and gesture handlers run around the per-tick update, all
+    // sharing the running parameter values so one handler's write carries into
+    // the next and finally back to the lens. A handler the script leaves out is
+    // a no-op the backend skips.
+    if (!s.script_inited) {
+        s.script_inited = true;
+        engine.event("onInit", &script_signal_names, &sig_values, names, vals, null) catch {};
+        engine.event("onTurnOn", &script_signal_names, &sig_values, names, vals, null) catch {};
+    }
+    if (signals.tap) engine.event("onTap", &script_signal_names, &sig_values, names, vals, null) catch {};
+    if (signals.touch_double_tap) engine.event("onDoubleTap", &script_signal_names, &sig_values, names, vals, null) catch {};
+    if (signals.touch_long_press) engine.event("onLongPress", &script_signal_names, &sig_values, names, vals, null) catch {};
+    if (signals.touch_swipe != 0) engine.event("onSwipe", &script_signal_names, &sig_values, names, vals, null) catch {};
+    if (signals.touch_pinch != 1.0) engine.event("onPinch", &script_signal_names, &sig_values, names, vals, null) catch {};
+    if (signals.touch_rotate != 0) engine.event("onRotate", &script_signal_names, &sig_values, names, vals, null) catch {};
+    for (signals.events) |ev| engine.event("onEvent", &script_signal_names, &sig_values, names, vals, ev) catch {};
+    engine.tick(&script_signal_names, &sig_values, names, vals) catch return;
+    for (0..n) |i| lens.setParam(s.script_param_names[i], @floatCast(vals[i]));
 }
 
 const audio_sample_rate: u32 = 48000;
@@ -10255,6 +10310,46 @@ test "a fed swipe reaches a script through the touch signals" {
     try t.expectEqual(Status.ok, goss_session_parameter_value(session, "swiped", "swiped".len, &swiped));
     try t.expectApproxEqAbs(@as(f32, 2.0), swiped, 1e-6);
     try t.expectEqual(Status.invalid_argument, goss_session_touch(session, 9, 1, 0.5, 0.5));
+}
+
+test "a script's onInit runs once and its onTap fires per tap" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const manifest_json =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "ready", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0},
+        \\   {"name": "taps", "type": "float", "default": 0.0, "min": 0.0, "max": 10.0}],
+        \\ "nodes": [{"id": "drive", "type": "script", "params": {},
+        \\   "source": "function update(lens){} function onInit(lens){lens.params.ready=1;} function onTap(lens){lens.params.taps=lens.params.taps+1;}"}],
+        \\ "triggers": []}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len));
+
+    var signals = std.mem.zeroes(LensSignals);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 16_000, &signals));
+    var ready: f32 = -1;
+    try t.expectEqual(Status.ok, goss_session_parameter_value(session, "ready", "ready".len, &ready));
+    try t.expectApproxEqAbs(@as(f32, 1.0), ready, 1e-6);
+    var taps: f32 = -1;
+    try t.expectEqual(Status.ok, goss_session_parameter_value(session, "taps", "taps".len, &taps));
+    try t.expectApproxEqAbs(@as(f32, 0.0), taps, 1e-6);
+
+    try t.expectEqual(Status.ok, goss_session_touch(session, 0, 1, 0.4, 0.4));
+    try t.expectEqual(Status.ok, goss_session_touch(session, 2, 1, 0.4, 0.4));
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 16_000, &signals));
+    try t.expectEqual(Status.ok, goss_session_parameter_value(session, "taps", "taps".len, &taps));
+    try t.expectApproxEqAbs(@as(f32, 1.0), taps, 1e-6);
+
+    // A second tap far from the first is another single tap, not a double.
+    try t.expectEqual(Status.ok, goss_session_touch(session, 0, 1, 0.9, 0.9));
+    try t.expectEqual(Status.ok, goss_session_touch(session, 2, 1, 0.9, 0.9));
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 16_000, &signals));
+    try t.expectEqual(Status.ok, goss_session_parameter_value(session, "taps", "taps".len, &taps));
+    try t.expectApproxEqAbs(@as(f32, 2.0), taps, 1e-6);
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {
