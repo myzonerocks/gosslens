@@ -246,8 +246,8 @@ the same core compiled to wasm. `sdk/c` packages the same header and a linkable
 No C++ type crosses it. No vendor type crosses it. No platform object crosses
 it except as an opaque platform handle described by the ABI contract.
 
-ABI changes are additive within a major version and are checked against all
-five bindings.
+ABI changes are additive within a major version and are checked against every
+binding.
 
 ## Public API contract
 

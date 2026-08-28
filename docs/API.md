@@ -1,6 +1,6 @@
 # API
 
-Gosslens has one C ABI and five SDKs on top of it: Swift, Kotlin, TypeScript,
+Gosslens has one C ABI and SDKs on top of it: Swift, Kotlin, TypeScript,
 C, and the Android JNI binding. The ABI is the engine contract. This file is
 the public SDK naming and shape contract built on top of it.
 
@@ -8,7 +8,7 @@ The C SDK is the ABI packaged as a first-class SDK of its own.
 [sdk/c](../sdk/c) builds [include/gosslens.h](../include/gosslens.h) into a
 linkable library - a static archive and a shared object from `zig build c`,
 with a README, a runnable demo, and a CMake import - so any language with a C
-FFI reaches all 113 `goss_*` operations through the header as they are spelled
+FFI reaches every `goss_*` operation through the header as it is spelled
 here. The C surface uses those names unchanged; the naming rules below govern
 the wrappers that rename them for a host language.
 
@@ -326,7 +326,7 @@ mask channels. These names are the manifest contract, not `goss_*` operations,
 so they live in the engine rather than the table above; they are listed here so
 an SDK author knows what a lens can ask for.
 
-The 29 node and pass types (`NodeType` in
+The node and pass types (`NodeType` in
 [core/lens/runtime.zig](../core/lens/runtime.zig)) are `beauty.face`,
 `beauty.reshape`, `beauty.lipstick`, `beauty.blusher`, `shader.pass`,
 `lut.pass`, `blend.pass`, `blur.pass`, `grade.pass`, `bloom.pass`, `dof.pass`,
@@ -337,8 +337,8 @@ The 29 node and pass types (`NodeType` in
 `text.2d`, and `video.texture`. A `tint.pass` carries a `normal`, `multiply`,
 or `screen` blend mode.
 
-A `shader.pass` node's fragment shader can itself be a material graph of 38 ops
-(`NodeKind` in [core/material/graph.zig](../core/material/graph.zig)): the
+A `shader.pass` node's fragment shader can itself be a material graph whose ops
+(`NodeKind` in [core/material/graph.zig](../core/material/graph.zig)) are the
 sources `uv`, `time`, `constant`, `uniform`, `texture`; `sample`; the maths
 `add`, `subtract`, `multiply`, `divide`, `power`, `min`, `max`, `atan2`, `dot`,
 `distance`, `normalize`, `length`, `saturate`, `abs`, `floor`, `fract`, `sin`,
@@ -346,7 +346,7 @@ sources `uv`, `time`, `constant`, `uniform`, `texture`; `sample`; the maths
 vector ops `split`, `combine3`, `combine4`, `colormatrix`; the shading
 `lambert`, `fresnel`; and the graph root `output`.
 
-The 21 mask channels a pass can name, which `segmentationChannels()` reports a
+The mask channels a pass can name, which `segmentationChannels()` reports a
 bitmask over (`mask_channels` in
 [core/lens/manifest.zig](../core/lens/manifest.zig)), are `person`,
 `background`, `hair`, `body_skin`, `face_skin`, `clothes`, `others`, `head`,

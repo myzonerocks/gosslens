@@ -1,7 +1,7 @@
 # Gosslens
 
-A camera and AR engine with a Zig core and five SDKs: Swift for iOS,
-Kotlin for Android, TypeScript for the web, a full-parity C SDK any
+A camera and AR engine with a Zig core and SDKs on top of it: Swift for
+iOS, Kotlin for Android, TypeScript for the web, a full-parity C SDK any
 C-FFI language can link, and the Android JNI binding under Kotlin. The
 core owns the frame graph, the lens runtime, the effect pipeline,
 tracking, and the portable media contract behind a single C ABI. The
@@ -55,13 +55,13 @@ on-screen harness and the conformance proof to the per-device checks, is in
 ## SDKs
 
 The C ABI in [include/gosslens.h](include/gosslens.h) is the surface every SDK
-wraps. [sdk/c](sdk/c) is a full-parity package that exposes all 113 `goss_*`
-operations as a linkable `libgosslens` for any language with a C FFI. The three
+wraps. [sdk/c](sdk/c) is a full-parity package that exposes every `goss_*`
+operation the header declares as a linkable `libgosslens` for any language with a C FFI. The three
 platform SDKs are thin wrappers over the same functions and share one idiomatic
 operation contract ([docs/API.md](docs/API.md)); the Android JNI binding exports
 the same ABI to Java under Kotlin.
 
-- C, for any language: [sdk/c](sdk/c), all 113 ops through the canonical header, built as a shared and static library by `zig build c`, with a demo and CMake
+- C, for any language: [sdk/c](sdk/c), every op through the canonical header, built as a shared and static library by `zig build c`, with a demo and CMake
 - Swift, for iOS: [sdk/swift](sdk/swift), integrated per [docs/INTEGRATION-iOS.md](docs/INTEGRATION-iOS.md)
 - Kotlin, for Android: [sdk/kotlin](sdk/kotlin), integrated per [docs/INTEGRATION-ANDROID.md](docs/INTEGRATION-ANDROID.md)
 - TypeScript, for the web: [sdk/ts](sdk/ts), integrated per [docs/INTEGRATION-WEB.md](docs/INTEGRATION-WEB.md)

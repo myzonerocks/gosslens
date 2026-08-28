@@ -121,7 +121,7 @@ script node last wrote.
 
 ## Beauty and makeup
 
-The six beauty effects are direct session calls, each an amount in 0..1:
+The beauty effects are direct session calls, each an amount in 0..1:
 
     session.setSmooth(0.6);
     session.setWhiten(0.5);
