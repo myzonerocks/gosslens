@@ -361,6 +361,17 @@ The engine has no depth attachment on its composite targets and draws 3D
 content without a depth test, so occlusion is this screen-space reveal keyed to
 the landmark matte, ordered by the chain, rather than a depth-buffer cull.
 
+A `"cutout.pass"` node isolates the face onto a plain background. It carries a
+`"cutout": {"color", "mask", "softness"}` block: where a named `mask` channel
+marks the subject (the `head` matte by default, from the face landmarks) it
+keeps the camera frame through, and everywhere else it replaces the frame with
+the flat `color` (three 0..1 numbers), so the face reads on a solid background
+of the lens author's choosing. `softness` (0..0.5) feathers the matte edge so
+the cut is not jagged. It is the face-matte sibling of `blend.pass`, which swaps
+a background image behind the segmented person; a cutout swaps a flat color
+behind the landmark face. With no face the matte is the zero mask, so the pass
+is not ready and holds the frame through rather than flooding the flat color.
+
 A `"tint.pass"` node is a masked color layer. It carries a `"tint": {"color",
 "opacity", "mask", "source", "blend", "finish"}` block: it folds `color` (three
 0..1 numbers) into the region a named `mask` channel marks, scaled by the mask
@@ -453,9 +464,19 @@ around a center within a radius. It carries a `"warp": {"mode", "center_x",
 refracts the frame through a sphere and lets the surround through),
 `sphere_refraction` (the same refraction but the classic crystal ball, black
 outside the sphere), `bulge` (magnify toward the center), `pinch` (pull the
-image inward), `swirl` (twist about the center), or `liquify` (freeform
-multi-point push/pull). `center_x` and `center_y` place the distortion, `radius`
+image inward), `swirl` (twist about the center), `liquify` (freeform
+multi-point push/pull), or `face_scale` (scale the whole tracked face about its
+own center). `center_x` and `center_y` place the distortion, `radius`
 sizes it, and `strength` scales how hard it pushes, with zero an identity.
+
+`face_scale` is a landmark-anchored transform: it ignores the static center and
+radius and takes both from the tracked face each frame, then scales the face
+region about its own centroid. `strength` reads as a signed scale here, so a
+positive value enlarges the face (a stretch) and a negative one shrinks it (an
+inset), easing to identity by the region's rim so the surround is untouched. It
+needs a tracked face like `reshape.bank`; with no face it holds the frame
+through. The `face-inset`, `face-stretch`, and `face-cutout` reference lenses
+show the three landmark-anchored face transforms.
 `refractive_index` is the glass index the two sphere modes bend the view ray by;
 the displacement modes ignore it. `aspect_auto` keeps the region circular on
 screen by correcting for the frame's aspect.

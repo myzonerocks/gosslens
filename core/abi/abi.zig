@@ -766,6 +766,12 @@ pub const Session = struct {
     occluder_frame_target: ?render.Renderer.OffscreenTarget = null,
     occluder_frame_w: u16 = 0,
     occluder_frame_h: u16 = 0,
+    /// cutout.pass nodes by graph index: their background color (rgb) and edge
+    /// softness. The face matte keys the frame through, the rest goes flat color.
+    cutout_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// cutout.pass nodes' kept face-matte channel by graph index (head by
+    /// default, else another landmark or class channel).
+    cutout_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     /// tint.pass nodes by graph index: their color (rgb) and opacity.
     tint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     /// tint.pass nodes' mask channel by graph index (0 person, else a class).
@@ -1714,6 +1720,33 @@ fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirro
     return true;
 }
 
+/// The tracked face's centroid and a covering radius in the frame's normalized
+/// draw space, so a face_scale warp scales the whole face about its own center.
+/// The radius is the farthest contour point plus a margin, aspect corrected the
+/// way the shader is. Null on no face, the same hold-through reshape degrades to.
+fn faceScaleCenter(s: *Session, width: u16, height: u16, rotation: u32, mirror: bool, aspect: f32) ?struct { cx: f32, cy: f32, radius: f32 } {
+    var contour: [face106.point_count * 2]f32 = undefined;
+    var hubs: [4]f32 = undefined;
+    if (!fillReshapeContour(s, width, height, rotation, mirror, &contour, &hubs)) return null;
+    var cx: f32 = 0;
+    var cy: f32 = 0;
+    for (0..face106.point_count) |i| {
+        cx += contour[i * 2];
+        cy += contour[i * 2 + 1];
+    }
+    const n: f32 = @floatFromInt(face106.point_count);
+    cx /= n;
+    cy /= n;
+    var maxd: f32 = 0;
+    for (0..face106.point_count) |i| {
+        const dx = contour[i * 2] - cx;
+        const dy = (contour[i * 2 + 1] - cy) * aspect;
+        const d = @sqrt(dx * dx + dy * dy);
+        if (d > maxd) maxd = d;
+    }
+    return .{ .cx = cx, .cy = cy, .radius = @max(maxd * 1.2, 0.02) };
+}
+
 /// Grows the per-frame vertex staging to hold `floats`, called once per
 /// dynamic mesh at lens activation. Never runs on the frame path.
 fn reserveFrameStage(s: *Session, floats: usize) void {
@@ -1758,6 +1791,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // channel degrades to the zero mask with no face, so it holds the
             // frame through rather than blocking the chain.
             .occluder => s.occluder_params.contains(entry.graph_index) and s.occluder_masks.contains(entry.graph_index),
+            // A cutout composites the face matte over a flat color: it needs its
+            // params and a matte channel whose texture landed this frame, so with
+            // no face it holds the frame through rather than flooding flat color.
+            .cutout => s.cutout_params.contains(entry.graph_index) and (if (s.cutout_masks.get(entry.graph_index)) |ch| (if (ch == 0) s.segmentation_texture != null else s.segmentation_class_textures[ch] != null) else false),
             // A tint is a masked color layer: it needs both its params and a
             // named mask channel, else it holds the frame through.
             .tint => s.tint_params.contains(entry.graph_index) and s.tint_masks.contains(entry.graph_index),
@@ -1776,8 +1813,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // at activation, so it is ready as soon as they are in place.
             .edge => s.edge_params.contains(entry.graph_index),
             // A warp pass ships no asset; its distortion params resolve at
-            // activation, so it is ready as soon as they are in place.
-            .warp => s.warp_params.contains(entry.graph_index),
+            // activation. face_scale rides the tracked face like the reshape
+            // bank, so it holds the frame through when no face is present.
+            .warp => blk: {
+                const wp = s.warp_params.get(entry.graph_index) orelse break :blk false;
+                break :blk if (wp[0] > 5.5) reshapeFaceReady(s) else true;
+            },
             // A reshape bank needs a tracked face to sculpt around, like dof
             // needs depth: with its params resolved but no face it holds the
             // frame through, the standard capability degradation.
@@ -2043,6 +2084,20 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             },
             .warp => {
                 const wp = s.warp_params.get(entry.graph_index) orelse continue;
+                // aspect_auto (wp[6]) reshapes the region into a circle on
+                // screen by the source frame's own height/width, the way
+                // gpupixel's sphere filters do; off keeps it square.
+                const aspect = if (wp[6] > 0.5) @as(f32, @floatFromInt(height)) / @as(f32, @floatFromInt(width)) else 1.0;
+                // face_scale rides the tracked face: its center and radius come
+                // from the live landmarks, not the static field, so the scale
+                // stays on the face. No face was gated out in the readiness pass.
+                var center = [2]f32{ wp[1], wp[2] };
+                var region_radius = wp[3];
+                if (wp[0] > 5.5) {
+                    const fc = faceScaleCenter(s, width, height, rotation, mirror, aspect) orelse continue;
+                    center = .{ fc.cx, fc.cy };
+                    region_radius = fc.radius;
+                }
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -2050,10 +2105,6 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                // aspect_auto (wp[6]) reshapes the region into a circle on
-                // screen by the source frame's own height/width, the way
-                // gpupixel's sphere filters do; off keeps it square.
-                const aspect = if (wp[6] > 0.5) @as(f32, @floatFromInt(height)) / @as(f32, @floatFromInt(width)) else 1.0;
                 // Unflatten the liquify points into per-point vectors and radii
                 // for the two shader arrays; the header rides in warp and extra.
                 var points: [manifest.warp_point_max][4]f32 = undefined;
@@ -2070,7 +2121,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
                 else
                     r.default_mask_texture;
-                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], wp[1], wp[2], wp[3] }, .{ wp[4], wp[5], aspect, 0.0 }, .{ wp[9], wp[7], wp[8], 0.0 }, &points, &fall);
+                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], center[0], center[1], region_radius }, .{ wp[4], wp[5], aspect, 0.0 }, .{ wp[9], wp[7], wp[8], 0.0 }, &points, &fall);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2168,6 +2219,26 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitOccluderPass(view_id, input_texture, restore, mask_tex, .{ params[0], params[0], params[1], 0 });
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .cutout => {
+                const params = s.cutout_params.get(entry.graph_index) orelse continue;
+                const channel = s.cutout_masks.get(entry.graph_index) orelse continue;
+                // The face matte keys the frame through; an absent class serves
+                // the zero mask, but readiness already held the frame through
+                // then, so here the matte is real.
+                const mask_tex = if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitCutoutPass(view_id, input_texture, mask_tex, .{ params[0], params[1], params[2] }, params[3]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3235,6 +3306,8 @@ pub fn destroySession(session: *Session) void {
     session.outline_masks.deinit(session.engine.gpa);
     session.occluder_params.deinit(session.engine.gpa);
     session.occluder_masks.deinit(session.engine.gpa);
+    session.cutout_params.deinit(session.engine.gpa);
+    session.cutout_masks.deinit(session.engine.gpa);
     session.tint_params.deinit(session.engine.gpa);
     session.tint_masks.deinit(session.engine.gpa);
     session.tint_modes.deinit(session.engine.gpa);
@@ -6174,6 +6247,8 @@ fn maskChannelNeeded(session: *Session, channel: u8) bool {
     while (outline_it.next()) |c| if (c.* == channel) return true;
     var occluder_it = session.occluder_masks.valueIterator();
     while (occluder_it.next()) |c| if (c.* == channel) return true;
+    var cutout_it = session.cutout_masks.valueIterator();
+    while (cutout_it.next()) |c| if (c.* == channel) return true;
     var tint_it = session.tint_masks.valueIterator();
     while (tint_it.next()) |c| if (c.* == channel) return true;
     var smooth_it = session.smooth_masks.valueIterator();
@@ -6491,6 +6566,8 @@ fn destroyBlendState(session: *Session) void {
     session.outline_masks.clearRetainingCapacity();
     session.occluder_params.clearRetainingCapacity();
     session.occluder_masks.clearRetainingCapacity();
+    session.cutout_params.clearRetainingCapacity();
+    session.cutout_masks.clearRetainingCapacity();
     session.tint_params.clearRetainingCapacity();
     session.tint_masks.clearRetainingCapacity();
     session.tint_modes.clearRetainingCapacity();
@@ -6912,6 +6989,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createFogParams(s, gpa) catch {};
     createOutlineParams(s, gpa) catch {};
     createOccluderParams(s, gpa) catch {};
+    createCutoutParams(s, gpa) catch {};
     createTintParams(s, gpa) catch {};
     createSmoothParams(s, gpa) catch {};
     createRetouchParams(s, gpa) catch {};
@@ -7018,6 +7096,18 @@ fn createOccluderParams(session: *Session, gpa: std.mem.Allocator) !void {
     for (occluders) |o| {
         session.occluder_params.put(gpa, o.graph_index, o.params) catch {};
         session.occluder_masks.put(gpa, o.graph_index, o.mask_channel) catch {};
+    }
+}
+
+/// Resolves the active lens's cutout.pass nodes into session.cutout_params and
+/// cutout_masks, once at activation - mirrors createOccluderParams.
+fn createCutoutParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const cutouts = try lens.cutoutPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(cutouts);
+    for (cutouts) |cp| {
+        session.cutout_params.put(gpa, cp.graph_index, cp.params) catch {};
+        session.cutout_masks.put(gpa, cp.graph_index, cp.mask_channel) catch {};
     }
 }
 
@@ -8138,6 +8228,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createFogParams(session, gpa);
     try createOutlineParams(session, gpa);
     try createOccluderParams(session, gpa);
+    try createCutoutParams(session, gpa);
     try createTintParams(session, gpa);
     try createSmoothParams(session, gpa);
     try createRetouchParams(session, gpa);

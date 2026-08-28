@@ -299,6 +299,18 @@ pub const OccluderField = struct {
     mask_channel: u8 = head_channel,
 };
 
+pub const CutoutField = struct {
+    /// A cutout.pass node isolates the face: the matte keys the camera frame
+    /// through, and the rest of the frame is replaced by a flat color. color is
+    /// that background (rgb, 0..1), softness feathers the matte edge, and mask
+    /// names the matte channel it keeps, the head by default.
+    r: f32 = 0.0,
+    g: f32 = 0.0,
+    b: f32 = 0.0,
+    softness: f32 = 0.02,
+    mask_channel: u8 = head_channel,
+};
+
 /// How a tint.pass folds its color into the masked region. normal blends
 /// straight toward the color (the makeup default); multiply darkens through it
 /// for a contour shadow; screen lightens through it for a highlight, each
@@ -413,11 +425,10 @@ pub const LiquifyPoint = struct {
 
 pub const WarpField = struct {
     /// A warp.pass node's geometric distortion, all radial around a center
-    /// within a radius. glass_sphere and sphere_refraction bend the frame
-    /// through a glass ball - one keeps the surround, the other blackens it -
-    /// while bulge magnifies, pinch shrinks, swirl twists, and liquify sums
-    /// freeform push/pull points.
-    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl, liquify } = .glass_sphere,
+    /// within a radius: the two sphere modes bend the frame through glass,
+    /// bulge, pinch and swirl displace it, liquify sums push points, and
+    /// face_scale scales the whole tracked face about its own center.
+    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl, liquify, face_scale } = .glass_sphere,
     /// The distortion center in normalized frame coordinates.
     center_x: f32 = 0.5,
     center_y: f32 = 0.5,
@@ -425,8 +436,9 @@ pub const WarpField = struct {
     /// sphere_refraction goes black.
     radius: f32 = 0.25,
     /// How hard the warp pushes: the displacement scale for bulge, pinch,
-    /// swirl and liquify and the refraction blend for the two sphere modes.
-    /// Zero is identity.
+    /// swirl and liquify, the refraction blend for the two sphere modes, and
+    /// the signed face scale for face_scale (positive enlarges, negative
+    /// shrinks). Zero is identity.
     strength: f32 = 1.0,
     /// The glass index of refraction the two sphere modes bend the view ray by.
     refractive_index: f32 = 0.71,
@@ -732,6 +744,9 @@ pub const Node = struct {
     /// Set only on an occluder.pass node: its silhouette expand, edge softness,
     /// and the head-matte channel it reveals.
     occluder: ?OccluderField = null,
+    /// Set only on a cutout.pass node: its background color, edge softness, and
+    /// the face-matte channel it keeps.
+    cutout: ?CutoutField = null,
     /// Set only on a tint.pass node: its color, opacity, and mask channel.
     tint: ?TintField = null,
     /// Set only on a smooth.pass node: its amount and mask channel.
@@ -1697,6 +1712,35 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "occluder.pass")) {
             occluder_field = .{};
         }
+        var cutout_field: ?CutoutField = null;
+        if (getField(object, "cutout")) |cv| {
+            const cmark = path.push("cutout");
+            if (!std.mem.eql(u8, node_type, "cutout.pass")) {
+                try diags.add(path.slice(), "cutout is a cutout.pass field, found it on '{s}'", .{node_type});
+            } else if (cv != .object) {
+                try diags.add(path.slice(), "cutout must be an object", .{});
+            } else {
+                var field: CutoutField = .{};
+                if (getField(cv.object, "color")) |v| {
+                    var rgb: [3]f32 = undefined;
+                    if (readVec3(v, &rgb)) {
+                        field.r = std.math.clamp(rgb[0], 0.0, 1.0);
+                        field.g = std.math.clamp(rgb[1], 0.0, 1.0);
+                        field.b = std.math.clamp(rgb[2], 0.0, 1.0);
+                    } else try diags.add(path.slice(), "cutout color must be three numbers", .{});
+                }
+                if (getField(cv.object, "softness")) |v| field.softness = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.softness)), 0.0, 0.5);
+                if (getField(cv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "cutout mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                cutout_field = field;
+            }
+            path.pop(cmark);
+        } else if (std.mem.eql(u8, node_type, "cutout.pass")) {
+            cutout_field = .{};
+        }
         var tint_field: ?TintField = null;
         if (getField(object, "tint")) |tv| {
             const tintmark = path.push("tint");
@@ -1886,7 +1930,12 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(wv.object, "center_x")) |v| field.center_x = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.center_x)), 0.0, 1.0);
                 if (getField(wv.object, "center_y")) |v| field.center_y = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.center_y)), 0.0, 1.0);
                 if (getField(wv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0.01, 1.0);
-                if (getField(wv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 4.0);
+                // face_scale reads strength as a signed scale, so it allows a
+                // negative shrink; every other mode keeps the positive range.
+                if (getField(wv.object, "strength")) |v| {
+                    const lo: f32 = if (field.mode == .face_scale) -4.0 else 0.0;
+                    field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), lo, 4.0);
+                }
                 if (getField(wv.object, "refractive_index")) |v| field.refractive_index = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.refractive_index)), 0.1, 1.0);
                 if (getField(wv.object, "aspect_auto")) |v| {
                     if (v == .bool) field.aspect_auto = v.bool;
@@ -2561,6 +2610,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .fog = fog_field,
             .outline = outline_field,
             .occluder = occluder_field,
+            .cutout = cutout_field,
             .tint = tint_field,
             .smooth = smooth_field,
             .retouch = retouch_field,

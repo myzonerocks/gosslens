@@ -4403,6 +4403,9 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // occluder.pass's own fixed head-occluder shader, same kit-authored
         // reasoning as fs_smooth_pass below.
         .{ .name = "fs_occluder_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // cutout.pass's own fixed face-isolation shader: the face matte keys the
+        // frame through, the rest goes flat color, same reasoning as fs_smooth.
+        .{ .name = "fs_cutout_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_smooth_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // retouch.pass's own fixed fragment shader: a mode-branched selective
         // skin filter (edge-aware blemish smooth or T-zone shine matte), same

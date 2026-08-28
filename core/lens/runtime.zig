@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -54,6 +54,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "fog.pass")) return .fog_pass;
     if (std.mem.eql(u8, type_str, "outline.pass")) return .outline_pass;
     if (std.mem.eql(u8, type_str, "occluder.pass")) return .occluder_pass;
+    if (std.mem.eql(u8, type_str, "cutout.pass")) return .cutout_pass;
     if (std.mem.eql(u8, type_str, "tint.pass")) return .tint_pass;
     if (std.mem.eql(u8, type_str, "smooth.pass")) return .smooth_pass;
     if (std.mem.eql(u8, type_str, "retouch.pass")) return .retouch_pass;
@@ -94,7 +95,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
     };
 }
 
@@ -150,6 +151,9 @@ const LensNode = struct {
     /// .occluder_pass only: the node's silhouette expand, edge softness, and
     /// the head-matte channel it reveals.
     occluder: ?manifest.OccluderField = null,
+    /// .cutout_pass only: the node's background color, edge softness, and the
+    /// face-matte channel it keeps.
+    cutout: ?manifest.CutoutField = null,
     /// .tint_pass only: the node's color, opacity, and mask channel.
     tint: ?manifest.TintField = null,
     /// .smooth_pass only: the node's amount and mask channel.
@@ -338,6 +342,15 @@ pub const OccluderPassNode = struct {
     mask_channel: u8,
 };
 
+/// One cutout.pass node ready to draw - which graph node it is, its background
+/// color packed with the edge softness for u_cutout, and the face-matte channel
+/// it keeps the frame through.
+pub const CutoutPassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [4]f32,
+    mask_channel: u8,
+};
+
 pub const TintPassNode = struct {
     graph_index: graph.NodeIndex,
     color: [3]f32,
@@ -438,7 +451,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, draw_board, sprite };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, draw_board, sprite };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -658,6 +671,21 @@ pub const Lens = struct {
             if (node.node_type != .occluder_pass) continue;
             const o = node.occluder orelse manifest.OccluderField{};
             try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ o.expand, o.softness }, .mask_channel = o.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every cutout.pass node this lens spliced, in execution order, each
+    /// carrying its background color, edge softness, and face-matte channel.
+    pub fn cutoutPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]CutoutPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(CutoutPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .cutout_pass) continue;
+            const cf = node.cutout orelse manifest.CutoutField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ cf.r, cf.g, cf.b, cf.softness }, .mask_channel = cf.mask_channel });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -957,6 +985,7 @@ pub const Lens = struct {
                 .fog_pass => .fog,
                 .outline_pass => .outline,
                 .occluder_pass => .occluder,
+                .cutout_pass => .cutout,
                 .tint_pass => .tint,
                 .smooth_pass => .smooth,
                 .retouch_pass => .retouch,
@@ -1201,6 +1230,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .fog = if (node_type == .fog_pass) node.fog else null,
             .outline = if (node_type == .outline_pass) node.outline else null,
             .occluder = if (node_type == .occluder_pass) node.occluder else null,
+            .cutout = if (node_type == .cutout_pass) node.cutout else null,
             .tint = if (node_type == .tint_pass) node.tint else null,
             .smooth = if (node_type == .smooth_pass) node.smooth else null,
             .retouch = if (node_type == .retouch_pass) node.retouch else null,

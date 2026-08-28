@@ -350,6 +350,15 @@ pub const Renderer = struct {
         _ = params;
     }
 
+    pub fn submitCutoutPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, color: [3]f32, softness: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = color;
+        _ = softness;
+    }
+
     pub fn submitRetouchPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, mode: f32, amount: f32) void {
         _ = r;
         _ = view_id;

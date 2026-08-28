@@ -73,6 +73,19 @@ void main()
 	// unmasked warp; below 1 it eases the displacement toward none.
 	float gate = texture2D(s_texDepth, uv).r;
 
+	if (mode > 5.5) {
+		// face_scale: scale the frame about the face center within its radius.
+		// A positive amount enlarges the face, negative shrinks it; the region
+		// eases to identity by the rim and the mask on unit 1 gates it further.
+		float du = distance(vec2(uv.x, uv.y * aspect), vec2(cen.x, cen.y * aspect)) / rad;
+		float ease = clamp(1.0 - du * du, 0.0, 1.0);
+		float k = clamp(1.0 - amount * ease, 0.05, 4.0);
+		vec2 srcuv = cen + (uv - cen) * k;
+		if (gate < 1.0) srcuv = mix(uv, srcuv, gate);
+		gl_FragColor = texture2D(s_texColor, srcuv);
+		return;
+	}
+
 	if (mode > 4.5) {
 		// liquify: sum the multi-point push, optionally mirrored, then
 		// sample where the pushed content comes from.

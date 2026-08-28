@@ -157,6 +157,7 @@ pub const Renderer = struct {
     outline_program: c.bgfx_program_handle_t,
     tint_program: c.bgfx_program_handle_t,
     occluder_program: c.bgfx_program_handle_t,
+    cutout_program: c.bgfx_program_handle_t,
     smooth_program: c.bgfx_program_handle_t,
     retouch_program: c.bgfx_program_handle_t,
     matte_refine_program: c.bgfx_program_handle_t,
@@ -231,6 +232,7 @@ pub const Renderer = struct {
     tint_mode_uniform: c.bgfx_uniform_handle_t,
     tint_finish_uniform: c.bgfx_uniform_handle_t,
     occluder_uniform: c.bgfx_uniform_handle_t,
+    cutout_uniform: c.bgfx_uniform_handle_t,
     smooth_uniform: c.bgfx_uniform_handle_t,
     retouch_uniform: c.bgfx_uniform_handle_t,
     matte_refine_uniform: c.bgfx_uniform_handle_t,
@@ -411,6 +413,7 @@ pub const Renderer = struct {
         const outline_program = try loadOutlineProgram();
         const tint_program = try loadTintProgram();
         const occluder_program = try loadOccluderProgram();
+        const cutout_program = try loadCutoutProgram();
         const smooth_program = try loadSmoothProgram();
         const retouch_program = try loadRetouchProgram();
         const matte_refine_program = try loadMatteRefineProgram();
@@ -500,6 +503,7 @@ pub const Renderer = struct {
             .outline_program = outline_program,
             .tint_program = tint_program,
             .occluder_program = occluder_program,
+            .cutout_program = cutout_program,
             .smooth_program = smooth_program,
             .retouch_program = retouch_program,
             .matte_refine_program = matte_refine_program,
@@ -560,6 +564,7 @@ pub const Renderer = struct {
             .tint_mode_uniform = c.bgfx_create_uniform("u_tintMode", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .tint_finish_uniform = c.bgfx_create_uniform("u_tintFinish", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .occluder_uniform = c.bgfx_create_uniform("u_occluder", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .cutout_uniform = c.bgfx_create_uniform("u_cutout", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .smooth_uniform = c.bgfx_create_uniform("u_smooth", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .retouch_uniform = c.bgfx_create_uniform("u_retouch", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .matte_refine_uniform = c.bgfx_create_uniform("u_matteRefine", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -735,6 +740,19 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_occluder_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_occluder_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_occluder_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// cutout.pass's own fixed program: the frame on unit 0 and the face matte
+    /// on unit 1, keeping the frame where the matte is set and replacing the
+    /// rest with a flat color, so the face reads on a plain background.
+    pub fn loadCutoutProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_cutout_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_cutout_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_cutout_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_cutout_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -1100,6 +1118,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tint_mode_uniform);
         c.bgfx_destroy_uniform(r.tint_finish_uniform);
         c.bgfx_destroy_uniform(r.occluder_uniform);
+        c.bgfx_destroy_uniform(r.cutout_uniform);
         c.bgfx_destroy_uniform(r.matte_refine_uniform);
         c.bgfx_destroy_uniform(r.stylize_uniform);
         c.bgfx_destroy_uniform(r.edge_uniform);
@@ -1152,6 +1171,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.outline_program);
         c.bgfx_destroy_program(r.tint_program);
         c.bgfx_destroy_program(r.occluder_program);
+        c.bgfx_destroy_program(r.cutout_program);
         c.bgfx_destroy_program(r.smooth_program);
         c.bgfx_destroy_program(r.retouch_program);
         c.bgfx_destroy_program(r.matte_refine_program);
@@ -1733,6 +1753,20 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.occluder_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.occluder_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Isolates the face into view_id: the frame on unit 0 and the face matte on
+    /// unit 1, keeping the frame where the matte is set and replacing the rest
+    /// with `color`, feathered by `softness`. mask_texture is a single-channel
+    /// matte, color rgb 0..1.
+    pub fn submitCutoutPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, color: [3]f32, softness: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ color[0], color[1], color[2], softness };
+        c.bgfx_set_uniform(r.cutout_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.cutout_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Blends the frame toward a small neighbor average, masked by the texture

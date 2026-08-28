@@ -6157,6 +6157,217 @@ fn proveReshapeBank(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// True when the top-left corner block is a single flat color - every pixel
+/// byte-identical to the first - the mark a cutout replaced the background with
+/// one chosen color rather than any image content.
+fn cornerBlockUniform(buf: []const u8, cap_width: usize, block: usize) bool {
+    const first = buf[0..4];
+    var y: usize = 0;
+    while (y < block) : (y += 1) {
+        var x: usize = 0;
+        while (x < block) : (x += 1) {
+            const i = (y * cap_width + x) * 4;
+            if (!std.mem.eql(u8, buf[i .. i + 4], first)) return false;
+        }
+    }
+    return true;
+}
+
+/// Renders one inline-JSON lens over a frame with a set of host-submitted faces
+/// and captures the composited frame. The faces drive the face_scale center
+/// with no native tracker, so the proof is deterministic and needs no model.
+fn captureSubmittedFaceShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, json: ?[]const u8, faces: []const abi.FaceResult) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (json) |j| {
+        if (abi.goss_session_activate_lens(session, j.ptr, j.len) != .ok) return error.ActivationFailed;
+    }
+    if (abi.goss_session_submit_faces(session, faces.ptr, @intCast(faces.len)) != .ok) return error.SubmitFacesFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves the three landmark-anchored face transforms. face_scale scales the
+/// face about its center: a probe right of center samples nearer center under a
+/// stretch and farther under an inset, ordering stretch below the control below
+/// inset. Cutout keys the face matte over a flat color. All bit-stable.
+fn proveFaceTransform(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const cap_w: usize = 400;
+    const cap_h: usize = 300;
+    const corner: usize = 40;
+    const center: usize = 40;
+
+    // A gradient frame: red rides the column, so a horizontal resample toward or
+    // away from the face center shifts the sampled red measurably.
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const i = (row * @as(usize, width) + col) * 4;
+            frame_rgba[i + 0] = @intCast(col * 255 / (@as(usize, width) - 1));
+            frame_rgba[i + 1] = @intCast(row * 255 / (@as(usize, height) - 1));
+            frame_rgba[i + 2] = 128;
+            frame_rgba[i + 3] = 255;
+        }
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    // A synthetic face: 478 landmarks on a circle centered on the frame, so the
+    // face_scale center lands on the frame center with a radius covering it.
+    var synthetic = std.mem.zeroes(abi.FaceResult);
+    synthetic.presence = 1.0;
+    const lm_count = synthetic.landmarks.len / 3;
+    synthetic.landmark_count_out = @intCast(lm_count);
+    const cxp: f32 = @as(f32, @floatFromInt(width)) / 2.0;
+    const cyp: f32 = @as(f32, @floatFromInt(height)) / 2.0;
+    const face_r: f32 = 110.0;
+    for (0..lm_count) |lm| {
+        const ang = @as(f32, @floatFromInt(lm)) / @as(f32, @floatFromInt(lm_count)) * std.math.tau;
+        synthetic.landmarks[lm * 3 + 0] = cxp + face_r * @cos(ang);
+        synthetic.landmarks[lm * 3 + 1] = cyp + face_r * @sin(ang);
+        synthetic.landmarks[lm * 3 + 2] = 0;
+    }
+    const faces_one = [_]abi.FaceResult{synthetic};
+    const no_faces = [_]abi.FaceResult{};
+
+    const inset_json =
+        \\{"glf":"1.0","id":"goss.reference.face-inset-proof","version":"1.0.0","display_name":"Face Inset Proof","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"face_scale","strength":-0.6}}],"triggers":[]}
+    ;
+    const stretch_json =
+        \\{"glf":"1.0","id":"goss.reference.face-stretch-proof","version":"1.0.0","display_name":"Face Stretch Proof","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"face_scale","strength":0.7}}],"triggers":[]}
+    ;
+    const control_json =
+        \\{"glf":"1.0","id":"goss.reference.face-scale-control","version":"1.0.0","display_name":"Face Scale Control","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"face_scale","strength":0.0}}],"triggers":[]}
+    ;
+
+    const inset_a = try captureSubmittedFaceShot(gpa, engine, planes, inset_json, &faces_one);
+    defer gpa.free(inset_a);
+    const inset_b = try captureSubmittedFaceShot(gpa, engine, planes, inset_json, &faces_one);
+    defer gpa.free(inset_b);
+    if (!std.mem.eql(u8, inset_a, inset_b)) {
+        std.debug.print("conformance: FAIL face inset is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const stretch = try captureSubmittedFaceShot(gpa, engine, planes, stretch_json, &faces_one);
+    defer gpa.free(stretch);
+    const control = try captureSubmittedFaceShot(gpa, engine, planes, control_json, &faces_one);
+    defer gpa.free(control);
+    const inset_noface = try captureSubmittedFaceShot(gpa, engine, planes, inset_json, &no_faces);
+    defer gpa.free(inset_noface);
+    const plain = try captureSubmittedFaceShot(gpa, engine, planes, null, &no_faces);
+    defer gpa.free(plain);
+
+    // With no face the face_scale holds the frame through, byte-identical to the
+    // plain frame - the effect is keyed to the tracked face.
+    if (!std.mem.eql(u8, inset_noface, plain)) {
+        std.debug.print("conformance: FAIL face_scale altered the frame with no face - not keyed to the face\n", .{});
+        return false;
+    }
+    // Both scales reshape the face region versus the identity control.
+    if (!centerBlockDiffers(inset_a, control, cap_w, cap_h, center) or !centerBlockDiffers(stretch, control, cap_w, cap_h, center)) {
+        std.debug.print("conformance: FAIL a face_scale did not reshape the face region\n", .{});
+        return false;
+    }
+    // A far corner outside the face radius stays byte-identical to the control,
+    // so the scale is local to the face, not a global resample.
+    if (!cornerBlockEqual(inset_a, control, cap_w, corner) or !cornerBlockEqual(stretch, control, cap_w, corner)) {
+        std.debug.print("conformance: FAIL a face_scale changed a far corner outside the face\n", .{});
+        return false;
+    }
+    // Direction: a probe right of the face center samples nearer the center
+    // under a stretch (smaller red) and farther under an inset (larger red), so
+    // the identity control sits between them - stretch enlarges, inset shrinks.
+    const pidx = (@as(usize, 150) * cap_w + 255) * 4;
+    const stretch_red = stretch[pidx];
+    const control_red = control[pidx];
+    const inset_red = inset_a[pidx];
+    if (!(stretch_red + 2 < control_red and control_red + 2 < inset_red)) {
+        std.debug.print("conformance: FAIL face_scale direction wrong (stretch {d}, control {d}, inset {d})\n", .{ stretch_red, control_red, inset_red });
+        return false;
+    }
+
+    // Cutout over a real tracked face: keying the face matte over a flat color.
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const corpus_planes = try rgbaToNv12(gpa, corpus.frame);
+    defer corpus_planes.deinit(gpa);
+
+    const cutout_json =
+        \\{"glf":"1.0","id":"goss.reference.face-cutout-proof","version":"1.0.0","display_name":"Face Cutout Proof","engine_compat":">=0.5","capabilities":["face"],"parameters":[],"nodes":[{"id":"cut","type":"cutout.pass","inputs":{"frame":"camera"},"params":{},"cutout":{"mask":"head","color":[0.05,0.5,0.55],"softness":0.03}}],"triggers":[]}
+    ;
+
+    const plain_face = try captureOccluderShot(gpa, engine, corpus_planes, null, true);
+    defer gpa.free(plain_face);
+    const cut_a = try captureOccluderShot(gpa, engine, corpus_planes, cutout_json, true);
+    defer gpa.free(cut_a);
+    const cut_b = try captureOccluderShot(gpa, engine, corpus_planes, cutout_json, true);
+    defer gpa.free(cut_b);
+    const cut_noface = try captureOccluderShot(gpa, engine, corpus_planes, cutout_json, false);
+    defer gpa.free(cut_noface);
+    const plain_noface = try captureOccluderShot(gpa, engine, corpus_planes, null, false);
+    defer gpa.free(plain_noface);
+
+    if (!std.mem.eql(u8, cut_a, cut_b)) {
+        std.debug.print("conformance: FAIL face cutout is not bit-stable across runs\n", .{});
+        return false;
+    }
+    // With no face the cutout holds the frame through, byte-identical to plain.
+    if (wholeFrameMeanDiff(cut_noface, plain_noface) >= 2) {
+        std.debug.print("conformance: FAIL cutout altered the frame with no face - not keyed to the face\n", .{});
+        return false;
+    }
+    // The far corner outside the face is replaced by one flat background color.
+    if (cornerBlockEqual(cut_a, plain_face, cap_w, corner)) {
+        std.debug.print("conformance: FAIL cutout did not replace the background outside the face\n", .{});
+        return false;
+    }
+    if (!cornerBlockUniform(cut_a, cap_w, corner)) {
+        std.debug.print("conformance: FAIL cutout background is not a single flat color\n", .{});
+        return false;
+    }
+    // cut_noface is the passthrough camera frame. Against it, cut_a keeps the
+    // frame where the face matte is on and swaps a flat color in where it is
+    // off. Both regions are substantial, so neither the face nor the flat
+    // background flooded the whole frame.
+    var kept: usize = 0;
+    var replaced: usize = 0;
+    var pi: usize = 0;
+    while (pi + 3 < cut_a.len) : (pi += 4) {
+        const d = pixelChannelDiff(cut_a, cut_noface, pi);
+        if (d <= 8) kept += 1 else if (d > 24) replaced += 1;
+    }
+    if (kept < 500) {
+        std.debug.print("conformance: FAIL cutout kept too little of the face over the background ({d} pixels)\n", .{kept});
+        return false;
+    }
+    if (replaced < 5000) {
+        std.debug.print("conformance: FAIL cutout replaced too little of the background ({d} pixels)\n", .{replaced});
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, cut_a, 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-face-cutout.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF the face transforms are landmark anchored: face_scale enlarges the face under a stretch and shrinks it under an inset about the face center (probe stretch {d} < control {d} < inset {d}) while a far corner stays byte-identical and no face is a passthrough; cutout keys the face matte over a flat color, {d} background pixels replaced and {d} face pixels kept, all bit-stable\n", .{ stretch_red, control_red, inset_red, replaced, kept });
+    return true;
+}
+
 /// Proves a bloom.pass post-effect: the bright pass, separable blur and
 /// additive composite bleed a glow from the highlights, so a bloomed
 /// capture differs from the plain one and is bit-stable across runs (no
@@ -10856,6 +11067,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveBodyReshape(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "reshape")) {
             if (!try proveReshapeBank(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "face-transform")) {
+            if (!try proveFaceTransform(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "material-ops")) {
             if (!try proveMaterialOps(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "second-lifecycle")) {
@@ -11094,6 +11307,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("body reshape");
     if (!try proveReshapeBank(gpa, engine)) return 1;
     watchHold("reshape bank");
+    if (!try proveFaceTransform(gpa, engine)) return 1;
+    watchHold("face transform");
     if (!try proveExpressionScript(gpa, engine)) return 1;
     watchHold("expression script");
     if (!try proveEmber(gpa, engine)) return 1;
