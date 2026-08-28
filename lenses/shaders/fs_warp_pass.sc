@@ -5,6 +5,7 @@ $input v_texcoord0
 #define WARP_POINTS 8
 
 SAMPLER2D(s_texColor, 0);
+SAMPLER2D(s_texDepth, 1);   // confine mask: 1 warps the pixel, 0 leaves it put
 uniform vec4 u_warp;        // mode, center.x, center.y, radius
 uniform vec4 u_warpParams;  // strength, refractive index, aspect, unused
 uniform vec4 u_warpExtra;   // point count, symmetry, symmetry axis x, unused
@@ -55,8 +56,8 @@ vec2 liquifyDisp(vec2 p, float aspect)
 
 // One geometric distortion over the frame on unit 0, radial around a center
 // within a radius. u_warp.x picks the mode: 0 glass_sphere, 1 sphere_refraction,
-// 2 bulge, 3 pinch, 4 swirl, 5 liquify. u_warpExtra can mirror the displacement
-// across a vertical axis so the reshape is symmetric.
+// 2 bulge, 3 pinch, 4 swirl, 5 liquify. u_warpExtra can mirror the displacement.
+// The mask on unit 1 confines it: 1 warps, 0 leaves the pixel identity.
 void main()
 {
 	float mode = u_warp.x;
@@ -68,6 +69,9 @@ void main()
 
 	vec2 uv = v_texcoord0;
 	vec4 base = texture2D(s_texColor, uv);
+	// The confine mask. A full mask (1) leaves every path identity to the
+	// unmasked warp; below 1 it eases the displacement toward none.
+	float gate = texture2D(s_texDepth, uv).r;
 
 	if (mode > 4.5) {
 		// liquify: sum the multi-point push, optionally mirrored, then
@@ -78,7 +82,9 @@ void main()
 			vec2 dm = liquifyDisp(vec2(2.0 * ax - uv.x, uv.y), aspect);
 			disp += vec2(-dm.x, dm.y);
 		}
-		gl_FragColor = texture2D(s_texColor, uv - disp);
+		vec2 srcuv = uv - disp;
+		if (gate < 1.0) srcuv = mix(uv, srcuv, gate);
+		gl_FragColor = texture2D(s_texColor, srcuv);
 		return;
 	}
 
@@ -104,7 +110,9 @@ void main()
 			vec3 ambient = vec3(0.0, 0.0, 1.0);
 			float lit = 2.5 * (1.0 - pow(clamp(dot(ambient, nrm), 0.0, 1.0), 0.25));
 			col += lit;
-			vec3 outc = mix(base.rgb, col, amount * presence);
+			float glassAmt = amount * presence;
+			if (gate < 1.0) glassAmt *= gate;
+			vec3 outc = mix(base.rgb, col, glassAmt);
 			gl_FragColor = vec4(outc, base.a);
 		} else {
 			// sphere_refraction: the raw refraction sampled from screen center,
@@ -112,7 +120,9 @@ void main()
 			vec3 refr = refract(vec3(0.0, 0.0, -1.0), nrm, idx);
 			vec3 col = texture2D(s_texColor, (refr.xy + 1.0) * 0.5).rgb;
 			vec3 inside = mix(base.rgb, col, amount);
-			gl_FragColor = vec4(inside * presence, base.a);
+			vec3 outc = inside * presence;
+			if (gate < 1.0) outc = mix(base.rgb, outc, gate);
+			gl_FragColor = vec4(outc, base.a);
 		}
 	} else {
 		// Radial UV displacement inside the region, identity outside. pct is 1
@@ -146,6 +156,7 @@ void main()
 			vec2 dispm = (radialWarpUv(uvm, mode, cen, rad, amount, aspect) - uvm) * presm;
 			finaluv += vec2(-dispm.x, dispm.y);
 		}
+		if (gate < 1.0) finaluv = mix(uv, finaluv, gate);
 		gl_FragColor = texture2D(s_texColor, finaluv);
 	}
 }

@@ -390,6 +390,9 @@ pub const EdgePassNode = struct {
 pub const WarpPassNode = struct {
     graph_index: graph.NodeIndex,
     params: [manifest.warp_params_len]f32,
+    /// The mask channel the displacement is confined to, null when the node
+    /// named none and the warp acts on the whole frame.
+    mask_channel: ?u8,
 };
 
 /// One reshape.bank node ready for the caller to draw: which graph node it
@@ -754,7 +757,7 @@ pub const Lens = struct {
                 params[10 + i * 4 + 3] = pt.dy;
                 params[10 + manifest.warp_point_max * 4 + i] = pt.radius;
             }
-            try out.append(gpa, .{ .graph_index = node.graph_index, .params = params });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = params, .mask_channel = wf.mask_channel });
         }
         return out.toOwnedSlice(gpa);
     }

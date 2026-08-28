@@ -1,0 +1,17 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.body-slim",
+  "version": "1.0.0",
+  "display_name": "Body Slim",
+  "engine_compat": ">=0.5",
+  "capabilities": ["segmentation"],
+  "parameters": [],
+  "nodes": [
+    {"id": "slim", "type": "warp.pass", "inputs": {"frame": "camera"}, "params": {},
+     "warp": {"mode": "liquify", "strength": 1.0, "mask": "person", "points": [
+       {"x": 0.34, "y": 0.6, "dx": 0.06, "dy": 0.0, "radius": 0.24},
+       {"x": 0.66, "y": 0.6, "dx": -0.06, "dy": 0.0, "radius": 0.24}
+     ]}}
+  ],
+  "triggers": []
+}

@@ -5835,6 +5835,153 @@ fn proveLiquifySymmetry(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Renders one warp lens over a synthetic frame, optionally injecting a
+/// synthetic class mask each frame so the warp is confined to that region. A
+/// null mask leaves the warp acting on the whole frame.
+fn captureBodyWarpShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, manifest_json: []const u8, mask: ?*const [abi.segmentation_mask_len]f32, channel: usize) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len) != .ok) {
+        std.debug.print("conformance: FAIL body warp lens activation\n", .{});
+        return error.ActivationFailed;
+    }
+    for (0..3) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        if (mask) |m| abi.injectMaskChannel(session, channel, m);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+        return error.CaptureFailed;
+    }
+    return shot;
+}
+
+/// Proves a mask-gated warp reshapes only the masked body and spares the
+/// background: a full-frame bulge moves the masked center but leaves a corner
+/// outside the mask byte-identical to the original frame, while an unmasked or
+/// fully-present-class warp matches the no-mask warp. Bit-stable across runs.
+fn proveBodyReshape(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const cap_w: usize = 400;
+    const cap_h: usize = 300;
+    const corner: usize = 40;
+    const center: usize = 40;
+
+    // A synthetic frame with variation on both axes, so any displacement moves
+    // the sampled color: red rides the column, green rides the row.
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const i = (row * @as(usize, width) + col) * 4;
+            frame_rgba[i + 0] = @intCast(col * 255 / (@as(usize, width) - 1));
+            frame_rgba[i + 1] = @intCast(row * 255 / (@as(usize, height) - 1));
+            frame_rgba[i + 2] = 128;
+            frame_rgba[i + 3] = 255;
+        }
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    // A mask over only the central region: 1 where the grid maps into
+    // [0.35, 0.65] on both axes, 0 elsewhere, so all four corners are outside.
+    const side = abi.segmentation_mask_side;
+    var central: [abi.segmentation_mask_len]f32 = undefined;
+    var full: [abi.segmentation_mask_len]f32 = undefined;
+    for (0..side) |gy| {
+        for (0..side) |gx| {
+            const u = (@as(f32, @floatFromInt(gx)) + 0.5) / @as(f32, @floatFromInt(side));
+            const v = (@as(f32, @floatFromInt(gy)) + 0.5) / @as(f32, @floatFromInt(side));
+            const inside = u >= 0.35 and u <= 0.65 and v >= 0.35 and v <= 0.65;
+            central[gy * side + gx] = if (inside) 1.0 else 0.0;
+            full[gy * side + gx] = 1.0;
+        }
+    }
+    const body_channel: usize = lens_manifest.maskChannelIndex("body_skin").?;
+
+    // A full-frame bulge (radius past every corner) so an unmasked warp would
+    // move the corner too; the mask is the only thing that can spare it.
+    const masked_json =
+        \\{"glf":"1.0","id":"goss.reference.body-reshape-proof","version":"1.0.0","display_name":"Body Reshape Proof","engine_compat":">=0.5","capabilities":["segmentation"],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"bulge","center_x":0.5,"center_y":0.5,"radius":0.95,"strength":3.0,"aspect_auto":false,"mask":"body_skin"}}],"triggers":[]}
+    ;
+    const unmasked_json =
+        \\{"glf":"1.0","id":"goss.reference.body-reshape-plain","version":"1.0.0","display_name":"Body Reshape Plain","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"bulge","center_x":0.5,"center_y":0.5,"radius":0.95,"strength":3.0,"aspect_auto":false}}],"triggers":[]}
+    ;
+    const control_json =
+        \\{"glf":"1.0","id":"goss.reference.body-reshape-control","version":"1.0.0","display_name":"Body Reshape Control","engine_compat":">=0.5","capabilities":["segmentation"],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"bulge","center_x":0.5,"center_y":0.5,"radius":0.95,"strength":0.0,"aspect_auto":false,"mask":"body_skin"}}],"triggers":[]}
+    ;
+
+    const original = try captureWarpShotJson(gpa, engine, planes, null);
+    defer gpa.free(original);
+
+    const masked_a = try captureBodyWarpShot(gpa, engine, planes, masked_json, &central, body_channel);
+    defer gpa.free(masked_a);
+    const masked_b = try captureBodyWarpShot(gpa, engine, planes, masked_json, &central, body_channel);
+    defer gpa.free(masked_b);
+    if (!std.mem.eql(u8, masked_a, masked_b)) {
+        std.debug.print("conformance: FAIL mask-gated warp is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    const control = try captureBodyWarpShot(gpa, engine, planes, control_json, &central, body_channel);
+    defer gpa.free(control);
+
+    const unmasked_a = try captureBodyWarpShot(gpa, engine, planes, unmasked_json, null, body_channel);
+    defer gpa.free(unmasked_a);
+    const unmasked_b = try captureBodyWarpShot(gpa, engine, planes, unmasked_json, null, body_channel);
+    defer gpa.free(unmasked_b);
+    if (!std.mem.eql(u8, unmasked_a, unmasked_b)) {
+        std.debug.print("conformance: FAIL unmasked warp is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    const full_masked = try captureBodyWarpShot(gpa, engine, planes, masked_json, &full, body_channel);
+    defer gpa.free(full_masked);
+
+    // The masked warp reshapes the center inside the mask, versus the identity control.
+    if (!centerBlockDiffers(masked_a, control, cap_w, cap_h, center)) {
+        std.debug.print("conformance: FAIL mask-gated warp did not reshape the masked region\n", .{});
+        return false;
+    }
+    // The corner is outside the mask, so it stays byte-identical to the original
+    // frame - the background is truly untouched, not merely matching the control.
+    if (!cornerBlockEqual(masked_a, original, cap_w, corner)) {
+        std.debug.print("conformance: FAIL mask-gated warp changed the background outside the mask\n", .{});
+        return false;
+    }
+    // The same warp with no mask does move that corner, so the mask, not the
+    // radius, is what spared the background.
+    if (cornerBlockEqual(unmasked_a, original, cap_w, corner)) {
+        std.debug.print("conformance: FAIL the unmasked warp left the corner unchanged, so the proof cannot isolate the mask gate\n", .{});
+        return false;
+    }
+    // A warp with no mask is byte-identical to the same warp keyed to a fully
+    // present class: the gate is transparent where the mask is set, so masked
+    // pixels warp exactly like the current unmasked warp.
+    if (!std.mem.eql(u8, unmasked_a, full_masked)) {
+        std.debug.print("conformance: FAIL a fully-masked warp is not byte-identical to the unmasked warp\n", .{});
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, masked_a, 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-body-reshape.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF a mask-gated warp reshapes only the masked body - the center warps while a corner outside the mask stays byte-identical to the original frame - and a warp with no mask is byte-identical to the fully-masked warp, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Builds a one-node reshape.bank lens whose reshape block is `body`, over a
 /// real corpus face. The empty body "{}" is the identity control every param
 /// capture shares its resample path with.
@@ -10552,6 +10699,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveWarp(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "liquify-symmetry")) {
             if (!try proveLiquifySymmetry(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "body-reshape")) {
+            if (!try proveBodyReshape(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "reshape")) {
             if (!try proveReshapeBank(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "material-ops")) {
@@ -10786,6 +10935,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("warp");
     if (!try proveLiquifySymmetry(gpa, engine)) return 1;
     watchHold("liquify symmetry");
+    if (!try proveBodyReshape(gpa, engine)) return 1;
+    watchHold("body reshape");
     if (!try proveReshapeBank(gpa, engine)) return 1;
     watchHold("reshape bank");
     if (!try proveExpressionScript(gpa, engine)) return 1;

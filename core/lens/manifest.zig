@@ -434,6 +434,10 @@ pub const WarpField = struct {
     /// zeroed and contribute nothing.
     points: [warp_point_max]LiquifyPoint = [_]LiquifyPoint{.{}} ** warp_point_max,
     point_count: usize = 0,
+    /// The mask channel the displacement is confined to: only pixels the mask
+    /// marks move, the rest stay put, so a body-slim reshapes the person and
+    /// leaves the background behind them untouched. Null warps the whole frame.
+    mask_channel: ?u8 = null,
 };
 
 pub const ReshapeField = struct {
@@ -1875,6 +1879,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         }
                         field.point_count = n;
                     } else try diags.add(path.slice(), "warp points must be an array of up to eight push points", .{});
+                }
+                if (getField(wv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "warp mask names an unknown channel '{s}'", .{name});
+                    }
                 }
                 warp_field = field;
             }

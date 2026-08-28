@@ -1824,13 +1824,13 @@ pub const Renderer = struct {
     }
 
     /// Draws one lens warp.pass node as a full-screen pass into view_id: the
-    /// frame on unit 0, u_warp as (mode, center.x, center.y, radius), u_warpParams
-    /// as (strength, refractive_index, aspect, 0), u_warpExtra as (point_count,
-    /// symmetry, symmetry_x, 0), and the liquify push points and radii, the one
-    /// fixed warp_program every node shares.
-    pub fn submitWarpPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, warp: [4]f32, params: [4]f32, extra: [4]f32, points: *const [8][4]f32, fall: *const [8][4]f32) void {
+    /// frame on unit 0, the confine mask on unit 1, then u_warp, u_warpParams and
+    /// u_warpExtra plus the liquify push points and radii, on the one fixed
+    /// warp_program every node shares.
+    pub fn submitWarpPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, warp: [4]f32, params: [4]f32, extra: [4]f32, points: *const [8][4]f32, fall: *const [8][4]f32) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, mask_texture, std.math.maxInt(u32));
         c.bgfx_set_uniform(r.warp_uniform, &warp, 1);
         c.bgfx_set_uniform(r.warp_params_uniform, &params, 1);
         c.bgfx_set_uniform(r.warp_extra_uniform, &extra, 1);

@@ -796,6 +796,10 @@ pub const Session = struct {
     /// aspect_auto, symmetry, symmetry_x, point_count) then the liquify points
     /// and their radii, resolved at activation.
     warp_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [manifest.warp_params_len]f32) = .empty,
+    /// warp.pass nodes' mask channel by graph index (0 person, else a class):
+    /// present only when a node confines its displacement to a segmentation
+    /// class, so the reshape moves the subject and leaves the background put.
+    warp_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     /// reshape.bank nodes by graph index: their sixty-six per-region sculpt
     /// amounts in ReshapeField order, resolved at activation. The live tracked
     /// contour joins them each frame in the draw arm.
@@ -2009,7 +2013,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     points[i] = .{ wp[10 + i * 4 + 0], wp[10 + i * 4 + 1], wp[10 + i * 4 + 2], wp[10 + i * 4 + 3] };
                     fall[i] = .{ wp[10 + manifest.warp_point_max * 4 + i], 0.0, 0.0, 0.0 };
                 }
-                r.submitWarpPass(view_id, input_texture, .{ wp[0], wp[1], wp[2], wp[3] }, .{ wp[4], wp[5], aspect, 0.0 }, .{ wp[9], wp[7], wp[8], 0.0 }, &points, &fall);
+                // A masked warp confines the displacement to its class: the
+                // named channel binds on unit 1 (an absent class serves the zero
+                // mask, so it moves nothing), while no mask binds the all-set
+                // default the shader reads as identity, warping the whole frame.
+                const warp_mask = if (s.warp_masks.get(entry.graph_index)) |channel|
+                    (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
+                else
+                    r.default_mask_texture;
+                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], wp[1], wp[2], wp[3] }, .{ wp[4], wp[5], aspect, 0.0 }, .{ wp[9], wp[7], wp[8], 0.0 }, &points, &fall);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3164,6 +3176,7 @@ pub fn destroySession(session: *Session) void {
     session.stylize_params.deinit(session.engine.gpa);
     session.edge_params.deinit(session.engine.gpa);
     session.warp_params.deinit(session.engine.gpa);
+    session.warp_masks.deinit(session.engine.gpa);
     session.reshape_params.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
@@ -5425,6 +5438,22 @@ pub fn loadsPending(session: ?*Session) u32 {
     return @intCast(n);
 }
 
+/// The segmentation mask grid a synthetic proof fills, re-exported so a headless
+/// test can size a mask without importing the tracking module.
+pub const segmentation_mask_side = segmentation.mask_side;
+pub const segmentation_mask_len = segmentation.mask_len;
+
+/// Test-only: pushes a synthetic mask straight into a channel's texture so a
+/// headless proof can gate a pass on a known region with no tracking model.
+/// Channel zero is the subject texture, the rest are class textures.
+pub fn injectMaskChannel(session: *Session, channel: usize, mask: *const [segmentation.mask_len]f32) void {
+    if (channel == 0) {
+        session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
+    } else if (channel < manifest.mask_channels.len) {
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
+    }
+}
+
 /// How many of the active lens's particle nodes run on the GPU compute path,
 /// so the harness can prove the GPU sim was taken rather than the CPU fallback.
 pub fn activeGpuParticleSims(session: ?*Session) u32 {
@@ -6077,6 +6106,8 @@ fn maskChannelNeeded(session: *Session, channel: u8) bool {
     while (retouch_it.next()) |c| if (c.* == channel) return true;
     var matte_it = session.matte_masks.valueIterator();
     while (matte_it.next()) |c| if (c.* == channel) return true;
+    var warp_it = session.warp_masks.valueIterator();
+    while (warp_it.next()) |c| if (c.* == channel) return true;
     return false;
 }
 
@@ -6396,6 +6427,7 @@ fn destroyBlendState(session: *Session) void {
     session.stylize_params.clearRetainingCapacity();
     session.edge_params.clearRetainingCapacity();
     session.warp_params.clearRetainingCapacity();
+    session.warp_masks.clearRetainingCapacity();
     session.reshape_params.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
     session.ssr_params.clearRetainingCapacity();
@@ -6980,6 +7012,7 @@ fn createWarpParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(warps);
     for (warps) |wp| {
         session.warp_params.put(gpa, wp.graph_index, wp.params) catch {};
+        if (wp.mask_channel) |channel| session.warp_masks.put(gpa, wp.graph_index, channel) catch {};
     }
 }
 

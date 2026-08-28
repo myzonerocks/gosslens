@@ -388,7 +388,9 @@ A `"smooth.pass"` node is a masked detail pass. It carries a `"smooth":
 {"amount", "mask"}` block: it mixes the masked region toward a small neighbor
 average by `amount`, so a positive amount blurs (skin smoothing) and a
 negative one (down to -1) sharpens. It keys the same mask channels as
-`tint.pass`; a smooth naming none is inert.
+`tint.pass`; a smooth naming none is inert. Keyed to `body_skin` or `person` it
+evens body skin without touching the background, the retouch companion to the
+mask-gated body reshape above.
 
 A `"retouch.pass"` node is a masked selective skin filter, a stronger companion
 to `smooth.pass`. It carries a `"retouch": {"mode", "amount", "mask"}` block.
@@ -433,7 +435,7 @@ It reads no host input, ships no asset, and is always ready.
 A `"warp.pass"` node is a geometric distortion over the whole frame, radial
 around a center within a radius. It carries a `"warp": {"mode", "center_x",
 "center_y", "radius", "strength", "refractive_index", "aspect_auto", "symmetry",
-"symmetry_x", "points"}` block. `mode` is `glass_sphere` (a glass lens that
+"symmetry_x", "points", "mask"}` block. `mode` is `glass_sphere` (a glass lens that
 refracts the frame through a sphere and lets the surround through),
 `sphere_refraction` (the same refraction but the classic crystal ball, black
 outside the sphere), `bulge` (magnify toward the center), `pinch` (pull the
@@ -452,6 +454,13 @@ and `y` place it, `dx` and `dy` are the push direction scaled by magnitude, and
 `radius` is the falloff the push fades to zero at. The pushes sum with a smooth
 falloff, so several local points reshape freeform rather than around one radial
 center. It reads no host input, ships no asset, and is always ready.
+
+`mask` names a segmentation class the displacement is confined to. Only pixels
+the mask marks move; the rest stay exactly where they were, so a body-slim (a
+`person` or `body_skin` pinch over the torso) narrows the subject and leaves the
+background behind them undistorted. Named but with no live class the warp moves
+nothing; omitted, it warps the whole frame, byte for byte as before. It keys the
+same channels as the masked color and retouch passes below.
 
 A `"reshape.bank"` node is a landmark-driven face sculpt: sixty-six per-region
 deformations that warp the frame around the tracked face and decay to identity
