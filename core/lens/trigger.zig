@@ -41,13 +41,32 @@ pub const SignalKind = enum {
     body_wave,
     body_dance,
     device_in_volume,
+    touch_double_tap,
+    touch_long_press,
+    touch_swipe,
+    touch_drag,
+    touch_pinch,
+    touch_rotate,
+    pointer_x,
+    pointer_y,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume => true,
-        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle => false,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
+        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y => false,
     };
+}
+
+/// The swipe direction classes a lens names, matching the recognizer's own
+/// order so touch.swipe('left') reads the value the engine feeds. Zero is no
+/// swipe, the resting value most ticks carry.
+fn swipeDirIndex(name: []const u8) ?u8 {
+    if (std.mem.eql(u8, name, "left")) return 1;
+    if (std.mem.eql(u8, name, "right")) return 2;
+    if (std.mem.eql(u8, name, "up")) return 3;
+    if (std.mem.eql(u8, name, "down")) return 4;
+    return null;
 }
 
 pub const Signal = struct {
@@ -55,6 +74,7 @@ pub const Signal = struct {
     blendshape_index: u8 = 0,
     gesture_index: u8 = 0,
     bone_index: u8 = 0,
+    swipe_dir: u8 = 0,
     param_index: u16 = 0,
     timer_name: []const u8 = "",
     event_name: []const u8 = "",
@@ -152,6 +172,22 @@ pub const Signals = struct {
     body_jump: bool = false,
     body_wave: bool = false,
     body_dance: bool = false,
+    /// Screen gestures the on-device recognizer completed this tick, fed from
+    /// the host touch stream. The tap edge rides the existing tap signal; these
+    /// carry the richer ones. touch_swipe is a direction class (0 none, 1 left,
+    /// 2 right, 3 up, 4 down) a lens matches with touch.swipe('left').
+    touch_double_tap: bool = false,
+    touch_long_press: bool = false,
+    touch_swipe: u8 = 0,
+    touch_drag: bool = false,
+    /// Live two-finger levels: pinch is the current spread over the spread at
+    /// gesture start (one at rest), rotate is signed radians since it started.
+    touch_pinch: f64 = 1,
+    touch_rotate: f64 = 0,
+    /// The primary finger's last position, normalized 0..1 over the frame, so a
+    /// lens reads where a tap or drag landed with pointer.x and pointer.y.
+    pointer_x: f64 = 0,
+    pointer_y: f64 = 0,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -217,6 +253,10 @@ fn readBool(s: Signal, signals: Signals) bool {
         .body_jump => signals.body_jump,
         .body_wave => signals.body_wave,
         .body_dance => signals.body_dance,
+        .touch_double_tap => signals.touch_double_tap,
+        .touch_long_press => signals.touch_long_press,
+        .touch_swipe => signals.touch_swipe == s.swipe_dir,
+        .touch_drag => signals.touch_drag,
         else => unreachable,
     };
 }
@@ -238,6 +278,10 @@ fn readNumber(s: Signal, signals: Signals) f64 {
         .gaze_y => gazeXY(signals)[1],
         .head_tilt => signals.head_tilt,
         .bone_angle => if (signals.bone_angles) |a| a[s.bone_index] else 0,
+        .touch_pinch => signals.touch_pinch,
+        .touch_rotate => signals.touch_rotate,
+        .pointer_x => signals.pointer_x,
+        .pointer_y => signals.pointer_y,
         else => unreachable,
     };
 }
@@ -669,6 +713,26 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "head") and std.mem.eql(u8, tail, "tilt")) {
             return .{ .kind = .head_tilt };
         }
+        if (std.mem.eql(u8, head, "touch")) {
+            if (std.mem.eql(u8, tail, "doubleTap")) return .{ .kind = .touch_double_tap };
+            if (std.mem.eql(u8, tail, "longPress")) return .{ .kind = .touch_long_press };
+            if (std.mem.eql(u8, tail, "drag")) return .{ .kind = .touch_drag };
+            if (std.mem.eql(u8, tail, "pinch")) return .{ .kind = .touch_pinch };
+            if (std.mem.eql(u8, tail, "rotate")) return .{ .kind = .touch_rotate };
+            if (std.mem.eql(u8, tail, "swipe")) {
+                const name = try self.parseCall();
+                const dir = swipeDirIndex(name) orelse {
+                    return self.fail("unknown swipe direction '{s}'", .{name});
+                };
+                return .{ .kind = .touch_swipe, .swipe_dir = dir };
+            }
+            return self.fail("unknown touch signal '{s}'", .{tail});
+        }
+        if (std.mem.eql(u8, head, "pointer")) {
+            if (std.mem.eql(u8, tail, "x")) return .{ .kind = .pointer_x };
+            if (std.mem.eql(u8, tail, "y")) return .{ .kind = .pointer_y };
+            return self.fail("unknown pointer signal '{s}'", .{tail});
+        }
         return self.fail("unknown signal '{s}.{s}'", .{ head, tail });
     }
 };
@@ -823,6 +887,38 @@ test "body.present reads the fed pose presence" {
     defer expr.deinit();
     try t.expect(!evaluate(expr.root, .{}));
     try t.expect(evaluate(expr.root, .{ .body_present = true }));
+}
+
+test "touch double tap and long press read the fed edges" {
+    var dbl = try compileOk("touch.doubleTap");
+    defer dbl.deinit();
+    try t.expect(!evaluate(dbl.root, .{}));
+    try t.expect(evaluate(dbl.root, .{ .touch_double_tap = true }));
+    var long = try compileOk("touch.longPress");
+    defer long.deinit();
+    try t.expect(evaluate(long.root, .{ .touch_long_press = true }));
+}
+
+test "touch.swipe matches only the fed direction" {
+    var left = try compileOk("touch.swipe('left')");
+    defer left.deinit();
+    try t.expect(!evaluate(left.root, .{}));
+    try t.expect(evaluate(left.root, .{ .touch_swipe = 1 }));
+    try t.expect(!evaluate(left.root, .{ .touch_swipe = 2 }));
+    const err = try compileFails("touch.swipe('nowhere')");
+    defer t.allocator.free(err.message);
+    try t.expect(std.mem.indexOf(u8, err.message, "unknown swipe") != null);
+}
+
+test "touch pinch, rotate and pointer read as levels" {
+    var pinch = try compileOk("touch.pinch > 1.4");
+    defer pinch.deinit();
+    try t.expect(!evaluate(pinch.root, .{ .touch_pinch = 1 }));
+    try t.expect(evaluate(pinch.root, .{ .touch_pinch = 1.6 }));
+    var px = try compileOk("pointer.x > 0.5");
+    defer px.deinit();
+    try t.expect(evaluate(px.root, .{ .pointer_x = 0.7 }));
+    try t.expect(!evaluate(px.root, .{ .pointer_x = 0.2 }));
 }
 
 test "body.bone_angle compares the fed bend of a named bone" {
