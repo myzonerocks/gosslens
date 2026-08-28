@@ -33,6 +33,17 @@ pub const Shape = struct {
     }
 };
 
+/// Builds a Shape from a model's reported dimensions (the runtime hands these
+/// back as ints). Up to four dims are kept; a non-positive dim reads as zero,
+/// the unknown-size case a bound then rejects.
+pub fn shapeFromDims(dims: []const i32) Shape {
+    var s: Shape = .{};
+    const n = @min(dims.len, 4);
+    for (0..n) |i| s.dims[i] = if (dims[i] > 0) @intCast(dims[i]) else 0;
+    s.rank = @intCast(n);
+    return s;
+}
+
 /// The sandbox an author model runs under. A model past any bound never loads,
 /// so a lens cannot smuggle in a net that exhausts memory or stalls the frame.
 pub const Bounds = struct {
@@ -64,4 +75,14 @@ test "bounds admit a model within limits and reject one past any of them" {
     try t.expect(!b.admits(1200, 3, 400));
     try t.expect(!b.admits(800, 5, 400));
     try t.expect(!b.admits(800, 3, 600));
+}
+
+test "a shape builds from reported dims, keeping four and zeroing unknowns" {
+    const s = shapeFromDims(&[_]i32{ 1, 224, 224, 3 });
+    try t.expectEqual(@as(u8, 4), s.rank);
+    try t.expectEqual(@as(u64, 1 * 224 * 224 * 3), s.elementCount());
+    // A dynamic (non-positive) dim reads as zero, which a bound then rejects.
+    const dyn = shapeFromDims(&[_]i32{ -1, 10 });
+    try t.expectEqual(@as(u32, 0), dyn.dims[0]);
+    try t.expectEqual(@as(u64, 0), dyn.elementCount());
 }
