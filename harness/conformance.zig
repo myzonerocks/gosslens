@@ -6696,12 +6696,10 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
     return true;
 }
 
-/// Wraps an allocator to track bytes currently in use, so the per-frame
-/// gate can watch the heap footprint settle instead of timing the wall
-/// clock (which drifts machine to machine).
-/// The engine's asset-loader and tracking threads allocate concurrently with
-/// the render thread, so the counters are atomic: a non-atomic += / -= could
-/// lose an update and silently corrupt the very leak proof they back.
+/// Wraps an allocator to track bytes in use, so the per-frame gate watches the
+/// heap footprint settle rather than the wall clock. The loader and tracking
+/// threads allocate concurrently with the render thread, so the counters are
+/// atomic; a non-atomic step could lose an update and corrupt the leak proof.
 const CountingAllocator = struct {
     backing: std.mem.Allocator,
     in_use_atomic: std.atomic.Value(usize) = .init(0),
