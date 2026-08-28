@@ -784,10 +784,11 @@ pub const Session = struct {
     /// edge.pass nodes by graph index: their detector packed as (mode, low,
     /// high, blur_radius, strength, invert), resolved at activation.
     edge_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [6]f32) = .empty,
-    /// warp.pass nodes by graph index: their distortion packed as (mode,
-    /// center_x, center_y, radius, strength, refractive_index, aspect_auto, 0),
-    /// resolved at activation.
-    warp_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [8]f32) = .empty,
+    /// warp.pass nodes by graph index: their distortion flat-packed as a header
+    /// (mode, center_x, center_y, radius, strength, refractive_index,
+    /// aspect_auto, symmetry, symmetry_x, point_count) then the liquify points
+    /// and their radii, resolved at activation.
+    warp_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [manifest.warp_params_len]f32) = .empty,
     /// reshape.bank nodes by graph index: their sixty-six per-region sculpt
     /// amounts in ReshapeField order, resolved at activation. The live tracked
     /// contour joins them each frame in the draw arm.
@@ -1990,7 +1991,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // screen by the source frame's own height/width, the way
                 // gpupixel's sphere filters do; off keeps it square.
                 const aspect = if (wp[6] > 0.5) @as(f32, @floatFromInt(height)) / @as(f32, @floatFromInt(width)) else 1.0;
-                r.submitWarpPass(view_id, input_texture, .{ wp[0], wp[1], wp[2], wp[3] }, .{ wp[4], wp[5], aspect, 0.0 });
+                // Unflatten the liquify points into per-point vectors and radii
+                // for the two shader arrays; the header rides in warp and extra.
+                var points: [manifest.warp_point_max][4]f32 = undefined;
+                var fall: [manifest.warp_point_max][4]f32 = undefined;
+                for (0..manifest.warp_point_max) |i| {
+                    points[i] = .{ wp[10 + i * 4 + 0], wp[10 + i * 4 + 1], wp[10 + i * 4 + 2], wp[10 + i * 4 + 3] };
+                    fall[i] = .{ wp[10 + manifest.warp_point_max * 4 + i], 0.0, 0.0, 0.0 };
+                }
+                r.submitWarpPass(view_id, input_texture, .{ wp[0], wp[1], wp[2], wp[3] }, .{ wp[4], wp[5], aspect, 0.0 }, .{ wp[9], wp[7], wp[8], 0.0 }, &points, &fall);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;

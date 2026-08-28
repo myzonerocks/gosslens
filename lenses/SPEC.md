@@ -422,16 +422,26 @@ It reads no host input, ships no asset, and is always ready.
 
 A `"warp.pass"` node is a geometric distortion over the whole frame, radial
 around a center within a radius. It carries a `"warp": {"mode", "center_x",
-"center_y", "radius", "strength", "refractive_index", "aspect_auto"}` block.
-`mode` is `glass_sphere` (a glass lens that refracts the frame through a sphere
-and lets the surround through), `sphere_refraction` (the same refraction but the
-classic crystal ball, black outside the sphere), `bulge` (magnify toward the
-center), `pinch` (pull the image inward) or `swirl` (twist about the center).
-`center_x` and `center_y` place the distortion, `radius` sizes it, and
-`strength` scales how hard it pushes, with zero an identity. `refractive_index`
-is the glass index the two sphere modes bend the view ray by; the three UV warps
-ignore it. `aspect_auto` keeps the region circular on screen by correcting for
-the frame's aspect. It reads no host input, ships no asset, and is always ready.
+"center_y", "radius", "strength", "refractive_index", "aspect_auto", "symmetry",
+"symmetry_x", "points"}` block. `mode` is `glass_sphere` (a glass lens that
+refracts the frame through a sphere and lets the surround through),
+`sphere_refraction` (the same refraction but the classic crystal ball, black
+outside the sphere), `bulge` (magnify toward the center), `pinch` (pull the
+image inward), `swirl` (twist about the center), or `liquify` (freeform
+multi-point push/pull). `center_x` and `center_y` place the distortion, `radius`
+sizes it, and `strength` scales how hard it pushes, with zero an identity.
+`refractive_index` is the glass index the two sphere modes bend the view ray by;
+the displacement modes ignore it. `aspect_auto` keeps the region circular on
+screen by correcting for the frame's aspect.
+
+`symmetry` mirrors the displacement across the vertical axis at `symmetry_x`, so
+an off-center warp reshapes both sides at once; it applies to the bulge, pinch,
+swirl and liquify modes, not the sphere refractions. `liquify` reads a `points`
+array of up to eight push points, each `{"x", "y", "dx", "dy", "radius"}`: `x`
+and `y` place it, `dx` and `dy` are the push direction scaled by magnitude, and
+`radius` is the falloff the push fades to zero at. The pushes sum with a smooth
+falloff, so several local points reshape freeform rather than around one radial
+center. It reads no host input, ships no asset, and is always ready.
 
 A `"reshape.bank"` node is a landmark-driven face sculpt: sixty-six per-region
 deformations that warp the frame around the tracked face and decay to identity

@@ -362,26 +362,58 @@ pub const EdgeField = struct {
     invert: bool = false,
 };
 
+/// The most local push/pull points a liquify warp sums in one pass.
+pub const warp_point_max = 8;
+
+/// The flat float layout a warp.pass node packs for the renderer: a ten-float
+/// header, then warp_point_max points as (x, y, dx, dy), then their radii.
+pub const warp_params_len = 10 + warp_point_max * 5;
+
+pub const LiquifyPoint = struct {
+    /// One liquify push point: a position that pulls nearby pixels along its
+    /// direction, the pull fading smoothly to nothing by its falloff radius.
+    x: f32 = 0.5,
+    y: f32 = 0.5,
+    /// Push direction scaled by magnitude, in normalized uv.
+    dx: f32 = 0,
+    dy: f32 = 0,
+    /// The falloff radius the push fades to zero at.
+    radius: f32 = 0.1,
+};
+
 pub const WarpField = struct {
     /// A warp.pass node's geometric distortion, all radial around a center
     /// within a radius. glass_sphere and sphere_refraction bend the frame
     /// through a glass ball - one keeps the surround, the other blackens it -
-    /// while bulge magnifies, pinch shrinks, and swirl twists.
-    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl } = .glass_sphere,
+    /// while bulge magnifies, pinch shrinks, swirl twists, and liquify sums
+    /// freeform push/pull points.
+    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl, liquify } = .glass_sphere,
     /// The distortion center in normalized frame coordinates.
     center_x: f32 = 0.5,
     center_y: f32 = 0.5,
     /// The distortion radius (0..1). A pixel beyond it passes through, or for
     /// sphere_refraction goes black.
     radius: f32 = 0.25,
-    /// How hard the warp pushes: the displacement scale for bulge, pinch and
-    /// swirl and the refraction blend for the two sphere modes. Zero is identity.
+    /// How hard the warp pushes: the displacement scale for bulge, pinch,
+    /// swirl and liquify and the refraction blend for the two sphere modes.
+    /// Zero is identity.
     strength: f32 = 1.0,
     /// The glass index of refraction the two sphere modes bend the view ray by.
     refractive_index: f32 = 0.71,
     /// Correct the radius for the frame's own aspect so the region stays a
     /// circle on screen; off treats the frame as square.
     aspect_auto: bool = true,
+    /// Mirror the displacement across a vertical axis so the warp reshapes
+    /// both sides at once. Off leaves it one-sided. Applies to the bulge,
+    /// pinch, swirl and liquify displacement modes, not the sphere refractions.
+    symmetry: bool = false,
+    /// The vertical mirror axis in normalized x when symmetry is on.
+    symmetry_x: f32 = 0.5,
+    /// liquify only: local push/pull points summed with smooth falloff, each
+    /// pulling nearby pixels along its direction. Slots past point_count stay
+    /// zeroed and contribute nothing.
+    points: [warp_point_max]LiquifyPoint = [_]LiquifyPoint{.{}} ** warp_point_max,
+    point_count: usize = 0,
 };
 
 pub const ReshapeField = struct {
@@ -1770,6 +1802,30 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(wv.object, "refractive_index")) |v| field.refractive_index = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.refractive_index)), 0.1, 1.0);
                 if (getField(wv.object, "aspect_auto")) |v| {
                     if (v == .bool) field.aspect_auto = v.bool;
+                }
+                if (getField(wv.object, "symmetry")) |v| {
+                    if (v == .bool) field.symmetry = v.bool;
+                }
+                if (getField(wv.object, "symmetry_x")) |v| field.symmetry_x = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.symmetry_x)), 0.0, 1.0);
+                if (getField(wv.object, "points")) |v| {
+                    if (v == .array and v.array.items.len <= warp_point_max) {
+                        var n: usize = 0;
+                        for (v.array.items) |pv| {
+                            if (pv != .object) {
+                                try diags.add(path.slice(), "each warp point must be an object", .{});
+                                continue;
+                            }
+                            var p: LiquifyPoint = .{};
+                            if (getField(pv.object, "x")) |xv| p.x = std.math.clamp(@as(f32, @floatCast(numberOf(xv) orelse p.x)), 0.0, 1.0);
+                            if (getField(pv.object, "y")) |yv| p.y = std.math.clamp(@as(f32, @floatCast(numberOf(yv) orelse p.y)), 0.0, 1.0);
+                            if (getField(pv.object, "dx")) |dxv| p.dx = std.math.clamp(@as(f32, @floatCast(numberOf(dxv) orelse p.dx)), -1.0, 1.0);
+                            if (getField(pv.object, "dy")) |dyv| p.dy = std.math.clamp(@as(f32, @floatCast(numberOf(dyv) orelse p.dy)), -1.0, 1.0);
+                            if (getField(pv.object, "radius")) |rv| p.radius = std.math.clamp(@as(f32, @floatCast(numberOf(rv) orelse p.radius)), 0.01, 1.0);
+                            field.points[n] = p;
+                            n += 1;
+                        }
+                        field.point_count = n;
+                    } else try diags.add(path.slice(), "warp points must be an array of up to eight push points", .{});
                 }
                 warp_field = field;
             }

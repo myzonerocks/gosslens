@@ -1,0 +1,16 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.liquify-cheeks",
+  "version": "1.0.0",
+  "display_name": "Liquify Cheeks",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "liquify", "type": "warp.pass", "inputs": {"frame": "camera"}, "params": {}, "warp": {"mode": "liquify", "strength": 1.0, "points": [
+      {"x": 0.36, "y": 0.55, "dx": 0.05, "dy": 0.0, "radius": 0.16},
+      {"x": 0.64, "y": 0.55, "dx": -0.05, "dy": 0.0, "radius": 0.16}
+    ]}}
+  ],
+  "triggers": []
+}

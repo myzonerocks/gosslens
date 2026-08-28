@@ -403,12 +403,15 @@ pub const Renderer = struct {
         _ = params;
     }
 
-    pub fn submitWarpPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, warp: [4]f32, params: [4]f32) void {
+    pub fn submitWarpPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, warp: [4]f32, params: [4]f32, extra: [4]f32, points: *const [8][4]f32, fall: *const [8][4]f32) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
         _ = warp;
         _ = params;
+        _ = extra;
+        _ = points;
+        _ = fall;
     }
 
     pub fn submitEdgeSobel(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32, texel: [2]f32) void {

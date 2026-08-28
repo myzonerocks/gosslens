@@ -370,12 +370,13 @@ pub const EdgePassNode = struct {
 };
 
 /// One warp.pass node ready for the caller to draw - which graph node it is,
-/// and its distortion packed as (mode, center_x, center_y, radius, strength,
-/// refractive_index, aspect_auto, unused). mode 0 glass_sphere, 1
-/// sphere_refraction, 2 bulge, 3 pinch, 4 swirl.
+/// and its distortion flat-packed: a header (mode, center_x, center_y, radius,
+/// strength, refractive_index, aspect_auto, symmetry, symmetry_x, point_count)
+/// then the liquify points as (x, y, dx, dy) and their falloff radii. mode 0
+/// glass_sphere, 1 sphere_refraction, 2 bulge, 3 pinch, 4 swirl, 5 liquify.
 pub const WarpPassNode = struct {
     graph_index: graph.NodeIndex,
-    params: [8]f32,
+    params: [manifest.warp_params_len]f32,
 };
 
 /// One reshape.bank node ready for the caller to draw: which graph node it
@@ -695,8 +696,8 @@ pub const Lens = struct {
     }
 
     /// Every warp.pass node this lens spliced, in execution order, each
-    /// carrying its distortion packed as (mode, center_x, center_y, radius,
-    /// strength, refractive_index, aspect_auto, unused).
+    /// carrying its distortion flat-packed for the shader: the ten-float
+    /// header, then the liquify points as (x, y, dx, dy), then their radii.
     pub fn warpPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]WarpPassNode {
         const order = try g.executionOrder();
         var out: std.ArrayList(WarpPassNode) = .empty;
@@ -705,7 +706,27 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .warp_pass) continue;
             const wf = node.warp orelse manifest.WarpField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ @floatFromInt(@intFromEnum(wf.mode)), wf.center_x, wf.center_y, wf.radius, wf.strength, wf.refractive_index, if (wf.aspect_auto) 1 else 0, 0 } });
+            var params = [_]f32{0} ** manifest.warp_params_len;
+            params[0] = @floatFromInt(@intFromEnum(wf.mode));
+            params[1] = wf.center_x;
+            params[2] = wf.center_y;
+            params[3] = wf.radius;
+            params[4] = wf.strength;
+            params[5] = wf.refractive_index;
+            params[6] = if (wf.aspect_auto) 1 else 0;
+            params[7] = if (wf.symmetry) 1 else 0;
+            params[8] = wf.symmetry_x;
+            params[9] = @floatFromInt(wf.point_count);
+            var i: usize = 0;
+            while (i < wf.point_count) : (i += 1) {
+                const pt = wf.points[i];
+                params[10 + i * 4 + 0] = pt.x;
+                params[10 + i * 4 + 1] = pt.y;
+                params[10 + i * 4 + 2] = pt.dx;
+                params[10 + i * 4 + 3] = pt.dy;
+                params[10 + manifest.warp_point_max * 4 + i] = pt.radius;
+            }
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = params });
         }
         return out.toOwnedSlice(gpa);
     }

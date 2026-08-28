@@ -5725,6 +5725,116 @@ fn proveWarp(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// True when any pixel in the block-sized region at (x0, y0) differs between
+/// two captures - used to test a specific point neighborhood or mirror side.
+fn blockDiffersAt(a: []const u8, b: []const u8, cap_width: usize, x0: usize, y0: usize, block: usize) bool {
+    var y: usize = y0;
+    while (y < y0 + block) : (y += 1) {
+        const start = (y * cap_width + x0) * 4;
+        if (!std.mem.eql(u8, a[start .. start + block * 4], b[start .. start + block * 4])) return true;
+    }
+    return false;
+}
+
+/// Proves the two freeform warp traits. Liquify sums local push points: two of
+/// them warp both neighborhoods while a far corner stays byte-identical to the
+/// strength-zero identity control, so the push is local. Symmetry mirrors an
+/// off-center warp onto the opposite side, which stays untouched without it.
+fn proveLiquifySymmetry(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const cap_w: usize = 400;
+    const corner: usize = 40;
+    const block: usize = 30;
+    // Point one sits at u 0.3 (px 120), point two at u 0.7 (px 280), both on
+    // the vertical middle (py 150); the mirror axis is the frame center u 0.5.
+    const left_x: usize = 120 - block / 2;
+    const right_x: usize = 280 - block / 2;
+    const mid_y: usize = 150 - block / 2;
+
+    const liquify_json =
+        \\{"glf":"1.0","id":"goss.reference.liquify-proof","version":"1.0.0","display_name":"Liquify Proof","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"liquify","strength":1.0,"points":[{"x":0.3,"y":0.5,"dx":0.08,"dy":0.0,"radius":0.13},{"x":0.7,"y":0.5,"dx":-0.08,"dy":0.0,"radius":0.13}]}}],"triggers":[]}
+    ;
+    // The same two points at strength zero: an identity resample through the
+    // very same pass, isolating the push everywhere it acts.
+    const liquify_control_json =
+        \\{"glf":"1.0","id":"goss.reference.liquify-control","version":"1.0.0","display_name":"Liquify Control","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"liquify","strength":0.0,"points":[{"x":0.3,"y":0.5,"dx":0.08,"dy":0.0,"radius":0.13},{"x":0.7,"y":0.5,"dx":-0.08,"dy":0.0,"radius":0.13}]}}],"triggers":[]}
+    ;
+
+    const liq_a = try captureWarpShotJson(gpa, engine, planes, liquify_json);
+    defer gpa.free(liq_a);
+    const liq_b = try captureWarpShotJson(gpa, engine, planes, liquify_json);
+    defer gpa.free(liq_b);
+    if (!std.mem.eql(u8, liq_a, liq_b)) {
+        std.debug.print("conformance: FAIL liquify is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const liq_ctrl = try captureWarpShotJson(gpa, engine, planes, liquify_control_json);
+    defer gpa.free(liq_ctrl);
+
+    if (!blockDiffersAt(liq_a, liq_ctrl, cap_w, left_x, mid_y, block)) {
+        std.debug.print("conformance: FAIL liquify did not warp the first point neighborhood\n", .{});
+        return false;
+    }
+    if (!blockDiffersAt(liq_a, liq_ctrl, cap_w, right_x, mid_y, block)) {
+        std.debug.print("conformance: FAIL liquify did not warp the second point neighborhood\n", .{});
+        return false;
+    }
+    if (!cornerBlockEqual(liq_a, liq_ctrl, cap_w, corner)) {
+        std.debug.print("conformance: FAIL liquify changed a far corner outside every point radius (not local)\n", .{});
+        return false;
+    }
+
+    // An off-center bulge at u 0.3, once one-sided and once mirrored about u 0.5,
+    // against the same bulge at strength zero (the identity control).
+    const asym_json =
+        \\{"glf":"1.0","id":"goss.reference.warp-asym","version":"1.0.0","display_name":"Warp Asym","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"bulge","center_x":0.3,"center_y":0.5,"radius":0.2,"strength":2.0}}],"triggers":[]}
+    ;
+    const sym_json =
+        \\{"glf":"1.0","id":"goss.reference.warp-sym","version":"1.0.0","display_name":"Warp Sym","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"bulge","center_x":0.3,"center_y":0.5,"radius":0.2,"strength":2.0,"symmetry":true,"symmetry_x":0.5}}],"triggers":[]}
+    ;
+    const sym_control_json =
+        \\{"glf":"1.0","id":"goss.reference.warp-sym-control","version":"1.0.0","display_name":"Warp Sym Control","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"bulge","center_x":0.3,"center_y":0.5,"radius":0.2,"strength":0.0}}],"triggers":[]}
+    ;
+
+    const asym = try captureWarpShotJson(gpa, engine, planes, asym_json);
+    defer gpa.free(asym);
+    const sym_a = try captureWarpShotJson(gpa, engine, planes, sym_json);
+    defer gpa.free(sym_a);
+    const sym_b = try captureWarpShotJson(gpa, engine, planes, sym_json);
+    defer gpa.free(sym_b);
+    if (!std.mem.eql(u8, sym_a, sym_b)) {
+        std.debug.print("conformance: FAIL symmetric warp is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const sym_ctrl = try captureWarpShotJson(gpa, engine, planes, sym_control_json);
+    defer gpa.free(sym_ctrl);
+
+    if (!blockDiffersAt(asym, sym_ctrl, cap_w, left_x, mid_y, block)) {
+        std.debug.print("conformance: FAIL the off-center warp did not touch its own side\n", .{});
+        return false;
+    }
+    if (blockDiffersAt(asym, sym_ctrl, cap_w, right_x, mid_y, block)) {
+        std.debug.print("conformance: FAIL the one-sided warp leaked onto the opposite side\n", .{});
+        return false;
+    }
+    if (!blockDiffersAt(sym_a, sym_ctrl, cap_w, right_x, mid_y, block)) {
+        std.debug.print("conformance: FAIL symmetry did not mirror the warp onto the opposite side\n", .{});
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, sym_a, 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-liquify.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF liquify sums local push points - both neighborhoods warp while a far corner stays byte-identical to the identity control - and symmetry mirrors an off-center warp onto the opposite side that is untouched without it\n", .{});
+    return true;
+}
+
 /// Builds a one-node reshape.bank lens whose reshape block is `body`, over a
 /// real corpus face. The empty body "{}" is the identity control every param
 /// capture shares its resample path with.
@@ -10188,6 +10298,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveEdge(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "warp")) {
             if (!try proveWarp(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "liquify-symmetry")) {
+            if (!try proveLiquifySymmetry(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "reshape")) {
             if (!try proveReshapeBank(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "material-ops")) {
@@ -10418,6 +10530,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("edge");
     if (!try proveWarp(gpa, engine)) return 1;
     watchHold("warp");
+    if (!try proveLiquifySymmetry(gpa, engine)) return 1;
+    watchHold("liquify symmetry");
     if (!try proveReshapeBank(gpa, engine)) return 1;
     watchHold("reshape bank");
     if (!try proveExpressionScript(gpa, engine)) return 1;

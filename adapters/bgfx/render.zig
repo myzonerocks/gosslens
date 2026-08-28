@@ -235,6 +235,9 @@ pub const Renderer = struct {
     edge_texel_uniform: c.bgfx_uniform_handle_t,
     warp_uniform: c.bgfx_uniform_handle_t,
     warp_params_uniform: c.bgfx_uniform_handle_t,
+    warp_extra_uniform: c.bgfx_uniform_handle_t,
+    warp_points_uniform: c.bgfx_uniform_handle_t,
+    warp_fall_uniform: c.bgfx_uniform_handle_t,
     tex_prev: c.bgfx_uniform_handle_t,
     trail_uniform: c.bgfx_uniform_handle_t,
     ssr_uniform: c.bgfx_uniform_handle_t,
@@ -555,6 +558,11 @@ pub const Renderer = struct {
             .edge_texel_uniform = c.bgfx_create_uniform("u_edgeTexel", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .warp_uniform = c.bgfx_create_uniform("u_warp", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .warp_params_uniform = c.bgfx_create_uniform("u_warpParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            // The liquify arrays hold up to eight push points; the count must
+            // match warp_point_max in the lens core and WARP_POINTS in the shader.
+            .warp_extra_uniform = c.bgfx_create_uniform("u_warpExtra", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .warp_points_uniform = c.bgfx_create_uniform("u_warpPoints", c.BGFX_UNIFORM_TYPE_VEC4, 8),
+            .warp_fall_uniform = c.bgfx_create_uniform("u_warpFall", c.BGFX_UNIFORM_TYPE_VEC4, 8),
             .tex_prev = c.bgfx_create_uniform("s_texPrev", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .trail_uniform = c.bgfx_create_uniform("u_trail", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .ssr_uniform = c.bgfx_create_uniform("u_ssr", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -1062,6 +1070,9 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.edge_texel_uniform);
         c.bgfx_destroy_uniform(r.warp_uniform);
         c.bgfx_destroy_uniform(r.warp_params_uniform);
+        c.bgfx_destroy_uniform(r.warp_extra_uniform);
+        c.bgfx_destroy_uniform(r.warp_points_uniform);
+        c.bgfx_destroy_uniform(r.warp_fall_uniform);
         c.bgfx_destroy_uniform(r.tex_prev);
         c.bgfx_destroy_uniform(r.trail_uniform);
         c.bgfx_destroy_uniform(r.ssr_uniform);
@@ -1781,14 +1792,18 @@ pub const Renderer = struct {
     }
 
     /// Draws one lens warp.pass node as a full-screen pass into view_id: the
-    /// frame on unit 0, u_warp as (mode, center.x, center.y, radius) and
-    /// u_warpParams as (strength, refractive_index, aspect, 0), the one fixed
-    /// warp_program every node shares.
-    pub fn submitWarpPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, warp: [4]f32, params: [4]f32) void {
+    /// frame on unit 0, u_warp as (mode, center.x, center.y, radius), u_warpParams
+    /// as (strength, refractive_index, aspect, 0), u_warpExtra as (point_count,
+    /// symmetry, symmetry_x, 0), and the liquify push points and radii, the one
+    /// fixed warp_program every node shares.
+    pub fn submitWarpPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, warp: [4]f32, params: [4]f32, extra: [4]f32, points: *const [8][4]f32, fall: *const [8][4]f32) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
         c.bgfx_set_uniform(r.warp_uniform, &warp, 1);
         c.bgfx_set_uniform(r.warp_params_uniform, &params, 1);
+        c.bgfx_set_uniform(r.warp_extra_uniform, &extra, 1);
+        c.bgfx_set_uniform(r.warp_points_uniform, points, 8);
+        c.bgfx_set_uniform(r.warp_fall_uniform, fall, 8);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.warp_program, 0, c.BGFX_DISCARD_ALL);
     }
