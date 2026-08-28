@@ -9369,6 +9369,171 @@ fn proveMatteRefine(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A misaligned coarse hair class as a mask-grid ramp: 0.1 flat on the dark
+/// side and up to ramp_start, rising to 0.9 over span columns, so its crossing
+/// sits right of the frame's luma edge until a matte.hair source pulls it back.
+fn buildCoarseHairRamp(mask: *[abi.segmentation_mask_len]f32, ramp_start_col: f32, span_col: f32) void {
+    const side = abi.segmentation_mask_side;
+    for (0..side) |gy| {
+        for (0..side) |gx| {
+            const u = (@as(f32, @floatFromInt(gx)) + 0.5) / @as(f32, @floatFromInt(side));
+            const col = u * @as(f32, @floatFromInt(width));
+            const ramp = (col - ramp_start_col) / span_col;
+            mask[gy * side + gx] = std.math.clamp(0.1 + 0.8 * ramp, 0.1, 0.9);
+        }
+    }
+}
+
+/// A matte.hair source publishing the hair_matte channel, then a strength-0
+/// matte.refine reading that channel back out as grayscale, so a capture reads
+/// the published alpha verbatim in its red channel.
+const hair_matte_proof_json =
+    \\{"glf":"1.0","id":"goss.reference.hair-matte-proof","version":"1.0.0","display_name":"Hair Matte Proof","engine_compat":">=0.5","capabilities":["segmentation"],"parameters":[],"nodes":[{"id":"hair_source","type":"matte.hair","inputs":{"frame":"camera"},"hair_matte":{"radius":3.5,"sensitivity":12.0,"strength":1.0}},{"id":"show","type":"matte.refine","inputs":{"frame":"hair_source"},"params":{},"matte":{"strength":0.0,"mask":"hair_matte"}}],"triggers":[]}
+;
+
+/// Renders the hair-matte source over a synthetic frame with a vertical luma
+/// edge at edge_col, injecting a coarse hair ramp aligned to it when present,
+/// and captures the published hair_matte as an RGBA frame (matte in red).
+fn captureHairMatteScene(gpa: std.mem.Allocator, engine: *abi.Engine, edge_col: usize, present: bool) ![]u8 {
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const luma: u8 = if (col >= edge_col) 245 else 10;
+            const i = (row * @as(usize, width) + col) * 4;
+            frame_rgba[i + 0] = luma;
+            frame_rgba[i + 1] = luma;
+            frame_rgba[i + 2] = luma;
+            frame_rgba[i + 3] = 255;
+        }
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    var coarse: [abi.segmentation_mask_len]f32 = undefined;
+    buildCoarseHairRamp(&coarse, @as(f32, @floatFromInt(edge_col)) + 6.0, 20.0);
+
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens(session, hair_matte_proof_json.ptr, hair_matte_proof_json.len) != .ok) {
+        std.debug.print("conformance: FAIL hair-matte lens activation\n", .{});
+        return error.ActivationFailed;
+    }
+    for (0..4) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        if (present) abi.injectMaskChannel(session, lens_manifest.hair_channel, &coarse);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+        return error.CaptureFailed;
+    }
+    return shot;
+}
+
+fn proveHairMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // The channel vocabulary the source rides: the coarse hair class it consumes
+    // and the strand channel it publishes, appended at the frozen tail.
+    if (lens_manifest.hair_channel != 2 or lens_manifest.maskChannelIndex("hair_matte") != 21) {
+        std.debug.print("conformance: FAIL hair matte channel vocabulary moved (hair {d}, hair_matte {?d})\n", .{ lens_manifest.hair_channel, lens_manifest.maskChannelIndex("hair_matte") });
+        return false;
+    }
+
+    const edge: usize = 200;
+    // The coarse ramp starts at edge+6 and spans 20 columns, so its 50% crossing
+    // sits at edge+16, well right of the true luma edge the refinement snaps to.
+    const input_cross: f32 = @as(f32, @floatFromInt(edge)) + 6.0 + 10.0;
+
+    const a = try captureHairMatteScene(gpa, engine, edge, true);
+    defer gpa.free(a);
+    const b = try captureHairMatteScene(gpa, engine, edge, true);
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL hair matte is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // The published alpha across the boundary: low on the dark (non-hair) side,
+    // high on the bright side, with a real step and a graded transition band.
+    const far_left = matteBandMean(a, edge - 45, edge - 25);
+    const far_right = matteBandMean(a, edge + 25, edge + 45);
+    const near_left = matteBandMean(a, edge - 12, edge - 2);
+    const near_right = matteBandMean(a, edge + 2, edge + 12);
+    const transition = matteBandMean(a, edge + 2, edge + 16);
+    const refined_step = near_right - near_left;
+    const mid = (far_left + far_right) * 0.5;
+    const refined_cross = matteCrossing(a, mid, edge - 45, edge + 45);
+
+    std.debug.print(
+        "conformance: hair-matte far_left {d:.3} far_right {d:.3} transition {d:.3} refined_step {d:.3} refined_cross {d:.1} input_cross {d:.1}\n",
+        .{ far_left, far_right, transition, refined_step, refined_cross, input_cross },
+    );
+
+    // Spatially confined: near zero off the hair region, filled inside it.
+    if (!(far_left < 0.35)) {
+        std.debug.print("conformance: FAIL hair matte not confined - alpha off the hair region (far_left {d:.3})\n", .{far_left});
+        return false;
+    }
+    if (!(far_right > 0.65)) {
+        std.debug.print("conformance: FAIL hair matte did not fill the hair region (far_right {d:.3})\n", .{far_right});
+        return false;
+    }
+    // A soft 0..1 alpha, not a hard 0/1 bit: the plateaus stay off the extremes
+    // and the boundary carries a graded band strictly between the two, so the
+    // matte feathers rather than cutting a binary edge.
+    if (!(far_left > 0.02 and far_right < 0.98 and transition > far_left + 0.08 and transition < far_right - 0.08)) {
+        std.debug.print("conformance: FAIL hair matte is not a soft 0..1 alpha (far_left {d:.3} transition {d:.3} far_right {d:.3})\n", .{ far_left, transition, far_right });
+        return false;
+    }
+    if (!(refined_step > 0.2)) {
+        std.debug.print("conformance: FAIL the refined matte did not step at the luma edge (refined_step {d:.3})\n", .{refined_step});
+        return false;
+    }
+    // Snapped toward the luma edge - the strand boundary - from the coarse crossing.
+    if (!(refined_cross < input_cross - 2.0)) {
+        std.debug.print("conformance: FAIL the refined edge did not snap toward the luma edge (refined_cross {d:.1} input_cross {d:.1})\n", .{ refined_cross, input_cross });
+        return false;
+    }
+
+    // Tracks the hair region as it moves: a scene shifted right by `shift` puts
+    // the luma edge and the coarse hair at edge+shift, and the refined edge
+    // follows there rather than staying put.
+    const shift: usize = 40;
+    const edge2 = edge + shift;
+    const shifted = try captureHairMatteScene(gpa, engine, edge2, true);
+    defer gpa.free(shifted);
+    const mid2 = (matteBandMean(shifted, edge2 - 45, edge2 - 25) + matteBandMean(shifted, edge2 + 25, edge2 + 45)) * 0.5;
+    const refined_cross2 = matteCrossing(shifted, mid2, edge2 - 45, edge2 + 45);
+    if (!(refined_cross2 > refined_cross + @as(f32, @floatFromInt(shift)) - 15.0)) {
+        std.debug.print("conformance: FAIL hair matte did not track the shifted hair region (cross {d:.1} -> {d:.1}, shift {d})\n", .{ refined_cross, refined_cross2, shift });
+        return false;
+    }
+
+    // Absent with no person: the same frame with no coarse hair injected leaves
+    // the channel the zero mask, so the visualized matte reads black everywhere.
+    const absent = try captureHairMatteScene(gpa, engine, edge, false);
+    defer gpa.free(absent);
+    const absent_left = matteBandMean(absent, edge - 45, edge - 25);
+    const absent_right = matteBandMean(absent, edge + 25, edge + 45);
+    if (!(absent_left < 0.1 and absent_right < 0.1)) {
+        std.debug.print("conformance: FAIL hair matte not absent with no hair class (left {d:.3} right {d:.3})\n", .{ absent_left, absent_right });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF matte.hair publishes a soft strand-level hair_matte channel, confined to the hair region, snapped to the luma edge (crossing {d:.1}->{d:.1}), tracking the region when it shifts to {d:.1}, gone with no hair class, bit-stable across runs\n", .{ input_cross, refined_cross, refined_cross2 });
+    return true;
+}
+
 fn proveTeeth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // The teeth matte fills the inner-lip loop, the mouth aperture inside the
     // outer lip. First prove the loop is the inner mouth: its centroid sits
@@ -11428,6 +11593,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveRetouchBreadth(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "matte-refine")) {
             if (!try proveMatteRefine(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "hair-matte")) {
+            if (!try proveHairMatte(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "teeth")) {
             if (!try proveTeeth(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "sharpen")) {
@@ -11554,6 +11721,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("retouch breadth");
     if (!try proveMatteRefine(gpa, engine)) return 1;
     watchHold("matte refine");
+    if (!try proveHairMatte(gpa, engine)) return 1;
+    watchHold("hair matte");
     if (!try proveTeeth(gpa, engine)) return 1;
     watchHold("teeth whiten");
     if (!try proveSharpen(gpa, engine)) return 1;

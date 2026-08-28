@@ -1,0 +1,15 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.hair-matte",
+  "version": "1.0.0",
+  "display_name": "Hair Matte",
+  "engine_compat": ">=0.9",
+  "capabilities": ["segmentation"],
+  "parameters": [],
+  "nodes": [
+    {"id": "hair_source", "type": "matte.hair", "inputs": {"frame": "camera"},
+     "hair_matte": {"radius": 2.5, "sensitivity": 12.0, "strength": 1.0}},
+    {"id": "recolor", "type": "shader.pass", "inputs": {"frame": "hair_source"}, "params": {}, "mask": "hair_matte"}
+  ],
+  "triggers": []
+}

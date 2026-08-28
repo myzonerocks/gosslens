@@ -471,6 +471,19 @@ the input matte toward the refined one. `mask` picks the channel it refines -
 carries; a node naming no channel refines the submitted depth instead. The
 output is the refined matte as grayscale.
 
+A `"matte.hair"` node is a dedicated high-resolution hair matte source. It draws
+nothing itself and passes the frame through; each frame it refines the coarse
+`hair` segmentation class against the camera luminance through the same guided
+joint-bilateral filter `matte.refine` uses, then publishes the result as the
+`hair_matte` channel. A hair effect keys `hair_matte` for a soft, strand-level
+alpha with a feathered edge instead of the hard coarse `hair` bit. It carries a
+`"hair_matte": {"radius", "sensitivity", "strength"}` block with the same
+guided-filter meaning `matte.refine` gives them, all optional with engine
+defaults. Without the coarse `hair` class (no segmentation, or a model without
+the class) the published channel is the zero mask, so a hair pass keyed to it
+fades to nothing, the standard capability degradation. The `hair-matte` reference
+lens recolors hair through the refined channel.
+
 A `"stylize.pass"` node is a single-pass artistic filter over the whole
 frame. It carries a `"stylize": {"mode", "strength", "threshold", "levels"}`
 block: `mode` is `sketch` (a pencil edge over pale paper), `toon` (color
@@ -659,7 +672,8 @@ The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, the beauty nodes, shader
 passes reading `shaders/*.glsl`, the post-effect passes blur/grade/bloom/
-dof/fog/outline/tint/smooth/matte/stylize/edge/warp/trail/ssr/env, glTF model
+dof/fog/outline/tint/smooth/matte/stylize/edge/warp/trail/ssr/env, the
+`matte.hair` hair matte source, glTF model
 draws, LUT passes, compositing,
 the draw board, the layout composite, the 2D sprite, the 2D text, the
 `video.texture` node, `mesh.face` - the canonical face mesh warped by the tracked landmarks,
@@ -787,7 +801,11 @@ bridge, cupid's bow, and chin), and `lash_line` is the upper lash-line band
 each eye's upper lid arc rises into. Four more mark the retouch regions:
 `under_eye` the band below each eye, `nasolabial` the smile-line fold, `sclera`
 the eye-white inside the eye contour with the iris punched out, and `t_zone` the
-forehead and nose bridge. A makeup or retouch lens keys those directly. The
+forehead and nose bridge. A makeup or retouch lens keys those directly. One more
+is derived on the GPU: `hair_matte` is the strand-level hair alpha a `matte.hair`
+source refines from the coarse `hair` class against the camera luma, a soft
+feathered edge a hair effect keys in place of the hard `hair` bit; with no
+`matte.hair` source in the lens it serves the zero mask. The
 shader reads the channel through `SAMPLER2D(s_texMask, 2)` beside the frame's
 own `s_texColor`. When a named channel has no live data (segmentation
 disabled, a single-class model without it, or no face or hand tracked for a

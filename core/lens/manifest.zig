@@ -62,7 +62,7 @@ pub const mask_channels = [_][]const u8{
     "clothes", "others",     "head",    "hand",      "lips",
     "eyes",    "brows",      "iris",    "teeth",     "contour",
     "highlight", "lash_line", "under_eye", "nasolabial", "sclera",
-    "t_zone",
+    "t_zone",  "hair_matte",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -70,6 +70,9 @@ pub const mask_channels = [_][]const u8{
 /// the model-class mapping must not reach them. head, hand and the face parts
 /// ride the face and hand landmarks, not a segmentation model.
 pub const model_class_end = 7;
+/// hair is segmenter class 2; a coarse channel a matte.hair source lifts into
+/// the strand-level hair_matte channel below.
+pub const hair_channel = 2;
 /// face_skin is segmenter class 4; a foundation tint keys its mask and a
 /// reference photo can fill its color, so name the channel for both.
 pub const skin_channel = 4;
@@ -97,6 +100,10 @@ pub const under_eye_channel = 17;
 pub const nasolabial_channel = 18;
 pub const sclera_channel = 19;
 pub const t_zone_channel = 20;
+/// A strand-level hair alpha a matte.hair source derives each frame by refining
+/// the coarse hair class against the camera luma; hair effects key this channel
+/// for a soft feathered edge instead of the hard coarse hair bit.
+pub const hair_matte_channel = 21;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {
@@ -400,6 +407,16 @@ pub const MatteField = struct {
     /// The mask channel this refines (hair by default use); null refines the
     /// submitted depth instead, so the pass has a source with no segmenter.
     mask_channel: ?u8 = null,
+};
+
+pub const HairMatteField = struct {
+    /// A matte.hair source's guided refinement of the coarse hair class against
+    /// the camera luma, so the published hair_matte channel carries a soft
+    /// strand alpha, not the hard hair bit. radius is reach in texels,
+    /// sensitivity the edge rejection, strength the mix toward the refined.
+    radius: f32 = 2.5,
+    sensitivity: f32 = 12.0,
+    strength: f32 = 1.0,
 };
 
 pub const StylizeField = struct {
@@ -789,6 +806,9 @@ pub const Node = struct {
     /// Set only on a matte.refine node: its guided edge-refinement parameters
     /// and the mask channel (or depth) it refines.
     matte: ?MatteField = null,
+    /// Set only on a matte.hair node: the guided-refinement parameters it lifts
+    /// the coarse hair class into the strand-level hair_matte channel with.
+    hair_matte: ?HairMatteField = null,
     /// Set only on a stylize.pass node: its artistic mode and parameters.
     stylize: ?StylizeField = null,
     /// Set only on an edge.pass node: its detector mode and parameters.
@@ -1947,6 +1967,24 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "matte.refine")) {
             matte_field = .{};
         }
+        var hair_matte_field: ?HairMatteField = null;
+        if (getField(object, "hair_matte")) |hv| {
+            const hairmark = path.push("hair_matte");
+            if (!std.mem.eql(u8, node_type, "matte.hair")) {
+                try diags.add(path.slice(), "hair_matte is a matte.hair field, found it on '{s}'", .{node_type});
+            } else if (hv != .object) {
+                try diags.add(path.slice(), "hair_matte must be an object", .{});
+            } else {
+                var field: HairMatteField = .{};
+                if (getField(hv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0.5, 6.0);
+                if (getField(hv.object, "sensitivity")) |v| field.sensitivity = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.sensitivity)));
+                if (getField(hv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0.0, 1.0);
+                hair_matte_field = field;
+            }
+            path.pop(hairmark);
+        } else if (std.mem.eql(u8, node_type, "matte.hair")) {
+            hair_matte_field = .{};
+        }
         var stylize_field: ?StylizeField = null;
         if (getField(object, "stylize")) |yv| {
             const ymark = path.push("stylize");
@@ -2701,6 +2739,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .lashes = lash_field,
             .retouch = retouch_field,
             .matte = matte_field,
+            .hair_matte = hair_matte_field,
             .stylize = stylize_field,
             .edge = edge_field,
             .warp = warp_field,

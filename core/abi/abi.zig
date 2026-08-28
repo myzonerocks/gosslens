@@ -803,6 +803,16 @@ pub const Session = struct {
     /// matte.refine nodes that refine a mask channel's matte instead of the
     /// submitted depth, by graph index (0 person, else a class).
     matte_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// matte.hair source nodes by graph index: their guided-filter parameters
+    /// (radius, sensitivity, strength). Each refines the coarse hair class into
+    /// the strand-level hair_matte channel the passes below can bind.
+    hair_matte_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    /// The session-owned target a matte.hair source refines the hair alpha into,
+    /// aliased as the hair_matte channel texture each frame; sized to the frame
+    /// and null until a lens carries a matte.hair node, freed at teardown.
+    hair_matte_target: ?render.Renderer.OffscreenTarget = null,
+    hair_matte_w: u16 = 0,
+    hair_matte_h: u16 = 0,
     /// stylize.pass nodes by graph index: their artistic filter packed for
     /// u_stylize (mode, strength, threshold, levels), resolved at activation.
     stylize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1254,6 +1264,18 @@ fn ensureOccluderFrame(s: *Session, width: u16, height: u16) !void {
     s.occluder_frame_target = try render.Renderer.createOffscreenTarget(width, height);
     s.occluder_frame_w = width;
     s.occluder_frame_h = height;
+}
+
+/// (Re)creates the session-owned target a matte.hair source refines the
+/// strand-level hair alpha into, only when the frame size changes or it does
+/// not exist yet. Bound as the hair_matte channel texture each frame.
+fn ensureHairMatteTarget(s: *Session, width: u16, height: u16) !void {
+    if (s.hair_matte_w == width and s.hair_matte_h == height and s.hair_matte_target != null) return;
+    if (s.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.hair_matte_target = null;
+    s.hair_matte_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.hair_matte_w = width;
+    s.hair_matte_h = height;
 }
 
 /// Whether the active chain carries an occluder.pass node, so the camera frame
@@ -1817,6 +1839,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // A matte refine needs its params and a source: either a named
             // mask channel to refine or the submitted depth, like the outline.
             .matte => s.matte_params.contains(entry.graph_index) and (s.matte_masks.contains(entry.graph_index) or s.depth_texture != null),
+            // A hair matte source ships no asset: its params resolve at
+            // activation and it passes the frame through, publishing hair_matte
+            // when the coarse hair class is live and clearing it when it is not.
+            .hair_matte => s.hair_matte_params.contains(entry.graph_index),
             // A stylize pass ships no asset; its packed params resolve at
             // activation, so it is ready the moment they are in place.
             .stylize => s.stylize_params.contains(entry.graph_index),
@@ -2342,6 +2368,43 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitMatteRefinePass(view_id, input_texture, matte_tex, params);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .hair_matte => {
+                const params = s.hair_matte_params.get(entry.graph_index) orelse continue;
+                // Refine the coarse hair class against the camera luma into the
+                // session target on its own view, then publish that as the
+                // hair_matte channel the passes below sample. No coarse hair
+                // clears the channel, so a hair pass keyed to it fades out.
+                if (s.segmentation_class_textures[manifest.hair_channel]) |coarse| {
+                    ensureHairMatteTarget(s, width, height) catch {};
+                    if (s.hair_matte_target) |hmt| {
+                        const refine_view = next_view_id;
+                        next_view_id += 1;
+                        r.tile = null;
+                        render.Renderer.setViewTarget(refine_view, hmt, width, height);
+                        r.submitMatteRefinePass(refine_view, input_texture, coarse, params);
+                        s.segmentation_class_textures[manifest.hair_matte_channel] = hmt.texture;
+                    } else {
+                        s.segmentation_class_textures[manifest.hair_matte_channel] = null;
+                    }
+                } else {
+                    s.segmentation_class_textures[manifest.hair_matte_channel] = null;
+                }
+                // The source changes no visible pixels: pass the frame through
+                // like any chain stage so the composite order and final target
+                // hold for whatever samples the channel after it.
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3393,6 +3456,7 @@ pub fn destroySession(session: *Session) void {
     session.retouch_masks.deinit(session.engine.gpa);
     session.matte_params.deinit(session.engine.gpa);
     session.matte_masks.deinit(session.engine.gpa);
+    session.hair_matte_params.deinit(session.engine.gpa);
     session.stylize_params.deinit(session.engine.gpa);
     session.edge_params.deinit(session.engine.gpa);
     session.warp_params.deinit(session.engine.gpa);
@@ -3403,6 +3467,7 @@ pub fn destroySession(session: *Session) void {
     session.env_params.deinit(session.engine.gpa);
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.occluder_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
@@ -6321,6 +6386,9 @@ fn pollSegmentationMask(session: *Session) void {
 /// True when any active mask consumer, shader or outline or tint, names this
 /// channel, so a class the running lens never reads is never built.
 fn maskChannelNeeded(session: *Session, channel: u8) bool {
+    // A matte.hair source consumes the coarse hair class to refine it, so the
+    // class is built whenever a source is active even if nothing names it.
+    if (channel == manifest.hair_channel and session.hair_matte_params.count() > 0) return true;
     var shader_it = session.shader_masks.valueIterator();
     while (shader_it.next()) |c| if (c.* == channel) return true;
     var outline_it = session.outline_masks.valueIterator();
@@ -6663,6 +6731,8 @@ fn destroyBlendState(session: *Session) void {
     session.retouch_masks.clearRetainingCapacity();
     session.matte_params.clearRetainingCapacity();
     session.matte_masks.clearRetainingCapacity();
+    session.hair_matte_params.clearRetainingCapacity();
+    session.segmentation_class_textures[manifest.hair_matte_channel] = null;
     session.stylize_params.clearRetainingCapacity();
     session.edge_params.clearRetainingCapacity();
     session.warp_params.clearRetainingCapacity();
@@ -7091,6 +7161,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createSmoothParams(s, gpa) catch {};
     createRetouchParams(s, gpa) catch {};
     createMatteParams(s, gpa) catch {};
+    createHairMatteParams(s, gpa) catch {};
     createStylizeParams(s, gpa) catch {};
     createEdgeParams(s, gpa) catch {};
     createWarpParams(s, gpa) catch {};
@@ -7269,6 +7340,18 @@ fn createMatteParams(session: *Session, gpa: std.mem.Allocator) !void {
     for (mattes) |mp| {
         session.matte_params.put(gpa, mp.graph_index, mp.params) catch {};
         if (mp.mask_channel) |channel| session.matte_masks.put(gpa, mp.graph_index, channel) catch {};
+    }
+}
+
+/// Resolves the active lens's matte.hair sources into session.hair_matte_params,
+/// once at activation - mirrors createMatteParams. Each source refines the
+/// coarse hair class into the hair_matte channel while the lens is active.
+fn createHairMatteParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const sources = try lens.hairMattePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(sources);
+    for (sources) |hp| {
+        session.hair_matte_params.put(gpa, hp.graph_index, hp.params) catch {};
     }
 }
 
@@ -8398,6 +8481,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createPaintFaceParams(session, gpa);
     try createRetouchParams(session, gpa);
     try createMatteParams(session, gpa);
+    try createHairMatteParams(session, gpa);
     try createStylizeParams(session, gpa);
     try createEdgeParams(session, gpa);
     try createWarpParams(session, gpa);

@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -61,6 +61,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "smooth.pass")) return .smooth_pass;
     if (std.mem.eql(u8, type_str, "retouch.pass")) return .retouch_pass;
     if (std.mem.eql(u8, type_str, "matte.refine")) return .matte_refine;
+    if (std.mem.eql(u8, type_str, "matte.hair")) return .matte_hair;
     if (std.mem.eql(u8, type_str, "stylize.pass")) return .stylize_pass;
     if (std.mem.eql(u8, type_str, "edge.pass")) return .edge_pass;
     if (std.mem.eql(u8, type_str, "warp.pass")) return .warp_pass;
@@ -97,7 +98,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
     };
 }
 
@@ -171,6 +172,9 @@ const LensNode = struct {
     /// .matte_refine only: the node's guided edge-refinement parameters and
     /// the mask channel (or depth) it refines.
     matte: ?manifest.MatteField = null,
+    /// .matte_hair only: the guided-refinement parameters the source lifts the
+    /// coarse hair class into the hair_matte channel with.
+    hair_matte: ?manifest.HairMatteField = null,
     /// .stylize_pass only: the node's artistic mode and parameters.
     stylize: ?manifest.StylizeField = null,
     /// .edge_pass only: the node's detector mode and parameters.
@@ -482,7 +486,16 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte };
+
+/// One matte.hair source node ready for the caller to draw - which graph node
+/// it is, and its guided-filter parameters packed for the refine pass (radius,
+/// sensitivity, strength). The source refines the coarse hair class against the
+/// camera luma and publishes the result as the hair_matte channel.
+pub const HairMattePassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [3]f32,
+};
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -781,6 +794,22 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every matte.hair source this lens spliced, in execution order, each
+    /// carrying the guided-filter parameters it refines the coarse hair class
+    /// into the hair_matte channel with.
+    pub fn hairMattePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]HairMattePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(HairMattePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .matte_hair) continue;
+            const hf = node.hair_matte orelse manifest.HairMatteField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ hf.radius, hf.sensitivity, hf.strength } });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every stylize.pass node this lens spliced, in execution order, each
     /// carrying its artistic filter packed for u_stylize (mode index, then
     /// strength, threshold, and quantization levels).
@@ -1053,6 +1082,7 @@ pub const Lens = struct {
                 .smooth_pass => .smooth,
                 .retouch_pass => .retouch,
                 .matte_refine => .matte,
+                .matte_hair => .hair_matte,
                 .stylize_pass => .stylize,
                 .edge_pass => .edge,
                 .warp_pass => .warp,
@@ -1302,6 +1332,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .lashes = if (node_type == .mesh_lashes) node.lashes else null,
             .retouch = if (node_type == .retouch_pass) node.retouch else null,
             .matte = if (node_type == .matte_refine) node.matte else null,
+            .hair_matte = if (node_type == .matte_hair) node.hair_matte else null,
             .stylize = if (node_type == .stylize_pass) node.stylize else null,
             .edge = if (node_type == .edge_pass) node.edge else null,
             .warp = if (node_type == .warp_pass) node.warp else null,
