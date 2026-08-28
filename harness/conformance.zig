@@ -6726,10 +6726,6 @@ fn proveHostileManifest(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-/// Proves the session lifecycle leaks no memory: many activate/tick/destroy
-/// cycles of the adapter-heavy lenses (blur, grade, bloom, audio, script) run
-/// on a headless engine under a leak-checking allocator, which reports no leak
-/// only if every session and the engine free everything - a phone-heat gate.
 /// Submits `frames` corpus frames through the loader and render path on
 /// the renderer-backed engine, the same submit/decode/nv12 sequence a
 /// live session runs.
