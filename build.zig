@@ -2708,8 +2708,8 @@ fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // truth for what compiles on each processor; parsing them keeps this build
 // aligned with the pin instead of a hand-copied snapshot that would rot.
 fn cmakeSourceList(b: *std.Build, root: []const u8, cmake_path: []const u8, var_name: []const u8, out: *std.ArrayList([]const u8)) void {
-    const text = b.build_root.handle.readFileAlloc(b.graph.io, cmake_path, b.allocator, .limited(8 << 20)) catch
-        std.debug.panic("unreadable cmake list {s}", .{cmake_path});
+    const text = b.build_root.handle.readFileAlloc(b.graph.io, cmake_path, b.allocator, .limited(8 << 20)) catch |err|
+        std.debug.panic("unreadable cmake list {s}: {s}", .{ cmake_path, @errorName(err) });
     const open = b.fmt("SET({s}", .{var_name});
     var search: usize = 0;
     const body_start = while (std.mem.indexOfPos(u8, text, search, open)) |at| {
