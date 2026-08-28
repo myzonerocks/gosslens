@@ -1265,6 +1265,13 @@ export class GossSession {
     this.mod.ccall("goss_session_ar_brush_clear", "number", ["number"], [this.handle]);
   }
 
+  /** Feeds one screen touch event so the engine recognizes the gestures a lens
+   * reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled; pointerId names
+   * the finger; x and y are normalized 0..1 over the frame. */
+  touch(phase: number, pointerId: number, x: number, y: number): void {
+    this.mod.ccall("goss_session_touch", "number", ["number", "number", "number", "number", "number"], [this.handle, phase, pointerId, x, y]);
+  }
+
   grab(x: number, y: number, z: number): void {
     this.mod.ccall("goss_session_grab", "number", ["number", "number", "number", "number"], [this.handle, x, y, z]);
   }

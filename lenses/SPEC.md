@@ -673,8 +673,10 @@ defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
 and ramps, exposing the current signals as `lens.signals.<name>` (read) and
 the lens parameters as `lens.params.<name>` (read and write). The signal
-surface is the six live signals (`face_present`, `hands_present`,
-`audio_level`, `audio_beat`, `world_tracking_state`, `tap`) plus every ARKit
+surface is the live signals (`face_present`, `hands_present`, `audio_level`,
+`audio_beat`, `world_tracking_state`, `tap`), the screen gestures
+(`touch_double_tap`, `touch_long_press`, `touch_swipe`, `touch_drag`,
+`touch_pinch`, `touch_rotate`, `pointer_x`, `pointer_y`), and every ARKit
 blendshape by name (`lens.signals.jawOpen`, `mouthSmileLeft`, and the rest),
 so a script reacts to an expression the way a trigger reads `jawOpen.blendshape`. Whatever it
 writes to a parameter flows into that tick like any other parameter change.
@@ -750,6 +752,12 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `device.in_volume` (true while the
   tracked device is inside the lens's `volume` region, see below), `tap`,
+  `touch.doubleTap` / `touch.longPress` (true for one tick when the screen
+  gesture completes), `touch.swipe('left')` (true for one tick on a swipe in
+  the named direction: left, right, up, down), `touch.drag` (true while one
+  finger slides), `touch.pinch` (the two-finger spread over the spread at
+  gesture start, one at rest), `touch.rotate` (two-finger twist in radians),
+  `pointer.x` / `pointer.y` (the primary finger's last position, 0 to 1),
   `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
   numeric or boolean literal.

@@ -336,6 +336,12 @@ extension GossSession {
     public func endARStroke() throws { try checked(goss_session_ar_brush_end(handle)) }
     public func undoARStroke() throws { try checked(goss_session_ar_brush_undo(handle)) }
     public func clearARStrokes() throws { try checked(goss_session_ar_brush_clear(handle)) }
+    /// Feeds one screen touch event so the engine recognizes the gestures a
+    /// lens reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled;
+    /// pointerId names the finger; x and y are normalized 0..1 over the frame.
+    public func touch(phase: UInt32, pointerId: UInt32 = 0, x: Float, y: Float) throws {
+        try checked(goss_session_touch(handle, phase, pointerId, x, y))
+    }
     public func grab(x: Float, y: Float, z: Float) throws { try checked(goss_session_grab(handle, x, y, z)) }
     public func release() throws { try checked(goss_session_release(handle)) }
     public func addCollider(x: Float, y: Float, z: Float) throws { try checked(goss_session_add_collider(handle, x, y, z)) }

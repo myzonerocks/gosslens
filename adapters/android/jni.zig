@@ -976,6 +976,12 @@ export fn Java_com_gosslens_Gosslens_nativeGrab(env: *JniEnv, cls: jobject, sess
     return @intFromEnum(abi.goss_session_grab(sessionFromHandle(session), x, y, z));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeTouch(env: *JniEnv, cls: jobject, session: i64, phase: i32, pointer_id: i32, x: f32, y: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_touch(sessionFromHandle(session), @intCast(@max(phase, 0)), @intCast(@max(pointer_id, 0)), x, y));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeRelease(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;

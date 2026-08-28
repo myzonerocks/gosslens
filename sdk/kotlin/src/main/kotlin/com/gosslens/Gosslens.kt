@@ -128,6 +128,7 @@ object Gosslens {
     internal external fun nativeArBrushUndo(session: Long): Int
     internal external fun nativeArBrushClear(session: Long): Int
     internal external fun nativeGrab(session: Long, x: Float, y: Float, z: Float): Int
+    internal external fun nativeTouch(session: Long, phase: Int, pointerId: Int, x: Float, y: Float): Int
     internal external fun nativeRelease(session: Long): Int
     internal external fun nativeAddCollider(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeEraseCollider(session: Long, x: Float, y: Float, z: Float, radius: Float): Int
@@ -1235,6 +1236,11 @@ class GossSession private constructor(
     fun endARStroke(): Boolean = Gosslens.nativeArBrushEnd(handle) == 0
     fun undoARStroke(): Boolean = Gosslens.nativeArBrushUndo(handle) == 0
     fun clearARStrokes(): Boolean = Gosslens.nativeArBrushClear(handle) == 0
+    /// Feeds one screen touch event so the engine recognizes the gestures a
+    /// lens reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled;
+    /// pointerId names the finger; x and y are normalized 0..1 over the frame.
+    fun touch(phase: Int, pointerId: Int = 0, x: Float, y: Float): Boolean =
+        Gosslens.nativeTouch(handle, phase, pointerId, x, y) == 0
     fun grab(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeGrab(handle, x, y, z) == 0
     fun release(): Boolean = Gosslens.nativeRelease(handle) == 0
     fun addCollider(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeAddCollider(handle, x, y, z) == 0

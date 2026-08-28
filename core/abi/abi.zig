@@ -10222,6 +10222,41 @@ test "a script node drives a parameter from a signal" {
     try t.expectApproxEqAbs(@as(f32, 0.8), v, 1e-6);
 }
 
+test "a fed swipe reaches a script through the touch signals" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const manifest_json =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [
+        \\   {"name": "px", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0},
+        \\   {"name": "swiped", "type": "float", "default": 0.0, "min": 0.0, "max": 4.0}],
+        \\ "nodes": [{"id": "drive", "type": "script", "params": {},
+        \\   "source": "function update(lens) { lens.params.px = lens.signals.pointer_x; lens.params.swiped = lens.signals.touch_swipe; }"}],
+        \\ "triggers": []}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len));
+
+    // One finger sweeps left to right across the frame inside a tick: a swipe
+    // right ending at 0.7, both of which the script reads back through params.
+    try t.expectEqual(Status.ok, goss_session_touch(session, 0, 1, 0.2, 0.5));
+    try t.expectEqual(Status.ok, goss_session_touch(session, 1, 1, 0.7, 0.5));
+    try t.expectEqual(Status.ok, goss_session_touch(session, 2, 1, 0.7, 0.5));
+
+    var signals = std.mem.zeroes(LensSignals);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 16_000, &signals));
+
+    var px: f32 = -1;
+    try t.expectEqual(Status.ok, goss_session_parameter_value(session, "px", "px".len, &px));
+    try t.expectApproxEqAbs(@as(f32, 0.7), px, 1e-4);
+    var swiped: f32 = -1;
+    try t.expectEqual(Status.ok, goss_session_parameter_value(session, "swiped", "swiped".len, &swiped));
+    try t.expectApproxEqAbs(@as(f32, 2.0), swiped, 1e-6);
+    try t.expectEqual(Status.invalid_argument, goss_session_touch(session, 9, 1, 0.5, 0.5));
+}
+
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {
     const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
     defer destroyEngine(engine);
