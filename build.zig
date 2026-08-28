@@ -1308,6 +1308,9 @@ pub fn build(b: *std.Build) void {
         // The same module instance the render backend imports: one file, one
         // module, so the strip geometry the proof checks is the one drawn.
         conformance_module.addImport("lash_mesh", lash_mesh_module);
+        // The face mesh topology the swap proof reads: the same feather and
+        // landmark projection the renderer draws with.
+        conformance_module.addImport("face_mesh_topology", face_mesh_topology_module);
         if (gltf_module) |gm| conformance_module.addImport("gltf", gm);
         const world_replay_module = b.createModule(.{
             .root_source_file = b.path("harness/world_replay.zig"),
@@ -4477,6 +4480,12 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // the tracked face through the makeup mesh UVs, masked to a channel
         // and blended over the skin. Shares vs_makeup's vec2 vertex contract.
         .{ .name = "fs_paint_face", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
+        // face.swap's own vertex and fragment stages: the mesh vertex stage
+        // carries a third stream, the per-vertex seam feather, beside the
+        // position and canonical UV, and the fragment stage warps the donor
+        // face onto the tracked mesh and feathers it into the surrounding skin.
+        .{ .name = "vs_face_swap", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_face_swap.def.sc" },
+        .{ .name = "fs_face_swap", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_face_swap.def.sc" },
         // mesh.lashes' own fixed fragment shader: the lash strip combed into
         // strands and blended over the frame in its tint. Shares vs_makeup's
         // vec2 vertex contract, the strip's live positions in screen UV.

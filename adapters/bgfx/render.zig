@@ -185,6 +185,7 @@ pub const Renderer = struct {
     reshape_bank_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
     paint_face_program: c.bgfx_program_handle_t,
+    face_swap_program: c.bgfx_program_handle_t,
     lash_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
     model_instanced_program: c.bgfx_program_handle_t,
@@ -209,6 +210,9 @@ pub const Renderer = struct {
     face_mesh_index_buffer: c.bgfx_index_buffer_handle_t,
     face_mesh_uv_buffer: c.bgfx_vertex_buffer_handle_t,
     face_mesh_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
+    /// The face swap's per-vertex seam feather, one static stream uploaded once
+    /// from face_mesh_topology.vertex_feather, 0 on the silhouette to 1 inside.
+    face_mesh_feather_buffer: c.bgfx_vertex_buffer_handle_t,
     /// The lash strip: fixed indices and strip UVs uploaded once, live tip
     /// positions rebuilt from the tracked eye landmarks and streamed per draw.
     lash_index_buffer: c.bgfx_index_buffer_handle_t,
@@ -274,6 +278,8 @@ pub const Renderer = struct {
     makeup_params_uniform: c.bgfx_uniform_handle_t,
     /// paint.face's opacity and blend mode, one vec4 (x opacity, y mode).
     paint_params_uniform: c.bgfx_uniform_handle_t,
+    /// face.swap's opacity and seam feather width, one vec4 (x opacity, y width).
+    swap_params_uniform: c.bgfx_uniform_handle_t,
     /// mesh.lashes' tint and opacity (u_lashColor), and its strand count and
     /// edge softness (u_lashShape).
     lash_color_uniform: c.bgfx_uniform_handle_t,
@@ -454,6 +460,7 @@ pub const Renderer = struct {
         const reshape_bank_program = try loadReshapeBankProgram();
         const makeup_program = try loadMakeupProgram();
         const paint_face_program = try loadPaintFaceProgram();
+        const face_swap_program = try loadFaceSwapProgram();
         const lash_program = try loadLashProgram();
         const model_program = try loadModelProgram();
         const model_instanced_program = try loadModelInstancedProgram();
@@ -489,6 +496,17 @@ pub const Renderer = struct {
         const face_mesh_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&face_mesh_topology.triangle_indices, @sizeOf(@TypeOf(face_mesh_topology.triangle_indices))), 0);
         const face_mesh_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&face_mesh_topology.vertex_uvs, @sizeOf(@TypeOf(face_mesh_topology.vertex_uvs))), &makeup_uv_layout, 0);
         const face_mesh_position_buffer = c.bgfx_create_dynamic_vertex_buffer(face_mesh_topology.vertex_count, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+
+        var feather_layout: c.bgfx_vertex_layout_t = undefined;
+        _ = c.bgfx_vertex_layout_begin(&feather_layout, c.BGFX_RENDERER_TYPE_NOOP);
+        _ = c.bgfx_vertex_layout_add(&feather_layout, c.BGFX_ATTRIB_TEXCOORD2, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        c.bgfx_vertex_layout_end(&feather_layout);
+        var feather_pairs: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+        for (face_mesh_topology.vertex_feather, 0..) |weight, at| {
+            feather_pairs[at * 2] = weight;
+            feather_pairs[at * 2 + 1] = 0.0;
+        }
+        const face_mesh_feather_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&feather_pairs, @sizeOf(@TypeOf(feather_pairs))), &feather_layout, 0);
 
         const lash_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&lash_mesh.triangle_indices, @sizeOf(@TypeOf(lash_mesh.triangle_indices))), 0);
         const lash_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&lash_mesh.vertex_uvs, @sizeOf(@TypeOf(lash_mesh.vertex_uvs))), &makeup_uv_layout, 0);
@@ -550,6 +568,7 @@ pub const Renderer = struct {
             .reshape_bank_program = reshape_bank_program,
             .makeup_program = makeup_program,
             .paint_face_program = paint_face_program,
+            .face_swap_program = face_swap_program,
             .lash_program = lash_program,
             .model_program = model_program,
             .model_instanced_program = model_instanced_program,
@@ -566,6 +585,7 @@ pub const Renderer = struct {
             .face_mesh_index_buffer = face_mesh_index_buffer,
             .face_mesh_uv_buffer = face_mesh_uv_buffer,
             .face_mesh_position_buffer = face_mesh_position_buffer,
+            .face_mesh_feather_buffer = face_mesh_feather_buffer,
             .lash_index_buffer = lash_index_buffer,
             .lash_uv_buffer = lash_uv_buffer,
             .lash_position_buffer = lash_position_buffer,
@@ -626,6 +646,7 @@ pub const Renderer = struct {
             .reshape_hubs_uniform = c.bgfx_create_uniform("u_reshapeHubs", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .paint_params_uniform = c.bgfx_create_uniform("u_paintParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .swap_params_uniform = c.bgfx_create_uniform("u_swapParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .lash_color_uniform = c.bgfx_create_uniform("u_lashColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .lash_shape_uniform = c.bgfx_create_uniform("u_lashShape", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
@@ -1044,6 +1065,19 @@ pub const Renderer = struct {
         };
     }
 
+    /// face.swap's program: its own mesh vertex stage carries the per-vertex
+    /// seam feather beside the position and UV, and the fragment stage warps
+    /// the donor face onto the tracked mesh and feathers it into the skin.
+    pub fn loadFaceSwapProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_face_swap_metal, blobs.fs_face_swap_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_face_swap_spirv, blobs.fs_face_swap_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_face_swap_essl, blobs.fs_face_swap_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_face_swap_wgsl, blobs.fs_face_swap_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// mesh.lashes' program: the makeup mesh vertex stage paired with the
     /// lash fragment shader, so the strip's live positions draw as strands
     /// rising off the lid in the node's tint.
@@ -1205,6 +1239,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.reshape_hubs_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
         c.bgfx_destroy_uniform(r.paint_params_uniform);
+        c.bgfx_destroy_uniform(r.swap_params_uniform);
         c.bgfx_destroy_uniform(r.lash_color_uniform);
         c.bgfx_destroy_uniform(r.lash_shape_uniform);
         c.bgfx_destroy_uniform(r.face_points_uniform);
@@ -1255,6 +1290,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.reshape_bank_program);
         c.bgfx_destroy_program(r.makeup_program);
         c.bgfx_destroy_program(r.paint_face_program);
+        c.bgfx_destroy_program(r.face_swap_program);
         c.bgfx_destroy_program(r.lash_program);
         c.bgfx_destroy_program(r.model_program);
         c.bgfx_destroy_program(r.model_instanced_program);
@@ -1266,6 +1302,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_index_buffer(r.face_mesh_index_buffer);
         c.bgfx_destroy_vertex_buffer(r.face_mesh_uv_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.face_mesh_position_buffer);
+        c.bgfx_destroy_vertex_buffer(r.face_mesh_feather_buffer);
         c.bgfx_destroy_index_buffer(r.lash_index_buffer);
         c.bgfx_destroy_vertex_buffer(r.lash_uv_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.lash_position_buffer);
@@ -2154,6 +2191,28 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.paint_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.paint_face_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Warps the donor face onto the tracked mesh: each vertex rides its tracked
+    /// landmark, samples the donor at its canonical face UV, keys the mask at the
+    /// screen position, and blends over the frame by opacity and the per-vertex
+    /// seam feather, so the swap fades into the surrounding skin.
+    pub fn submitFaceSwap(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, donor_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, feather: f32) void {
+        std.debug.assert(landmarks.len >= 468 * 3);
+        var positions: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+        face_mesh_topology.projectPositions(landmarks, frame_width, frame_height, &positions);
+        c.bgfx_update_dynamic_vertex_buffer(r.face_mesh_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
+        c.bgfx_set_dynamic_vertex_buffer(0, r.face_mesh_position_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_vertex_buffer(1, r.face_mesh_uv_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_vertex_buffer(2, r.face_mesh_feather_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_index_buffer(r.face_mesh_index_buffer, 0, face_mesh_topology.triangle_indices.len);
+        c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_makeup, donor_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ opacity, feather, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.swap_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.face_swap_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws the lash strip over the frame: each eye's tip row is rebuilt from

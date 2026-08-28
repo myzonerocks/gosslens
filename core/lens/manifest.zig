@@ -372,6 +372,19 @@ pub const PaintField = struct {
     blend: TintBlend = .normal,
 };
 
+pub const SwapField = struct {
+    /// A face.swap node warps a donor face (assets/<id>.png, baked in the
+    /// canonical face-mesh UVs) onto the live tracked mesh, blending it inside
+    /// the face with a feathered seam. opacity scales the swap strength.
+    opacity: f32 = 1.0,
+    /// The seam softness: how much of the silhouette-to-interior ramp the blend
+    /// fades over, so the donor meets the surrounding skin without a hard edge.
+    feather: f32 = 0.5,
+    /// An optional face region the swap is further confined to within the mesh;
+    /// null lets the face mesh and its feather define the region.
+    mask_channel: ?u8 = null,
+};
+
 pub const LashField = struct {
     /// A mesh.lashes node's lash strip: a tint colour (rgb, 0..1) and the
     /// opacity it blends over the frame. length is how far each strand rises
@@ -797,6 +810,9 @@ pub const Node = struct {
     /// Set only on a paint.face node: the opacity, face region, and blend it
     /// lays its texture onto the face with.
     paint: ?PaintField = null,
+    /// Set only on a face.swap node: the opacity, seam feather, and optional
+    /// region the donor face is warped onto the tracked face with.
+    swap: ?SwapField = null,
     /// Set only on a mesh.lashes node: the colour, opacity, length, and curl
     /// of the lash strip it rises off the upper lid.
     lashes: ?LashField = null,
@@ -1892,6 +1908,28 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "paint.face")) {
             paint_field = .{};
         }
+        var swap_field: ?SwapField = null;
+        if (getField(object, "swap")) |sv| {
+            const swapmark = path.push("swap");
+            if (!std.mem.eql(u8, node_type, "face.swap")) {
+                try diags.add(path.slice(), "swap is a face.swap field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "swap must be an object", .{});
+            } else {
+                var field: SwapField = .{};
+                if (getField(sv.object, "opacity")) |v| field.opacity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.opacity)), 0.0, 1.0);
+                if (getField(sv.object, "feather")) |v| field.feather = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.feather)), 0.02, 1.0);
+                if (getField(sv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "swap mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                swap_field = field;
+            }
+            path.pop(swapmark);
+        } else if (std.mem.eql(u8, node_type, "face.swap")) {
+            swap_field = .{};
+        }
         var lash_field: ?LashField = null;
         if (getField(object, "lashes")) |lv| {
             const lashmark = path.push("lashes");
@@ -2736,6 +2774,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .tint = tint_field,
             .smooth = smooth_field,
             .paint = paint_field,
+            .swap = swap_field,
             .lashes = lash_field,
             .retouch = retouch_field,
             .matte = matte_field,

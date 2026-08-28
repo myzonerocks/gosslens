@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.face-swap",
+  "version": "1.0.0",
+  "display_name": "Face Swap",
+  "engine_compat": ">=0.10",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "donor", "type": "face.swap", "inputs": {"frame": "camera"}, "params": {}, "swap": {"opacity": 1.0, "feather": 0.5}}
+  ],
+  "triggers": []
+}

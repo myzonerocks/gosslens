@@ -445,6 +445,22 @@ named region with no live data serves the zero mask, so the paint fades there.
 The `face-projection`, `war-paint`, and `face-tattoo` reference lenses show the
 whole-face projection, the skin-masked paint, and the region-masked ink.
 
+A `"face.swap"` node warps a donor face onto the tracked face. It ships the
+donor as `assets/<id>.png`, a face baked into the canonical face-mesh UV layout
+the same way `paint.face` and `mesh.face` read their textures, so the donor
+samples through the mesh and tracks and deforms with the live face. It carries a
+`"swap": {"opacity", "feather", "mask"}` block: `opacity` (0..1) scales the swap
+strength, `feather` (0.02..1) sets the seam softness, and `mask` optionally
+names a face channel the swap is further confined to within the mesh. The engine
+carries a per-vertex seam weight that is zero on the face silhouette and rises to
+one in the interior; the fragment stage ramps the swap alpha over the `feather`
+band of that weight, so the donor fades into the surrounding skin at the boundary
+instead of ending on a hard mesh edge. With no `mask` the face mesh and its
+feather define the region, and where the donor's own alpha is zero the live skin
+shows through. Without a tracked face the node draws nothing, the standard
+capability degradation. The `face-swap` reference lens shows the feathered swap
+on a tracked face.
+
 A `"mesh.lashes"` node rises a 3D lash strip off each eye's upper lid, the mesh
 sibling of the flat mascara and false-lash tints. It ships no asset: the strip
 is a thin ribbon whose base pins to the upper lash-line landmarks and whose tip
@@ -680,7 +696,9 @@ the draw board, the layout composite, the 2D sprite, the 2D text, the
 textured by `assets/<id>.png` in canonical UV space with v measured from
 the bottom; without a tracked face the node draws nothing, the standard
 capability degradation - `paint.face`, the same face-mesh texture warp
-masked to a face region and blended onto the skin by opacity and mode, and
+masked to a face region and blended onto the skin by opacity and mode,
+`face.swap`, a donor face warped through the mesh and feathered into the
+surrounding skin at the silhouette, and
 `mesh.lashes`, a 3D lash strip rising off each tracked upper lid).
 Splice happens once, at lens activation, not per frame; unsplice reverses
 it exactly, freeing every resource the splice allocated. Both are edit-time
@@ -915,7 +933,7 @@ never through code.**
 
 ## 9. Conformance
 
-The reference set (`lenses/reference/`) has 154 lens bundles, at least one
+The reference set (`lenses/reference/`) carries at least one bundle
 per node type and capability class the format defines: shader passes, the
 beauty nodes and the masked makeup passes, `mesh.face`, glTF models and the
 face, body, skeleton, and world anchors, physics bodies with joints and

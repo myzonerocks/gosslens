@@ -1010,6 +1010,13 @@ pub const Session = struct {
     paint_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     paint_face_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     paint_face_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// face.swap nodes: the donor load in flight and its resolved texture, the
+    /// optional face region each is confined to (absent lets the mesh and its
+    /// feather define it), and its {opacity, seam feather} blended onto the face.
+    face_swap_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
+    face_swap_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    face_swap_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    face_swap_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// sprite.2d nodes: the image load in flight, its resolved texture, and
     /// the normalized rect+opacity {x,y,w,h,opacity} the node draws at.
     sprite_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
@@ -1888,6 +1895,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // data serves the zero mask, so the paint fades to nothing there
             // rather than blocking the chain, and no face means no draw.
             .paint => s.paint_face_textures.contains(entry.graph_index),
+            // Ready once its donor has decoded; the face mesh and its feather
+            // confine the draw, so no face means no draw and a named region with
+            // no live data serves the zero mask rather than blocking the chain.
+            .face_swap => s.face_swap_textures.contains(entry.graph_index),
             .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index) or s.particle_base_meshes.contains(entry.graph_index) or s.particle_ribbon_meshes.contains(entry.graph_index) or s.gpu_particle_sims.contains(entry.graph_index) or s.fluid_sims.contains(entry.graph_index),
             // The draw board carries no loaded asset: it passes the frame
             // through and draws the session's brush strokes over it, so it is
@@ -2643,6 +2654,38 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     var tracked: face.Result = undefined;
                     if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
                         r.submitFaceMaterial(view_id, input_texture, paint_texture, mask_tex, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), params[0], params[1]);
+                    }
+                }
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .face_swap => {
+                const donor_texture = s.face_swap_textures.get(entry.graph_index) orelse continue;
+                const params = s.face_swap_params.get(entry.graph_index) orelse [2]f32{ 1.0, 0.5 };
+                // A named region keys the swap further; an absent class serves the
+                // zero mask so the swap fades there, and no channel named lets the
+                // face mesh and its feather define the region.
+                const mask_tex = if (s.face_swap_masks.get(entry.graph_index)) |channel|
+                    (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
+                else
+                    r.default_mask_texture;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The frame passes through whole; the face mesh then warps the
+                // donor over it. No tracked face means no draw, the capability's
+                // defined degradation.
+                r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                if (s.face_tracking) |worker| {
+                    var tracked: face.Result = undefined;
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                        r.submitFaceSwap(view_id, input_texture, donor_texture, mask_tex, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), params[0], params[1]);
                     }
                 }
                 if (output) |target| {
@@ -3476,6 +3519,10 @@ pub fn destroySession(session: *Session) void {
     session.paint_face_textures.deinit(session.engine.gpa);
     session.paint_face_masks.deinit(session.engine.gpa);
     session.paint_face_params.deinit(session.engine.gpa);
+    session.face_swap_loaders.deinit(session.engine.gpa);
+    session.face_swap_textures.deinit(session.engine.gpa);
+    session.face_swap_masks.deinit(session.engine.gpa);
+    session.face_swap_params.deinit(session.engine.gpa);
     session.model_face_anchors.deinit(session.engine.gpa);
     session.model_body_anchors.deinit(session.engine.gpa);
     session.model_skeleton_anchors.deinit(session.engine.gpa);
@@ -3812,6 +3859,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollEnvLoaders(s, r, s.engine.gpa);
         pollMeshFaceLoaders(s, r, s.engine.gpa);
         pollPaintFaceLoaders(s, r, s.engine.gpa);
+        pollFaceSwapLoaders(s, r, s.engine.gpa);
         pollSpriteLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
@@ -4386,7 +4434,7 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     // sub-frustum crop; the screen-space face-mesh overlay and rotated or
     // mirrored plain frames stay single-target under the cap.
     const tile_cap: u32 = if (s.capture_tile_cap != 0) s.capture_tile_cap else 16384;
-    const has_screenspace_mesh = s.mesh_face_textures.count() > 0 or s.paint_face_textures.count() > 0 or s.lash_params.count() > 0;
+    const has_screenspace_mesh = s.mesh_face_textures.count() > 0 or s.paint_face_textures.count() > 0 or s.face_swap_textures.count() > 0 or s.lash_params.count() > 0;
     const rot = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
     const upright = rot == 0 and (current.desc.flags & frame_flag_mirror) == 0;
     const tileable = !has_screenspace_mesh and upright;
@@ -5720,7 +5768,7 @@ pub export fn goss_session_face_count(session: ?*Session, out_count: ?*u32) Stat
 /// wait for a deterministic frame before it reads the output.
 pub fn loadsPending(session: ?*Session) u32 {
     const s = session orelse return 0;
-    var n: usize = s.sprite_loaders.count() + s.model_loaders.count() + s.lut_loaders.count() + s.blend_loaders.count() + s.env_loaders.count() + s.mesh_face_loaders.count() + s.paint_face_loaders.count();
+    var n: usize = s.sprite_loaders.count() + s.model_loaders.count() + s.lut_loaders.count() + s.blend_loaders.count() + s.env_loaders.count() + s.mesh_face_loaders.count() + s.paint_face_loaders.count() + s.face_swap_loaders.count();
     var it = s.sprite_anims.valueIterator();
     while (it.next()) |anim| {
         for (anim.loaders) |maybe| {
@@ -6403,6 +6451,8 @@ fn maskChannelNeeded(session: *Session, channel: u8) bool {
     while (smooth_it.next()) |c| if (c.* == channel) return true;
     var paint_it = session.paint_face_masks.valueIterator();
     while (paint_it.next()) |c| if (c.* == channel) return true;
+    var swap_it = session.face_swap_masks.valueIterator();
+    while (swap_it.next()) |c| if (c.* == channel) return true;
     var retouch_it = session.retouch_masks.valueIterator();
     while (retouch_it.next()) |c| if (c.* == channel) return true;
     var matte_it = session.matte_masks.valueIterator();
@@ -6727,6 +6777,8 @@ fn destroyBlendState(session: *Session) void {
     session.smooth_masks.clearRetainingCapacity();
     session.paint_face_masks.clearRetainingCapacity();
     session.paint_face_params.clearRetainingCapacity();
+    session.face_swap_masks.clearRetainingCapacity();
+    session.face_swap_params.clearRetainingCapacity();
     session.retouch_params.clearRetainingCapacity();
     session.retouch_masks.clearRetainingCapacity();
     session.matte_params.clearRetainingCapacity();
@@ -6858,6 +6910,16 @@ fn destroyMeshFaceState(session: *Session) void {
         while (paint_texture_it.next()) |handle| r.destroyTexture(handle.*);
     }
     session.paint_face_textures.clearRetainingCapacity();
+
+    var swap_loader_it = session.face_swap_loaders.valueIterator();
+    while (swap_loader_it.next()) |loader| loader.*.deinit();
+    session.face_swap_loaders.clearRetainingCapacity();
+
+    if (session.engine.renderer) |*r| {
+        var swap_texture_it = session.face_swap_textures.valueIterator();
+        while (swap_texture_it.next()) |handle| r.destroyTexture(handle.*);
+    }
+    session.face_swap_textures.clearRetainingCapacity();
 }
 
 fn destroyModelState(session: *Session) void {
@@ -7966,6 +8028,59 @@ fn pollPaintFaceLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.All
     }
 }
 
+/// Starts a background load for every spliced face.swap node's donor texture
+/// (assets/<stem>.png) - mirrors createPaintFaceLoaders exactly.
+fn createFaceSwapLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const swaps = try lens.faceSwapNodes(gpa, &session.lens_graph);
+    defer gpa.free(swaps);
+    for (swaps) |swap| {
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, swap.donor_stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        session.face_swap_loaders.put(gpa, swap.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Resolves the active lens's face.swap nodes into their region and
+/// {opacity, feather} params, once at activation - mirrors createPaintFaceParams.
+fn createFaceSwapParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const swaps = try lens.faceSwapNodes(gpa, &session.lens_graph);
+    defer gpa.free(swaps);
+    for (swaps) |swap| {
+        session.face_swap_params.put(gpa, swap.graph_index, .{ swap.opacity, swap.feather }) catch {};
+        if (swap.mask_channel) |channel| session.face_swap_masks.put(gpa, swap.graph_index, channel) catch {};
+    }
+}
+
+/// Turns every finished face.swap donor load into a real texture -
+/// mirrors pollPaintFaceLoaders exactly.
+fn pollFaceSwapLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.face_swap_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+            gpa.free(decoded.rgba);
+            session.face_swap_textures.put(gpa, entry.key_ptr.*, texture) catch {
+                r.destroyTexture(texture);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.face_swap_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
 /// Fills the session's emitter buffer with a sampled subset of the live face
 /// landmarks, mapped from frame pixels into the particle camera's world space,
 /// and points the face-pattern sim at them. No tracked face leaves the buffer
@@ -8464,6 +8579,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createEnvLoaders(session, gpa, bundle_path);
     try createMeshFaceLoaders(session, gpa, bundle_path);
     try createPaintFaceLoaders(session, gpa, bundle_path);
+    try createFaceSwapLoaders(session, gpa, bundle_path);
     try createSpriteLoaders(session, gpa, bundle_path);
     try createVideoLoaders(session, gpa, bundle_path);
     try createTextTextures(session, gpa);
@@ -8479,6 +8595,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createTintParams(session, gpa);
     try createSmoothParams(session, gpa);
     try createPaintFaceParams(session, gpa);
+    try createFaceSwapParams(session, gpa);
     try createRetouchParams(session, gpa);
     try createMatteParams(session, gpa);
     try createHairMatteParams(session, gpa);

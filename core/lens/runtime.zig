@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -47,6 +47,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "mesh.face")) return .mesh_face;
     if (std.mem.eql(u8, type_str, "mesh.lashes")) return .mesh_lashes;
     if (std.mem.eql(u8, type_str, "paint.face")) return .paint_face;
+    if (std.mem.eql(u8, type_str, "face.swap")) return .face_swap;
     if (std.mem.eql(u8, type_str, "lut.pass")) return .lut_pass;
     if (std.mem.eql(u8, type_str, "blend.pass")) return .blend_pass;
     if (std.mem.eql(u8, type_str, "blur.pass")) return .blur_pass;
@@ -98,7 +99,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
     };
 }
 
@@ -164,6 +165,9 @@ const LensNode = struct {
     /// .paint_face only: the opacity, face region, and blend the node lays its
     /// texture onto the face with.
     paint: ?manifest.PaintField = null,
+    /// .face_swap only: the opacity, seam feather, and optional region the donor
+    /// face is warped onto the tracked face with.
+    swap: ?manifest.SwapField = null,
     /// .mesh_lashes only: the colour, opacity, length, and curl of the lash
     /// strip the node rises off the upper lid.
     lashes: ?manifest.LashField = null,
@@ -281,6 +285,20 @@ pub const PaintFaceNode = struct {
     opacity: f32,
     /// 0 blend straight over, 1 multiply (ink tattoo), 2 screen (projection).
     blend: u8,
+};
+
+/// One face.swap node ready for the caller to load and draw - which graph node
+/// it is, the donor face (assets/<stem>.png, in canonical face-mesh UVs) it
+/// warps onto the tracked face, and the opacity, seam feather, and optional
+/// region it blends the donor in with.
+pub const FaceSwapNode = struct {
+    graph_index: graph.NodeIndex,
+    donor_stem: []const u8,
+    /// An optional face region the swap is further confined to, null for the
+    /// whole face mesh.
+    mask_channel: ?u8,
+    opacity: f32,
+    feather: f32,
 };
 
 /// One sprite.2d node ready for the caller to load and draw - which graph
@@ -486,7 +504,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap };
 
 /// One matte.hair source node ready for the caller to draw - which graph node
 /// it is, and its guided-filter parameters packed for the refine pass (radius,
@@ -1010,6 +1028,22 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every face.swap node this lens spliced, in execution order, each carrying
+    /// its donor stem, optional region, opacity, and seam feather - mirrors the
+    /// other per-kind accessors.
+    pub fn faceSwapNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]FaceSwapNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(FaceSwapNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .face_swap) continue;
+            const sf = node.swap orelse manifest.SwapField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .donor_stem = node.asset_stem.?, .mask_channel = sf.mask_channel, .opacity = sf.opacity, .feather = sf.feather });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every sprite.2d node this lens spliced, in execution order, each
     /// carrying its image stem, screen rect, and opacity - mirrors the
     /// other per-kind accessors.
@@ -1094,6 +1128,7 @@ pub const Lens = struct {
                 .mesh_face => .mesh,
                 .mesh_lashes => .lashes,
                 .paint_face => .paint,
+                .face_swap => .face_swap,
                 .draw_board => .draw_board,
                 .sprite_2d, .text_2d, .video_texture => .sprite,
                 else => continue,
@@ -1301,7 +1336,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .graph_index = graph_index,
             .node_type = node_type,
             .asset_stem = switch (node_type) {
-                .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .paint_face, .sprite_2d => node.id,
+                .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .paint_face, .face_swap, .sprite_2d => node.id,
                 else => null,
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
@@ -1329,6 +1364,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .tint = if (node_type == .tint_pass) node.tint else null,
             .smooth = if (node_type == .smooth_pass) node.smooth else null,
             .paint = if (node_type == .paint_face) node.paint else null,
+            .swap = if (node_type == .face_swap) node.swap else null,
             .lashes = if (node_type == .mesh_lashes) node.lashes else null,
             .retouch = if (node_type == .retouch_pass) node.retouch else null,
             .matte = if (node_type == .matte_refine) node.matte else null,

@@ -684,6 +684,74 @@ pub const triangle_indices = [index_count]u16{
     13, 109, 14, 17, 16, 113,
 };
 
+/// The face-oval silhouette landmarks: the outer boundary of the tracked face.
+/// A face swap ramps its blend to zero here so the donor meets the surrounding
+/// skin in a soft seam rather than at a hard mesh edge.
+pub const face_oval_landmarks = [_]u16{
+    10,  338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+    397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+    172, 58,  132, 93,  234, 127, 162, 21,  54,  103, 67,  109,
+};
+
+/// The seam feather band in canonical UV: a vertex within this distance of the
+/// silhouette ramps its swap coverage down toward the edge.
+pub const feather_band: f32 = 0.15;
+
+/// Per-vertex seam feather, 0 on the silhouette rising to 1 in the interior:
+/// the canonical-UV distance to the nearest silhouette vertex over the band.
+/// A face swap scales its coverage by this so the donor fades into the
+/// surrounding skin instead of ending at a hard mesh edge.
+pub const vertex_feather = computeFeather();
+
+fn computeFeather() [vertex_count]f32 {
+    @setEvalBranchQuota(20_000_000);
+    var oval: [face_oval_landmarks.len][2]f32 = undefined;
+    var count: usize = 0;
+    for (face_oval_landmarks) |landmark| {
+        if (vertexRidingLandmark(landmark)) |b| {
+            oval[count] = .{ vertex_uvs[b * 2], vertex_uvs[b * 2 + 1] };
+            count += 1;
+        }
+    }
+    var out: [vertex_count]f32 = undefined;
+    var v: usize = 0;
+    while (v < vertex_count) : (v += 1) {
+        const ux = vertex_uvs[v * 2];
+        const uy = vertex_uvs[v * 2 + 1];
+        var nearest: f32 = 1.0e9;
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const dx = ux - oval[i][0];
+            const dy = uy - oval[i][1];
+            const d2 = dx * dx + dy * dy;
+            if (d2 < nearest) nearest = d2;
+        }
+        const d = @sqrt(nearest);
+        out[v] = if (d >= feather_band) 1.0 else d / feather_band;
+    }
+    return out;
+}
+
+/// The mesh vertex riding a landmark, or null if none does. Comptime-only, to
+/// place the silhouette in UV space for the feather.
+fn vertexRidingLandmark(landmark: u16) ?usize {
+    for (vertex_landmarks, 0..) |rides, at| {
+        if (rides == landmark) return at;
+    }
+    return null;
+}
+
+/// Projects the live tracked landmarks onto the mesh vertices in 0-1 frame UV,
+/// the position stream a face-mesh draw uploads each frame. Moving a landmark
+/// moves every vertex riding it, so a mesh effect tracks and deforms with the
+/// face.
+pub fn projectPositions(landmarks: []const f32, frame_width: f32, frame_height: f32, out: *[vertex_count * 2]f32) void {
+    for (vertex_landmarks, 0..) |landmark, at| {
+        out[at * 2] = landmarks[@as(usize, landmark) * 3] / frame_width;
+        out[at * 2 + 1] = landmarks[@as(usize, landmark) * 3 + 1] / frame_height;
+    }
+}
+
 const std = @import("std");
 const t = std.testing;
 
@@ -697,4 +765,50 @@ test "uvs live in the unit square" {
     while (at < vertex_uvs.len) : (at += 1) {
         try t.expect(vertex_uvs[at] >= 0.0 and vertex_uvs[at] <= 1.0);
     }
+}
+
+test "the swap feather is graded, zero on the silhouette and one inside" {
+    // Every silhouette vertex sits at the band edge, so its feather is zero.
+    for (face_oval_landmarks) |landmark| {
+        const b = vertexRidingLandmark(landmark) orelse continue;
+        try t.expect(vertex_feather[b] < 0.001);
+    }
+    // The feather spans the full range and carries a genuine middle band, so
+    // the seam is a graded transition, not a hard cut.
+    var min_f: f32 = 1.0;
+    var max_f: f32 = 0.0;
+    var interior: usize = 0;
+    var graded: usize = 0;
+    for (vertex_feather) |f| {
+        try t.expect(f >= 0.0 and f <= 1.0);
+        if (f < min_f) min_f = f;
+        if (f > max_f) max_f = f;
+        if (f >= 0.999) interior += 1;
+        if (f > 0.05 and f < 0.95) graded += 1;
+    }
+    try t.expect(min_f < 0.001);
+    try t.expect(max_f > 0.999);
+    try t.expect(interior > 0);
+    try t.expect(graded > 8);
+}
+
+test "projected positions ride the landmarks they carry" {
+    var landmarks: [468 * 3]f32 = undefined;
+    for (0..468) |i| {
+        landmarks[i * 3] = @floatFromInt(i);
+        landmarks[i * 3 + 1] = @floatFromInt(468 - i);
+        landmarks[i * 3 + 2] = 0;
+    }
+    var pos: [vertex_count * 2]f32 = undefined;
+    projectPositions(&landmarks, 100.0, 200.0, &pos);
+    // Each vertex reads exactly its landmark, so shifting a landmark shifts it.
+    for (vertex_landmarks, 0..) |lm, at| {
+        try t.expectEqual(@as(f32, @floatFromInt(lm)) / 100.0, pos[at * 2]);
+    }
+    var shifted = landmarks;
+    const moved = vertex_landmarks[0];
+    shifted[@as(usize, moved) * 3] += 25.0;
+    var pos2: [vertex_count * 2]f32 = undefined;
+    projectPositions(&shifted, 100.0, 200.0, &pos2);
+    try t.expect(pos2[0] > pos[0]);
 }

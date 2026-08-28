@@ -18,6 +18,7 @@ const world_replay = @import("world_replay");
 const math = @import("math");
 const lens_manifest = @import("manifest");
 const lash_mesh = @import("lash_mesh");
+const face_mesh_topology = @import("face_mesh_topology");
 const material = @import("material");
 const gltf = @import("gltf");
 
@@ -8358,6 +8359,162 @@ fn proveFaceMaterial(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn proveFaceSwap(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // The tracked face gives the live landmarks the donor warps to; the nose is
+    // the facial midline the two-tone donor seam should land on.
+    var nose_x: f32 = 0;
+    var frame_w: f32 = 1;
+    var frame_h: f32 = 1;
+    var landmarks: [468 * 3]f32 = undefined;
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL face.swap tracking enable\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        frame_w = @floatFromInt(planes.width);
+        frame_h = @floatFromInt(planes.height);
+        nose_x = result.landmarks[1 * 3] / frame_w;
+        for (0..468 * 3) |i| landmarks[i] = result.landmarks[i];
+    }
+
+    // The seam feather is a graded transition, not a hard cut: zero on the
+    // silhouette, one deep inside, with a real band between.
+    var min_f: f32 = 1.0;
+    var max_f: f32 = 0.0;
+    var graded: usize = 0;
+    for (face_mesh_topology.vertex_feather) |f| {
+        if (f < min_f) min_f = f;
+        if (f > max_f) max_f = f;
+        if (f > 0.05 and f < 0.95) graded += 1;
+    }
+    if (!(min_f < 0.001 and max_f > 0.999 and graded > 8)) {
+        std.debug.print("conformance: FAIL the swap seam is not a graded feather (min {d:.3} max {d:.3} band {d})\n", .{ min_f, max_f, graded });
+        return false;
+    }
+
+    // Moving a live landmark carries the swapped region: each vertex rides its
+    // tracked landmark, so shifting the nose shifts only the vertices on it.
+    var base_pos: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+    face_mesh_topology.projectPositions(&landmarks, frame_w, frame_h, &base_pos);
+    var moved = landmarks;
+    moved[1 * 3] += 0.1 * frame_w;
+    var moved_pos: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+    face_mesh_topology.projectPositions(&moved, frame_w, frame_h, &moved_pos);
+    var carried = false;
+    for (face_mesh_topology.vertex_landmarks, 0..) |lm, at| {
+        if (lm == 1) {
+            if (@abs(moved_pos[at * 2] - base_pos[at * 2]) > 0.05) carried = true;
+        } else if (moved_pos[at * 2] != base_pos[at * 2] or moved_pos[at * 2 + 1] != base_pos[at * 2 + 1]) {
+            std.debug.print("conformance: FAIL a vertex off the moved landmark shifted with it\n", .{});
+            return false;
+        }
+    }
+    if (!carried) {
+        std.debug.print("conformance: FAIL moving a live landmark did not carry the swapped mesh\n", .{});
+        return false;
+    }
+
+    const swap = try captureLens(gpa, engine, ".lens-packages/face-swap", true);
+    defer gpa.free(swap.data);
+    const swap_b = try captureLens(gpa, engine, ".lens-packages/face-swap", true);
+    defer gpa.free(swap_b.data);
+    const plain = try captureLens(gpa, engine, ".lens-packages/face-swap", false);
+    defer gpa.free(plain.data);
+    if (swap.w != plain.w or swap.h != plain.h or swap.w != swap_b.w) {
+        std.debug.print("conformance: FAIL face.swap renders differ in size\n", .{});
+        return false;
+    }
+
+    // Bit-stable across two runs, and present only with a tracked face.
+    if (!std.mem.eql(u8, swap.data, swap_b.data)) {
+        std.debug.print("conformance: FAIL the face swap is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, swap.data, plain.data)) {
+        std.debug.print("conformance: FAIL the face swap is gone with a tracked face - it never drew\n", .{});
+        return false;
+    }
+
+    const w = swap.w;
+    const h = swap.h;
+    var changed: usize = 0;
+    var blue_count: usize = 0;
+    var yellow_count: usize = 0;
+    var blue_sum_x: f64 = 0;
+    var yellow_sum_x: f64 = 0;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        var x: usize = 0;
+        while (x < w) : (x += 1) {
+            const pr = plain.r(x, y);
+            const pg = plain.g(x, y);
+            const pb = plain.b(x, y);
+            const sr = swap.r(x, y);
+            const sg = swap.g(x, y);
+            const sb = swap.b(x, y);
+            if (absDiff(sr, pr) + absDiff(sg, pg) + absDiff(sb, pb) > 60) {
+                changed += 1;
+                if (sb > sr + 60) {
+                    blue_count += 1;
+                    blue_sum_x += @floatFromInt(x);
+                } else if (sr > sb + 60) {
+                    yellow_count += 1;
+                    yellow_sum_x += @floatFromInt(x);
+                }
+            }
+        }
+    }
+
+    const total: f64 = @floatFromInt(w * h);
+    if (blue_count == 0 or yellow_count == 0) {
+        std.debug.print("conformance: FAIL the donor's own colors did not appear (blue {d} yellow {d})\n", .{ blue_count, yellow_count });
+        return false;
+    }
+    const wf: f64 = @floatFromInt(w);
+    const blue_cx = blue_sum_x / @as(f64, @floatFromInt(blue_count));
+    const yellow_cx = yellow_sum_x / @as(f64, @floatFromInt(yellow_count));
+    // The swap must clearly repaint the face region, not a stray pixel.
+    if (@as(f64, @floatFromInt(changed)) < 0.02 * total) {
+        std.debug.print("conformance: FAIL the swap barely touched the frame ({d} px)\n", .{changed});
+        return false;
+    }
+    const seam = (blue_cx + yellow_cx) * 0.5;
+    const expected = @as(f64, nose_x) * wf;
+    if (@abs(seam - expected) > 0.15 * wf) {
+        std.debug.print("conformance: FAIL the donor seam did not land on the face midline (seam {d:.1} nose {d:.1})\n", .{ seam, expected });
+        return false;
+    }
+    // The face mesh and its feather confine the swap: the frame corners, well
+    // outside the mesh, stay byte-identical to the no-swap control.
+    if (!cornersUnchanged(swap, plain)) {
+        std.debug.print("conformance: FAIL the swap changed a frame corner outside the face\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF face.swap warps a donor face through the mesh onto the tracked landmarks (two-tone seam at x {d:.0} on the nose at x {d:.0}, {d} px changed), a graded feather (feather {d:.2}..{d:.2}, {d}-vertex band) confines it to the face (corners clean), gone with no face, bit-stable\n", .{ seam, expected, changed, min_f, max_f, graded });
+    return true;
+}
+
 fn proveGlam(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // The glam look chains three tint.pass nodes (lips, eyes, brows), each
     // reading the previous one's output, so it stacks all three regions and
@@ -11575,6 +11732,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveFoundation(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "paint-face")) {
             if (!try proveFaceMaterial(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "face-swap")) {
+            if (!try proveFaceSwap(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "glam")) {
             if (!try proveGlam(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "contour-highlight")) {
@@ -11703,6 +11862,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("foundation");
     if (!try proveFaceMaterial(gpa, engine)) return 1;
     watchHold("paint.face");
+    if (!try proveFaceSwap(gpa, engine)) return 1;
+    watchHold("face.swap");
     if (!try proveGlam(gpa, engine)) return 1;
     watchHold("glam look");
     if (!try proveContourHighlight(gpa, engine)) return 1;

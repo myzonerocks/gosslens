@@ -219,6 +219,19 @@ pub const Renderer = struct {
         _ = blend;
     }
 
+    pub fn submitFaceSwap(r: *Renderer, view_id: u16, background_texture: TextureHandle, donor_texture: TextureHandle, mask_texture: TextureHandle, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, feather: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = background_texture;
+        _ = donor_texture;
+        _ = mask_texture;
+        _ = landmarks;
+        _ = frame_width;
+        _ = frame_height;
+        _ = opacity;
+        _ = feather;
+    }
+
     pub fn submitLashMesh(r: *Renderer, view_id: u16, background_texture: TextureHandle, landmarks: []const f32, frame_width: f32, frame_height: f32, color: [4]f32, length: f32, curl: f32) void {
         _ = r;
         _ = view_id;
