@@ -1272,6 +1272,19 @@ export class GossSession {
     this.mod.ccall("goss_session_touch", "number", ["number", "number", "number", "number", "number"], [this.handle, phase, pointerId, x, y]);
   }
 
+  /** Drains one haptic a haptic trigger queued this tick, or null when none
+   * remain. Call in a loop after tickLens and buzz the device for each. The
+   * style is 0 light..7 failure; intensity is a 0..1 hint. */
+  pullHaptic(): { style: number; intensity: number } | null {
+    const stylePtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const intensityPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const status = this.mod.ccall("goss_session_pull_haptic", "number", ["number", "number", "number"], [this.handle, stylePtr, intensityPtr]);
+    const result = status === 0 ? { style: this.mod.getValue(stylePtr, "i32"), intensity: this.mod.getValue(intensityPtr, "float") } : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [stylePtr, 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [intensityPtr, 4]);
+    return result;
+  }
+
   grab(x: number, y: number, z: number): void {
     this.mod.ccall("goss_session_grab", "number", ["number", "number", "number", "number"], [this.handle, x, y, z]);
   }

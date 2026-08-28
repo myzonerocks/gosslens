@@ -900,6 +900,8 @@ pub const ActionKind = enum {
     increment_counter,
     reset_counter,
     set_counter,
+    /// Device haptic: target names the style, to is the 0..1 intensity.
+    haptic,
 };
 
 pub const Curve = enum { linear, ease_in_quad, ease_out_quad, ease_in_out_quad, ease_in_out_cubic, ease_in_out_sine, spring };

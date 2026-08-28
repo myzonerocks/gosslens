@@ -817,10 +817,13 @@ curve primitives in 6.3), `param_set` (immediate), `play_animation` (a
 named glTF animation clip), `play_sound` (start a voice for the sound at
 the bundle-relative path in `target`, decoded from `sounds/` and mixed into
 the audio the host pulls out), `reset_timer` (name a timer signal back to
-zero), and the counter actions `increment_counter`, `reset_counter` and
+zero), the counter actions `increment_counter`, `reset_counter` and
 `set_counter` (step a named counter that `counter('name')` reads and that
 persists across ticks, so a no-code lens keeps a score or a step index with no
-script; `set_counter` writes `to`). Reserved, accepted by the validator but not yet executed by the
+script; `set_counter` writes `to`), and `haptic` (buzz the device: `target`
+names the style, one of light, medium, heavy, soft, rigid, success, warning,
+failure, and `to` is a 0..1 intensity hint the host drains through
+`goss_session_pull_haptic`). Reserved, accepted by the validator but not yet executed by the
 runtime: `show` / `hide` (a node by id) and `swap_subgraph` (splice a
 different set of this lens's own nodes in place of a named group -
 edit-time, deferred to the next frame boundary so it never tears a

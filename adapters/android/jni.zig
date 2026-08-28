@@ -982,6 +982,20 @@ export fn Java_com_gosslens_Gosslens_nativeTouch(env: *JniEnv, cls: jobject, ses
     return @intFromEnum(abi.goss_session_touch(sessionFromHandle(session), @intCast(@max(phase, 0)), @intCast(@max(pointer_id, 0)), x, y));
 }
 
+export fn Java_com_gosslens_Gosslens_nativePullHaptic(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: *[2]f32 = @ptrCast(@alignCast(bytes));
+    var style: u32 = 0;
+    var intensity: f32 = 0;
+    const rc = abi.goss_session_pull_haptic(sessionFromHandle(session), &style, &intensity);
+    if (rc == .ok) {
+        out[0] = @floatFromInt(style);
+        out[1] = intensity;
+    }
+    return @intFromEnum(rc);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeRelease(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;

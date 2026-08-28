@@ -1,4 +1,4 @@
-abi 0.54
+abi 0.55
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -208,3 +208,4 @@ fn goss_status goss_session_tick_lens(goss_session *session, uint32_t dt_us, con
 fn goss_status goss_physics_hair_remove(goss_session *session, uint32_t hair_id)
 fn goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle)
 fn goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)
+fn goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)

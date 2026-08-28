@@ -129,6 +129,7 @@ object Gosslens {
     internal external fun nativeArBrushClear(session: Long): Int
     internal external fun nativeGrab(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeTouch(session: Long, phase: Int, pointerId: Int, x: Float, y: Float): Int
+    internal external fun nativePullHaptic(session: Long, outBuffer: ByteBuffer): Int
     internal external fun nativeRelease(session: Long): Int
     internal external fun nativeAddCollider(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeEraseCollider(session: Long, x: Float, y: Float, z: Float, radius: Float): Int
@@ -1241,6 +1242,21 @@ class GossSession private constructor(
     /// pointerId names the finger; x and y are normalized 0..1 over the frame.
     fun touch(phase: Int, pointerId: Int = 0, x: Float, y: Float): Boolean =
         Gosslens.nativeTouch(handle, phase, pointerId, x, y) == 0
+
+    /// A device haptic a haptic trigger asked for: the style index (0 light..7
+    /// failure) and a 0..1 intensity hint.
+    data class Haptic(val style: Int, val intensity: Float)
+
+    private val hapticBuffer: ByteBuffer = ByteBuffer.allocateDirect(2 * 4).order(ByteOrder.nativeOrder())
+
+    /// Drains one haptic queued this tick, or null when none remain. Call in a
+    /// loop after tickLens and buzz the device for each.
+    fun pullHaptic(): Haptic? {
+        if (Gosslens.nativePullHaptic(handle, hapticBuffer) != 0) return null
+        hapticBuffer.rewind()
+        val fb = hapticBuffer.asFloatBuffer()
+        return Haptic(fb.get(0).toInt(), fb.get(1))
+    }
     fun grab(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeGrab(handle, x, y, z) == 0
     fun release(): Boolean = Gosslens.nativeRelease(handle) == 0
     fun addCollider(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeAddCollider(handle, x, y, z) == 0

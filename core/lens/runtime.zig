@@ -536,6 +536,16 @@ pub const ActivateError = error{
 /// returns these instead of touching an engine directly.
 pub const AppliedEffect = struct { effect: EffectSlot, value: f32 };
 
+/// The device haptic a lens asks for. The style names the feel; the host maps
+/// it to the platform's own haptic vocabulary. Intensity is 0..1, a hint the
+/// host may honor where the platform allows it.
+pub const HapticStyle = enum(u8) { light, medium, heavy, soft, rigid, success, warning, failure };
+pub const HapticEvent = struct { style: HapticStyle, intensity: f32 };
+
+fn hapticStyleFromName(name: []const u8) HapticStyle {
+    return std.meta.stringToEnum(HapticStyle, name) orelse .medium;
+}
+
 pub const Lens = struct {
     gpa: std.mem.Allocator,
     manifest: manifest.Manifest,
@@ -573,6 +583,11 @@ pub const Lens = struct {
     /// frame path never allocates.
     tick_sounds: [][]const u8,
     tick_sound_count: usize = 0,
+    /// Haptics a haptic trigger fired this tick; the host drains them each
+    /// frame and buzzes the device. Sized to the trigger count, so the frame
+    /// path never allocates.
+    tick_haptics: []HapticEvent,
+    tick_haptic_count: usize = 0,
 
     pub fn deinit(self: *Lens, g: *graph.Graph) void {
         for (self.nodes) |n| g.removeNode(n.graph_index);
@@ -593,6 +608,7 @@ pub const Lens = struct {
         self.gpa.free(self.tick_touched);
         self.gpa.free(self.tick_applied);
         self.gpa.free(self.tick_sounds);
+        self.gpa.free(self.tick_haptics);
         self.manifest.deinit();
         self.* = undefined;
     }
@@ -1236,6 +1252,12 @@ pub const Lens = struct {
         return self.tick_sounds[0..self.tick_sound_count];
     }
 
+    /// The haptics a haptic trigger fired on the last tick, for the host to
+    /// buzz the device with.
+    pub fn firedHaptics(self: *const Lens) []const HapticEvent {
+        return self.tick_haptics[0..self.tick_haptic_count];
+    }
+
     /// Whether this lens spliced any beauty.* node - what gates whether
     /// the live preview needs the GPU beauty compositing bridge running
     /// at all. A lens with no beauty node still lets a session enable
@@ -1475,6 +1497,8 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     errdefer gpa.free(tick_applied);
     const tick_sounds = try gpa.alloc([]const u8, lens_manifest.triggers.len);
     errdefer gpa.free(tick_sounds);
+    const tick_haptics = try gpa.alloc(HapticEvent, lens_manifest.triggers.len);
+    errdefer gpa.free(tick_haptics);
 
     return .{
         .gpa = gpa,
@@ -1493,6 +1517,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .tick_touched = tick_touched,
         .tick_applied = tick_applied,
         .tick_sounds = tick_sounds,
+        .tick_haptics = tick_haptics,
     };
 }
 
@@ -1599,6 +1624,7 @@ pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const Appl
     const touched_params = lens.tick_touched;
     @memset(touched_params, false);
     lens.tick_sound_count = 0;
+    lens.tick_haptic_count = 0;
 
     for (lens.compiled_triggers, 0..) |*expr, i| {
         const is_true = trigger.evaluate(expr.root, live_signals);
@@ -1679,6 +1705,12 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
         },
         .set_counter => {
             if (counterIndex(lens, action.target)) |idx| lens.counter_values[idx] = action.to;
+        },
+        .haptic => {
+            if (lens.tick_haptic_count < lens.tick_haptics.len) {
+                lens.tick_haptics[lens.tick_haptic_count] = .{ .style = hapticStyleFromName(action.target), .intensity = action.to };
+                lens.tick_haptic_count += 1;
+            }
         },
         .show, .hide, .swap_subgraph => {},
     }
@@ -2241,4 +2273,30 @@ test "a counter increments on an event, persists, and drives a trigger at its th
     // The next tick sees the counter at its threshold and fires the trigger.
     _ = tick(&lens, animation.fixed_step_us, .{});
     try t.expectApproxEqAbs(@as(f32, 1.0), lens.paramValue("win").?, 1e-6);
+}
+
+test "a haptic trigger queues a styled buzz for the host to drain" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const src =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [{"id": "s", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}}],
+        \\ "triggers": [{"when": "event('buzz')", "action": {"kind": "haptic", "target": "success", "to": 0.8}}]}
+    ;
+    const lens_manifest = try parseTestManifest(t.allocator, src);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const buzz = [_][]const u8{"buzz"};
+    _ = tick(&lens, animation.fixed_step_us, .{ .events = &buzz });
+    const fired = lens.firedHaptics();
+    try t.expectEqual(@as(usize, 1), fired.len);
+    try t.expectEqual(HapticStyle.success, fired[0].style);
+    try t.expectApproxEqAbs(@as(f32, 0.8), fired[0].intensity, 1e-6);
+
+    // The buzz is a one-tick pulse; a quiet tick clears it.
+    _ = tick(&lens, animation.fixed_step_us, .{});
+    try t.expectEqual(@as(usize, 0), lens.firedHaptics().len);
 }

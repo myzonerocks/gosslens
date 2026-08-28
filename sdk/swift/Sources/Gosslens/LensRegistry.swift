@@ -1,6 +1,14 @@
 import CGosslens
 import Foundation
 
+/// A device haptic a haptic trigger asked for. style is the style index (0
+/// light, 1 medium, 2 heavy, 3 soft, 4 rigid, 5 success, 6 warning, 7 failure)
+/// and intensity a 0..1 hint the platform may honor.
+public struct Haptic {
+    public let style: UInt32
+    public let intensity: Float
+}
+
 /// The live signals goss_session_tick_lens evaluates a lens's compiled
 /// triggers against. hasFace false means every face-driven signal reads
 /// as false regardless of what blendshapes holds.
@@ -341,6 +349,13 @@ extension GossSession {
     /// pointerId names the finger; x and y are normalized 0..1 over the frame.
     public func touch(phase: UInt32, pointerId: UInt32 = 0, x: Float, y: Float) throws {
         try checked(goss_session_touch(handle, phase, pointerId, x, y))
+    }
+    /// Drains one haptic a haptic trigger queued this tick, or nil when none
+    /// remain. Call in a loop after tickLens and buzz the device for each.
+    public func pullHaptic() -> Haptic? {
+        var style: UInt32 = 0
+        var intensity: Float = 0
+        return goss_session_pull_haptic(handle, &style, &intensity) == GOSS_OK ? Haptic(style: style, intensity: intensity) : nil
     }
     public func grab(x: Float, y: Float, z: Float) throws { try checked(goss_session_grab(handle, x, y, z)) }
     public func release() throws { try checked(goss_session_release(handle)) }

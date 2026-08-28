@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 54u
+#define GOSS_ABI_MINOR 55u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -789,6 +789,12 @@ goss_status goss_session_ar_brush_clear(goss_session *session);
  * moved, 2 ended, 3 cancelled; pointer_id names the finger; x and y are
  * normalized 0..1. Recognized gestures reach the lens at the next tick. */
 goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y);
+
+/* Haptics. A haptic trigger queues a device buzz each tick; drain them in a
+ * loop after goss_session_tick_lens until GOSS_AGAIN and play each on the
+ * platform. out_style is the style (0 light, 1 medium, 2 heavy, 3 soft, 4
+ * rigid, 5 success, 6 warning, 7 failure); out_intensity is a 0..1 hint. */
+goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity);
 
 /* Grab and throw. goss_session_grab moves the nearest dynamic physics body to a
  * world point and, while it holds one, drags it there; the body is driven

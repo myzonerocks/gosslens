@@ -221,6 +221,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_physics_hair_remove(goss_session *session, uint32_t hair_id)",
     "goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle)",
     "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
+    "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -266,6 +267,9 @@ pub const frame_rotation_mask: u32 = 0x3 << 8;
 /// truncated to this many bytes. Bounded so firing allocates nothing.
 const max_pending_events: usize = 8;
 const max_event_name: usize = 31;
+/// The most haptics one tick queues for the host to drain; a lens rarely fires
+/// more than one at a time, so a small buffer holds a whole tick's worth.
+const max_haptics: usize = 8;
 
 /// A composite source name is truncated to this many bytes.
 const max_source_name: usize = 31;
@@ -914,6 +918,11 @@ pub const Session = struct {
     pending_event_buf: [max_pending_events][max_event_name]u8 = undefined,
     pending_event_len: [max_pending_events]u8 = undefined,
     pending_event_count: u8 = 0,
+    /// Haptics a haptic trigger queued on the last tick, drained by the host
+    /// through goss_session_pull_haptic each frame; read advances the cursor.
+    haptic_queue: [max_haptics]runtime.HapticEvent = undefined,
+    haptic_count: u8 = 0,
+    haptic_read: u8 = 0,
     /// Named RGBA sources for multi-source composition (Duet/Stitch, live
     /// grids), in definition order; the camera is the implicit source 0. Fixed
     /// arrays so the frame-path composite walks them without a hashmap.
@@ -7319,6 +7328,36 @@ fn playFiredSounds(s: *Session) void {
     }
 }
 
+/// Copies this tick's fired haptics into the session buffer for the host to
+/// drain, resetting the read cursor. No mixer of its own: the device buzz is
+/// the host's to make from what goss_session_pull_haptic reports.
+fn drainHaptics(s: *Session) void {
+    const lens = if (s.active_lens) |*l| l else {
+        s.haptic_count = 0;
+        s.haptic_read = 0;
+        return;
+    };
+    const fired = lens.firedHaptics();
+    const n = @min(fired.len, max_haptics);
+    for (0..n) |i| s.haptic_queue[i] = fired[i];
+    s.haptic_count = @intCast(n);
+    s.haptic_read = 0;
+}
+
+/// Pops the next haptic a haptic trigger queued this tick into out_style (the
+/// style index: 0 light, 1 medium, 2 heavy, 3 soft, 4 rigid, 5 success, 6
+/// warning, 7 failure) and out_intensity (0..1). Reports GOSS_AGAIN when none
+/// remain, so the host drains them in a loop each frame and buzzes the device.
+pub export fn goss_session_pull_haptic(session: ?*Session, out_style: ?*u32, out_intensity: ?*f32) Status {
+    const s = session orelse return .invalid_argument;
+    if (s.haptic_read >= s.haptic_count) return .again;
+    const ev = s.haptic_queue[s.haptic_read];
+    s.haptic_read += 1;
+    if (out_style) |o| o.* = @intFromEnum(ev.style);
+    if (out_intensity) |o| o.* = ev.intensity;
+    return .ok;
+}
+
 /// Pulls the next block of mixed lens audio (frames * channels, s16) for the
 /// SDK to play. Silence when no lens sound is active.
 pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: u32) Status {
@@ -9765,6 +9804,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     const effects = runtime.tick(&s.active_lens.?, dt_us, live_signals);
     applyLensEffects(s, effects);
     playFiredSounds(s);
+    drainHaptics(s);
     s.pending_event_count = 0;
     s.cam_focus_pulse = false;
     s.cam_exposure_pulse = false;
@@ -10574,6 +10614,32 @@ test "a slider reports its track position and a carousel steps on swipe" {
     try t.expectApproxEqAbs(@as(f32, 2.0), car.update(&lsig, 0, 0).carousel.?, 1e-5);
     var rsig = trigger.Signals{ .touch_swipe = 2 };
     try t.expectApproxEqAbs(@as(f32, 1.0), car.update(&rsig, 0, 0).carousel.?, 1e-5);
+}
+
+test "a haptic trigger surfaces through goss_session_pull_haptic" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const manifest_json =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [{"id": "s", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}}],
+        \\ "triggers": [{"when": "event('buzz')", "action": {"kind": "haptic", "target": "success", "to": 0.8}}]}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len));
+    try t.expectEqual(Status.ok, goss_session_fire_event(session, "buzz", "buzz".len));
+
+    var signals = std.mem.zeroes(LensSignals);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 16_000, &signals));
+
+    var style: u32 = 99;
+    var intensity: f32 = -1;
+    try t.expectEqual(Status.ok, goss_session_pull_haptic(session, &style, &intensity));
+    try t.expectEqual(@as(u32, 5), style); // success
+    try t.expectApproxEqAbs(@as(f32, 0.8), intensity, 1e-6);
+    // The queue drains: a second pull reports none remain.
+    try t.expectEqual(Status.again, goss_session_pull_haptic(session, &style, &intensity));
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {
