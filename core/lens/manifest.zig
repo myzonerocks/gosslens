@@ -62,7 +62,7 @@ pub const mask_channels = [_][]const u8{
     "clothes", "others",     "head",    "hand",      "lips",
     "eyes",    "brows",      "iris",    "teeth",     "contour",
     "highlight", "lash_line", "under_eye", "nasolabial", "sclera",
-    "t_zone",  "hair_matte",
+    "t_zone",  "hair_matte", "sky",     "ground",    "building",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -104,6 +104,12 @@ pub const t_zone_channel = 20;
 /// the coarse hair class against the camera luma; hair effects key this channel
 /// for a soft feathered edge instead of the hard coarse hair bit.
 pub const hair_matte_channel = 21;
+/// Scene-parse classes a scene-segmentation model supplies: the sky, the ground
+/// plane, and buildings. No scene model is wired in yet, so a lens keying these
+/// serves the zero mask and draws nothing until one fills the scene slot.
+pub const sky_channel = 22;
+pub const ground_channel = 23;
+pub const building_channel = 24;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {
@@ -3742,4 +3748,17 @@ test "engine_compat range boundaries are exact" {
     try t.expect(range.contains(0, 9));
     try t.expect(!range.contains(0, 4));
     try t.expect(!range.contains(1, 0));
+}
+
+test "scene classes append at the frozen mask-channel tail" {
+    // The tail indices the scene slot and its proof pin. Existing channels keep
+    // their numbers; the scene classes only extend the vocabulary.
+    try t.expectEqual(@as(?u8, 21), maskChannelIndex("hair_matte"));
+    try t.expectEqual(@as(?u8, 22), maskChannelIndex("sky"));
+    try t.expectEqual(@as(?u8, 23), maskChannelIndex("ground"));
+    try t.expectEqual(@as(?u8, 24), maskChannelIndex("building"));
+    try t.expectEqual(sky_channel, maskChannelIndex("sky").?);
+    try t.expectEqual(ground_channel, maskChannelIndex("ground").?);
+    try t.expectEqual(building_channel, maskChannelIndex("building").?);
+    try t.expectEqual(@as(usize, 25), mask_channels.len);
 }

@@ -9691,6 +9691,170 @@ fn proveHairMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A tint.pass keying one scene mask channel, so an injected scene map confines
+/// the recolor to that region. Only the channel name varies between the three.
+fn sceneLensJson(comptime mask: []const u8) []const u8 {
+    return "{\"glf\":\"1.0\",\"id\":\"goss.reference.scene-" ++ mask ++
+        "\",\"version\":\"1.0.0\",\"display_name\":\"Scene " ++ mask ++
+        "\",\"engine_compat\":\">=0.9\",\"capabilities\":[\"segmentation\"],\"parameters\":[]," ++
+        "\"nodes\":[{\"id\":\"tint\",\"type\":\"tint.pass\",\"inputs\":{\"frame\":\"camera\"},\"params\":{}," ++
+        "\"tint\":{\"color\":[0.95,0.5,0.2],\"opacity\":0.7,\"mask\":\"" ++ mask ++ "\"}}],\"triggers\":[]}";
+}
+
+/// A synthetic scene class: 1 to the right of edge_col, 0 to the left, a clean
+/// step so a tint keyed to it lands on exactly that region.
+fn buildSceneStep(mask: *[abi.segmentation_mask_len]f32, edge_col: f32) void {
+    const side = abi.segmentation_mask_side;
+    for (0..side) |gy| {
+        for (0..side) |gx| {
+            const u = (@as(f32, @floatFromInt(gx)) + 0.5) / @as(f32, @floatFromInt(side));
+            const col = u * @as(f32, @floatFromInt(width));
+            mask[gy * side + gx] = if (col >= edge_col) 1.0 else 0.0;
+        }
+    }
+}
+
+/// Renders a scene tint over a flat gray frame, injecting the synthetic scene
+/// class into its channel when present so the recolor is confined to that
+/// region. Absent leaves the channel the zero mask, the model-absent state.
+fn captureSceneScene(gpa: std.mem.Allocator, engine: *abi.Engine, lens_json: []const u8, channel: usize, edge_col: f32, present: bool) ![]u8 {
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (frame_rgba, 0..) |*px, i| px.* = if (i % 4 == 3) 255 else 128;
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    var scene: [abi.segmentation_mask_len]f32 = undefined;
+    buildSceneStep(&scene, edge_col);
+
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens(session, lens_json.ptr, lens_json.len) != .ok) {
+        std.debug.print("conformance: FAIL scene lens activation\n", .{});
+        return error.ActivationFailed;
+    }
+    for (0..4) |i| {
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        if (present) abi.injectMaskChannel(session, channel, &scene);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+        return error.CaptureFailed;
+    }
+    return shot;
+}
+
+/// One scene channel plumbs when an injected map tints its region and an absent
+/// map leaves the region the base frame. Returns false with a diagnostic on the
+/// first channel that does not.
+fn sceneChannelTinted(gpa: std.mem.Allocator, engine: *abi.Engine, lens_json: []const u8, channel: usize, name: []const u8) !bool {
+    const edge: usize = 200;
+    const present = try captureSceneScene(gpa, engine, lens_json, channel, @floatFromInt(edge), true);
+    defer gpa.free(present);
+    const absent = try captureSceneScene(gpa, engine, lens_json, channel, @floatFromInt(edge), false);
+    defer gpa.free(absent);
+    const p_left = matteBandMean(present, edge - 45, edge - 25);
+    const p_right = matteBandMean(present, edge + 25, edge + 45);
+    const a_left = matteBandMean(absent, edge - 45, edge - 25);
+    const a_right = matteBandMean(absent, edge + 25, edge + 45);
+    if (!(p_right > p_left + 0.12)) {
+        std.debug.print("conformance: FAIL scene {s} did not tint its region (left {d:.3} right {d:.3})\n", .{ name, p_left, p_right });
+        return false;
+    }
+    if (!(a_right < a_left + 0.05)) {
+        std.debug.print("conformance: FAIL scene {s} tinted with no scene class (left {d:.3} right {d:.3})\n", .{ name, a_left, a_right });
+        return false;
+    }
+    return true;
+}
+
+/// Proves the scene classes plumb end to end with no scene model: a synthetic
+/// sky, ground, or building map keyed on a tint.pass confines the recolor to
+/// that region, tracks it when it moves, is bit-stable, and with no map the
+/// channel is empty so the frame matches the model-absent control.
+fn proveSceneClasses(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    if (lens_manifest.maskChannelIndex("sky") != 22 or lens_manifest.maskChannelIndex("ground") != 23 or lens_manifest.maskChannelIndex("building") != 24) {
+        std.debug.print("conformance: FAIL scene channel vocabulary moved (sky {?d}, ground {?d}, building {?d})\n", .{ lens_manifest.maskChannelIndex("sky"), lens_manifest.maskChannelIndex("ground"), lens_manifest.maskChannelIndex("building") });
+        return false;
+    }
+
+    const sky_json = comptime sceneLensJson("sky");
+    const edge: usize = 200;
+
+    const a = try captureSceneScene(gpa, engine, sky_json, lens_manifest.sky_channel, @floatFromInt(edge), true);
+    defer gpa.free(a);
+    const b = try captureSceneScene(gpa, engine, sky_json, lens_manifest.sky_channel, @floatFromInt(edge), true);
+    defer gpa.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL scene sky is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    const far_left = matteBandMean(a, edge - 45, edge - 25);
+    const far_right = matteBandMean(a, edge + 25, edge + 45);
+    const mid = (far_left + far_right) * 0.5;
+    const cross = matteCrossing(a, mid, edge - 45, edge + 45);
+    std.debug.print("conformance: scene-sky base {d:.3} tinted {d:.3} edge {d:.1}\n", .{ far_left, far_right, cross });
+
+    // Confined: the base region left of the edge stays the gray frame, the sky
+    // region right of it is recolored.
+    if (!(far_left < 0.6)) {
+        std.debug.print("conformance: FAIL scene sky bled onto the base region (far_left {d:.3})\n", .{far_left});
+        return false;
+    }
+    if (!(far_right > far_left + 0.15)) {
+        std.debug.print("conformance: FAIL scene sky did not fill its region (far_left {d:.3} far_right {d:.3})\n", .{ far_left, far_right });
+        return false;
+    }
+
+    // Tracks: a map whose edge shifts right moves the recolor boundary with it.
+    const shift: usize = 40;
+    const edge2 = edge + shift;
+    const shifted = try captureSceneScene(gpa, engine, sky_json, lens_manifest.sky_channel, @floatFromInt(edge2), true);
+    defer gpa.free(shifted);
+    const cross2 = matteCrossing(shifted, mid, edge2 - 45, edge2 + 45);
+    if (!(cross2 > cross + @as(f32, @floatFromInt(shift)) - 15.0)) {
+        std.debug.print("conformance: FAIL scene sky did not track the shifted region (edge {d:.1} -> {d:.1}, shift {d})\n", .{ cross, cross2, shift });
+        return false;
+    }
+
+    // Absent: with no scene map injected the channel is the zero mask, so the
+    // tint draws nothing and both bands read the base frame. Two absent renders
+    // are byte-identical, the reproducible model-absent control.
+    const absent = try captureSceneScene(gpa, engine, sky_json, lens_manifest.sky_channel, @floatFromInt(edge), false);
+    defer gpa.free(absent);
+    const control = try captureSceneScene(gpa, engine, sky_json, lens_manifest.sky_channel, @floatFromInt(edge), false);
+    defer gpa.free(control);
+    if (!std.mem.eql(u8, absent, control)) {
+        std.debug.print("conformance: FAIL the model-absent scene render is not byte-identical across runs\n", .{});
+        return false;
+    }
+    const absent_left = matteBandMean(absent, edge - 45, edge - 25);
+    const absent_right = matteBandMean(absent, edge + 25, edge + 45);
+    if (!(absent_right < absent_left + 0.05)) {
+        std.debug.print("conformance: FAIL scene sky tinted with no scene model (left {d:.3} right {d:.3})\n", .{ absent_left, absent_right });
+        return false;
+    }
+
+    // The ground and building channels plumb through the identical path.
+    if (!try sceneChannelTinted(gpa, engine, comptime sceneLensJson("ground"), lens_manifest.ground_channel, "ground")) return false;
+    if (!try sceneChannelTinted(gpa, engine, comptime sceneLensJson("building"), lens_manifest.building_channel, "building")) return false;
+
+    std.debug.print("conformance: PROOF a tint.pass keys the scene classes sky, ground, and building, each confined to its injected region (sky edge {d:.1}->{d:.1} when shifted), empty and byte-identical to the model-absent control with no scene model, bit-stable across runs\n", .{ cross, cross2 });
+    return true;
+}
+
 fn proveTeeth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // The teeth matte fills the inner-lip loop, the mouth aperture inside the
     // outer lip. First prove the loop is the inner mouth: its centroid sits
@@ -11754,6 +11918,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveMatteRefine(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hair-matte")) {
             if (!try proveHairMatte(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "scene-classes")) {
+            if (!try proveSceneClasses(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "teeth")) {
             if (!try proveTeeth(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "sharpen")) {
@@ -11884,6 +12050,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("matte refine");
     if (!try proveHairMatte(gpa, engine)) return 1;
     watchHold("hair matte");
+    if (!try proveSceneClasses(gpa, engine)) return 1;
+    watchHold("scene classes");
     if (!try proveTeeth(gpa, engine)) return 1;
     watchHold("teeth whiten");
     if (!try proveSharpen(gpa, engine)) return 1;

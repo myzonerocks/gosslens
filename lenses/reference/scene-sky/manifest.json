@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.scene-sky",
+  "version": "1.0.0",
+  "display_name": "Sky Recolor",
+  "engine_compat": ">=0.9",
+  "capabilities": ["segmentation"],
+  "parameters": [],
+  "nodes": [
+    {"id": "sky", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [0.25, 0.5, 0.95], "opacity": 0.7, "mask": "sky"}}
+  ],
+  "triggers": []
+}

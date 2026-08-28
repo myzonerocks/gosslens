@@ -823,7 +823,10 @@ forehead and nose bridge. A makeup or retouch lens keys those directly. One more
 is derived on the GPU: `hair_matte` is the strand-level hair alpha a `matte.hair`
 source refines from the coarse `hair` class against the camera luma, a soft
 feathered edge a hair effect keys in place of the hard `hair` bit; with no
-`matte.hair` source in the lens it serves the zero mask. The
+`matte.hair` source in the lens it serves the zero mask. Three name the scene
+around the subject: `sky`, `ground`, and `building` come from a scene-parse
+segmentation model. No such model is wired in yet, so a lens may key these today
+and they serve the zero mask until one fills the scene slot. The
 shader reads the channel through `SAMPLER2D(s_texMask, 2)` beside the frame's
 own `s_texColor`. When a named channel has no live data (segmentation
 disabled, a single-class model without it, or no face or hand tracked for a

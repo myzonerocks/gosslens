@@ -619,6 +619,11 @@ pub const Session = struct {
     /// joints (knees down) read absent, for selfie framing with the legs out.
     pose_upper_body: bool = false,
     segmentation_worker: ?*segmentation.Segmentation = null,
+    /// The scene-parse segmenter, parallel to the person and hair segmenter and
+    /// feeding the sky, ground, and building channels. Null until a scene model
+    /// is handed to enableSceneSegmentation, so those channels stay the zero
+    /// mask and poll for them costs nothing per frame.
+    scene_worker: ?*segmentation.Segmentation = null,
     /// Monotonic timestamp for still images fed to the segmenter through
     /// goss_session_submit_segmentation_image, so each submit orders after the
     /// last the way successive camera frames do.
@@ -3568,6 +3573,8 @@ pub fn destroySession(session: *Session) void {
     session.pose_tracking = null;
     if (session.segmentation_worker) |worker| segmentation.destroy(worker);
     session.segmentation_worker = null;
+    if (session.scene_worker) |worker| segmentation.destroy(worker);
+    session.scene_worker = null;
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
     releaseCurrentFrame(session);
@@ -3863,6 +3870,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollSpriteLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
+        pollSceneSegmentation(s);
         pollDepthOcclusion(s);
         pollLandmarkMattes(s);
         if (e.recording != null and e.recording_session == s and !s.capture_requested) {
@@ -3960,6 +3968,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
     if (s.current) |current| {
@@ -4057,6 +4066,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
     if (s.current) |current| {
@@ -5687,6 +5697,48 @@ pub export fn goss_session_disable_segmentation(session: ?*Session) void {
     clearSegmentationTextures(s);
 }
 
+/// The scene-parse segmentation model the scene mask channels bind to. No
+/// permissively licensed scene model is in the lock yet, so this file is never
+/// fetched and the scene slot stays empty; adding it to the lock and handing
+/// its bytes to enableSceneSegmentation is all that lights the scene channels.
+pub const scene_model_name = "scene_parse.tflite";
+
+/// The scene-parse segmenter's output classes bound to the scene mask channels,
+/// in this order. A scene model exposes its sky, ground, and building classes
+/// in this order and the channels fill with no other change.
+const scene_class_order = [_]u8{ manifest.sky_channel, manifest.ground_channel, manifest.building_channel };
+
+/// Maps a scene mask channel to the scene-parse model's output class that fills
+/// it, or null when the channel is not one the scene segmenter supplies.
+fn sceneChannelSource(channel: u8) ?u32 {
+    for (scene_class_order, 0..) |ch, class| {
+        if (ch == channel) return @intCast(class);
+    }
+    return null;
+}
+
+/// Stands the scene-parse segmenter up from its model bytes, parallel to
+/// goss_session_enable_segmentation. The slot where a future scene model plugs
+/// in: the bytes are copied and the caller may release them on return.
+pub fn enableSceneSegmentation(session: *Session, model_bytes: []const u8, threads: i32) Status {
+    if (model_bytes.len == 0) return .invalid_argument;
+    if (session.scene_worker != null) return .ok;
+    const worker_threads = if (threads <= 0) 2 else threads;
+    session.scene_worker = segmentation.create(session.engine.gpa, model_bytes, worker_threads) catch |err| switch (err) {
+        error.Unsupported => return .unsupported,
+        error.InvalidModel => return .invalid_argument,
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return .ok;
+}
+
+/// Tears the scene-parse segmenter down and clears the scene channels it fed.
+pub fn disableSceneSegmentation(session: *Session) void {
+    if (session.scene_worker) |worker| segmentation.destroy(worker);
+    session.scene_worker = null;
+    for (scene_class_order) |channel| session.segmentation_class_textures[channel] = null;
+}
+
 /// Feeds one NV12 frame to the tracking worker. The planes are CPU
 /// addresses valid for the duration of the call; the worker copies and
 /// returns immediately, dropping stale frames in favor of this one.
@@ -5695,7 +5747,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null) return .again;
+    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -5716,6 +5768,9 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
         tracking.pose_worker.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     if (s.segmentation_worker) |worker| {
+        segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    if (s.scene_worker) |worker| {
         segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     return .ok;
@@ -6426,6 +6481,20 @@ fn pollSegmentationMask(session: *Session) void {
     for (1..manifest.mask_channels.len) |channel| {
         if (!maskChannelNeeded(session, @intCast(channel))) continue;
         const source = classChannelSource(class_count, channel) orelse continue;
+        if (!segmentation.readClassMask(worker, source, &mask)) continue;
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+    }
+}
+
+/// Fills the scene mask channels from the scene-parse segmenter when one runs.
+/// With no scene model the worker is null and the channels stay the zero mask,
+/// so a scene-keyed pass draws nothing at no per-frame cost.
+fn pollSceneSegmentation(session: *Session) void {
+    const worker = session.scene_worker orelse return;
+    var mask: [segmentation.mask_len]f32 = undefined;
+    for (scene_class_order) |channel| {
+        if (!maskChannelNeeded(session, channel)) continue;
+        const source = sceneChannelSource(channel) orelse continue;
         if (!segmentation.readClassMask(worker, source, &mask)) continue;
         session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
     }
@@ -9442,6 +9511,18 @@ test "alloc and free round-trip through the abi allocator" {
 
 test "abi version packs major and minor" {
     try t.expectEqual((@as(u32, abi_major) << 16) | abi_minor, goss_abi_version());
+}
+
+test "scene channels map to the scene segmenter's class order and nothing else" {
+    // The scene slot binds sky, ground, and building to the model's first three
+    // classes in order; every other channel is not one it supplies.
+    try t.expectEqual(@as(?u32, 0), sceneChannelSource(manifest.sky_channel));
+    try t.expectEqual(@as(?u32, 1), sceneChannelSource(manifest.ground_channel));
+    try t.expectEqual(@as(?u32, 2), sceneChannelSource(manifest.building_channel));
+    try t.expectEqual(@as(?u32, null), sceneChannelSource(manifest.hair_matte_channel));
+    try t.expectEqual(@as(?u32, null), sceneChannelSource(0));
+    try t.expectEqual(@as(usize, 3), scene_class_order.len);
+    try t.expectEqual(manifest.sky_channel, scene_class_order[0]);
 }
 
 test "camera controls normalize to their valid envelope" {
