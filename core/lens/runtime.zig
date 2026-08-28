@@ -81,9 +81,11 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
 }
 
 /// A behavior node drives parameters each tick and draws nothing, so it never
-/// joins the composite chain: the script and the logic graph.
+/// joins the composite chain: the script, the logic graph, the ml.infer model.
 fn isBehaviorNode(type_str: []const u8) bool {
-    return std.mem.eql(u8, type_str, "script") or std.mem.eql(u8, type_str, "logic.graph");
+    return std.mem.eql(u8, type_str, "script") or
+        std.mem.eql(u8, type_str, "logic.graph") or
+        std.mem.eql(u8, type_str, "ml.infer");
 }
 
 const ParamSlot = struct { name: []const u8, effect: EffectSlot };
@@ -2441,4 +2443,22 @@ test "a logic graph drives a parameter from the signals each tick" {
     try t.expectApproxEqAbs(@as(f32, 0.6), lens.paramValue("intensity").?, 1e-5);
     _ = tick(&lens, animation.fixed_step_us, .{ .pointer_x = 0.9 });
     try t.expectApproxEqAbs(@as(f32, 1.0), lens.paramValue("intensity").?, 1e-5);
+}
+
+test "an ml.infer node activates as a behavior node, outside the composite chain" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const src =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "score", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "m", "type": "ml.infer", "params": {}, "ml": {"model": "model.tflite", "outputs": [{"param": "score"}]}}],
+        \\ "triggers": []}
+    ;
+    const lens_manifest = try parseTestManifest(t.allocator, src);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+    // The ml.infer node draws nothing, so no node joins the composite chain.
+    try t.expectEqual(@as(usize, 0), lens.nodes.len);
 }
