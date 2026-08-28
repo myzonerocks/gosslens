@@ -753,6 +753,45 @@ const Parser = struct {
     }
 };
 
+/// Reads one signal's numeric value, a boolean as 0 or 1, the value a logic
+/// graph's signal leaf feeds. Shares the trigger evaluator's own readers.
+pub fn signalValue(s: Signal, signals: Signals) f64 {
+    return if (signalIsBoolean(s.kind)) (if (readBool(s, signals)) @as(f64, 1) else 0) else readNumber(s, signals);
+}
+
+/// Compiles one bare signal expression (pointer.x, counter('score'), a
+/// blendshape name) to a Signal a logic graph reads with signalValue: no
+/// comparison or combinator, just the one signal. Name slices dupe into arena;
+/// returns null with err set on a parse failure.
+pub fn compileSignal(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, source: []const u8, param_names: []const []const u8, err: *?CompileError) error{OutOfMemory}!?Signal {
+    var parser = Parser{
+        .tok = .{ .source = source },
+        .current = undefined,
+        .arena = arena,
+        .diag_arena = diag_arena,
+        .param_names = param_names,
+    };
+    parser.advance() catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Compile => {
+            err.* = parser.err;
+            return null;
+        },
+    };
+    const s = parser.parseSignal() catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Compile => {
+            err.* = parser.err;
+            return null;
+        },
+    };
+    if (parser.current != .end) {
+        err.* = .{ .message = try std.fmt.allocPrint(diag_arena, "unexpected trailing input", .{}), .offset = parser.tok.pos };
+        return null;
+    }
+    return s;
+}
+
 /// Compiles one `when` expression source string against the spec grammar.
 /// param_names resolves `param('name')` reads the same way the manifest
 /// cross-references parameter targets - an unresolvable name is a compile
