@@ -1275,7 +1275,7 @@ test "top-level trees require their re-include line" {
 }
 
 test "forbidden prefixes catch force-added trees" {
-    try std.testing.expectEqualStrings("docs/private/", forbiddenPrefix("docs/private/ENGINEERING.md").?);
+    try std.testing.expectEqualStrings("docs/private/", forbiddenPrefix("docs/private/notes.md").?);
     try std.testing.expectEqualStrings(".models/", forbiddenPrefix(".models/face.task").?);
     try std.testing.expectEqualStrings("zig-out/", forbiddenPrefix("zig-out/bin/gate").?);
     try std.testing.expect(forbiddenPrefix("docs/ROADMAP.md") == null);
