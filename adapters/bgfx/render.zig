@@ -1741,6 +1741,51 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.composite_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Draws a sprite as a quad rotated about its centre so an interactive
+    /// sprite can be turned two-fingered. cx, cy is the centre and hw, hh the
+    /// half extents in normalized frame coordinates; rotation is radians and
+    /// aspect the output width over height, so the turn keeps the sprite shape.
+    pub fn submitSpriteRotated(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32) void {
+        var tvb: c.bgfx_transient_vertex_buffer_t = undefined;
+        var tib: c.bgfx_transient_index_buffer_t = undefined;
+        if (c.bgfx_get_avail_transient_vertex_buffer(4, &r.layout) < 4) return;
+        if (c.bgfx_get_avail_transient_index_buffer(6, false) < 6) return;
+        c.bgfx_alloc_transient_vertex_buffer(&tvb, 4, &r.layout);
+        c.bgfx_alloc_transient_index_buffer(&tib, 6, false);
+        c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
+
+        const cos_a = @cos(rotation);
+        const sin_a = @sin(rotation);
+        const corners = [4][2]f32{ .{ -hw, -hh }, .{ hw, -hh }, .{ hw, hh }, .{ -hw, hh } };
+        const uvs = [4][2]f32{ .{ 0, 1 }, .{ 1, 1 }, .{ 1, 0 }, .{ 0, 0 } };
+        const verts: [*][5]f32 = @ptrCast(@alignCast(tvb.data));
+        for (corners, 0..) |cnr, i| {
+            // Rotate in the aspect-corrected pixel space, then map the corner
+            // to clip space with the frame's own y flip.
+            const rx = cnr[0] * cos_a - cnr[1] * sin_a / aspect;
+            const ry = cnr[0] * aspect * sin_a + cnr[1] * cos_a;
+            const nx = (cx + rx) * 2.0 - 1.0;
+            const ny = 1.0 - (cy + ry) * 2.0;
+            verts[i] = .{ nx, ny, 0.0, uvs[i][0], uvs[i][1] };
+        }
+        const idx: [*]u16 = @ptrCast(@alignCast(tib.data));
+        for ([6]u16{ 0, 1, 2, 0, 2, 3 }, 0..) |v, i| idx[i] = v;
+
+        const view = math.Mat4.identity;
+        const proj = math.Mat4.ortho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, .zero_to_one);
+        c.bgfx_set_view_transform(view_id, &view.cols, &proj.cols);
+        c.bgfx_set_transient_vertex_buffer(0, &tvb, 0, 4);
+        c.bgfx_set_transient_index_buffer(&tib, 0, 6);
+        c.bgfx_set_texture(0, r.tex_color, sprite_tex, std.math.maxInt(u32));
+        const params = [4]f32{ opacity, 0, 0, 0 };
+        const chroma = [4]f32{ 0, 0, 0, 0 };
+        c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
+        c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
+        const blend = blendFunc(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA);
+        c.bgfx_set_state(@as(u64, c.BGFX_STATE_WRITE_RGB) | @as(u64, c.BGFX_STATE_WRITE_A) | blend, 0);
+        c.bgfx_submit(view_id, r.composite_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Points `view_id` at a sub-rectangle of `target` with no clear, so the
     /// caller can draw the camera preview into one composite cell via
     /// submitPreview (which fills whatever viewport is set).

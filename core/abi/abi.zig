@@ -2763,13 +2763,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
                 var rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
                 // An interactive sprite draws at its dragged and scaled rect,
-                // keeping its own opacity.
+                // keeping its own opacity, and turned by any live rotation.
+                var sprite_rotation: f32 = 0;
                 if (s.sprite_interactions.get(entry.graph_index)) |si| {
                     const tr = si.rect();
                     rect[0] = tr[0];
                     rect[1] = tr[1];
                     rect[2] = tr[2];
                     rect[3] = tr[3];
+                    sprite_rotation = si.rot;
                 }
                 drawn += 1;
                 const blit_view = next_view_id;
@@ -2800,7 +2802,16 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         if (lens.paramValue(pname)) |v| sprite_opacity = std.math.clamp(v, 0, 1);
                     }
                 }
-                r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, sprite_opacity);
+                if (sprite_rotation != 0) {
+                    // A turned sprite draws as a rotated quad over the full
+                    // view; the axis-aligned rect path cannot rotate.
+                    const cx = rect[0] + rect[2] * 0.5;
+                    const cy = rect[1] + rect[3] * 0.5;
+                    const aspect = if (full_h > 0) full_w / full_h else 1.0;
+                    r.submitSpriteRotated(sprite_view, sprite_texture, cx, cy, rect[2] * 0.5, rect[3] * 0.5, sprite_rotation, aspect, sprite_opacity);
+                } else {
+                    r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, sprite_opacity);
+                }
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -7906,6 +7917,9 @@ const SpriteInteraction = struct {
     last_py: f32 = 0,
     pinching: bool = false,
     scale_at_pinch: f32 = 1,
+    rot: f32 = 0,
+    rotating: bool = false,
+    rot_at_start: f32 = 0,
 
     /// The current rect after the offset and centre scale, for the draw and
     /// for hit-testing a tap.
@@ -7951,6 +7965,16 @@ const SpriteInteraction = struct {
                 }
                 self.scale = std.math.clamp(self.scale_at_pinch * p, 0.1, 10.0);
             } else self.pinching = false;
+        }
+        if (self.cfg.rotate) {
+            const rr: f32 = @floatCast(sig.touch_rotate);
+            if (rr != 0) {
+                if (!self.rotating) {
+                    self.rotating = true;
+                    self.rot_at_start = self.rot;
+                }
+                self.rot = self.rot_at_start + rr;
+            } else self.rotating = false;
         }
         return fired;
     }
@@ -10473,6 +10497,12 @@ test "an interactive sprite drags, scales, and reports a tap on it" {
     sig = .{ .touch_pinch = 2.0 };
     _ = si.update(&sig, 0, 0);
     try t.expectApproxEqAbs(@as(f32, 2.0), si.scale, 1e-5);
+
+    // A two-finger twist turns it, but only when rotate is enabled.
+    var turn = SpriteInteraction{ .cfg = .{ .rotate = true }, .base = .{ 0.4, 0.4, 0.2, 0.2 } };
+    var rsig = trigger.Signals{ .touch_rotate = 0.5 };
+    _ = turn.update(&rsig, 0, 0);
+    try t.expectApproxEqAbs(@as(f32, 0.5), turn.rot, 1e-5);
 
     // A drag that began off the sprite is ignored.
     var off = SpriteInteraction{ .cfg = .{ .drag = true }, .base = .{ 0.4, 0.4, 0.2, 0.2 } };

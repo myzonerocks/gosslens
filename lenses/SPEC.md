@@ -636,12 +636,13 @@ sticker animates without a param or a frame count. Until its image decodes
 blocking the chain.
 
 A sprite carries an optional `"interaction"` block so a finger can move it:
-`{"drag", "pinch", "tap_event"}`. With `"drag"` a single finger that goes
-down on the sprite slides it, with `"pinch"` two fingers scale it about its
-centre, and `"tap_event"` names an event the engine fires when a tap lands on
-the sprite, delivered to `event('name')` triggers and the script's `onEvent`
-the same tick, so a lens reacts to the object being tapped. The recognized
-gestures come from `goss_session_touch`; a sprite names only what it wants.
+`{"drag", "pinch", "rotate", "tap_event"}`. With `"drag"` a single finger that
+goes down on the sprite slides it, with `"pinch"` two fingers scale it about
+its centre, with `"rotate"` two fingers turn it, and `"tap_event"` names an
+event the engine fires when a tap lands on the sprite, delivered to
+`event('name')` triggers and the script's `onEvent` the same tick, so a lens
+reacts to the object being tapped. The recognized gestures come from
+`goss_session_touch`; a sprite names only what it wants.
 
 A `"text.2d"` node draws a line of text over the frame. It carries a `"text":
 {"content", "x", "y", "w", "h", "opacity", "color"}` block: the string to

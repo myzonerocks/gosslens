@@ -286,6 +286,19 @@ pub const Renderer = struct {
         _ = opacity;
     }
 
+    pub fn submitSpriteRotated(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = sprite_tex;
+        _ = cx;
+        _ = cy;
+        _ = hw;
+        _ = hh;
+        _ = rotation;
+        _ = aspect;
+        _ = opacity;
+    }
+
     pub fn setLayoutViewport(view_id: u16, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
         _ = view_id;
         _ = target;

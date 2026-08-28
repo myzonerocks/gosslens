@@ -624,15 +624,16 @@ pub const EnvField = struct {
 };
 
 /// The direct-manipulation gestures a sprite responds to. drag moves it with a
-/// finger that started on it, pinch scales it about its centre, and tap_event
-/// names an event the engine fires when a tap lands on it. All off by default.
+/// finger that started on it, pinch scales it about its centre, rotate turns it
+/// two-fingered, and tap_event names an event fired on a tap. All off default.
 pub const Interaction = struct {
     drag: bool = false,
     pinch: bool = false,
+    rotate: bool = false,
     tap_event: []const u8 = "",
 
     pub fn any(self: Interaction) bool {
-        return self.drag or self.pinch or self.tap_event.len > 0;
+        return self.drag or self.pinch or self.rotate or self.tap_event.len > 0;
     }
 };
 
@@ -2273,6 +2274,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         if (getField(iv.object, "pinch")) |b| {
                             if (b == .bool) it.pinch = b.bool;
                         }
+                        if (getField(iv.object, "rotate")) |b| {
+                            if (b == .bool) it.rotate = b.bool;
+                        }
                         if (getField(iv.object, "tap_event")) |v| {
                             if (try expectString(diags, path, v)) |s| it.tap_event = try arena.dupe(u8, s);
                         }
@@ -3606,7 +3610,7 @@ test "a sprite.2d node parses its interaction block" {
         \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
         \\ "capabilities": [], "parameters": [], "nodes": [
         \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {},
-        \\    "sprite": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2, "interaction": {"drag": true, "pinch": true, "tap_event": "hit"}}}
+        \\    "sprite": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2, "interaction": {"drag": true, "pinch": true, "rotate": true, "tap_event": "hit"}}}
         \\ ], "triggers": []}
     ;
     var manifest = try parseOk(source);
@@ -3614,6 +3618,7 @@ test "a sprite.2d node parses its interaction block" {
     const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
     try t.expect(sp.interaction.drag);
     try t.expect(sp.interaction.pinch);
+    try t.expect(sp.interaction.rotate);
     try t.expectEqualStrings("hit", sp.interaction.tap_event);
     try t.expect(sp.interaction.any());
 }
