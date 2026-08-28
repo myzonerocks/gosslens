@@ -4,6 +4,12 @@ const builtin = @import("builtin");
 /// The one android ndk the android target builds against.
 const ndk_version = "29.0.14206865";
 
+/// The android api level every android target compiles against. Bionic's
+/// headers refuse an unversioned target triple, and translate-c does not
+/// carry the level into the triple it hands clang, so the cImport modules
+/// state it as __ANDROID_MIN_SDK_VERSION__ themselves.
+const android_api_level = 29;
+
 pub fn build(b: *std.Build) void {
     enforcePinnedZig(b);
 
@@ -1368,7 +1374,12 @@ fn androidTriple(arch: std.Target.Cpu.Arch) []const u8 {
 fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8, triple: []const u8) void {
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include" }) });
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include", triple }) });
-    module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "lib", triple, "29" }) });
+    module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "lib", triple, b.fmt("{d}", .{android_api_level}) }) });
+    // Bionic's cdefs.h refuses to compile at all unless the api level
+    // reached it through the target triple. translate-c does not carry the
+    // level into the triple it hands clang, so every module that cImports a
+    // bionic header states the level here instead.
+    module.addCMacro("__ANDROID_MIN_SDK_VERSION__", b.fmt("{d}", .{android_api_level}));
 }
 
 /// Gives a module that compiles vendored C its target's sysroot include
@@ -2026,7 +2037,7 @@ fn gltfModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
     });
     m.link_libc = true;
-    if (target.result.os.tag == .ios) addAppleSdkPaths(b, m);
+    addCTargetSysroot(b, m, target);
     return m;
 }
 
@@ -2050,7 +2061,7 @@ fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     });
     image_module.link_libc = true;
     image_module.linkLibrary(buildLibyuvLib(b, target, optimize, null));
-    if (target.result.os.tag == .ios) addAppleSdkPaths(b, image_module);
+    addCTargetSysroot(b, image_module, target);
     const asset_module = b.createModule(.{
         .root_source_file = b.path("adapters/asset/asset.zig"),
         .target = target,
