@@ -330,8 +330,9 @@ The 29 node and pass types (`NodeType` in
 [core/lens/runtime.zig](../core/lens/runtime.zig)) are `beauty.face`,
 `beauty.reshape`, `beauty.lipstick`, `beauty.blusher`, `shader.pass`,
 `lut.pass`, `blend.pass`, `blur.pass`, `grade.pass`, `bloom.pass`, `dof.pass`,
-`fog.pass`, `outline.pass`, `tint.pass`, `smooth.pass`, `matte.refine`,
-`stylize.pass`, `edge.pass`, `warp.pass`, `trail.pass`, `ssr.pass`, `env.pass`,
+`fog.pass`, `outline.pass`, `tint.pass`, `smooth.pass`, `retouch.pass`,
+`matte.refine`, `stylize.pass`, `edge.pass`, `warp.pass`, `reshape.bank`,
+`trail.pass`, `ssr.pass`, `env.pass`,
 `model.gltf`, `mesh.face`, `draw.board`, `layout.composite`, `sprite.2d`,
 `text.2d`, and `video.texture`. A `tint.pass` carries a `normal`, `multiply`,
 or `screen` blend mode.
@@ -345,13 +346,14 @@ sources `uv`, `time`, `constant`, `uniform`, `texture`; `sample`; the maths
 vector ops `split`, `combine3`, `combine4`, `colormatrix`; the shading
 `lambert`, `fresnel`; and the graph root `output`.
 
-The 16 mask channels a pass can name, which `segmentationChannels()` reports a
+The 21 mask channels a pass can name, which `segmentationChannels()` reports a
 bitmask over (`mask_channels` in
 [core/lens/manifest.zig](../core/lens/manifest.zig)), are `person`,
 `background`, `hair`, `body_skin`, `face_skin`, `clothes`, `others`, `head`,
-`hand`, `lips`, `eyes`, `brows`, `iris`, `teeth`, `contour`, and `highlight`.
-The person and multiclass channels ride the segmenter; `head`, `hand`, the face
-parts, `contour`, and `highlight` ride the face and hand landmarks instead.
+`hand`, `lips`, `eyes`, `brows`, `iris`, `teeth`, `contour`, `highlight`,
+`lash_line`, `under_eye`, `nasolabial`, `sclera`, and `t_zone`. The person and
+multiclass channels ride the segmenter; the rest ride the face and hand
+landmarks instead.
 
 ## Web tracking module
 

@@ -390,6 +390,16 @@ average by `amount`, so a positive amount blurs (skin smoothing) and a
 negative one (down to -1) sharpens. It keys the same mask channels as
 `tint.pass`; a smooth naming none is inert.
 
+A `"retouch.pass"` node is a masked selective skin filter, a stronger companion
+to `smooth.pass`. It carries a `"retouch": {"mode", "amount", "mask"}` block.
+`mode` is `blemish`, a wider edge-aware average that evens small spots while a
+real edge (a lid, a brow) keeps its own tone so skin texture survives, or
+`shine`, which pulls pixels brighter than their local mean back toward it to
+matte a specular highlight. `amount` (0..1) scales the effect. It keys the same
+mask channels as `tint.pass`; a retouch naming none is inert. The retouch looks
+pair it with the landmark regions below: blemish over `face_skin`, shine over
+`t_zone`.
+
 A `"matte.refine"` node refines a segmentation matte's edges against the
 frame. It carries a `"matte": {"radius", "sensitivity", "strength", "mask"}`
 block and runs a guided (joint-bilateral) filter: the frame luminance is the
@@ -687,15 +697,18 @@ dialect: `$input v_texcoord0`, `#include <bgfx_shader.sh>`).
 
 A `shader.pass` node may also name a mask channel with a `mask` field. The
 valid channel names are the same set every mask-keyed node draws from
-(`tint.pass`, `smooth.pass`, `matte.refine`, `outline.pass`). Seven come from
-the segmentation model: `person`, `background`, `hair`, `body_skin`,
-`face_skin`, `clothes`, `others`. Ten more ride the face and hand landmarks
-rather than a segmentation model: `head` and `hand` follow the tracked head
-and hand, `lips`, `eyes`, `brows`, `iris`, and `teeth` are the face parts,
+(`tint.pass`, `smooth.pass`, `retouch.pass`, `matte.refine`, `outline.pass`).
+Seven come from the segmentation model: `person`, `background`, `hair`,
+`body_skin`, `face_skin`, `clothes`, `others`. The rest ride the face and hand
+landmarks rather than a segmentation model: `head` and `hand` follow the tracked
+head and hand, `lips`, `eyes`, `brows`, `iris`, and `teeth` are the face parts,
 `contour` and `highlight` are clustered face regions (contour the cheekbone
 hollows, nose sides, and jaw; highlight the cheekbone tops, brow bones, nose
 bridge, cupid's bow, and chin), and `lash_line` is the upper lash-line band
-each eye's upper lid arc rises into, so a makeup lens keys those directly. The
+each eye's upper lid arc rises into. Four more mark the retouch regions:
+`under_eye` the band below each eye, `nasolabial` the smile-line fold, `sclera`
+the eye-white inside the eye contour with the iris punched out, and `t_zone` the
+forehead and nose bridge. A makeup or retouch lens keys those directly. The
 shader reads the channel through `SAMPLER2D(s_texMask, 2)` beside the frame's
 own `s_texColor`. When a named channel has no live data (segmentation
 disabled, a single-class model without it, or no face or hand tracked for a

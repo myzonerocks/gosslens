@@ -8024,6 +8024,256 @@ fn totalVariation(buf: []const u8) u64 {
     return tv;
 }
 
+/// The sum of every byte in a captured RGBA frame, a monotonic proxy for total
+/// brightness across every channel, read from the GPU readback (not a stale
+/// on-disk screenshot).
+fn frameByteSum(buf: []const u8) u64 {
+    var sum: u64 = 0;
+    for (buf) |byte| sum += byte;
+    return sum;
+}
+
+/// Renders a retouch lens over the corpus and reads the composited frame back
+/// off the GPU, optionally with the face tracker or the skin segmenter live so
+/// its landmark or class matte fills. A capability left off is the control for
+/// a region-keyed effect, whose mask then stays on the zero mask.
+fn captureRetouchShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, pkg: []const u8, face: bool, seg_model: ?[]const u8) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    var face_bytes: ?[]u8 = null;
+    defer if (face_bytes) |fb| gpa.free(fb);
+    if (face) {
+        face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.?.ptr, face_bytes.?.len, 2) != .ok) return error.EnableFaceTrackingFailed;
+    }
+    if (seg_model) |mp| {
+        const seg = try std.Io.Dir.cwd().readFileAlloc(harness_io, mp, gpa, .limited(16 << 20));
+        defer gpa.free(seg);
+        if (abi.goss_session_enable_segmentation(session, seg.ptr, seg.len, 2) != .ok) return error.EnableSegmentationFailed;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+        std.debug.print("conformance: FAIL retouch lens activation {s}\n", .{pkg});
+        return error.ActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (face or seg_model != null) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+    }
+    if (face) {
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+    }
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    if (seg_model != null) {
+        var mask_polls: usize = 0;
+        while (session.segmentation_texture == null) {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            mask_polls += 1;
+            if (mask_polls > 100_000) return error.SegmentationTimedOut;
+        }
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var shot_width: u32 = 0;
+    var shot_height: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// The six Wave 5 retouch effects: each lands on the right anatomy and does the
+/// right thing. First the region mattes are placed against tracked landmarks,
+/// then each look renders keyed to the face (or the skin segmenter) and vanishes
+/// without it, softening, brightening, or mattING its region, bit-stable.
+fn proveRetouchBreadth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    // Anatomy: the new region clusters sit where their names say on a real face.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL retouch face tracking enable\n", .{});
+            return false;
+        }
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+        var result: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        const lm = &result.landmarks;
+        const re = ringCentroid(lm, &abi.right_eye_loop);
+        const le = ringCentroid(lm, &abi.left_eye_loop);
+        const eye_y = (re[1] + le[1]) * 0.5;
+        const mouth = ringCentroid(lm, &abi.outer_lip_loop);
+        const nose_y = lm[1 * 3 + 1];
+        const chin_y = lm[152 * 3 + 1];
+
+        for (abi.under_eye_regions) |region| {
+            const c0 = ringCentroid(lm, region);
+            if (!(c0[1] > eye_y and c0[1] < mouth[1])) {
+                std.debug.print("conformance: FAIL an under-eye cluster not below the eye and above the mouth (y {d:.1} eye {d:.1} mouth {d:.1})\n", .{ c0[1], eye_y, mouth[1] });
+                return false;
+            }
+        }
+        const nl0 = ringCentroid(lm, abi.nasolabial_regions[0]);
+        const nl1 = ringCentroid(lm, abi.nasolabial_regions[1]);
+        if (!(nl0[1] > nose_y and nl1[1] > nose_y and nl0[1] < chin_y and nl1[1] < chin_y)) {
+            std.debug.print("conformance: FAIL a nasolabial cluster not between the nose tip and the chin\n", .{});
+            return false;
+        }
+        if ((nl0[0] > mouth[0]) == (nl1[0] > mouth[0])) {
+            std.debug.print("conformance: FAIL the nasolabial folds not flanking the mouth (x {d:.1} {d:.1} mouth {d:.1})\n", .{ nl0[0], nl1[0], mouth[0] });
+            return false;
+        }
+        const forehead = ringCentroid(lm, abi.t_zone_regions[0]);
+        const bridge = ringCentroid(lm, abi.t_zone_regions[1]);
+        if (!(forehead[1] < eye_y)) {
+            std.debug.print("conformance: FAIL the t-zone forehead not above the eyes (y {d:.1} eye {d:.1})\n", .{ forehead[1], eye_y });
+            return false;
+        }
+        const lo_x = @min(re[0], le[0]);
+        const hi_x = @max(re[0], le[0]);
+        if (!(lo_x < bridge[0] and bridge[0] < hi_x)) {
+            std.debug.print("conformance: FAIL the t-zone nose bridge not centered between the eyes (x {d:.1} in {d:.1}..{d:.1})\n", .{ bridge[0], lo_x, hi_x });
+            return false;
+        }
+    }
+
+    // eye-bag soften: a smooth over the under-eye band lowers total variation,
+    // gone with no face, bit-stable.
+    if (!try softenReducesVariation(gpa, engine, planes, "eye-bag soften", ".lens-packages/eye-bag-soften", true, null)) return false;
+    // smile-line soften: a smooth over the nasolabial fold, same three checks.
+    if (!try softenReducesVariation(gpa, engine, planes, "smile-line soften", ".lens-packages/smile-line-soften", true, null)) return false;
+    // blemish smooth: the edge-aware retouch over the segmented face skin lowers
+    // total variation, gone with no segmenter, bit-stable.
+    if (!try softenReducesVariation(gpa, engine, planes, "blemish smooth", ".lens-packages/blemish-smooth", false, multiclass_model_path)) return false;
+
+    // eye-brighten: a screen tint over the sclera lifts the eye white, so the
+    // frame brightens, gone with no face, bit-stable.
+    {
+        const a = try captureRetouchShot(gpa, engine, planes, ".lens-packages/eye-brighten", true, null);
+        defer gpa.free(a);
+        const b = try captureRetouchShot(gpa, engine, planes, ".lens-packages/eye-brighten", true, null);
+        defer gpa.free(b);
+        const control = try captureRetouchShot(gpa, engine, planes, ".lens-packages/eye-brighten", false, null);
+        defer gpa.free(control);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL eye brighten is not deterministic across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL eye brighten drew nothing over the sclera\n", .{});
+            return false;
+        }
+        if (!(frameByteSum(a) > frameByteSum(control))) {
+            std.debug.print("conformance: FAIL eye brighten did not lighten the sclera ({d} vs {d})\n", .{ frameByteSum(a), frameByteSum(control) });
+            return false;
+        }
+    }
+
+    // shine matte: the retouch pulls the T-zone highlights back toward the local
+    // mean, so the frame loses brightness, gone with no face, bit-stable.
+    {
+        const a = try captureRetouchShot(gpa, engine, planes, ".lens-packages/shine-matte", true, null);
+        defer gpa.free(a);
+        const b = try captureRetouchShot(gpa, engine, planes, ".lens-packages/shine-matte", true, null);
+        defer gpa.free(b);
+        const control = try captureRetouchShot(gpa, engine, planes, ".lens-packages/shine-matte", false, null);
+        defer gpa.free(control);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL shine matte is not deterministic across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL shine matte drew nothing over the t-zone\n", .{});
+            return false;
+        }
+        if (!(frameByteSum(a) < frameByteSum(control))) {
+            std.debug.print("conformance: FAIL shine matte did not lower the t-zone brightness ({d} vs {d})\n", .{ frameByteSum(a), frameByteSum(control) });
+            return false;
+        }
+    }
+
+    // face symmetry: a light reshape mirror-blend nudges both sides of the face,
+    // gone with no face, bit-stable.
+    {
+        const a = try captureRetouchShot(gpa, engine, planes, ".lens-packages/face-symmetry", true, null);
+        defer gpa.free(a);
+        const b = try captureRetouchShot(gpa, engine, planes, ".lens-packages/face-symmetry", true, null);
+        defer gpa.free(b);
+        const control = try captureRetouchShot(gpa, engine, planes, ".lens-packages/face-symmetry", false, null);
+        defer gpa.free(control);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("conformance: FAIL face symmetry is not deterministic across runs\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, a, control)) {
+            std.debug.print("conformance: FAIL face symmetry drew nothing over the face\n", .{});
+            return false;
+        }
+        // A symmetric nudge touches both sides: a block left of center and one
+        // right of center both differ from the no-face control.
+        if (!(blockDiffersAt(a, control, width, 110, 150, 28) and blockDiffersAt(a, control, width, 262, 150, 28))) {
+            std.debug.print("conformance: FAIL face symmetry did not nudge both sides of the face\n", .{});
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF the six retouch effects land on their anatomy - eye-bag, smile-line and blemish soften their regions (lower variation), eye-brighten lifts the sclera, shine-matte pulls the t-zone highlights down, face-symmetry nudges both sides - each keyed to the face or skin, gone without it, bit-stable\n", .{});
+    return true;
+}
+
+/// A soften look reduces its region's total variation versus the no-region
+/// control, is bit-stable across two captures, and draws something. Shared by
+/// the eye-bag, smile-line and blemish checks; face drives the landmark mattes,
+/// seg_model the skin class.
+fn softenReducesVariation(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12Copy, label: []const u8, pkg: []const u8, face: bool, seg_model: ?[]const u8) !bool {
+    const a = try captureRetouchShot(gpa, engine, planes, pkg, face, seg_model);
+    defer gpa.free(a);
+    const b = try captureRetouchShot(gpa, engine, planes, pkg, face, seg_model);
+    defer gpa.free(b);
+    const control = try captureRetouchShot(gpa, engine, planes, pkg, false, null);
+    defer gpa.free(control);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("conformance: FAIL {s} is not deterministic across runs\n", .{label});
+        return false;
+    }
+    if (std.mem.eql(u8, a, control)) {
+        std.debug.print("conformance: FAIL {s} drew nothing over its region\n", .{label});
+        return false;
+    }
+    if (!(totalVariation(a) < totalVariation(control))) {
+        std.debug.print("conformance: FAIL {s} did not reduce detail (tv {d} vs {d})\n", .{ label, totalVariation(a), totalVariation(control) });
+        return false;
+    }
+    return true;
+}
+
 fn proveSmooth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // A smooth.pass masked to the head region blends the face toward a local
     // average, so it draws only there, is gone with no face, and lowers the
@@ -10278,6 +10528,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveDepthMatting(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "smooth")) {
             if (!try proveSmooth(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "retouch-breadth")) {
+            if (!try proveRetouchBreadth(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "matte-refine")) {
             if (!try proveMatteRefine(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "teeth")) {
@@ -10392,6 +10644,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("depth matting");
     if (!try proveSmooth(gpa, engine)) return 1;
     watchHold("face smooth");
+    if (!try proveRetouchBreadth(gpa, engine)) return 1;
+    watchHold("retouch breadth");
     if (!try proveMatteRefine(gpa, engine)) return 1;
     watchHold("matte refine");
     if (!try proveTeeth(gpa, engine)) return 1;

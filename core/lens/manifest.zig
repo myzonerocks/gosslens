@@ -61,7 +61,8 @@ pub const mask_channels = [_][]const u8{
     "person",  "background", "hair",    "body_skin", "face_skin",
     "clothes", "others",     "head",    "hand",      "lips",
     "eyes",    "brows",      "iris",    "teeth",     "contour",
-    "highlight", "lash_line",
+    "highlight", "lash_line", "under_eye", "nasolabial", "sclera",
+    "t_zone",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -88,6 +89,14 @@ pub const highlight_channel = 15;
 /// into a thin band an eyeliner, mascara, or false-lash tint paints. One band
 /// serves all three, which differ by tint color and opacity, not by shape.
 pub const lash_line_channel = 16;
+/// The retouch regions ride clustered face landmarks: under_eye the band below
+/// each eye a soften eases, nasolabial the smile-line fold, sclera the eye-white
+/// inside the eye contour minus the iris a lighten brightens, and t_zone the
+/// forehead and nose bridge a shine-matte pulls back toward the local mean.
+pub const under_eye_channel = 17;
+pub const nasolabial_channel = 18;
+pub const sclera_channel = 19;
+pub const t_zone_channel = 20;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {
@@ -318,6 +327,17 @@ pub const SmoothField = struct {
     /// (sharpen). mask_channel is the region it acts on.
     amount: f32 = 0.5,
     /// The mask channel the smooth acts on; a smooth naming none is inert.
+    mask_channel: ?u8 = null,
+};
+
+pub const RetouchField = struct {
+    /// A retouch.pass node's selective skin filter over a masked region. blemish
+    /// is a wider edge-aware smooth that evens small spots while keeping real
+    /// edges and skin texture; shine pulls bright pixels back toward the local
+    /// mean to matte a specular highlight. amount (0..1) scales the effect.
+    mode: enum { blemish, shine } = .blemish,
+    amount: f32 = 0.5,
+    /// The mask channel the retouch acts on; a retouch naming none is inert.
     mask_channel: ?u8 = null,
 };
 
@@ -699,6 +719,9 @@ pub const Node = struct {
     tint: ?TintField = null,
     /// Set only on a smooth.pass node: its amount and mask channel.
     smooth: ?SmoothField = null,
+    /// Set only on a retouch.pass node: its selective-filter mode, amount, and
+    /// mask channel.
+    retouch: ?RetouchField = null,
     /// Set only on a matte.refine node: its guided edge-refinement parameters
     /// and the mask channel (or depth) it refines.
     matte: ?MatteField = null,
@@ -1708,6 +1731,32 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "smooth.pass")) {
             smooth_field = .{};
         }
+        var retouch_field: ?RetouchField = null;
+        if (getField(object, "retouch")) |rv| {
+            const retouchmark = path.push("retouch");
+            if (!std.mem.eql(u8, node_type, "retouch.pass")) {
+                try diags.add(path.slice(), "retouch is a retouch.pass field, found it on '{s}'", .{node_type});
+            } else if (rv != .object) {
+                try diags.add(path.slice(), "retouch must be an object", .{});
+            } else {
+                var field: RetouchField = .{};
+                if (getField(rv.object, "mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "retouch mode must be blemish or shine", .{});
+                    }
+                }
+                if (getField(rv.object, "amount")) |v| field.amount = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.amount)), 0.0, 1.0);
+                if (getField(rv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "retouch mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                retouch_field = field;
+            }
+            path.pop(retouchmark);
+        } else if (std.mem.eql(u8, node_type, "retouch.pass")) {
+            retouch_field = .{};
+        }
         var matte_field: ?MatteField = null;
         if (getField(object, "matte")) |mv| {
             const mattemark = path.push("matte");
@@ -2469,6 +2518,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .outline = outline_field,
             .tint = tint_field,
             .smooth = smooth_field,
+            .retouch = retouch_field,
             .matte = matte_field,
             .stylize = stylize_field,
             .edge = edge_field,

@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.eye-brighten",
+  "version": "1.0.0",
+  "display_name": "Eye Brighten",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "brighten", "type": "tint.pass", "inputs": {"frame": "camera"}, "params": {},
+     "tint": {"color": [0.98, 0.98, 1.0], "opacity": 0.5, "mask": "sclera", "blend": "screen"}}
+  ],
+  "triggers": []
+}

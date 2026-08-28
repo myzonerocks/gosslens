@@ -236,6 +236,32 @@ pub const highlight_regions = [_][]const u16{
     &.{ 152, 199, 148, 377 },
 };
 
+/// Under-eye regions, each a cluster just below one eye's lower lid and above
+/// the cheekbone, clear of the lid itself. A face-part matte fills each hull and
+/// unions them, so a smooth softening this channel eases the eye bag and a light
+/// screen tint lifts the shadow, both keyed to the face.
+pub const under_eye_regions = [_][]const u16{
+    &.{ 229, 230, 231, 232, 118, 119, 120, 121 },
+    &.{ 449, 450, 451, 452, 347, 348, 349, 350 },
+};
+
+/// Nasolabial regions, each a cluster tracing one smile-line fold from the nose
+/// ala down beside the mouth corner. A face-part matte fills each hull and
+/// unions them, so a smooth softening this channel eases the fold, keyed to the
+/// face.
+pub const nasolabial_regions = [_][]const u16{
+    &.{ 129, 203, 206, 186, 57, 92 },
+    &.{ 358, 423, 426, 410, 287, 322 },
+};
+
+/// T-zone regions: the central forehead and the nose bridge, the two planes a
+/// face lights specular. A face-part matte fills each hull and unions them into
+/// a T, so a shine-matte pass suppresses the highlights there, keyed to the face.
+pub const t_zone_regions = [_][]const u16{
+    &.{ 10, 151, 9, 108, 337, 107, 336 },
+    &.{ 168, 6, 197, 195, 5, 122, 351 },
+};
+
 /// A stable skin patch for reading skin tone from a reference photo: mid-cheek
 /// and mid-forehead landmarks, clear of the lips, eyes, brows, and hairline, so
 /// a reference-driven foundation samples skin, not a feature. averageLoopColor
@@ -306,6 +332,16 @@ test "the upper lash arc spans the top lid and the band rises above the eye" {
     for (ring) |p| band_cy += p[1];
     band_cy /= @floatFromInt(ring.len);
     try t.expect(band_cy < eye_cy);
+}
+
+test "the retouch region clusters name in-range landmarks" {
+    const groups = [_][]const []const u16{ &under_eye_regions, &nasolabial_regions, &t_zone_regions };
+    for (groups) |group| {
+        for (group) |region| {
+            try t.expect(region.len >= 3);
+            for (region) |idx| try t.expect(idx < landmark_count);
+        }
+    }
 }
 
 /// Indices of the landmarks the blendshape model consumes, in its input
