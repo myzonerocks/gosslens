@@ -1046,6 +1046,9 @@ pub const Session = struct {
     /// A sprite/text node's opacity parameter name (a slice into the lens
     /// manifest arena), when it binds one, so the draw reads a live opacity.
     sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
+    /// A sprite.2d node's live interaction transform, when it declares one, so
+    /// the recognized gestures drag and scale it and a tap on it fires an event.
+    sprite_interactions: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteInteraction) = .empty,
     /// An animated sprite's frame state, when it declares frames > 1: the
     /// per-frame loads in flight, the textures they land in, and the rate
     /// the draw cycles them at off the lens clock.
@@ -2758,7 +2761,16 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 } else {
                     sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
                 }
-                const rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
+                var rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
+                // An interactive sprite draws at its dragged and scaled rect,
+                // keeping its own opacity.
+                if (s.sprite_interactions.get(entry.graph_index)) |si| {
+                    const tr = si.rect();
+                    rect[0] = tr[0];
+                    rect[1] = tr[1];
+                    rect[2] = tr[2];
+                    rect[3] = tr[3];
+                }
                 drawn += 1;
                 const blit_view = next_view_id;
                 next_view_id += 1;
@@ -3492,6 +3504,7 @@ pub fn destroySession(session: *Session) void {
     session.video_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
+    session.sprite_interactions.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
     session.dof_params.deinit(session.engine.gpa);
@@ -6917,6 +6930,7 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
     session.sprite_opacity_params.clearRetainingCapacity();
+    session.sprite_interactions.clearRetainingCapacity();
     var anim_it = session.sprite_anims.valueIterator();
     while (anim_it.next()) |anim| {
         for (anim.loaders) |maybe| if (maybe) |l| l.deinit();
@@ -7878,6 +7892,74 @@ fn tryStartGifSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []c
 }
 
 /// Starts a background load for every spliced sprite.2d node's image
+/// A sprite.2d node's live direct-manipulation state. base is its authored
+/// rect; offset and scale accumulate from drags and pinches; the flags hold a
+/// gesture in progress so a delta applies once per finger motion.
+const SpriteInteraction = struct {
+    cfg: manifest.Interaction,
+    base: [4]f32,
+    offset_x: f32 = 0,
+    offset_y: f32 = 0,
+    scale: f32 = 1,
+    dragging: bool = false,
+    last_px: f32 = 0,
+    last_py: f32 = 0,
+    pinching: bool = false,
+    scale_at_pinch: f32 = 1,
+
+    /// The current rect after the offset and centre scale, for the draw and
+    /// for hit-testing a tap.
+    fn rect(self: SpriteInteraction) [4]f32 {
+        const w = self.base[2] * self.scale;
+        const h = self.base[3] * self.scale;
+        const cx = self.base[0] + self.base[2] * 0.5 + self.offset_x;
+        const cy = self.base[1] + self.base[3] * 0.5 + self.offset_y;
+        return .{ cx - w * 0.5, cy - h * 0.5, w, h };
+    }
+
+    /// Advances the transform one tick from the recognized gestures, returning
+    /// the tap event name when a tap lands on the sprite. start is where the
+    /// active finger went down, so a drag is claimed only if it began on this
+    /// sprite even after the finger has moved off it.
+    fn update(self: *SpriteInteraction, sig: *const trigger.Signals, start_x: f32, start_y: f32) ?[]const u8 {
+        const px: f32 = @floatCast(sig.pointer_x);
+        const py: f32 = @floatCast(sig.pointer_y);
+        const r = self.rect();
+        var fired: ?[]const u8 = null;
+        if (self.cfg.tap_event.len > 0 and sig.tap and inRect(px, py, r)) fired = self.cfg.tap_event;
+        if (self.cfg.drag) {
+            if (sig.touch_drag) {
+                if (!self.dragging and inRect(start_x, start_y, r)) {
+                    self.dragging = true;
+                    self.last_px = start_x;
+                    self.last_py = start_y;
+                }
+                if (self.dragging) {
+                    self.offset_x += px - self.last_px;
+                    self.offset_y += py - self.last_py;
+                    self.last_px = px;
+                    self.last_py = py;
+                }
+            } else self.dragging = false;
+        }
+        if (self.cfg.pinch) {
+            const p: f32 = @floatCast(sig.touch_pinch);
+            if (p != 1.0) {
+                if (!self.pinching) {
+                    self.pinching = true;
+                    self.scale_at_pinch = self.scale;
+                }
+                self.scale = std.math.clamp(self.scale_at_pinch * p, 0.1, 10.0);
+            } else self.pinching = false;
+        }
+        return fired;
+    }
+};
+
+fn inRect(x: f32, y: f32, r: [4]f32) bool {
+    return x >= r[0] and x <= r[0] + r[2] and y >= r[1] and y <= r[1] + r[3];
+}
+
 /// (assets/<stem>.png, or assets/<stem>_<i>.png for an animated sprite)
 /// and records the rect it draws at - mirrors createBlendLoaders, plus the
 /// static rect the render loop needs.
@@ -7888,6 +7970,7 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
     for (sprites) |sprite| {
         session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
         if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
+        if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
         // An animated GIF upgrades the node to a video texture; a node with no
         // GIF falls through to the still or image-sequence PNG path.
         if (tryStartGifSprite(session, gpa, bundle_path, sprite)) continue;
@@ -8823,13 +8906,30 @@ pub export fn goss_session_fire_event(session: ?*Session, name: ?[*]const u8, na
     const s = session orelse return .invalid_argument;
     const n = name orelse return .invalid_argument;
     if (name_len == 0) return .invalid_argument;
-    if (s.pending_event_count >= max_pending_events) return .ok; // dropped this tick
-    const copy_len = @min(name_len, max_event_name);
+    pushEvent(s, n[0..name_len]);
+    return .ok;
+}
+
+/// Queues a named event for the next event view, dropping it when the buffer is
+/// full and truncating an over-long name; shared by the host fire-event op and
+/// the tap-on-object interaction.
+fn pushEvent(s: *Session, name: []const u8) void {
+    if (s.pending_event_count >= max_pending_events) return;
+    const copy_len = @min(name.len, max_event_name);
     const slot = s.pending_event_count;
-    @memcpy(s.pending_event_buf[slot][0..copy_len], n[0..copy_len]);
+    @memcpy(s.pending_event_buf[slot][0..copy_len], name[0..copy_len]);
     s.pending_event_len[slot] = @intCast(copy_len);
     s.pending_event_count += 1;
-    return .ok;
+}
+
+/// Advances every interactive sprite's transform from this tick's gestures and
+/// queues a tap event for any sprite a tap landed on, so it reaches the lens
+/// like a host event this same tick.
+fn updateSpriteInteractions(s: *Session, signals: *const trigger.Signals, start_x: f32, start_y: f32) void {
+    var it = s.sprite_interactions.valueIterator();
+    while (it.next()) |si| {
+        if (si.update(signals, start_x, start_y)) |name| pushEvent(s, name);
+    }
 }
 
 const head_pose_history = 64;
@@ -9517,6 +9617,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     live_signals.touch_rotate = g.rotate;
     live_signals.pointer_x = g.pointer_x;
     live_signals.pointer_y = g.pointer_y;
+    // Interactive sprites consume the same gestures: a drag moves one, a pinch
+    // scales it, and a tap on one queues its event alongside the host events.
+    updateSpriteInteractions(s, &live_signals, g.start_x, g.start_y);
     // Head movement rides the tracked head pose, computed and scanned
     // on-device; only the nod/shake/tilt edges reach the lens, never the pose.
     s.head_clock_us += @as(i64, dt_us);
@@ -10350,6 +10453,32 @@ test "a script's onInit runs once and its onTap fires per tap" {
     try t.expectEqual(Status.ok, goss_session_tick_lens(session, 16_000, &signals));
     try t.expectEqual(Status.ok, goss_session_parameter_value(session, "taps", "taps".len, &taps));
     try t.expectApproxEqAbs(@as(f32, 2.0), taps, 1e-6);
+}
+
+test "an interactive sprite drags, scales, and reports a tap on it" {
+    var si = SpriteInteraction{ .cfg = .{ .drag = true, .pinch = true, .tap_event = "hit" }, .base = .{ 0.4, 0.4, 0.2, 0.2 } };
+
+    // A tap inside the sprite reports its event; one outside does not.
+    var sig = trigger.Signals{ .tap = true, .pointer_x = 0.5, .pointer_y = 0.5 };
+    try t.expectEqualStrings("hit", si.update(&sig, 0.5, 0.5).?);
+    sig = .{ .tap = true, .pointer_x = 0.95, .pointer_y = 0.95 };
+    try t.expect(si.update(&sig, 0.95, 0.95) == null);
+
+    // A drag that began on the sprite moves it by the pointer delta.
+    sig = .{ .touch_drag = true, .pointer_x = 0.7, .pointer_y = 0.5 };
+    _ = si.update(&sig, 0.5, 0.5);
+    try t.expectApproxEqAbs(@as(f32, 0.2), si.offset_x, 1e-5);
+
+    // A two-finger pinch scales it about its centre.
+    sig = .{ .touch_pinch = 2.0 };
+    _ = si.update(&sig, 0, 0);
+    try t.expectApproxEqAbs(@as(f32, 2.0), si.scale, 1e-5);
+
+    // A drag that began off the sprite is ignored.
+    var off = SpriteInteraction{ .cfg = .{ .drag = true }, .base = .{ 0.4, 0.4, 0.2, 0.2 } };
+    var dsig = trigger.Signals{ .touch_drag = true, .pointer_x = 0.95, .pointer_y = 0.95 };
+    _ = off.update(&dsig, 0.9, 0.9);
+    try t.expectApproxEqAbs(@as(f32, 0.0), off.offset_x, 1e-5);
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {

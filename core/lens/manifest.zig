@@ -623,6 +623,19 @@ pub const EnvField = struct {
     intensity: f32 = 1.0,
 };
 
+/// The direct-manipulation gestures a sprite responds to. drag moves it with a
+/// finger that started on it, pinch scales it about its centre, and tap_event
+/// names an event the engine fires when a tap lands on it. All off by default.
+pub const Interaction = struct {
+    drag: bool = false,
+    pinch: bool = false,
+    tap_event: []const u8 = "",
+
+    pub fn any(self: Interaction) bool {
+        return self.drag or self.pinch or self.tap_event.len > 0;
+    }
+};
+
 pub const SpriteField = struct {
     /// A sprite.2d node's screen rect in normalized coordinates (origin
     /// top-left, 0..1 across the frame) and its draw opacity. The default
@@ -632,6 +645,8 @@ pub const SpriteField = struct {
     w: f32 = 1.0,
     h: f32 = 1.0,
     opacity: f32 = 1.0,
+    /// The gestures that directly manipulate this sprite, off unless named.
+    interaction: Interaction = .{},
     /// A parameter name whose live value overrides `opacity` each frame, so
     /// a param_ramp can fade the sprite or a beat trigger pulse it. Empty
     /// leaves the static opacity in force.
@@ -2249,6 +2264,21 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     } else try diags.add(path.slice(), "sprite frames must be an integer 1..{d}", .{max_sprite_frames});
                 }
                 if (getField(sv.object, "fps")) |v| field.fps = @floatCast(numberOf(v) orelse field.fps);
+                if (getField(sv.object, "interaction")) |iv| {
+                    if (iv == .object) {
+                        var it: Interaction = .{};
+                        if (getField(iv.object, "drag")) |b| {
+                            if (b == .bool) it.drag = b.bool;
+                        }
+                        if (getField(iv.object, "pinch")) |b| {
+                            if (b == .bool) it.pinch = b.bool;
+                        }
+                        if (getField(iv.object, "tap_event")) |v| {
+                            if (try expectString(diags, path, v)) |s| it.tap_event = try arena.dupe(u8, s);
+                        }
+                        field.interaction = it;
+                    } else try diags.add(path.slice(), "sprite interaction must be an object", .{});
+                }
                 sprite_field = field;
             }
             path.pop(smark);
@@ -3569,6 +3599,23 @@ test "a sprite.2d node parses its rect and opacity" {
     try t.expectApproxEqAbs(@as(f32, 0.25), sp.x, 0.001);
     try t.expectApproxEqAbs(@as(f32, 0.5), sp.w, 0.001);
     try t.expectApproxEqAbs(@as(f32, 0.8), sp.opacity, 0.001);
+}
+
+test "a sprite.2d node parses its interaction block" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {},
+        \\    "sprite": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2, "interaction": {"drag": true, "pinch": true, "tap_event": "hit"}}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
+    try t.expect(sp.interaction.drag);
+    try t.expect(sp.interaction.pinch);
+    try t.expectEqualStrings("hit", sp.interaction.tap_event);
+    try t.expect(sp.interaction.any());
 }
 
 test "a sprite.2d node with no sprite block defaults to full frame" {

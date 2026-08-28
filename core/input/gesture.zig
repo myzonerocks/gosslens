@@ -20,6 +20,8 @@ pub const Swipe = enum(u8) { none, left, right, up, down };
 pub const Output = struct {
     pointer_x: f32 = 0,
     pointer_y: f32 = 0,
+    start_x: f32 = 0,
+    start_y: f32 = 0,
     tap: bool = false,
     double_tap: bool = false,
     long_press: bool = false,
@@ -210,6 +212,14 @@ pub const Recognizer = struct {
         out.active = count;
         out.pointer_x = self.last_x;
         out.pointer_y = self.last_y;
+        if (count >= 1) {
+            const primary = self.pointers[self.primarySlot()];
+            out.start_x = primary.start_x;
+            out.start_y = primary.start_y;
+        } else {
+            out.start_x = self.last_x;
+            out.start_y = self.last_y;
+        }
         out.dragging = count == 1 and self.pointers[self.primarySlot()].moved;
 
         if (self.two_active) {

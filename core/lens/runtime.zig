@@ -315,6 +315,8 @@ pub const SpriteNode = struct {
     /// Frame count and rate for an animated sprite; frames == 1 is static.
     frames: u32,
     fps: f32,
+    /// The direct-manipulation gestures this sprite responds to.
+    interaction: manifest.Interaction,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -1055,7 +1057,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .frames = sp.frames, .fps = sp.fps });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction });
         }
         return out.toOwnedSlice(gpa);
     }
