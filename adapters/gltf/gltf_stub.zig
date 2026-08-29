@@ -67,6 +67,7 @@ pub const DecodedModel = struct {
     animations: []DecodedAnimation,
     skin: ?DecodedSkin = null,
     morph_targets: []const []const [3]f32 = &.{},
+    morph_names: []const []const u8 = &.{},
 };
 
 pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel {
