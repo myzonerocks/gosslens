@@ -913,6 +913,21 @@ class GossSession private constructor(
         return Gosslens.nativeSubmitAvatarSourceRgba(handle, buf, width, height) == 0
     }
 
+    /** Feeds the platform's world understanding into the session: the camera
+     * pose and projection state, tracked planes, anchors, and light estimate,
+     * each a direct ByteBuffer laid out as the world ABI structs. Drives the
+     * world.tracking_state trigger and world-anchored lens content. */
+    fun submitWorld(
+        stateBuffer: ByteBuffer,
+        planesBuffer: ByteBuffer,
+        planeCount: Int,
+        anchorsBuffer: ByteBuffer,
+        anchorCount: Int,
+        lightBuffer: ByteBuffer,
+    ): Boolean = Gosslens.nativeSubmitWorld(
+        handle, stateBuffer, planesBuffer, planeCount, anchorsBuffer, anchorCount, lightBuffer,
+    ) == 0
+
     /** Stands the segmentation worker up from a raw model - a selfie or hair
      * segmenter .tflite; [model] is a direct buffer of the model bytes. Once
      * enabled, trackFrame feeds it the same frame it feeds the trackers. */
