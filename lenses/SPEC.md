@@ -210,6 +210,12 @@ it on silence, overriding that one target's tracked or bound value. Combine
 `retarget` and `talk` to lip-sync a tracked face's avatar to its own voice.
 `talk` is a `model.gltf` field only.
 
+A tracked avatar renders in any of the engine's art styles by drawing it and
+adding a stylize node after it: a `stylize.pass` in `toon`, `sketch`, `emboss`
+or `crosshatch` mode restyles the avatar, and a diffusion restyle masked to the
+face channel repaints it, both while the avatar keeps tracking the driving
+expression. Style and liveness compose, so a stylized avatar is still live.
+
 A `model.gltf` node may add `"control": {"orbit", "dolly", "roll"}`, a
 turntable the recognized gestures steer: `orbit` spins the model with a drag
 (yaw from the horizontal, pitch from the vertical), `dolly` scales it with a
@@ -1196,7 +1202,9 @@ a diffusion node targeting a shader.pass binds its generated image to the materi
 graph's generated sampler; a selfie-source splat.cloud generates its avatar from
 one submitted still through the avatar op and draws it off the per-frame camera;
 a retarget avatar is reenacted by an injected source performance, an open source
-jaw deforming the mesh where a closed one holds it at rest;
+jaw deforming the mesh where a closed one holds it at rest; a tracked avatar
+renders in a toon art style and stays live, tracking an injected jaw while
+differing from the un-stylized avatar;
 and the prompt
 compiler emits a GLF manifest on device that activates as a lens and renders.
 The conformance harness runs today on the host (macOS): it renders each

@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.avatar-toon",
+  "version": "1.0.0",
+  "display_name": "Avatar Toon",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "face", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "retarget": true},
+    {"id": "toon", "type": "stylize.pass", "inputs": {"frame": "camera"}, "params": {}, "stylize": {"mode": "toon", "strength": 1.0}}
+  ],
+  "triggers": []
+}

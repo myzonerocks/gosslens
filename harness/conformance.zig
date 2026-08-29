@@ -12062,6 +12062,71 @@ fn proveHeadReenact(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Loads a directory lens and lands its async .glb before a face-driven capture.
+fn activateAndLoad(gpa: std.mem.Allocator, engine: *abi.Engine, session: *abi.Session, dir: []const u8, planes: Nv12Copy) !bool {
+    _ = gpa;
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return false;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+    pumpUntilLoaded(engine, session);
+    return true;
+}
+
+/// Proves the stylized avatar system: the avatar-toon lens toon-shades a
+/// retarget avatar, and it stays live. The toon avatar under an open injected
+/// jaw differs from the same under a closed one (liveness) and from the
+/// un-stylized avatar (style applied), so any tracked avatar renders in a style.
+fn proveStylizedAvatar(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    // blendshape_names[25] is jawOpen, pinned by a face module test.
+    const jaw_open = 25;
+    var closed = std.mem.zeroes(abi.FaceResult);
+    closed.presence = 1.0;
+    closed.landmark_count_out = @intCast(closed.landmarks.len / 3);
+    closed.blendshapes[jaw_open] = 0.05;
+    var open = closed;
+    open.blendshapes[jaw_open] = 0.9;
+
+    const toon = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(toon);
+    defer settle(engine);
+    if (!try activateAndLoad(gpa, engine, toon, ".lens-packages/avatar-toon", planes)) {
+        std.debug.print("conformance: FAIL avatar-toon lens activation\n", .{});
+        return false;
+    }
+    const toon_open = try captureReenactShot(gpa, engine, toon, planes, &[_]abi.FaceResult{open});
+    defer gpa.free(toon_open);
+    const toon_closed = try captureReenactShot(gpa, engine, toon, planes, &[_]abi.FaceResult{closed});
+    defer gpa.free(toon_closed);
+
+    const plain = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(plain);
+    if (!try activateAndLoad(gpa, engine, plain, ".lens-packages/face-reenact", planes)) {
+        std.debug.print("conformance: FAIL face-reenact control activation\n", .{});
+        return false;
+    }
+    const plain_open = try captureReenactShot(gpa, engine, plain, planes, &[_]abi.FaceResult{open});
+    defer gpa.free(plain_open);
+
+    const live = countDiff(toon_open, toon_closed);
+    const styled = countDiff(toon_open, plain_open);
+    if (live == 0) {
+        std.debug.print("conformance: FAIL stylized-avatar: the toon avatar did not track the injected jaw\n", .{});
+        return false;
+    }
+    if (styled == 0) {
+        std.debug.print("conformance: FAIL stylized-avatar: the toon style left the avatar unchanged\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a tracked avatar renders in an art style and stays live: a toon avatar tracks an injected jaw ({d} bytes) and differs from the un-stylized avatar ({d} bytes)\n", .{ live, styled });
+    return true;
+}
+
 /// Proves a sprite.2d node draws its image over the frame. The static
 /// Renders frames until every async image and model load has landed, so a
 /// screenshot reads a deterministic frame no matter how the loader threads were
@@ -13303,6 +13368,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("morph blend");
     if (!try proveHeadReenact(gpa, engine)) return 1;
     watchHold("head reenact");
+    if (!try proveStylizedAvatar(gpa, engine)) return 1;
+    watchHold("stylized avatar");
     if (!try proveSpriteDraw(gpa, engine)) return 1;
     watchHold("sprite overlay");
     if (!try proveTextDraw(gpa, engine)) return 1;
