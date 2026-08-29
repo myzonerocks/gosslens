@@ -280,6 +280,13 @@ pub const RelightField = struct {
     angle: f32 = 0,
 };
 
+pub const GlareField = struct {
+    /// A glare.pass node's specular rolloff: `strength` (0..1) how far a pixel
+    /// above `threshold` luma is pulled back down, so blown speculars recover.
+    strength: f32 = 1,
+    threshold: f32 = 0.8,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -999,6 +1006,8 @@ pub const Node = struct {
     dehaze: ?DehazeField = null,
     /// Set only on a relight.pass node: its directional key light.
     relight: ?RelightField = null,
+    /// Set only on a glare.pass node: its specular-highlight rolloff.
+    glare: ?GlareField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -1901,6 +1910,21 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 relight_field = field;
             }
             path.pop(rmark);
+        }
+        var glare_field: ?GlareField = null;
+        if (getField(object, "glare")) |gv| {
+            const glmark = path.push("glare");
+            if (!std.mem.eql(u8, node_type, "glare.pass")) {
+                try diags.add(path.slice(), "glare is a glare.pass field, found it on '{s}'", .{node_type});
+            } else if (gv != .object) {
+                try diags.add(path.slice(), "glare must be an object", .{});
+            } else {
+                var field: GlareField = .{};
+                if (getField(gv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(gv.object, "threshold")) |v| field.threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.threshold)), 0, 1);
+                glare_field = field;
+            }
+            path.pop(glmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3165,6 +3189,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .grade = grade_field,
             .dehaze = dehaze_field,
             .relight = relight_field,
+            .glare = glare_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

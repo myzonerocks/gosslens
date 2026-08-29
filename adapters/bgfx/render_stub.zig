@@ -500,6 +500,14 @@ pub const Renderer = struct {
         _ = params3;
     }
 
+    pub fn submitGlarePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, strength: f32, threshold: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = strength;
+        _ = threshold;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
@@ -1006,6 +1014,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadRelightProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadGlareProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

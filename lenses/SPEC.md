@@ -375,6 +375,13 @@ and shades the far side, scaled by `strength` (0..1, default 1). Strength 0
 leaves the frame untouched. Like `grade.pass` it ships no asset and is always
 ready.
 
+A `"glare.pass"` node is a specular-highlight rolloff post-effect. It carries a
+`"glare": {"strength", "threshold"}` block: a pixel whose luma sits above
+`threshold` (0..1, default 0.8) is pulled back down toward it by `strength`
+(0..1, default 1), so a blown-out specular recovers while the rest of the frame
+holds. Strength 0 leaves the frame untouched. Like `grade.pass` it ships no
+asset and is always ready.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1229,7 +1236,9 @@ and drawing, where the same model with no reference is rejected at load;
 a dehaze.pass lifts the atmospheric veil, strength 1 darkening a hazy frame
 where strength 0 leaves it untouched; a relight.pass lights the frame
 directionally, angle 0 brightening the right over the left where the uniform
-strength-0 frame stays even;
+strength-0 frame stays even; a glare.pass recovers a blown highlight, strength 1
+pulling the bright region down toward the threshold where the normal region
+holds;
 a diffusion loop over a bundled encoder, unet, and decoder restyles
 the frame and draws it through a sprite; a diffusion lens with no encoder
 generates from seeded noise and a text embedding, drawing the image through a

@@ -2844,6 +2844,69 @@ fn proveRelight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a glare.pass lens at a static strength and threshold (no asset).
+fn writeGlareLens(dir: []const u8, strength: f32, threshold: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.glare","version":"1.0.0","display_name":"Glare","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"g","type":"glare.pass","inputs":{{"frame":"camera"}},"params":{{}},"glare":{{"strength":{d:.3},"threshold":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, threshold });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the specular glare rolloff: a glare.pass pulls a bright highlight down
+/// while a normal-luma region holds. The frame is blown out on the left and
+/// mid-toned on the right; strength 1 recovers the left where the right barely
+/// moves, and strength 0 is untouched.
+fn proveGlare(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const v: u8 = if (col < width / 2) 240 else 100;
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/glare-0");
+    try writeGlareLens("zig-out/glare-0", 0.0, 0.8);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/glare-1");
+    try writeGlareLens("zig-out/glare-1", 1.0, 0.8);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/glare-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/glare-1", planes);
+    defer gpa.free(shot1);
+
+    const changed = countDiff(shot0, shot1);
+    const bright0 = sumThird(shot0, 0);
+    const bright1 = sumThird(shot1, 0);
+    const normal0 = sumThird(shot0, 1);
+    const normal1 = sumThird(shot1, 1);
+    const normal_gap = if (normal1 > normal0) normal1 - normal0 else normal0 - normal1;
+    const bright_drop = if (bright0 > bright1) bright0 - bright1 else 0;
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL glare at strength 1 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (!(bright1 < bright0) or normal_gap > bright_drop / 4) {
+        std.debug.print("conformance: FAIL glare did not recover the highlight while holding the normal region (bright drop {d}, normal gap {d})\n", .{ bright_drop, normal_gap });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a glare.pass recovers a blown highlight: strength 1 pulls the bright region down toward the threshold where the normal region barely moves and strength 0 is untouched ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -14156,6 +14219,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("dehaze pass");
     if (!try proveRelight(gpa, engine)) return 1;
     watchHold("relight pass");
+    if (!try proveGlare(gpa, engine)) return 1;
+    watchHold("glare pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
