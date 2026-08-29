@@ -80,12 +80,14 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     return null;
 }
 
-/// A behavior node drives parameters each tick and draws nothing, so it never
-/// joins the composite chain: the script, the logic graph, the ml.infer model.
+/// A behavior node drives parameters or a sprite's texture each tick and draws
+/// nothing itself, so it never joins the composite chain: the script, the logic
+/// graph, the ml.infer model, and the diffusion restyle.
 fn isBehaviorNode(type_str: []const u8) bool {
     return std.mem.eql(u8, type_str, "script") or
         std.mem.eql(u8, type_str, "logic.graph") or
-        std.mem.eql(u8, type_str, "ml.infer");
+        std.mem.eql(u8, type_str, "ml.infer") or
+        std.mem.eql(u8, type_str, "diffusion");
 }
 
 const ParamSlot = struct { name: []const u8, effect: EffectSlot };

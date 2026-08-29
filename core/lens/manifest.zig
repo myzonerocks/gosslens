@@ -872,6 +872,21 @@ pub const MlField = struct {
     style: ?MlStyle = null,
 };
 
+/// A diffusion node's restyle slot: the three bundled models the loop runs (a
+/// VAE encoder, a UNet, a VAE decoder), an optional precomputed text embedding
+/// the UNet conditions on, the sprite the restyled frame draws through, and the
+/// sampler settings (few-step count, img2img strength, and noise seed).
+pub const DiffusionField = struct {
+    encoder: []const u8,
+    unet: []const u8,
+    decoder: []const u8,
+    text_embedding: []const u8 = "",
+    sprite: []const u8,
+    steps: u32 = 4,
+    strength: f32 = 0.6,
+    seed: u64 = 0,
+};
+
 pub const Node = struct {
     id: []const u8,
     type: []const u8,
@@ -893,6 +908,7 @@ pub const Node = struct {
     logic_graph: ?LogicGraphSpec = null,
     /// Set on an ml.infer node: the bring-your-own model slot.
     ml: ?MlField = null,
+    diffusion: ?DiffusionField = null,
     /// Set when the manifest gives the node a rigid body.
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
@@ -2938,6 +2954,18 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(ml_mark);
         }
+        var diffusion_field: ?DiffusionField = null;
+        if (getField(object, "diffusion")) |dv| {
+            const diff_mark = path.push("diffusion");
+            if (!std.mem.eql(u8, node_type, "diffusion")) {
+                try diags.add(path.slice(), "diffusion is a diffusion-node field, found it on '{s}'", .{node_type});
+            } else if (dv != .object) {
+                try diags.add(path.slice(), "diffusion must be an object", .{});
+            } else {
+                diffusion_field = try parseDiffusionField(diags, path, arena, dv.object);
+            }
+            path.pop(diff_mark);
+        }
 
         const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
         const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
@@ -2980,6 +3008,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .control = model_control,
             .logic_graph = logic_graph_spec,
             .ml = ml_field,
+            .diffusion = diffusion_field,
             .body_anchor = body_anchor,
             .skeleton_anchor = skeleton_anchor,
             .world_anchor = world_anchor,
@@ -3068,6 +3097,40 @@ fn parseLogicGraph(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         .output_id = try arena.dupe(u8, output_id),
         .output_param = try arena.dupe(u8, output_param),
     };
+}
+
+fn parseDiffusionField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?DiffusionField {
+    const encoder = if (getField(object, "encoder")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const unet = if (getField(object, "unet")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const decoder = if (getField(object, "decoder")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const sprite = if (getField(object, "sprite")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (encoder.len == 0 or unet.len == 0 or decoder.len == 0) {
+        try diags.add(path.slice(), "diffusion needs encoder, unet, and decoder model files", .{});
+        return null;
+    }
+    if (sprite.len == 0) {
+        try diags.add(path.slice(), "diffusion needs a sprite to draw the restyled frame through", .{});
+        return null;
+    }
+    var field: DiffusionField = .{
+        .encoder = try arena.dupe(u8, encoder),
+        .unet = try arena.dupe(u8, unet),
+        .decoder = try arena.dupe(u8, decoder),
+        .sprite = try arena.dupe(u8, sprite),
+    };
+    if (getField(object, "text_embedding")) |v| {
+        if (try expectString(diags, path, v)) |s| field.text_embedding = try arena.dupe(u8, s);
+    }
+    if (getField(object, "steps")) |v| {
+        if (v == .integer and v.integer >= 1 and v.integer <= 16) field.steps = @intCast(v.integer);
+    }
+    if (getField(object, "strength")) |v| {
+        field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+    }
+    if (getField(object, "seed")) |v| {
+        if (v == .integer and v.integer >= 0) field.seed = @intCast(v.integer);
+    }
+    return field;
 }
 
 fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?MlField {
@@ -4031,6 +4094,43 @@ test "an ml.infer node parses a mask binding to a named channel" {
     const mask = ml.mask orelse return error.TestUnexpectedResult;
     try t.expectEqual(@as(u32, 0), mask.tensor);
     try t.expectEqual(@as(u8, 2), mask.channel);
+}
+
+test "a diffusion node parses its three models and sampler settings" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "restyle", "type": "diffusion", "params": {},
+        \\    "diffusion": {"encoder": "vae_enc.onnx", "unet": "unet.onnx", "decoder": "vae_dec.onnx",
+        \\      "sprite": "canvas", "steps": 6, "strength": 0.4, "seed": 7}},
+        \\   {"id": "canvas", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const d = manifest.nodes[0].diffusion orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings("unet.onnx", d.unet);
+    try t.expectEqualStrings("canvas", d.sprite);
+    try t.expectEqual(@as(u32, 6), d.steps);
+    try t.expectApproxEqAbs(@as(f32, 0.4), d.strength, 0.001);
+    try t.expectEqual(@as(u64, 7), d.seed);
+}
+
+test "a diffusion node missing a model is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "restyle", "type": "diffusion", "params": {},
+        \\    "diffusion": {"encoder": "vae_enc.onnx", "decoder": "vae_dec.onnx", "sprite": "canvas"}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "diffusion needs encoder, unet, and decoder") != null) found = true;
+    }
+    try t.expect(found);
 }
 
 test "an ml.infer node parses a style binding to a sprite" {

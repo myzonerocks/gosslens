@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const ml_engine = @import("ml_engine");
+const ml_sample = @import("ml_sample");
 const sampler = @import("sampler");
 const ml_tensor = @import("ml_tensor");
 
@@ -15,10 +16,6 @@ pub const CreateError = error{ Unsupported, InvalidModel, ModelRejected, OutOfMe
 /// The most output tensors a byo-ml model may expose, a bound not a promise.
 pub const max_outputs = 8;
 
-/// How a model lays out its image input. The sampler writes interleaved RGB
-/// (NHWC); an NCHW model takes the same pixels transposed to planar.
-const Layout = enum { nhwc, nchw };
-
 /// A loaded author model: its backend engine, the reused RGB input plane, and
 /// an owned copy of each output tensor so a reader never touches the live
 /// engine output the next invoke overwrites. Outputs read zero until publish.
@@ -26,7 +23,7 @@ pub const Core = struct {
     gpa: std.mem.Allocator,
     model_bytes: []u8,
     engine: ml_engine.Engine,
-    layout: Layout,
+    in_sq: ml_sample.Square,
     input_side: u32,
     input_tensor: []f32,
     /// Planar scratch the NHWC sample transposes into for an NCHW model; empty
@@ -60,21 +57,12 @@ pub const Core = struct {
 
         var in_dims_buf: [8]i32 = undefined;
         const in_dims = engine.inputDims(0, &in_dims_buf) catch return error.InvalidModel;
-        if (in_dims.len != 4) return error.InvalidModel;
-        var layout: Layout = undefined;
-        var side: i32 = 0;
-        if (in_dims[3] == 3 and in_dims[1] > 0 and in_dims[1] == in_dims[2]) {
-            layout = .nhwc;
-            side = in_dims[1];
-        } else if (in_dims[1] == 3 and in_dims[2] > 0 and in_dims[2] == in_dims[3]) {
-            layout = .nchw;
-            side = in_dims[2];
-        } else return error.InvalidModel;
-        const input_side: u32 = @intCast(side);
+        const in_sq = ml_sample.detectSquareRgb(in_dims) orelse return error.InvalidModel;
+        const input_side: u32 = in_sq.side;
 
         const input_tensor = gpa.alloc(f32, @as(usize, input_side) * input_side * 3) catch return error.OutOfMemory;
         errdefer gpa.free(input_tensor);
-        const nchw_scratch = if (layout == .nchw)
+        const nchw_scratch = if (in_sq.layout == .nchw)
             gpa.alloc(f32, @as(usize, input_side) * input_side * 3) catch return error.OutOfMemory
         else
             try gpa.alloc(f32, 0);
@@ -87,7 +75,7 @@ pub const Core = struct {
         var output_lens: [max_outputs]usize = @splat(0);
         var largest: u64 = @as(u64, input_side) * input_side * 3 * @sizeOf(f32);
         @memset(input_tensor, 0);
-        writeSampledInput(&engine, layout, input_side, input_tensor, nchw_scratch) catch return error.InvalidModel;
+        ml_sample.writeSampled(&engine, 0, in_sq, input_tensor, nchw_scratch) catch return error.InvalidModel;
         engine.invoke() catch return error.InvalidModel;
         for (0..out_count) |i| {
             const floats = engine.outputFloats(i) catch return error.InvalidModel;
@@ -109,7 +97,7 @@ pub const Core = struct {
             .gpa = gpa,
             .model_bytes = owned_bytes,
             .engine = engine,
-            .layout = layout,
+            .in_sq = in_sq,
             .input_side = input_side,
             .input_tensor = input_tensor,
             .nchw_scratch = nchw_scratch,
@@ -133,8 +121,7 @@ pub const Core = struct {
     /// leaving the result in the engine for publish(). Reuses the input plane,
     /// so a compute allocates nothing.
     pub fn compute(core: *Core, frame: sampler.Frame) bool {
-        sampler.sampleRegion(frame, sampler.frameSquare(frame.width, frame.height), .unit, core.input_side, core.input_tensor);
-        writeSampledInput(&core.engine, core.layout, core.input_side, core.input_tensor, core.nchw_scratch) catch return false;
+        ml_sample.writeFrame(&core.engine, 0, core.in_sq, frame, core.input_tensor, core.nchw_scratch) catch return false;
         core.engine.invoke() catch return false;
         return true;
     }
@@ -172,7 +159,7 @@ pub const Core = struct {
     /// Whether the model's image tensors are channel-first (NCHW). A style
     /// output is read in the same layout the input declared.
     pub fn layoutIsNchw(core: *const Core) bool {
-        return core.layout == .nchw;
+        return core.in_sq.layout == .nchw;
     }
 
     /// The index of the largest finite element of an output tensor, a
@@ -204,24 +191,3 @@ pub const Core = struct {
     }
 };
 
-/// Writes the sampled RGB into the model's input tensor in its own layout: an
-/// NHWC model takes the interleaved sample straight through; an NCHW model
-/// takes it transposed to planar channels through the scratch buffer.
-fn writeSampledInput(engine: *ml_engine.Engine, layout: Layout, side: u32, nhwc: []const f32, nchw_scratch: []f32) anyerror!void {
-    switch (layout) {
-        .nhwc => try engine.writeInput(0, std.mem.sliceAsBytes(nhwc)),
-        .nchw => {
-            const s: usize = side;
-            const plane = s * s;
-            for (0..s) |y| {
-                for (0..s) |x| {
-                    const px = (y * s + x) * 3;
-                    nchw_scratch[0 * plane + y * s + x] = nhwc[px + 0];
-                    nchw_scratch[1 * plane + y * s + x] = nhwc[px + 1];
-                    nchw_scratch[2 * plane + y * s + x] = nhwc[px + 2];
-                }
-            }
-            try engine.writeInput(0, std.mem.sliceAsBytes(nchw_scratch));
-        },
-    }
-}

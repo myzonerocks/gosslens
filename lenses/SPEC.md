@@ -792,6 +792,22 @@ path: a restyle net loads like any other author model, runs off the frame
 thread under the same bounds, and draws through the sprite the composite chain
 already knows how to place, turn, and fade.
 
+A `"diffusion"` node runs an on-device latent-diffusion restyle. Like the other
+behavior nodes it draws nothing itself; it carries a `"diffusion"` block naming
+three models the bundle ships under `assets/`: an `"encoder"` (a VAE that turns
+the frame into a latent), a `"unet"` (the denoiser), and a `"decoder"` (a VAE
+that turns a latent back into an image). Each frame the engine samples the
+camera square into the encoder, seeds the latent with deterministic noise up to
+the `"strength"` (0 keeps the frame, 1 fully restyles), runs `"steps"` denoise
+steps of the UNet on a fixed few-step schedule, and decodes the result. The
+UNet reads the latent, and, if it declares them, a timestep and a conditioning
+input; a `"text_embedding"` file supplies that conditioning, so a prompt encoded
+ahead of time steers the restyle. A `"seed"` fixes the noise, so the same lens
+and frame restyle the same way every run. The decoded image draws through the
+`"sprite"` the block names, the same way the style binding does, so the restyle
+composites like any other sprite. The loop runs off the frame thread and never
+blocks the render; the models are bounded and sandboxed like every author model.
+
 The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, the beauty nodes, shader
@@ -1076,8 +1092,9 @@ harness: an `ml.infer` node runs a bundled TFLite segmenter and a bundled ONNX
 net, each driving a lens parameter from the frame; an author ONNX segmenter's
 output reaches the subject mask channel; an `argmax` reduce reads a
 classifier's predicted class into a parameter; a model output moves a sprite
-through its placement parameters; and a restyle net's output image draws
-through a sprite. The conformance harness runs today on the host (macOS): it renders each
+through its placement parameters; a restyle net's output image draws through a
+sprite; and a diffusion loop over a bundled encoder, unet, and decoder restyles
+the frame and draws it through a sprite. The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

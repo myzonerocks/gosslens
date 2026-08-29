@@ -285,7 +285,9 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("sph", sphModule(b, target, optimize));
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
-    abi_module.addImport("ml_infer", mlInferStubModule(b, target, optimize, math_module));
+    const stub_ml_tensor_host = mlTensorModule(b, target, optimize);
+    abi_module.addImport("ml_infer", mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_host));
+    abi_module.addImport("diffusion", diffusionStubModule(b, target, optimize, math_module, stub_ml_tensor_host));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
     abi_module.addImport("face106", face106_module);
 
@@ -743,12 +745,15 @@ pub fn build(b: *std.Build) void {
             },
         });
         const ml_tensor_module = mlTensorModule(b, target, optimize);
+        const ml_engine_module = mlEngineModule(b, target, optimize, runtime_module);
+        const ml_sample_module = mlSampleModule(b, target, optimize, sampler_module, ml_engine_module);
         const ml_infer_core_module = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "ml_engine", .module = mlEngineModule(b, target, optimize, runtime_module) },
+                .{ .name = "ml_engine", .module = ml_engine_module },
+                .{ .name = "ml_sample", .module = ml_sample_module },
                 .{ .name = "sampler", .module = sampler_module },
                 .{ .name = "ml_tensor", .module = ml_tensor_module },
             },
@@ -764,6 +769,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ml_infer_core", .module = ml_infer_core_module },
             },
         });
+        const diffusion_module = diffusionModule(b, target, optimize, ml_engine_module, ml_sample_module, sampler_module, math_module, ml_tensor_module);
         const beauty_real_module = b.createModule(.{
             .root_source_file = b.path("adapters/beauty/beauty.zig"),
             .target = target,
@@ -788,6 +794,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "tracking", .module = tracking_real_module },
                 .{ .name = "segmentation", .module = segmentation_module },
                 .{ .name = "ml_infer", .module = ml_infer_module },
+                .{ .name = "diffusion", .module = diffusion_module },
                 .{ .name = "manifest", .module = lens_manifest_module },
                 .{ .name = "trigger", .module = lens_trigger_module },
                 .{ .name = "runtime", .module = lens_runtime_module },
@@ -843,6 +850,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "face106", .module = face106_module },
                 .{ .name = "segmentation", .module = segmentation_module },
                 .{ .name = "ml_infer", .module = ml_infer_module },
+                .{ .name = "diffusion", .module = diffusion_module },
             },
         });
         if (host_asset) |am| tracking_module.addImport("image", am.image);
@@ -1044,7 +1052,9 @@ pub fn build(b: *std.Build) void {
         }));
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
-        abi_wasm.addImport("ml_infer", mlInferStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
+        const stub_ml_tensor_wasm = mlTensorModule(b, wasm_target, .ReleaseSmall);
+        abi_wasm.addImport("ml_infer", mlInferStubModule(b, wasm_target, .ReleaseSmall, math_wasm, stub_ml_tensor_wasm));
+        abi_wasm.addImport("diffusion", diffusionStubModule(b, wasm_target, .ReleaseSmall, math_wasm, stub_ml_tensor_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
         const lens_manifest_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/manifest.zig"),
@@ -1313,12 +1323,16 @@ pub fn build(b: *std.Build) void {
                 },
             });
             const ml_tensor_conformance = mlTensorModule(b, target, optimize);
+            const ml_engine_conformance = mlEngineModule(b, target, optimize, runtime_conformance);
+            const ml_sample_conformance = mlSampleModule(b, target, optimize, sampler_module, ml_engine_conformance);
+            const diffusion_conformance = diffusionModule(b, target, optimize, ml_engine_conformance, ml_sample_conformance, sampler_module, math_module, ml_tensor_conformance);
             const ml_infer_core_conformance = b.createModule(.{
                 .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
-                    .{ .name = "ml_engine", .module = mlEngineModule(b, target, optimize, runtime_conformance) },
+                    .{ .name = "ml_engine", .module = ml_engine_conformance },
+                    .{ .name = "ml_sample", .module = ml_sample_conformance },
                     .{ .name = "sampler", .module = sampler_module },
                     .{ .name = "ml_tensor", .module = ml_tensor_conformance },
                 },
@@ -1346,11 +1360,14 @@ pub fn build(b: *std.Build) void {
             abi_conformance_module.addImport("tracking", tracking_conformance);
             abi_conformance_module.addImport("segmentation", segmentation_conformance);
             abi_conformance_module.addImport("ml_infer", ml_infer_conformance);
+            abi_conformance_module.addImport("diffusion", diffusion_conformance);
             abi_conformance_module.addImport("beauty", beauty_conformance);
         } else {
             abi_conformance_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
             abi_conformance_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
-            abi_conformance_module.addImport("ml_infer", mlInferStubModule(b, target, optimize, math_module));
+            const stub_ml_tensor_conf = mlTensorModule(b, target, optimize);
+            abi_conformance_module.addImport("ml_infer", mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_conf));
+            abi_conformance_module.addImport("diffusion", diffusionStubModule(b, target, optimize, math_module, stub_ml_tensor_conf));
             abi_conformance_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
         }
         const conformance_module = b.createModule(.{
@@ -1706,12 +1723,16 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         });
         abi_android.addImport("segmentation", segmentation_android);
         const ml_tensor_android = mlTensorModule(b, android_target, optimize);
+        const ml_engine_android = mlEngineModule(b, android_target, optimize, runtime_android);
+        const ml_sample_android = mlSampleModule(b, android_target, optimize, tracking_cores_android.sampler, ml_engine_android);
+        const diffusion_android = diffusionModule(b, android_target, optimize, ml_engine_android, ml_sample_android, tracking_cores_android.sampler, math_android, ml_tensor_android);
         const ml_infer_core_android = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
             .target = android_target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "ml_engine", .module = mlEngineModule(b, android_target, optimize, runtime_android) },
+                .{ .name = "ml_engine", .module = ml_engine_android },
+                .{ .name = "ml_sample", .module = ml_sample_android },
                 .{ .name = "sampler", .module = tracking_cores_android.sampler },
                 .{ .name = "ml_tensor", .module = ml_tensor_android },
             },
@@ -1728,6 +1749,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
             },
         });
         abi_android.addImport("ml_infer", ml_infer_android);
+        abi_android.addImport("diffusion", diffusion_android);
         const face106_android = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = android_target,
@@ -1748,7 +1770,9 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     } else {
         abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, tracking_cores_android.hand, tracking_cores_android.pose, math_android));
         abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
-        abi_android.addImport("ml_infer", mlInferStubModule(b, android_target, optimize, math_android));
+        const stub_ml_tensor_android = mlTensorModule(b, android_target, optimize);
+        abi_android.addImport("ml_infer", mlInferStubModule(b, android_target, optimize, math_android, stub_ml_tensor_android));
+        abi_android.addImport("diffusion", diffusionStubModule(b, android_target, optimize, math_android, stub_ml_tensor_android));
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
     const have_cgltf_android = blk: {
@@ -2309,14 +2333,72 @@ fn mlEngineModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     });
 }
 
-fn mlInferStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_module: *std.Build.Module) *std.Build.Module {
+/// The shared camera-square sampling, over the variant's sampler and engine.
+fn mlSampleModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sampler_mod: *std.Build.Module, ml_engine_mod: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_sample.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_engine", .module = ml_engine_mod },
+        },
+    });
+}
+
+/// The diffusion restyle worker over the shared engine, sampling, and schedule.
+/// Returns the worker module; the schedule and core live under it.
+fn diffusionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ml_engine_mod: *std.Build.Module, ml_sample_mod: *std.Build.Module, sampler_mod: *std.Build.Module, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module) *std.Build.Module {
+    const schedule_mod = b.createModule(.{
+        .root_source_file = b.path("core/tracking/diffusion_schedule.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const core_mod = b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/diffusion_core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ml_engine", .module = ml_engine_mod },
+            .{ .name = "ml_sample", .module = ml_sample_mod },
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "diffusion_schedule", .module = schedule_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+        },
+    });
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/diffusion.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "diffusion_core", .module = core_mod },
+            .{ .name = "math", .module = math_mod },
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+        },
+    });
+}
+
+fn diffusionStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/diffusion_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "math", .module = math_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+        },
+    });
+}
+
+fn mlInferStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_module: *std.Build.Module, ml_tensor_mod: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("adapters/tracking/ml_infer_stub.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "math", .module = math_module },
-            .{ .name = "ml_tensor", .module = mlTensorModule(b, target, optimize) },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
         },
     });
 }
@@ -3820,12 +3902,16 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         });
         abi_ios.addImport("segmentation", segmentation_ios);
         const ml_tensor_ios = mlTensorModule(b, ios_target, optimize);
+        const ml_engine_ios = mlEngineModule(b, ios_target, optimize, runtime_ios);
+        const ml_sample_ios = mlSampleModule(b, ios_target, optimize, tracking_cores_ios.sampler, ml_engine_ios);
+        const diffusion_ios = diffusionModule(b, ios_target, optimize, ml_engine_ios, ml_sample_ios, tracking_cores_ios.sampler, math_ios, ml_tensor_ios);
         const ml_infer_core_ios = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
             .target = ios_target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "ml_engine", .module = mlEngineModule(b, ios_target, optimize, runtime_ios) },
+                .{ .name = "ml_engine", .module = ml_engine_ios },
+                .{ .name = "ml_sample", .module = ml_sample_ios },
                 .{ .name = "sampler", .module = tracking_cores_ios.sampler },
                 .{ .name = "ml_tensor", .module = ml_tensor_ios },
             },
@@ -3842,6 +3928,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             },
         });
         abi_ios.addImport("ml_infer", ml_infer_ios);
+        abi_ios.addImport("diffusion", diffusion_ios);
         const face106_ios = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = ios_target,
@@ -3883,7 +3970,9 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     } else {
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, tracking_cores_ios.hand, tracking_cores_ios.pose, math_ios));
         abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
-        abi_ios.addImport("ml_infer", mlInferStubModule(b, ios_target, optimize, math_ios));
+        const stub_ml_tensor_ios = mlTensorModule(b, ios_target, optimize);
+        abi_ios.addImport("ml_infer", mlInferStubModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios));
+        abi_ios.addImport("diffusion", diffusionStubModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios));
         abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
     const have_cgltf_ios = blk: {
@@ -4305,7 +4394,9 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("sph", sphModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
-    abi_em.addImport("ml_infer", mlInferStubModule(b, em_target, .ReleaseSmall, math_em));
+    const stub_ml_tensor_em = mlTensorModule(b, em_target, .ReleaseSmall);
+    abi_em.addImport("ml_infer", mlInferStubModule(b, em_target, .ReleaseSmall, math_em, stub_ml_tensor_em));
+    abi_em.addImport("diffusion", diffusionStubModule(b, em_target, .ReleaseSmall, math_em, stub_ml_tensor_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
     // Web's own beauty.reshape dispatch needs the 106-point
     // contour directly (no gpupixel bridge to hand raw

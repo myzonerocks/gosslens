@@ -2484,6 +2484,124 @@ fn proveMlInferStyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
+/// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
+/// its encoder, unet, and decoder from this.
+fn onnxConvModel(a: std.mem.Allocator, in_name: []const u8, cin: i64, cout: i64, side: i64, weights: []const f32, extra_inputs: []const []const u8) []const u8 {
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, cout);
+    w.varintField(1, cin);
+    w.varintField(1, 1);
+    w.varintField(1, 1);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (weights) |v| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(v), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const conv = onnxNode(a, "Conv", &.{ in_name, "W" }, &.{"y"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, in_name, &.{ 1, cin, side, side }));
+    for (extra_inputs) |ei| g.bytesField(11, ei);
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ cout, cin, 1, 1 }));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, cout, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+fn writeDiffusionLens(dir: []const u8, enc: []const u8, unet: []const u8, dec: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"restyle","type":"diffusion","params":{},
+        \\   "diffusion":{"encoder":"enc.onnx","unet":"unet.onnx","decoder":"dec.onnx","sprite":"canvas","steps":2,"strength":0.5}},
+        \\  {"id":"canvas","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
+        \\   "sprite":{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    inline for (.{ .{ "enc.onnx", enc }, .{ "unet.onnx", unet }, .{ "dec.onnx", dec } }) |pair| {
+        const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/{s}", .{ dir, pair[0] });
+        defer std.heap.page_allocator.free(asset_path);
+        try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = pair[1] });
+    }
+}
+
+fn runDiffusionOnce(engine: *abi.Engine, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-diffusion", "zig-out/ml-diffusion".len) != .ok) {
+        std.debug.print("conformance: FAIL diffusion lens activation\n", .{});
+        return error.DiffusionActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.DiffusionTrackFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.DiffusionSubmitFailed;
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    return true;
+}
+
+/// Proves the diffusion restyle loop: a lens ships a VAE encoder, unet, and
+/// decoder, and the engine runs the img2img loop (encode, seed noise, a few
+/// denoise steps, decode) off the frame thread, drawing through a sprite.
+/// Synthetic same-size models stand in for real weights; the engine ships the loop.
+fn proveMlInferDiffusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    // encoder 3->4: output channel m mirrors input channel m % 3.
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    // unet 4->4 identity: the noise estimate the schedule steps against.
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    // decoder 4->3: keep the first three latent channels as rgb.
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-diffusion/assets");
+    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runDiffusionOnce(engine, person);
+    const drew_b = try runDiffusionOnce(engine, person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the diffusion restyle never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion loop over a bundled encoder, unet, and decoder restyles the frame and draws it through a sprite\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -12798,6 +12916,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer placement");
     if (!try proveMlInferStyle(gpa, engine)) return 1;
     watchHold("ml infer style");
+    if (!try proveMlInferDiffusion(gpa, engine)) return 1;
+    watchHold("ml infer diffusion");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

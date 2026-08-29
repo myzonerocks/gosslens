@@ -16,6 +16,7 @@ const render = @import("render");
 const tracking = @import("tracking");
 const segmentation = @import("segmentation");
 const ml_infer = @import("ml_infer");
+const diffusion = @import("diffusion");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
 const png = @import("png");
@@ -635,6 +636,10 @@ pub const Session = struct {
     /// each holding its output-to-parameter bindings; built from the bundle at
     /// activation, fed the camera frame, read into params each tick.
     ml_workers: std.ArrayListUnmanaged(MlWorker) = .empty,
+    /// The diffusion restyle workers an active lens's diffusion nodes drive,
+    /// each drawing its decoded frame through a sprite; built from the bundle at
+    /// activation, fed the camera frame, uploaded to their sprite each render.
+    diffusion_workers: std.ArrayListUnmanaged(DiffusionWorker) = .empty,
     /// Monotonic timestamp for still images fed to the segmenter through
     /// goss_session_submit_segmentation_image, so each submit orders after the
     /// last the way successive camera frames do.
@@ -3646,6 +3651,8 @@ pub fn destroySession(session: *Session) void {
     session.scene_worker = null;
     destroyMlWorkers(session);
     session.ml_workers.deinit(session.engine.gpa);
+    destroyDiffusionWorkers(session);
+    session.diffusion_workers.deinit(session.engine.gpa);
     session.ml_style_textures.deinit(session.engine.gpa);
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
@@ -3944,6 +3951,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollSegmentationMask(s);
         pollMlMasks(s);
         pollMlStyle(s);
+        pollDiffusion(s);
         pollSceneSegmentation(s);
         pollDepthOcclusion(s);
         pollLandmarkMattes(s);
@@ -4044,6 +4052,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSegmentationMask(s);
     pollMlMasks(s);
     pollMlStyle(s);
+    pollDiffusion(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
@@ -4144,6 +4153,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSegmentationMask(s);
     pollMlMasks(s);
     pollMlStyle(s);
+    pollDiffusion(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
@@ -5842,7 +5852,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0) return .again;
+    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.diffusion_workers.items.len == 0) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -5870,6 +5880,9 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     }
     for (s.ml_workers.items) |mw| {
         ml_infer.submitNv12(mw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    for (s.diffusion_workers.items) |dw| {
+        diffusion.submitNv12(dw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     return .ok;
 }
@@ -7173,6 +7186,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyMeshFaceState(session);
     destroyModelState(session);
     destroyMlWorkers(session);
+    destroyDiffusionWorkers(session);
     destroyChainOrder(session);
     teardownScript(session);
     destroySounds(session);
@@ -8886,6 +8900,109 @@ fn destroyMlWorkers(session: *Session) void {
     session.ml_style_textures.clearRetainingCapacity();
 }
 
+const DiffusionWorker = struct {
+    worker: *diffusion.Diffusion,
+    target: graph.NodeIndex,
+    side: u32,
+    nchw: bool,
+    rgb: []f32,
+    bgra: []u8,
+    tex: render.TextureHandle,
+};
+
+/// Reads a bundle asset by name, or null if it is missing or oversized. The
+/// caller frees the returned bytes.
+fn readBundleAsset(gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8) ?[]u8 {
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch return null;
+    defer gpa.free(path);
+    return std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(64 * 1024 * 1024)) catch null;
+}
+
+/// Builds a diffusion restyle worker for every diffusion node from its three
+/// bundled models, resolving the sprite it draws through. Best-effort per node:
+/// a missing model or sprite leaves that node inert.
+fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    for (lens.manifest.nodes) |node| {
+        const df = node.diffusion orelse continue;
+        const enc = readBundleAsset(gpa, bundle_path, df.encoder) orelse continue;
+        defer gpa.free(enc);
+        const unet = readBundleAsset(gpa, bundle_path, df.unet) orelse continue;
+        defer gpa.free(unet);
+        const dec = readBundleAsset(gpa, bundle_path, df.decoder) orelse continue;
+        defer gpa.free(dec);
+        const emb: []u8 = if (df.text_embedding.len > 0) (readBundleAsset(gpa, bundle_path, df.text_embedding) orelse &.{}) else &.{};
+        defer if (emb.len > 0) gpa.free(emb);
+
+        const target = spriteNodeIndex(lens, gpa, &session.lens_graph, df.sprite) orelse continue;
+
+        const worker = diffusion.create(gpa, .{ .encoder = enc, .unet = unet, .decoder = dec, .text_embedding = emb }, .{}, .{ .steps = df.steps, .strength = df.strength, .seed = df.seed }, 2) catch continue;
+        const side = diffusion.outputSide(worker);
+        const len = diffusion.outputLen(worker);
+        const rgb = gpa.alloc(f32, len) catch {
+            diffusion.destroy(worker);
+            continue;
+        };
+        const bgra = gpa.alloc(u8, @as(usize, side) * side * 4) catch {
+            gpa.free(rgb);
+            diffusion.destroy(worker);
+            continue;
+        };
+        session.diffusion_workers.append(gpa, .{
+            .worker = worker,
+            .target = target,
+            .side = side,
+            .nchw = diffusion.outputIsNchw(worker),
+            .rgb = rgb,
+            .bgra = bgra,
+            .tex = .{ .idx = render.invalid_handle },
+        }) catch {
+            gpa.free(bgra);
+            gpa.free(rgb);
+            diffusion.destroy(worker);
+            return;
+        };
+    }
+}
+
+/// Uploads each diffusion worker's latest restyled frame to the sprite it
+/// draws through, so the restyle shows in the composite. Render-path, like the
+/// style poll: the texture upload needs the renderer.
+fn pollDiffusion(session: *Session) void {
+    for (session.diffusion_workers.items) |*dw| {
+        if (!diffusion.readOutput(dw.worker, dw.rgb)) continue;
+        const side: usize = dw.side;
+        const plane = side * side;
+        for (0..plane) |i| {
+            const rv = if (dw.nchw) dw.rgb[0 * plane + i] else dw.rgb[i * 3 + 0];
+            const gv = if (dw.nchw) dw.rgb[1 * plane + i] else dw.rgb[i * 3 + 1];
+            const bv = if (dw.nchw) dw.rgb[2 * plane + i] else dw.rgb[i * 3 + 2];
+            dw.bgra[i * 4 + 0] = floatToU8(bv);
+            dw.bgra[i * 4 + 1] = floatToU8(gv);
+            dw.bgra[i * 4 + 2] = floatToU8(rv);
+            dw.bgra[i * 4 + 3] = 255;
+        }
+        if (dw.tex.idx == render.invalid_handle) {
+            dw.tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
+        }
+        render.Renderer.updateDynamicBgraTexture(dw.tex, @intCast(side), @intCast(side), dw.bgra);
+        session.ml_style_textures.put(session.engine.gpa, dw.target, dw.tex) catch {};
+    }
+}
+
+fn destroyDiffusionWorkers(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.diffusion_workers.items) |dw| {
+        gpa.free(dw.bgra);
+        gpa.free(dw.rgb);
+        if (dw.tex.idx != render.invalid_handle) {
+            if (session.engine.renderer) |*r| r.destroyTexture(dw.tex);
+        }
+        diffusion.destroy(dw.worker);
+    }
+    session.diffusion_workers.clearRetainingCapacity();
+}
+
 /// Starts a background load for every spliced model.gltf node's .glb
 /// (assets/<stem>.glb) - mirrors createLutLoaders/createBlendLoaders
 /// exactly, one node type over.
@@ -9326,6 +9443,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
     createMlLoaders(session, gpa, bundle_path);
+    createDiffusionLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
@@ -9373,6 +9491,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyMeshFaceState(s);
     destroyModelState(s);
     destroyMlWorkers(s);
+    destroyDiffusionWorkers(s);
     destroyChainOrder(s);
     teardownScript(s);
     destroySounds(s);
