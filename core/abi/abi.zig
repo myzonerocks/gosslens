@@ -1113,6 +1113,9 @@ pub const Session = struct {
     /// each morph target to the live blendshapes. Filled at activation from the
     /// manifest's retarget fields, read when the mesh finishes loading.
     model_retargets: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    /// model.gltf nodes that mouth the submitted audio: their jaw-open morph is
+    /// driven by the audio envelope. Filled at activation, read at mesh load.
+    model_talks: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
 };
 
 /// A model.gltf node's loaded state: real gpu buffers plus the plain
@@ -1169,6 +1172,9 @@ const LoadedModel = struct {
     /// When set, the morph pass fills each mapped target from the tracked
     /// blendshapes instead of a bound parameter (an avatar's face retarget).
     auto_bind_blendshapes: bool = false,
+    /// When set, the jaw-open morph is driven by the audio envelope (a talking
+    /// avatar), overriding its tracked or bound value.
+    audio_talk: bool = false,
 };
 
 /// Maps each morph target name to the face blendshape index it drives (or -1
@@ -3358,16 +3364,25 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 if (loaded.morph_targets.len > 0 and loaded.morph_scratch.len > 0) {
                     if (active_lens) |lens| {
                         // An avatar retarget fills each named target from the live
-                        // blendshapes; every other target, and a plain morph mesh,
-                        // reads its bound parameter as before.
+                        // blendshapes, a talking avatar drives the jaw target from
+                        // the audio envelope, and every other target reads its
+                        // bound parameter as before.
                         const face_ready = s.face_count > 0 and s.face_results[0].presence >= 0.5;
                         const auto = loaded.auto_bind_blendshapes and face_ready;
-                        if (auto or lens.bindsMorphWeights(entry.graph_index)) {
+                        const talk = loaded.audio_talk;
+                        if (auto or talk or lens.bindsMorphWeights(entry.graph_index)) {
+                            const jaw_bs: i8 = if (face.blendshapeIndex("jawOpen")) |i| @intCast(i) else -1;
                             var weights: [max_morph_targets]f32 = undefined;
                             const n = @min(loaded.morph_targets.len, max_morph_targets);
                             for (0..n) |ti| {
-                                const mapped = auto and ti < loaded.morph_to_blendshape.len and loaded.morph_to_blendshape[ti] >= 0;
-                                weights[ti] = if (mapped) s.face_results[0].blendshapes[@intCast(loaded.morph_to_blendshape[ti])] else lens.morphWeight(entry.graph_index, ti);
+                                const bs: i8 = if (ti < loaded.morph_to_blendshape.len) loaded.morph_to_blendshape[ti] else -1;
+                                if (talk and bs >= 0 and bs == jaw_bs) {
+                                    weights[ti] = s.audio.jaw;
+                                } else if (auto and bs >= 0) {
+                                    weights[ti] = s.face_results[0].blendshapes[@intCast(bs)];
+                                } else {
+                                    weights[ti] = lens.morphWeight(entry.graph_index, ti);
+                                }
                             }
                             morphPositions(loaded.morph_scratch, loaded.morph_rest, loaded.morph_targets[0..n], weights[0..n]);
                             r.updateModelMesh(loaded.mesh, loaded.morph_scratch);
@@ -3773,6 +3788,7 @@ pub fn destroySession(session: *Session) void {
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
     session.model_retargets.deinit(session.engine.gpa);
+    session.model_talks.deinit(session.engine.gpa);
     if (session.depth_data.len != 0) session.engine.gpa.free(session.depth_data);
     if (session.depth_scratch.len != 0) session.engine.gpa.free(session.depth_scratch);
     if (session.frame_stage.len != 0) session.engine.gpa.free(session.frame_stage);
@@ -7315,6 +7331,7 @@ fn destroyModelState(session: *Session) void {
     }
     session.model_meshes.clearRetainingCapacity();
     session.model_retargets.clearRetainingCapacity();
+    session.model_talks.clearRetainingCapacity();
 }
 
 /// Replaces any currently active lens with the one manifest_json
@@ -9328,6 +9345,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         if (model.retarget) {
             session.model_retargets.put(gpa, model.graph_index, {}) catch {};
         }
+        if (model.talk) {
+            session.model_talks.put(gpa, model.graph_index, {}) catch {};
+        }
         if (model.body_anchor) {
             session.model_body_anchors.put(gpa, model.graph_index, {}) catch {};
         }
@@ -9711,6 +9731,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 .morph_scratch = morph_scratch,
                 .morph_to_blendshape = morph_to_blendshape,
                 .auto_bind_blendshapes = session.model_retargets.contains(entry.key_ptr.*),
+                .audio_talk = session.model_talks.contains(entry.key_ptr.*),
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
                 if (rig) |rg| {

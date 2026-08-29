@@ -198,6 +198,13 @@ target with no matching name still reads its `morph_weights` parameter, so a rig
 can mix retargeted expression with authored morphs. With no tracked face the
 mesh holds its rest shape. `retarget` is a `model.gltf` field only.
 
+A `model.gltf` node may add `"talk": true` to drive its `jawOpen` morph target
+from the submitted audio, so the mesh mouths speech even with no tracked face: a
+gated envelope of the voiced (low) audio band opens the jaw on vowels and closes
+it on silence, overriding that one target's tracked or bound value. Combine
+`retarget` and `talk` to lip-sync a tracked face's avatar to its own voice.
+`talk` is a `model.gltf` field only.
+
 A `model.gltf` node may add `"control": {"orbit", "dolly", "roll"}`, a
 turntable the recognized gestures steer: `orbit` spins the model with a drag
 (yaw from the horizontal, pitch from the vertical), `dolly` scales it with a

@@ -927,6 +927,9 @@ pub const Node = struct {
     /// each morph target named for an ARKit blendshape is driven by that live
     /// blendshape, turning the mesh into an avatar of the user's face.
     retarget: bool = false,
+    /// True when a model.gltf drives its jaw-open morph from the submitted audio
+    /// envelope, so the mesh mouths speech even with no tracked face.
+    talk: bool = false,
     /// True when a model.gltf node anchors to every tracked body.
     body_anchor: bool = false,
     /// True when a model.gltf node draws once per bone of every tracked body.
@@ -2962,6 +2965,14 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 retarget = rv.bool;
             } else try diags.add(path.slice(), "retarget must be a boolean", .{});
         }
+        var talk = false;
+        if (getField(object, "talk")) |tv| {
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "talk is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (tv == .bool) {
+                talk = tv.bool;
+            } else try diags.add(path.slice(), "talk must be a boolean", .{});
+        }
         if (getField(object, "control")) |cv| {
             const control_mark = path.push("control");
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -3069,6 +3080,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
             .retarget = retarget,
+            .talk = talk,
             .control = model_control,
             .logic_graph = logic_graph_spec,
             .ml = ml_field,
