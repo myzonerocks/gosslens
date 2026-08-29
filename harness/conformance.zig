@@ -2765,6 +2765,85 @@ fn proveDehaze(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a relight.pass lens at a static strength and light angle (no asset).
+fn writeRelightLens(dir: []const u8, strength: f32, angle: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.relight","version":"1.0.0","display_name":"Relight","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"r","type":"relight.pass","inputs":{{"frame":"camera"}},"params":{{}},"relight":{{"strength":{d:.3},"angle":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, angle });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Sums the rgb bytes over the left third (side 0) or right third (side 1) of
+/// the 400-wide capture, so a directional effect's two sides can be compared.
+fn sumThird(shot: []const u8, side: usize) u64 {
+    var total: u64 = 0;
+    const w: usize = 400;
+    const h: usize = 300;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        const x0: usize = if (side == 0) 0 else (w * 2) / 3;
+        const x1: usize = if (side == 0) w / 3 else w;
+        var x: usize = x0;
+        while (x < x1) : (x += 1) {
+            const idx = (y * w + x) * 4;
+            total += @as(u64, shot[idx]) + shot[idx + 1] + shot[idx + 2];
+        }
+    }
+    return total;
+}
+
+/// Proves the parametric directional relight: a relight.pass at angle 0 lights
+/// the frame from the right, so the right side brightens and the left shades,
+/// where a uniform frame under strength 0 stays even side to side.
+fn proveRelight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const grayf = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(grayf);
+    var q: usize = 0;
+    while (q + 4 <= grayf.len) : (q += 4) {
+        grayf[q + 0] = 128;
+        grayf[q + 1] = 128;
+        grayf[q + 2] = 128;
+        grayf[q + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = grayf }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/relight-0");
+    try writeRelightLens("zig-out/relight-0", 0.0, 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/relight-1");
+    try writeRelightLens("zig-out/relight-1", 1.0, 0.0);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/relight-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/relight-1", planes);
+    defer gpa.free(shot1);
+
+    const changed = countDiff(shot0, shot1);
+    const left1 = sumThird(shot1, 0);
+    const right1 = sumThird(shot1, 1);
+    const left0 = sumThird(shot0, 0);
+    const right0 = sumThird(shot0, 1);
+    const id_gap = if (right0 > left0) right0 - left0 else left0 - right0;
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL relight at strength 1 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (!(right1 > left1) or (right1 - left1) <= id_gap) {
+        std.debug.print("conformance: FAIL relight did not light from the right (left {d}, right {d}, identity gap {d})\n", .{ left1, right1, id_gap });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a relight.pass lights the frame directionally: at angle 0 the right side brightens over the left where the uniform strength-0 frame stays even ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -14075,6 +14154,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("mask strength");
     if (!try proveDehaze(gpa, engine)) return 1;
     watchHold("dehaze pass");
+    if (!try proveRelight(gpa, engine)) return 1;
+    watchHold("relight pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

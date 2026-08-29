@@ -272,6 +272,14 @@ pub const DehazeField = struct {
     strength: f32 = 1,
 };
 
+pub const RelightField = struct {
+    /// A relight.pass node's directional key light: `strength` (0..1) how far it
+    /// brightens the light side and shades the far side, `angle` the light
+    /// direction in degrees (0 lights from the right).
+    strength: f32 = 1,
+    angle: f32 = 0,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -989,6 +997,8 @@ pub const Node = struct {
     grade: ?GradeField = null,
     /// Set only on a dehaze.pass node: its dark-channel dehaze strength.
     dehaze: ?DehazeField = null,
+    /// Set only on a relight.pass node: its directional key light.
+    relight: ?RelightField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -1876,6 +1886,21 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 dehaze_field = field;
             }
             path.pop(dmark);
+        }
+        var relight_field: ?RelightField = null;
+        if (getField(object, "relight")) |rv| {
+            const rmark = path.push("relight");
+            if (!std.mem.eql(u8, node_type, "relight.pass")) {
+                try diags.add(path.slice(), "relight is a relight.pass field, found it on '{s}'", .{node_type});
+            } else if (rv != .object) {
+                try diags.add(path.slice(), "relight must be an object", .{});
+            } else {
+                var field: RelightField = .{};
+                if (getField(rv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(rv.object, "angle")) |v| field.angle = @floatCast(numberOf(v) orelse field.angle);
+                relight_field = field;
+            }
+            path.pop(rmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3139,6 +3164,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .morph_weights = morph_weights,
             .grade = grade_field,
             .dehaze = dehaze_field,
+            .relight = relight_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

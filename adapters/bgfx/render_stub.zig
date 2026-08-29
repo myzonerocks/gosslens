@@ -493,6 +493,13 @@ pub const Renderer = struct {
         _ = texel_h;
     }
 
+    pub fn submitRelightPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params3: [3]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params3;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
@@ -995,6 +1002,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadDehazeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadRelightProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

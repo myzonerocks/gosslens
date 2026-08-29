@@ -368,6 +368,13 @@ the scene radiance back out from under it, so a hazy frame gains contrast and
 its washed highlights come down. Strength 0 leaves the frame untouched. Like
 `grade.pass` it ships no asset and is always ready.
 
+A `"relight.pass"` node is a parametric directional relight post-effect. It
+carries a `"relight": {"strength", "angle"}` block: a soft key light from
+`angle` (degrees, 0 lights from the right) brightens the frame on the light side
+and shades the far side, scaled by `strength` (0..1, default 1). Strength 0
+leaves the frame untouched. Like `grade.pass` it ships no asset and is always
+ready.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1220,7 +1227,9 @@ draws through the style sprite at the enlarged side (16 from an 8 input);
 a two-input ml.infer net conditions on a bundled reference, feeding both inputs
 and drawing, where the same model with no reference is rejected at load;
 a dehaze.pass lifts the atmospheric veil, strength 1 darkening a hazy frame
-where strength 0 leaves it untouched;
+where strength 0 leaves it untouched; a relight.pass lights the frame
+directionally, angle 0 brightening the right over the left where the uniform
+strength-0 frame stays even;
 a diffusion loop over a bundled encoder, unet, and decoder restyles
 the frame and draws it through a sprite; a diffusion lens with no encoder
 generates from seeded noise and a text embedding, drawing the image through a
