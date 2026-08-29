@@ -138,6 +138,12 @@ const LensNode = struct {
     mask_channel: ?u8 = null,
     /// .model_gltf only: the node anchors to the tracked face.
     face_anchor: bool = false,
+    /// .model_gltf only: a face-anchored model retargets the tracked expression
+    /// onto its morph targets (an avatar of the user's face).
+    retarget: bool = false,
+    /// .model_gltf only: the model drives its jaw-open morph from the audio
+    /// envelope, so it mouths speech.
+    talk: bool = false,
     body_anchor: bool = false,
     skeleton_anchor: bool = false,
     world_anchor: bool = false,
@@ -263,6 +269,8 @@ pub const ModelNode = struct {
     /// chain naming its anchor) resolve at draw setup.
     node_id: []const u8,
     face_anchor: bool = false,
+    retarget: bool = false,
+    talk: bool = false,
     body_anchor: bool = false,
     skeleton_anchor: bool = false,
     world_anchor: bool = false,
@@ -359,6 +367,12 @@ pub const SplatNode = struct {
     /// True draws the model's output as a connected grid mesh; false draws it as
     /// a billboard point cloud.
     mesh: bool,
+    /// True runs the model once on a submitted selfie (an avatar) rather than the
+    /// live camera each tick.
+    selfie: bool,
+    /// True when the model emits rgb after xyz per point, so each splat carries
+    /// its own color instead of the node color.
+    colored: bool,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -1064,7 +1078,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .model_gltf) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles, .control = node.control });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .retarget = node.retarget, .talk = node.talk, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles, .control = node.control });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1158,7 +1172,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .splat_cloud) continue;
             const sf = node.splat orelse continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .selfie = sf.source == .selfie, .colored = sf.colored });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1451,6 +1465,8 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
             .face_anchor = node_type == .model_gltf and node.face_anchor,
+            .retarget = node_type == .model_gltf and node.retarget,
+            .talk = node_type == .model_gltf and node.talk,
             .body_anchor = node_type == .model_gltf and node.body_anchor,
             .skeleton_anchor = node_type == .model_gltf and node.skeleton_anchor,
             .world_anchor = node_type == .model_gltf and node.world_anchor,

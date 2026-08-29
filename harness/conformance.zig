@@ -2903,16 +2903,17 @@ fn proveMlInferMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool 
     return true;
 }
 
-fn writeSplatLens(dir: []const u8, model: []const u8, mesh: bool) !void {
+fn writeSplatLens(dir: []const u8, model: []const u8, mesh: bool, selfie: bool, colored: bool) !void {
     const page = std.heap.page_allocator;
     const draw = if (mesh) "mesh" else "points";
+    const source = if (selfie) "selfie" else "camera";
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.ml-splat","version":"1.0.0","display_name":"BYO Splat","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
         \\ "nodes":[{{"id":"cloud","type":"splat.cloud","inputs":{{"frame":"camera"}},"params":{{}},
-        \\   "splat":{{"model":"splat.onnx","draw":"{s}","point":8.0,"r":0.9,"g":0.8,"b":0.3}}}}],
+        \\   "splat":{{"model":"splat.onnx","source":"{s}","draw":"{s}","point":8.0,"r":0.9,"g":0.8,"b":0.3,"colored":{}}}}}],
         \\ "triggers":[]}}
-    , .{draw});
+    , .{ source, draw, colored });
     defer page.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
@@ -2963,7 +2964,7 @@ fn proveMlInferSplat(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splat/assets");
-    try writeSplatLens("zig-out/ml-splat", model, false);
+    try writeSplatLens("zig-out/ml-splat", model, false, false, false);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2992,7 +2993,7 @@ fn proveMlInferSplatMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splatmesh/assets");
-    try writeSplatLens("zig-out/ml-splatmesh", model, true);
+    try writeSplatLens("zig-out/ml-splatmesh", model, true, false, false);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -3006,6 +3007,135 @@ fn proveMlInferSplatMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a splat.cloud in mesh mode reads the model's points as a grid and draws them as a connected 3D surface\n", .{});
+    return true;
+}
+
+/// Proves per-splat color end to end: a colored splat.cloud runs a model that
+/// emits rgb after xyz per point (six channels), so the loader reads it at
+/// stride six and each splat carries its own color into the billboard cloud it
+/// draws. The color the writer packs per point is asserted by a unit test.
+fn proveMlInferSplatColored(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    // 6 outputs from 3 inputs: rows 0-2 carry rgb to xyz, rows 3-5 carry rgb to
+    // the point color, so each splat's color is its own source pixel.
+    const w6 = [_]f32{
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1,
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1,
+    };
+    const colored_model = onnxConvModel(a, "x", 3, 6, side, &w6, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splatcolor/assets");
+    try writeSplatLens("zig-out/ml-splatcolor", colored_model, false, false, true);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runSplatOnce(engine, "zig-out/ml-splatcolor", person);
+    const drew_b = try runSplatOnce(engine, "zig-out/ml-splatcolor", person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the colored splat never produced its cloud\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a colored splat.cloud reads a six-channel model at stride six and draws each point carrying its own color\n", .{});
+    return true;
+}
+
+/// Runs a selfie-source splat: the model is fed one still through the avatar op
+/// rather than the per-frame camera, so the cloud is generated once and held.
+fn runSelfieSplatOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.SplatActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    // The selfie feeds only through the avatar op; the per-frame camera does not
+    // drive it, so track_frame is never called here.
+    if (abi.goss_session_submit_avatar_source(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.AvatarSubmitFailed;
+    var polls: usize = 0;
+    while (abi.splatCloudReadyCount(session) == 0) {
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    var more: usize = 0;
+    while (more < 200) : (more += 1) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    return true;
+}
+
+/// The web selfie path: feeds one RGBA still through the avatar RGBA op rather
+/// than the NV12 op, so the same cloud is generated from a canvas byte buffer.
+fn runSelfieSplatRgbaOnce(engine: *abi.Engine, dir: []const u8, rgba: []const u8, w: u32, h: u32) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.SplatActivationFailed;
+    if (abi.goss_session_submit_avatar_source_rgba(session, rgba.ptr, w, h) != .ok) return error.AvatarSubmitFailed;
+    var polls: usize = 0;
+    while (abi.splatCloudReadyCount(session) == 0) {
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    var more: usize = 0;
+    while (more < 200) : (more += 1) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    return true;
+}
+
+/// Proves the photoreal selfie avatar: a splat.cloud with source:selfie runs its
+/// model once over a still submitted through goss_session_submit_avatar_source
+/// (not the live camera) and draws the generated cloud, so an avatar is built
+/// from one photo and held.
+fn proveMlInferSelfieAvatar(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-selfie/assets");
+    try writeSplatLens("zig-out/ml-selfie", model, false, true, false);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runSelfieSplatOnce(engine, "zig-out/ml-selfie", person);
+    const drew_b = try runSelfieSplatOnce(engine, "zig-out/ml-selfie", person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the selfie avatar never generated its cloud\n", .{});
+        return false;
+    }
+    // The web selfie path: the same still submitted as an RGBA buffer through the
+    // RGBA sibling op generates the cloud the same way.
+    const rgba = corpus.frame.pixels.rgba8;
+    const drew_rgba = try runSelfieSplatRgbaOnce(engine, "zig-out/ml-selfie", rgba, corpus.frame.width, corpus.frame.height);
+    if (!drew_rgba) {
+        std.debug.print("conformance: FAIL the selfie avatar never generated its cloud from an RGBA still\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a selfie-source splat.cloud generates its avatar from one submitted still through the avatar op (NV12 and RGBA) and draws it, off the per-frame camera\n", .{});
     return true;
 }
 
@@ -10340,7 +10470,7 @@ fn captureRetouchShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12C
     return shot;
 }
 
-/// The six Wave 5 retouch effects: each lands on the right anatomy and does the
+/// The six retouch effects: each lands on the right anatomy and does the
 /// right thing. First the region mattes are placed against tracked landmarks,
 /// then each look renders keyed to the face (or the skin segmenter) and vanishes
 /// without it, softening, brightening, or mattING its region, bit-stable.
@@ -11929,6 +12059,145 @@ fn proveMorphBlend(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Captures the face-reenact avatar deformed by one injected source face. The
+/// caller owns the returned RGBA; the source performance is held across the
+/// rendered frames since no tracker overwrites the submitted faces.
+fn captureReenactShot(gpa: std.mem.Allocator, engine: *abi.Engine, session: *abi.Session, planes: Nv12Copy, faces: []const abi.FaceResult) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (abi.goss_session_submit_faces(session, faces.ptr, @intCast(faces.len)) != .ok) return error.SubmitFacesFailed;
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves one-shot head reenactment: a source face injected through
+/// goss_session_submit_faces (not the local live face) carries jawOpen, and the
+/// face-reenact lens binds its jawOpen morph target to it, so a wide-open source
+/// jaw deforms the avatar mesh where a closed one holds it at rest, same still.
+fn proveHeadReenact(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/face-reenact";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len) != .ok) {
+        std.debug.print("conformance: FAIL face-reenact lens activation\n", .{});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    // Land the async .glb before either capture so both read a drawn mesh and
+    // only the driven pose differs.
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+    pumpUntilLoaded(engine, session);
+
+    // blendshape_names[25] is jawOpen, pinned by a face module test.
+    const jaw_open = 25;
+    var closed = std.mem.zeroes(abi.FaceResult);
+    closed.presence = 1.0;
+    closed.landmark_count_out = @intCast(closed.landmarks.len / 3);
+    closed.blendshapes[jaw_open] = 0.05;
+    var open = closed;
+    open.blendshapes[jaw_open] = 0.9;
+
+    const shot_closed = try captureReenactShot(gpa, engine, session, planes, &[_]abi.FaceResult{closed});
+    defer gpa.free(shot_closed);
+    const shot_open = try captureReenactShot(gpa, engine, session, planes, &[_]abi.FaceResult{open});
+    defer gpa.free(shot_open);
+
+    var changed: usize = 0;
+    var i: usize = 0;
+    while (i + 4 <= shot_closed.len) : (i += 4) {
+        if (!std.mem.eql(u8, shot_closed[i .. i + 4], shot_open[i .. i + 4])) changed += 1;
+    }
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL head-reenact: the injected source jaw left the avatar mesh unchanged\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a retarget avatar is reenacted by an injected source performance: an open source jaw deforms the mesh where a closed one holds it at rest ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
+/// Loads a directory lens and lands its async .glb before a face-driven capture.
+fn activateAndLoad(gpa: std.mem.Allocator, engine: *abi.Engine, session: *abi.Session, dir: []const u8, planes: Nv12Copy) !bool {
+    _ = gpa;
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return false;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+    pumpUntilLoaded(engine, session);
+    return true;
+}
+
+/// Proves the stylized avatar system: the avatar-toon lens toon-shades a
+/// retarget avatar, and it stays live. The toon avatar under an open injected
+/// jaw differs from the same under a closed one (liveness) and from the
+/// un-stylized avatar (style applied), so any tracked avatar renders in a style.
+fn proveStylizedAvatar(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    // blendshape_names[25] is jawOpen, pinned by a face module test.
+    const jaw_open = 25;
+    var closed = std.mem.zeroes(abi.FaceResult);
+    closed.presence = 1.0;
+    closed.landmark_count_out = @intCast(closed.landmarks.len / 3);
+    closed.blendshapes[jaw_open] = 0.05;
+    var open = closed;
+    open.blendshapes[jaw_open] = 0.9;
+
+    const toon = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(toon);
+    defer settle(engine);
+    if (!try activateAndLoad(gpa, engine, toon, ".lens-packages/avatar-toon", planes)) {
+        std.debug.print("conformance: FAIL avatar-toon lens activation\n", .{});
+        return false;
+    }
+    const toon_open = try captureReenactShot(gpa, engine, toon, planes, &[_]abi.FaceResult{open});
+    defer gpa.free(toon_open);
+    const toon_closed = try captureReenactShot(gpa, engine, toon, planes, &[_]abi.FaceResult{closed});
+    defer gpa.free(toon_closed);
+
+    const plain = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(plain);
+    if (!try activateAndLoad(gpa, engine, plain, ".lens-packages/face-reenact", planes)) {
+        std.debug.print("conformance: FAIL face-reenact control activation\n", .{});
+        return false;
+    }
+    const plain_open = try captureReenactShot(gpa, engine, plain, planes, &[_]abi.FaceResult{open});
+    defer gpa.free(plain_open);
+
+    const live = countDiff(toon_open, toon_closed);
+    const styled = countDiff(toon_open, plain_open);
+    if (live == 0) {
+        std.debug.print("conformance: FAIL stylized-avatar: the toon avatar did not track the injected jaw\n", .{});
+        return false;
+    }
+    if (styled == 0) {
+        std.debug.print("conformance: FAIL stylized-avatar: the toon style left the avatar unchanged\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a tracked avatar renders in an art style and stays live: a toon avatar tracks an injected jaw ({d} bytes) and differs from the un-stylized avatar ({d} bytes)\n", .{ live, styled });
+    return true;
+}
+
 /// Proves a sprite.2d node draws its image over the frame. The static
 /// Renders frames until every async image and model load has landed, so a
 /// screenshot reads a deterministic frame no matter how the loader threads were
@@ -13168,6 +13437,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("anim mixer blend");
     if (!try proveMorphBlend(gpa, engine)) return 1;
     watchHold("morph blend");
+    if (!try proveHeadReenact(gpa, engine)) return 1;
+    watchHold("head reenact");
+    if (!try proveStylizedAvatar(gpa, engine)) return 1;
+    watchHold("stylized avatar");
     if (!try proveSpriteDraw(gpa, engine)) return 1;
     watchHold("sprite overlay");
     if (!try proveTextDraw(gpa, engine)) return 1;
@@ -13382,6 +13655,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer splat");
     if (!try proveMlInferSplatMesh(gpa, engine)) return 1;
     watchHold("ml infer splat mesh");
+    if (!try proveMlInferSplatColored(gpa, engine)) return 1;
+    watchHold("ml infer splat colored");
+    if (!try proveMlInferSelfieAvatar(gpa, engine)) return 1;
+    watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;
     watchHold("compile prompt");
     if (!try proveScript(gpa, engine)) return 1;

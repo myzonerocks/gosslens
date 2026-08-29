@@ -204,6 +204,8 @@ file must move together.
 | `goss_session_disable_pose_tracking` | `disablePoseTracking()` | native tracking path |
 | `goss_session_set_pose_upper_body` | `setPoseUpperBody(enabled)`, upper-body mode; the tracked pose reports only the upper body, the lower-body joints (knees down) read absent | native tracking path |
 | `goss_session_track_frame` | `trackFrame(y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs)`; feeds every enabled tracking worker | native tracking path |
+| `goss_session_submit_avatar_source` | `submitAvatarSource(y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs)`, the NV12 still each selfie-source splat.cloud runs once to generate a held avatar | native path (NV12, like trackFrame; web feeds the still through its RGBA source path) |
+| `goss_session_submit_avatar_source_rgba` | `submitAvatarSourceRgba(rgba, width, height)`, the RGBA sibling: one single-plane RGBA8 still (row major) each selfie-source splat.cloud runs once; again with no selfie avatar | native + web (the web selfie path) |
 | `goss_session_face_result` | `faceResult(result)` | native tracking path |
 | `goss_session_hand_result` | `handResult(result)` | native tracking path |
 | `goss_session_hand_joint` | `handJoint(joint, handIndex)`, the handIndex-th tracked hand's named joint point (x, y in frame pixels, z in the same scale) so a lens pins content to a fingertip or the wrist; see the `GOSS_HAND_JOINT_*` points (palm is the middle knuckle) | native tracking path |

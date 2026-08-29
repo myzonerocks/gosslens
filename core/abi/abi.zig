@@ -198,6 +198,8 @@ pub const abi_functions = [_][]const u8{
     "uint32_t goss_session_segmentation_channels(goss_session *session)",
     "goss_status goss_session_set_segmentation_class_mask(goss_session *session, uint32_t channel, const float *mask, uint32_t mask_len)",
     "goss_status goss_session_track_frame(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
+    "goss_status goss_session_submit_avatar_source(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
+    "goss_status goss_session_submit_avatar_source_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_face_result(goss_session *session, goss_face_result *out_result)",
     "goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count)",
     "goss_status goss_session_face_count(goss_session *session, uint32_t *out_count)",
@@ -650,6 +652,9 @@ pub const Session = struct {
     /// goss_session_submit_segmentation_image, so each submit orders after the
     /// last the way successive camera frames do.
     segmentation_image_seq: i64 = 0,
+    /// Monotonic timestamp for each goss_session_submit_avatar_source_rgba still,
+    /// so an RGBA selfie orders after the last the way a camera frame would.
+    avatar_source_seq: i64 = 0,
     /// The most recent mask, uploaded as a real GPU texture the same way
     /// a lut.pass asset is - a raw byte array has no reason to cross the
     /// frozen ABI surface when nothing outside the render thread ever
@@ -1109,6 +1114,13 @@ pub const Session = struct {
     /// pollModelLoaders keeps around (not a bgfx resource, so it lives
     /// here rather than inside render.Renderer).
     model_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, LoadedModel) = .empty,
+    /// model.gltf nodes that retarget the tracked face: their mesh auto-binds
+    /// each morph target to the live blendshapes. Filled at activation from the
+    /// manifest's retarget fields, read when the mesh finishes loading.
+    model_retargets: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    /// model.gltf nodes that mouth the submitted audio: their jaw-open morph is
+    /// driven by the audio envelope. Filled at activation, read at mesh load.
+    model_talks: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
 };
 
 /// A model.gltf node's loaded state: real gpu buffers plus the plain
@@ -1158,7 +1170,29 @@ const LoadedModel = struct {
     /// empty for a mesh with no morph targets.
     morph_rest: []const [3]f32 = &.{},
     morph_scratch: [][3]f32 = &.{},
+    /// One entry per morph target: the face blendshape index it maps to by
+    /// name, or -1 when the target has no matching ARKit name. Built once at
+    /// load so an avatar drives each morph from the live blendshape array.
+    morph_to_blendshape: []const i8 = &.{},
+    /// When set, the morph pass fills each mapped target from the tracked
+    /// blendshapes instead of a bound parameter (an avatar's face retarget).
+    auto_bind_blendshapes: bool = false,
+    /// When set, the jaw-open morph is driven by the audio envelope (a talking
+    /// avatar), overriding its tracked or bound value.
+    audio_talk: bool = false,
 };
+
+/// Maps each morph target name to the face blendshape index it drives (or -1
+/// when no ARKit name matches), so an avatar retarget reads the live blendshape
+/// array by target rather than a hand-wired parameter per target.
+fn buildMorphBlendshapeTable(gpa: std.mem.Allocator, names: []const []const u8) []const i8 {
+    if (names.len == 0) return &.{};
+    const table = gpa.alloc(i8, names.len) catch return &.{};
+    for (names, 0..) |name, i| {
+        table[i] = if (face.blendshapeIndex(name)) |idx| @intCast(idx) else -1;
+    }
+    return table;
+}
 
 /// Deforms rest positions by a weighted sum of morph target deltas into
 /// `out`: out[v] = rest[v] + sum_t weight[t] * target[t][v]. Weights come
@@ -2713,15 +2747,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // Connect the grid of points into a surface and draw it as a
                     // solid 3D mesh over the passed-through frame.
                     if (frameStage(s, vertex_count * 3)) |verts| {
-                        writeSplatMesh(sw.positions, grid_side, verts);
+                        writeSplatMesh(sw.positions, grid_side, sw.colored, verts);
                         r.updateParticleMesh(mesh, verts);
                     }
                     r.submitRibbons(blit_view, mesh_view, input_texture, mesh, base_color, aspect_ratio);
                 } else {
                     // Expand the points into camera-facing billboards and draw them
                     // as a 3D cloud over the passed-through frame.
-                    if (frameStage(s, sw.count * 6 * 8)) |verts| {
-                        writeSplatBillboards(sw.positions, sw.count, verts);
+                    if (frameStage(s, sw.count * 6 * 12)) |verts| {
+                        writeSplatBillboards(sw.positions, sw.count, sw.colored, verts);
                         render.Renderer.updateParticleMeshFaded(mesh, verts);
                     }
                     const particle_params: [4]f32 = .{ sw.point / @as(f32, @floatFromInt(rect_w)), sw.point / @as(f32, @floatFromInt(rect_h)), 1.0, 0.0 };
@@ -3129,11 +3163,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             const sheet_dim: f32 = @ceil(@sqrt(frames));
                             particle_fx = .{ frames, sheet_dim, sys.field.stretch, 0 };
                             if (has_trail) {
-                                if (frameStage(s, sys.trailVertexCount() * 8)) |verts| {
+                                if (frameStage(s, sys.trailVertexCount() * 12)) |verts| {
                                     sys.writeTrailBillboards(verts);
                                     render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
                                 }
-                            } else if (frameStage(s, count * 6 * 8)) |verts| {
+                            } else if (frameStage(s, count * 6 * 12)) |verts| {
                                 sys.writeBillboards(verts);
                                 render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
                             }
@@ -3334,10 +3368,27 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // path draws it; an unbound mesh keeps its rest shape.
                 if (loaded.morph_targets.len > 0 and loaded.morph_scratch.len > 0) {
                     if (active_lens) |lens| {
-                        if (lens.bindsMorphWeights(entry.graph_index)) {
+                        // An avatar retarget fills each named target from the live
+                        // blendshapes, a talking avatar drives the jaw target from
+                        // the audio envelope, and every other target reads its
+                        // bound parameter as before.
+                        const face_ready = s.face_count > 0 and s.face_results[0].presence >= 0.5;
+                        const auto = loaded.auto_bind_blendshapes and face_ready;
+                        const talk = loaded.audio_talk;
+                        if (auto or talk or lens.bindsMorphWeights(entry.graph_index)) {
+                            const jaw_bs: i8 = if (face.blendshapeIndex("jawOpen")) |i| @intCast(i) else -1;
                             var weights: [max_morph_targets]f32 = undefined;
                             const n = @min(loaded.morph_targets.len, max_morph_targets);
-                            for (0..n) |ti| weights[ti] = lens.morphWeight(entry.graph_index, ti);
+                            for (0..n) |ti| {
+                                const bs: i8 = if (ti < loaded.morph_to_blendshape.len) loaded.morph_to_blendshape[ti] else -1;
+                                if (talk and bs >= 0 and bs == jaw_bs) {
+                                    weights[ti] = s.audio.jaw;
+                                } else if (auto and bs >= 0) {
+                                    weights[ti] = s.face_results[0].blendshapes[@intCast(bs)];
+                                } else {
+                                    weights[ti] = lens.morphWeight(entry.graph_index, ti);
+                                }
+                            }
                             morphPositions(loaded.morph_scratch, loaded.morph_rest, loaded.morph_targets[0..n], weights[0..n]);
                             r.updateModelMesh(loaded.mesh, loaded.morph_scratch);
                         }
@@ -3741,6 +3792,8 @@ pub fn destroySession(session: *Session) void {
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
+    session.model_retargets.deinit(session.engine.gpa);
+    session.model_talks.deinit(session.engine.gpa);
     if (session.depth_data.len != 0) session.engine.gpa.free(session.depth_data);
     if (session.depth_scratch.len != 0) session.engine.gpa.free(session.depth_scratch);
     if (session.frame_stage.len != 0) session.engine.gpa.free(session.frame_stage);
@@ -6000,7 +6053,73 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
         diffusion.submitNv12(dw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     for (s.splat_workers.items) |sw| {
+        // A selfie avatar's model runs once off a submitted still, not the live
+        // camera, so the per-frame feed skips it.
+        if (sw.selfie) continue;
         ml_infer.submitNv12(sw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    return .ok;
+}
+
+/// Runs each selfie-source splat.cloud once over a submitted still (NV12, the
+/// same layout track_frame takes), so a photoreal avatar is generated from one
+/// photo and then held. The worker publishes off the frame thread; a later
+/// render draws its points. Again when the session has no selfie avatar.
+pub export fn goss_session_submit_avatar_source(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const y_plane = y orelse return .invalid_argument;
+    const uv_plane = uv orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
+    if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
+    const standard: math.color.Standard = switch (d.color_standard) {
+        0 => .bt601,
+        2 => .bt2020,
+        else => .bt709,
+    };
+    const range: math.color.Range = if (d.color_range == 1) .full else .video;
+    const conversion = math.color.yuvToRgb(standard, range);
+    var fed = false;
+    for (s.splat_workers.items) |sw| {
+        if (!sw.selfie) continue;
+        ml_infer.submitNv12(sw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        fed = true;
+    }
+    return if (fed) .ok else .again;
+}
+
+/// The web selfie path: converts one host RGBA still to NV12 and runs each
+/// selfie-source splat.cloud once over it, the RGBA sibling of
+/// goss_session_submit_avatar_source. again when the session has no selfie
+/// avatar, so the caller only pays the convert when a worker will consume it.
+pub export fn goss_session_submit_avatar_source_rgba(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const pixels = rgba orelse return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    var any = false;
+    for (s.splat_workers.items) |sw| {
+        if (sw.selfie) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return .again;
+    const gpa = s.engine.gpa;
+    const w: usize = width;
+    const h: usize = height;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    const y_out = gpa.alloc(u8, w * h) catch return .out_of_memory;
+    defer gpa.free(y_out);
+    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return .out_of_memory;
+    defer gpa.free(uv_out);
+    image.argbToNv12(pixels[0 .. w * h * 4], @intCast(w), @intCast(h), .bt601, .full, y_out, uv_out) catch return .unsupported;
+    const conversion = math.color.yuvToRgb(.bt601, .full);
+    s.avatar_source_seq += 1;
+    for (s.splat_workers.items) |sw| {
+        if (!sw.selfie) continue;
+        ml_infer.submitNv12(sw.worker, width, height, s.avatar_source_seq, conversion, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
     }
     return .ok;
 }
@@ -7278,9 +7397,12 @@ fn destroyModelState(session: *Session) void {
         gltf.freeMorphTargets(session.engine.gpa, loaded.morph_targets);
         if (loaded.morph_rest.len > 0) session.engine.gpa.free(loaded.morph_rest);
         if (loaded.morph_scratch.len > 0) session.engine.gpa.free(loaded.morph_scratch);
+        if (loaded.morph_to_blendshape.len > 0) session.engine.gpa.free(loaded.morph_to_blendshape);
         if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
     session.model_meshes.clearRetainingCapacity();
+    session.model_retargets.clearRetainingCapacity();
+    session.model_talks.clearRetainingCapacity();
 }
 
 /// Replaces any currently active lens with the one manifest_json
@@ -9068,6 +9190,11 @@ const SplatWorker = struct {
     color: [3]f32,
     // True draws the points as a connected grid surface, false as billboards.
     mesh_draw: bool,
+    // True runs once on a submitted selfie (an avatar), not the live camera.
+    selfie: bool,
+    // True when the model emits rgb after xyz per point (stride six), so each
+    // splat draws in its own color rather than the node color.
+    colored: bool,
     positions: []f32,
     // The billboard mesh is created lazily on the first draw, since it needs the
     // renderer; null marks it not yet built.
@@ -9086,11 +9213,14 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         defer gpa.free(bytes);
         const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
         const len = ml_infer.outputLen(worker, 0);
-        if (len == 0 or len % 3 != 0) {
+        // A colored cloud's model emits xyz then rgb per point, so its output is
+        // a multiple of six; a plain one emits xyz only, a multiple of three.
+        const stride: usize = if (node.colored) 6 else 3;
+        if (len == 0 or len % stride != 0) {
             ml_infer.destroy(worker);
             continue;
         }
-        const count: u32 = @intCast(len / 3);
+        const count: u32 = @intCast(len / stride);
         const positions = gpa.alloc(f32, len) catch {
             ml_infer.destroy(worker);
             continue;
@@ -9102,11 +9232,17 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .point = node.point,
             .color = node.color,
             .mesh_draw = node.mesh,
+            .selfie = node.selfie,
+            .colored = node.colored,
             .positions = positions,
         }) catch {
             gpa.free(positions);
             ml_infer.destroy(worker);
+            continue;
         };
+        // Reserve the staging the billboard cloud writes each frame, six vertices
+        // of twelve floats per point, so the draw never falls back to a stale mesh.
+        reserveFrameStage(session, @as(usize, count) * 6 * 12);
     }
 }
 
@@ -9131,14 +9267,20 @@ fn splatWorkerFor(session: *Session, idx: graph.NodeIndex) ?*SplatWorker {
 /// draws: six per point (two triangles), each eight floats (position, corner,
 /// life, seed, velocity). A splat is fully alive and still, so life is one and
 /// the velocity zero; the point holds its place while the camera orbits it.
-fn writeSplatBillboards(positions: []const f32, count: u32, out: []f32) void {
+fn writeSplatBillboards(positions: []const f32, count: u32, colored: bool, out: []f32) void {
     const corners = [6]f32{ 0, 1, 2, 0, 2, 3 };
+    // A colored cloud's model emits xyz then rgb per point (stride six); a plain
+    // one emits xyz only (stride three) and each splat draws in the node color.
+    const stride: usize = if (colored) 6 else 3;
     for (0..count) |i| {
-        const px = positions[i * 3 + 0];
-        const py = positions[i * 3 + 1];
-        const pz = positions[i * 3 + 2];
+        const px = positions[i * stride + 0];
+        const py = positions[i * stride + 1];
+        const pz = positions[i * stride + 2];
+        const cr: f32 = if (colored) positions[i * stride + 3] else 1.0;
+        const cg: f32 = if (colored) positions[i * stride + 4] else 1.0;
+        const cb: f32 = if (colored) positions[i * stride + 5] else 1.0;
         for (corners, 0..) |corner, k| {
-            const base = (i * 6 + k) * 8;
+            const base = (i * 6 + k) * 12;
             out[base + 0] = px;
             out[base + 1] = py;
             out[base + 2] = pz;
@@ -9147,6 +9289,10 @@ fn writeSplatBillboards(positions: []const f32, count: u32, out: []f32) void {
             out[base + 5] = @floatFromInt(i % 256);
             out[base + 6] = 0;
             out[base + 7] = 0;
+            out[base + 8] = cr;
+            out[base + 9] = cg;
+            out[base + 10] = cb;
+            out[base + 11] = 1.0;
         }
     }
 }
@@ -9154,17 +9300,20 @@ fn writeSplatBillboards(positions: []const f32, count: u32, out: []f32) void {
 /// Connects a square grid of xyz points into a triangle soup (two triangles per
 /// cell, three floats per vertex), so a model that emits a grid of positions
 /// draws as a continuous 3D surface rather than loose points.
-fn writeSplatMesh(positions: []const f32, side: usize, out: []f32) void {
+fn writeSplatMesh(positions: []const f32, side: usize, colored: bool, out: []f32) void {
     if (side < 2) return;
+    // Colored points carry rgb after xyz, so step by six; the surface itself
+    // stays position only and reads just the xyz of each grid point.
+    const stride: usize = if (colored) 6 else 3;
     var v: usize = 0;
     var j: usize = 0;
     while (j + 1 < side) : (j += 1) {
         var i: usize = 0;
         while (i + 1 < side) : (i += 1) {
-            const p00 = (j * side + i) * 3;
-            const p10 = (j * side + i + 1) * 3;
-            const p01 = ((j + 1) * side + i) * 3;
-            const p11 = ((j + 1) * side + i + 1) * 3;
+            const p00 = (j * side + i) * stride;
+            const p10 = (j * side + i + 1) * stride;
+            const p01 = ((j + 1) * side + i) * stride;
+            const p11 = ((j + 1) * side + i + 1) * stride;
             for ([6]usize{ p00, p10, p11, p00, p11, p01 }) |p| {
                 out[v * 3 + 0] = positions[p + 0];
                 out[v * 3 + 1] = positions[p + 1];
@@ -9291,6 +9440,12 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         if (model.face_anchor) {
             session.model_face_anchors.put(gpa, model.graph_index, {}) catch {};
         }
+        if (model.retarget) {
+            session.model_retargets.put(gpa, model.graph_index, {}) catch {};
+        }
+        if (model.talk) {
+            session.model_talks.put(gpa, model.graph_index, {}) catch {};
+        }
         if (model.body_anchor) {
             session.model_body_anchors.put(gpa, model.graph_index, {}) catch {};
         }
@@ -9387,7 +9542,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.particle_meshes.put(gpa, model.graph_index, mesh) catch {
                                 render.Renderer.destroyParticleMesh(mesh);
                             };
-                            reserveFrameStage(session, if (faded) @as(usize, vertex_count) * 8 else @as(usize, vertex_count) * 3);
+                            reserveFrameStage(session, if (faded) @as(usize, vertex_count) * 12 else @as(usize, vertex_count) * 3);
                             if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
                         } else |_| {
                             var s2 = sys;
@@ -9659,6 +9814,11 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 gpa.free(decoded.positions);
             }
             gpa.free(decoded.indices);
+            // Distil the morph target names into a blendshape index per target
+            // (or -1), then drop the names; the table is all the retarget needs.
+            const morph_to_blendshape = buildMorphBlendshapeTable(gpa, decoded.morph_names);
+            for (decoded.morph_names) |n| gpa.free(n);
+            gpa.free(decoded.morph_names);
             session.model_meshes.put(gpa, entry.key_ptr.*, .{
                 .mesh = mesh,
                 .base_color = decoded.base_color,
@@ -9667,6 +9827,9 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 .morph_targets = decoded.morph_targets,
                 .morph_rest = morph_rest,
                 .morph_scratch = morph_scratch,
+                .morph_to_blendshape = morph_to_blendshape,
+                .auto_bind_blendshapes = session.model_retargets.contains(entry.key_ptr.*),
+                .audio_talk = session.model_talks.contains(entry.key_ptr.*),
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
                 if (rig) |rg| {
@@ -9675,6 +9838,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 }
                 gltf.freeAnimations(gpa, decoded.animations);
                 gltf.freeMorphTargets(gpa, decoded.morph_targets);
+                if (morph_to_blendshape.len > 0) gpa.free(morph_to_blendshape);
                 if (morph_rest.len > 0) gpa.free(morph_rest);
                 if (morph_scratch.len > 0) gpa.free(morph_scratch);
             };
@@ -10106,6 +10270,44 @@ test "morphPositions adds weighted target deltas to the rest pose" {
     try t.expectApproxEqAbs(@as(f32, 0.0), out[1][1], 0.001);
 }
 
+test "buildMorphBlendshapeTable maps ARKit names to blendshape indices" {
+    const names = [_][]const u8{ "jawOpen", "not_a_blendshape", "eyeBlinkLeft", "" };
+    const table = buildMorphBlendshapeTable(t.allocator, &names);
+    defer t.allocator.free(table);
+    try t.expectEqual(@as(i8, @intCast(face.blendshapeIndex("jawOpen").?)), table[0]);
+    try t.expectEqual(@as(i8, -1), table[1]);
+    try t.expectEqual(@as(i8, @intCast(face.blendshapeIndex("eyeBlinkLeft").?)), table[2]);
+    try t.expectEqual(@as(i8, -1), table[3]);
+}
+
+test "writeSplatBillboards carries per-point color when colored, white otherwise" {
+    // Colored: two points, xyz then rgb interleaved (stride six).
+    const colored_pts = [_]f32{
+        0.1, 0.2, 0.3, 0.9, 0.8, 0.7,
+        0.4, 0.5, 0.6, 0.15, 0.25, 0.35,
+    };
+    var out: [2 * 6 * 12]f32 = undefined;
+    writeSplatBillboards(&colored_pts, 2, true, &out);
+    // Every one of the first point's six vertices carries its own rgb, alpha one.
+    for (0..6) |k| {
+        const base = k * 12;
+        try t.expectEqual(@as(f32, 0.1), out[base + 0]);
+        try t.expectEqual(@as(f32, 0.9), out[base + 8]);
+        try t.expectEqual(@as(f32, 0.8), out[base + 9]);
+        try t.expectEqual(@as(f32, 0.7), out[base + 10]);
+        try t.expectEqual(@as(f32, 1.0), out[base + 11]);
+    }
+    // The second point reads its own color, at stride six.
+    try t.expectEqual(@as(f32, 0.4), out[6 * 12 + 0]);
+    try t.expectEqual(@as(f32, 0.15), out[6 * 12 + 8]);
+    // Plain: xyz-only points (stride three); the color slot is white.
+    const plain_pts = [_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 };
+    var out2: [2 * 6 * 12]f32 = undefined;
+    writeSplatBillboards(&plain_pts, 2, false, &out2);
+    try t.expectEqual(@as(f32, 0.4), out2[6 * 12 + 0]);
+    for (0..4) |c| try t.expectEqual(@as(f32, 1.0), out2[8 + c]);
+}
+
 /// Lowercases into buf and drops a "mixamorig:" style prefix (anything
 /// up to the last colon) so the mixamo and vrm/gltf conventions match
 /// the same table.
@@ -10159,10 +10361,47 @@ fn jointTargetPixel(landmarks: *const [pose.landmark_count * 3]f32, target: Join
     };
 }
 
-/// Fills the rig's joint palette for one tracked body: each mapped joint
-/// moves to its landmark, brought into mesh space by the anchor inverse
-/// so the anchor the draw re-applies cancels and lands it there.
-/// Unmapped joints and a singular anchor hold the bind pose.
+/// The landmark down-chain of a joint's own landmark: the next joint along the
+/// limb, so a bone's tracked direction can be measured. Null for a leaf (hand,
+/// foot, head) or a non-point target, which then rotates with its parent alone.
+fn childLandmark(target: JointTarget) ?u8 {
+    const point = switch (target) {
+        .point => |i| i,
+        else => return null,
+    };
+    return switch (point) {
+        11 => 13, // left shoulder -> elbow
+        13 => 15, // left elbow -> wrist
+        12 => 14, // right shoulder -> elbow
+        14 => 16, // right elbow -> wrist
+        23 => 25, // left hip -> knee
+        25 => 27, // left knee -> ankle
+        24 => 26, // right hip -> knee
+        26 => 28, // right knee -> ankle
+        else => null,
+    };
+}
+
+/// The bind (rest) mesh-space position of the joint whose target lands on
+/// `landmark`, read from the inverse of its inverse-bind matrix. Null when no
+/// joint drives that landmark, so a bone with no bound child skips rotation.
+fn childBindPosition(rig: *const SkinnedRig, landmark: u8) ?math.Vec3 {
+    for (rig.joint_targets, rig.skin.inverse_bind) |target, ibm| {
+        const point = switch (target) {
+            .point => |i| i,
+            else => continue,
+        };
+        if (point != landmark) continue;
+        const world = math.Mat4.inverse(ibm) orelse return null;
+        return .{ world.cols[3][0], world.cols[3][1], world.cols[3][2] };
+    }
+    return null;
+}
+
+/// Fills the rig's joint palette for one tracked body: each mapped joint moves
+/// to its landmark (the anchor inverse cancels the anchor the draw re-applies),
+/// and a joint with a tracked child bone also rotates in the image plane so a
+/// bent limb bends. Unmapped joints and a singular anchor hold the bind pose.
 fn buildBodySkinPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark_count * 3]f32, anchor_full: math.Mat4) void {
     const inv = math.Mat4.inverse(anchor_full) orelse {
         for (rig.palette) |*p| p.* = math.Mat4.identity;
@@ -10173,8 +10412,32 @@ fn buildBodySkinPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark
             p.* = math.Mat4.identity;
             continue;
         };
-        p.* = math.Mat4.translation(inv.mulPoint(pixel)).mul(ibm);
+        const tracked_pos = inv.mulPoint(pixel);
+        p.* = boneRotatedPalette(rig, landmarks, inv, target, ibm, tracked_pos) orelse
+            math.Mat4.translation(tracked_pos).mul(ibm);
     }
+}
+
+/// The palette for a limb joint carrying its bone's tracked in-plane rotation:
+/// T(tracked) * Rz(theta) * T(-bind), theta the angle from the bind bone
+/// direction to the tracked one. Null (fall back to translation) when there is
+/// no bound child bone or a direction is degenerate, so noise never rotates it.
+fn boneRotatedPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark_count * 3]f32, inv: math.Mat4, target: JointTarget, ibm: math.Mat4, tracked_pos: math.Vec3) ?math.Mat4 {
+    const child = childLandmark(target) orelse return null;
+    const child_pixel = jointTargetPixel(landmarks, .{ .point = child }) orelse return null;
+    const tracked_child = inv.mulPoint(child_pixel);
+    const bind_world = math.Mat4.inverse(ibm) orelse return null;
+    const bind_pos: math.Vec3 = .{ bind_world.cols[3][0], bind_world.cols[3][1], bind_world.cols[3][2] };
+    const bind_child = childBindPosition(rig, child) orelse return null;
+
+    const td: [2]f32 = .{ tracked_child[0] - tracked_pos[0], tracked_child[1] - tracked_pos[1] };
+    const bd: [2]f32 = .{ bind_child[0] - bind_pos[0], bind_child[1] - bind_pos[1] };
+    const tl = @sqrt(td[0] * td[0] + td[1] * td[1]);
+    const bl = @sqrt(bd[0] * bd[0] + bd[1] * bd[1]);
+    if (!(tl > 1e-4) or !(bl > 1e-4)) return null;
+    const theta = std.math.atan2(td[1], td[0]) - std.math.atan2(bd[1], bd[0]);
+    if (!(theta == theta)) return null;
+    return math.Mat4.translation(tracked_pos).mul(math.Mat4.rotationZ(theta)).mul(math.Mat4.translation(.{ -bind_pos[0], -bind_pos[1], -bind_pos[2] }));
 }
 
 /// Stands a skinned rig up from a decoded model: a dynamic render mesh,
@@ -10241,6 +10504,40 @@ test "buildBodySkinPalette lands a mapped joint on its landmark" {
     const placed = anchor.mul(palette[0]).mulPoint(.{ 0, 0, 0 });
     try t.expectApproxEqAbs(@as(f32, 200), placed[0], 0.001);
     try t.expectApproxEqAbs(@as(f32, 120), placed[1], 0.001);
+}
+
+test "buildBodySkinPalette rotates a limb joint by its bent bone" {
+    // A two-joint forearm rig: joint 0 the left elbow (landmark 13, child the
+    // wrist 15), joint 1 the wrist. Bind pose hangs the forearm straight down.
+    var inverse_bind = [_]math.Mat4{
+        math.Mat4.translation(.{ -100, -100, 0 }), // elbow bind at (100,100)
+        math.Mat4.translation(.{ -100, -200, 0 }), // wrist bind at (100,200)
+    };
+    var targets = [_]JointTarget{ .{ .point = 13 }, .{ .point = 15 } };
+    var palette: [2]math.Mat4 = undefined;
+    const rig: SkinnedRig = .{
+        .mesh = undefined,
+        .skin = .{ .joint_count = 2, .inverse_bind = &inverse_bind, .joint_names = &.{}, .vertex_joints = &.{}, .vertex_weights = &.{} },
+        .rest = &.{},
+        .skinned = &.{},
+        .palette = &palette,
+        .joint_targets = &targets,
+    };
+    var lm: [pose.landmark_count * 3]f32 = @splat(0);
+    // Tracked: elbow at (200,200), wrist out to the right (300,200) - the
+    // forearm now points along +x, a quarter turn from the bind's +y.
+    lm[13 * 3] = 200;
+    lm[13 * 3 + 1] = 200;
+    lm[15 * 3] = 300;
+    lm[15 * 3 + 1] = 200;
+    buildBodySkinPalette(&rig, &lm, math.Mat4.identity);
+    // A bind point 10 units down the forearm (toward the wrist) rotates to 10
+    // units along +x once the bone is bent, not straight down as translation
+    // alone would leave it.
+    const along_bind: math.Vec3 = .{ 100, 110, 0 };
+    const placed = palette[0].mulPoint(along_bind);
+    try t.expectApproxEqAbs(@as(f32, 210), placed[0], 0.01);
+    try t.expectApproxEqAbs(@as(f32, 200), placed[1], 0.01);
 }
 
 const body_history = 64;

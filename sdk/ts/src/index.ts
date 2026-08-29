@@ -1733,6 +1733,21 @@ export class GossSession {
     );
   }
 
+  /// The web selfie path: runs each selfie-source splat.cloud once over one
+  /// RGBA8 still (row major), so a photoreal avatar is generated from one photo
+  /// and then held off the live camera. Reuses the per-session frame staging.
+  submitAvatarSourceRgba(rgba: Uint8ClampedArray | Uint8Array, width: number, height: number): void {
+    const byteLength = width * 4 * height;
+    this.ensureFramePixels(byteLength);
+    this.mod.HEAPU8.set(rgba.subarray(0, byteLength), this.framePixelsPtr);
+    this.mod.ccall(
+      "goss_session_submit_avatar_source_rgba",
+      "number",
+      ["number", "number", "number"],
+      [this.handle, this.framePixelsPtr, width, height],
+    );
+  }
+
   /// Feeds the platform's world understanding into the session: camera
   /// pose and projection (column-major float16 arrays), tracked planes,
   /// anchors, and the light estimate. Drives the world.tracking_state

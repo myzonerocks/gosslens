@@ -1,5 +1,5 @@
-$input a_position, a_texcoord0, a_texcoord1
-$output v_billboard
+$input a_position, a_texcoord0, a_texcoord1, a_color0
+$output v_billboard, v_color
 
 #include <bgfx_shader.sh>
 
@@ -39,4 +39,5 @@ void main()
 	clip.xy += offset * clip.w;
 	gl_Position = clip;
 	v_billboard = vec4(corner, life, 0.0);
+	v_color = a_color0;
 }

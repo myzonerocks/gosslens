@@ -15,6 +15,13 @@ pub const Analysis = struct {
     /// True exactly on hops whose energy jumps well above the recent
     /// average - a beat-ish onset pulse for triggers.
     beat: bool = false,
+    /// Voiced (low-band) and unvoiced (high-band) energy in [0, 1], split by a
+    /// one-pole low-pass, so a vowel reads high on low and a fricative on high.
+    band_low: f32 = 0,
+    band_high: f32 = 0,
+    /// A gated jaw-open envelope in [0, 1] for a talking avatar: it opens on
+    /// voiced energy and closes on silence, so a mesh mouths the audio.
+    jaw: f32 = 0,
 
     // Running energy history for the onset comparison.
     history: [43]f32 = @splat(0),
@@ -22,10 +29,18 @@ pub const Analysis = struct {
     history_filled: bool = false,
     carry: [hop_size]f32 = @splat(0),
     carry_len: usize = 0,
+    // Persisted one-pole low-pass state for the band split.
+    lp_state: f32 = 0,
 
     const attack: f32 = 0.6;
     const release: f32 = 0.05;
     const onset_ratio: f32 = 1.6;
+    // The band split's low-pass, the jaw envelope's rates, and the silence gate.
+    const lp_coeff: f32 = 0.15;
+    const jaw_attack: f32 = 0.5;
+    const jaw_release: f32 = 0.15;
+    const jaw_gain: f32 = 4.0;
+    const silence_gate: f32 = 0.01;
 
     /// Feeds interleaved f32 samples; channels are averaged to mono.
     /// Level and beat reflect the latest completed hop afterwards.
@@ -49,9 +64,36 @@ pub const Analysis = struct {
 
     fn completeHop(analysis: *Analysis) void {
         var energy: f32 = 0;
-        for (analysis.carry) |sample| energy += sample * sample;
+        var low_energy: f32 = 0;
+        var high_energy: f32 = 0;
+        for (analysis.carry) |sample| {
+            energy += sample * sample;
+            // One-pole low-pass carries the voiced band; the residual is the
+            // unvoiced band, so a vowel and a fricative split apart.
+            analysis.lp_state += (sample - analysis.lp_state) * lp_coeff;
+            const high = sample - analysis.lp_state;
+            low_energy += analysis.lp_state * analysis.lp_state;
+            high_energy += high * high;
+        }
         energy /= hop_size;
+        // Reject a non-finite hop (a caller's NaN/inf sample) rather than let it
+        // poison the envelopes; treat it as silence.
+        if (!(energy >= 0)) {
+            energy = 0;
+            low_energy = 0;
+            high_energy = 0;
+            analysis.lp_state = 0;
+        }
         const rms = @sqrt(energy);
+        analysis.band_low = std.math.clamp(@sqrt(low_energy / hop_size), 0.0, 1.0);
+        analysis.band_high = std.math.clamp(@sqrt(high_energy / hop_size), 0.0, 1.0);
+
+        // The jaw opens on voiced energy above the silence gate and releases
+        // toward closed otherwise, so the mouth mimics speech, not noise.
+        const jaw_target: f32 = if (rms > silence_gate) std.math.clamp(analysis.band_low * jaw_gain, 0.0, 1.0) else 0.0;
+        const jaw_coeff: f32 = if (jaw_target > analysis.jaw) jaw_attack else jaw_release;
+        analysis.jaw += (jaw_target - analysis.jaw) * jaw_coeff;
+        analysis.jaw = std.math.clamp(analysis.jaw, 0.0, 1.0);
 
         const coefficient: f32 = if (rms > analysis.level) attack else release;
         analysis.level += (rms - analysis.level) * coefficient;
@@ -95,6 +137,41 @@ test "a loud burst after quiet raises the level and fires a beat" {
     analysis.feed(&burst, 1);
     try t.expect(analysis.beat);
     try t.expect(analysis.level > level_before);
+}
+
+test "the jaw opens on voiced audio, less on unvoiced, and closes on silence" {
+    // A low, near-DC tone reads as voiced (low band); a Nyquist-alternating
+    // tone of equal energy reads as unvoiced (high band).
+    var voiced: [hop_size]f32 = undefined;
+    var unvoiced: [hop_size]f32 = undefined;
+    for (0..hop_size) |i| {
+        voiced[i] = 0.5;
+        unvoiced[i] = if (i % 2 == 0) 0.5 else -0.5;
+    }
+
+    var open_mouth: Analysis = .{};
+    for (0..20) |_| open_mouth.feed(&voiced, 1);
+    try t.expect(open_mouth.jaw > 0.5);
+    try t.expect(open_mouth.band_low > open_mouth.band_high);
+
+    var closed_mouth: Analysis = .{};
+    for (0..20) |_| closed_mouth.feed(&unvoiced, 1);
+    // Equal energy, but the fricative opens the jaw far less than the vowel.
+    try t.expect(closed_mouth.jaw < open_mouth.jaw);
+    try t.expect(closed_mouth.band_high > closed_mouth.band_low);
+
+    // Silence releases the open jaw back toward closed.
+    const silence: [hop_size]f32 = @splat(0);
+    for (0..40) |_| open_mouth.feed(&silence, 1);
+    try t.expect(open_mouth.jaw < 0.1);
+}
+
+test "a non-finite audio sample does not poison the jaw envelope" {
+    var analysis: Analysis = .{};
+    var bad: [hop_size]f32 = @splat(std.math.nan(f32));
+    analysis.feed(&bad, 1);
+    try t.expect(analysis.jaw == analysis.jaw); // finite, not NaN
+    try t.expectEqual(@as(f32, 0), analysis.jaw);
 }
 
 test "stereo averages to mono and determinism holds" {

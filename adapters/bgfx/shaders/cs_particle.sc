@@ -4,8 +4,9 @@
 // [seed, -, -, -]. The compute shader integrates it in place, so the sim lives
 // entirely on the GPU.
 BUFFER_RW(state, vec4, 0);
-// The billboards it draws: six vertices per particle, two vec4 each (pos.xyz +
-// corner, then life fraction + seed + velocity xy) matching the CPU layout.
+// The billboards it draws: six vertices per particle, three vec4 each (pos.xyz +
+// corner, then life fraction + seed + velocity xy, then the per-vertex color)
+// matching the CPU layout.
 BUFFER_WO(billboards, vec4, 1);
 
 // x: dt, y: gravity, z: particle count, w: 1 on the first frame to seed state.
@@ -137,8 +138,9 @@ void main()
 	float frac = clamp(life / max(maxlife, 1e-6), 0.0, 1.0);
 	for (uint k = 0u; k < 6u; k++) {
 		float corner = (k == 1u) ? 1.0 : ((k == 2u || k == 4u) ? 2.0 : ((k == 5u) ? 3.0 : 0.0));
-		uint b = (i * 6u + k) * 2u;
+		uint b = (i * 6u + k) * 3u;
 		billboards[b + 0u] = vec4(pos.x, pos.y, pos.z, corner);
 		billboards[b + 1u] = vec4(frac, seed, vel.x, vel.y);
+		billboards[b + 2u] = vec4(1.0, 1.0, 1.0, 1.0);
 	}
 }

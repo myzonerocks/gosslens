@@ -158,6 +158,19 @@ public final class GossSession: @unchecked Sendable {
         try checked(goss_session_track_frame(handle, &raw, y, yStride, uv, uvStride))
     }
 
+    /// Runs each selfie-source splat.cloud once over one still, so a photoreal
+    /// avatar is generated from a photo and then held off the live camera.
+    public func submitAvatarSource(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, colorStandard: GossColorStandard = .bt709, colorRange: GossColorRange = .video, timestampUs: Int64) throws {
+        var raw = GossFrameDesc(width: width, height: height, pixelFormat: .nv12, colorStandard: colorStandard, colorRange: colorRange, timestampUs: timestampUs).raw
+        try checked(goss_session_submit_avatar_source(handle, &raw, y, yStride, uv, uvStride))
+    }
+
+    /// The RGBA sibling of submitAvatarSource: runs each selfie-source splat
+    /// once over one single-plane RGBA8 still (a canvas or photo's own bytes).
+    public func submitAvatarSourceRgba(rgba: UnsafePointer<UInt8>, width: UInt32, height: UInt32) throws {
+        try checked(goss_session_submit_avatar_source_rgba(handle, rgba, width, height))
+    }
+
     public func setFaceLandmarks(points: [Float]) throws {
         try points.withUnsafeBufferPointer { buffer in
             try checked(goss_session_set_face_landmarks(handle, buffer.baseAddress, UInt32(points.count / 3)))

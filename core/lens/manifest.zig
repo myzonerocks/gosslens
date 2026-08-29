@@ -901,17 +901,24 @@ pub const DiffusionField = struct {
 
 pub const SplatDraw = enum { points, mesh };
 
+/// Where a splat.cloud's model reads its input. `camera` lifts the live frame
+/// each tick; `selfie` runs once on a still submitted through the ABI, so a
+/// photoreal avatar is generated from one photo and then held.
+pub const SplatSource = enum { camera, selfie };
+
 pub const SplatField = struct {
-    /// A splat.cloud node lifts the camera frame into 3D with a bundled model
-    /// whose output is a flat list of xyz positions. `draw` picks the form:
-    /// `points` draws camera-facing billboards (a cloud), `mesh` reads a square
-    /// grid and draws a surface. `point` is the billboard size, r,g,b the color.
+    /// A splat.cloud node lifts a frame into 3D with a bundled model whose output
+    /// is a flat xyz list. `source` picks the input (live camera or a submitted
+    /// selfie); `draw` the form (`points` billboards or a `mesh` grid surface);
+    /// `point` the size, r,g,b the color, `colored` a per-point color from rgb.
     model: []const u8,
+    source: SplatSource = .camera,
     draw: SplatDraw = .points,
     point: f32 = 6.0,
     r: f32 = 0.9,
     g: f32 = 0.85,
     b: f32 = 0.8,
+    colored: bool = false,
 };
 
 pub const Node = struct {
@@ -923,6 +930,13 @@ pub const Node = struct {
     mask_channel: ?u8 = null,
     /// True when a model.gltf node anchors to the tracked face.
     face_anchor: bool = false,
+    /// True when a face-anchored model.gltf retargets the tracked expression:
+    /// each morph target named for an ARKit blendshape is driven by that live
+    /// blendshape, turning the mesh into an avatar of the user's face.
+    retarget: bool = false,
+    /// True when a model.gltf drives its jaw-open morph from the submitted audio
+    /// envelope, so the mesh mouths speech even with no tracked face.
+    talk: bool = false,
     /// True when a model.gltf node anchors to every tracked body.
     body_anchor: bool = false,
     /// True when a model.gltf node draws once per bone of every tracked body.
@@ -2950,6 +2964,22 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(anchor_mark);
         }
+        var retarget = false;
+        if (getField(object, "retarget")) |rv| {
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "retarget is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (rv == .bool) {
+                retarget = rv.bool;
+            } else try diags.add(path.slice(), "retarget must be a boolean", .{});
+        }
+        var talk = false;
+        if (getField(object, "talk")) |tv| {
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "talk is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (tv == .bool) {
+                talk = tv.bool;
+            } else try diags.add(path.slice(), "talk must be a boolean", .{});
+        }
         if (getField(object, "control")) |cv| {
             const control_mark = path.push("control");
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -3056,6 +3086,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .params = try params.toOwnedSlice(arena),
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
+            .retarget = retarget,
+            .talk = talk,
             .control = model_control,
             .logic_graph = logic_graph_spec,
             .ml = ml_field,
@@ -3197,6 +3229,11 @@ fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         return null;
     }
     var field: SplatField = .{ .model = try arena.dupe(u8, model) };
+    if (getField(object, "source")) |v| {
+        if (try expectString(diags, path, v)) |name| {
+            if (std.mem.eql(u8, name, "camera")) field.source = .camera else if (std.mem.eql(u8, name, "selfie")) field.source = .selfie else try diags.add(path.slice(), "splat source is 'camera' or 'selfie', found '{s}'", .{name});
+        }
+    }
     if (getField(object, "draw")) |v| {
         if (try expectString(diags, path, v)) |name| {
             if (std.mem.eql(u8, name, "points")) field.draw = .points else if (std.mem.eql(u8, name, "mesh")) field.draw = .mesh else try diags.add(path.slice(), "splat draw is 'points' or 'mesh', found '{s}'", .{name});
@@ -3206,6 +3243,9 @@ fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
     if (getField(object, "r")) |v| field.r = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.r)), 0, 1);
     if (getField(object, "g")) |v| field.g = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.g)), 0, 1);
     if (getField(object, "b")) |v| field.b = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.b)), 0, 1);
+    if (getField(object, "colored")) |v| {
+        if (v == .bool) field.colored = v.bool;
+    }
     return field;
 }
 

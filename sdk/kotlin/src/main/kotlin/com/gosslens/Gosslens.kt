@@ -70,6 +70,19 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+    internal external fun nativeSubmitAvatarSource(
+        session: Long,
+        yBuffer: ByteBuffer,
+        yStride: Int,
+        uvBuffer: ByteBuffer,
+        uvStride: Int,
+        width: Int,
+        height: Int,
+        colorStandard: Int,
+        colorRange: Int,
+        timestampUs: Long,
+    ): Int
+    internal external fun nativeSubmitAvatarSourceRgba(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeFaceResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeSubmitFaces(session: Long, faces: ByteBuffer, count: Int): Int
     internal external fun nativeFaceCount(session: Long): Int
@@ -874,6 +887,31 @@ class GossSession private constructor(
     ): Boolean = Gosslens.nativeTrackFrame(
         handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
     ) == 0
+
+    /** Runs each selfie-source splat.cloud once over one NV12 still, so a
+     * photoreal avatar is generated from a photo and then held off the camera. */
+    fun submitAvatarSource(
+        y: ByteBuffer,
+        yStride: Int,
+        uv: ByteBuffer,
+        uvStride: Int,
+        width: Int,
+        height: Int,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
+        timestampUs: Long,
+    ): Boolean = Gosslens.nativeSubmitAvatarSource(
+        handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
+    ) == 0
+
+    /** The RGBA sibling of submitAvatarSource: runs each selfie-source splat
+     * once over one width by height RGBA8 still, row major. */
+    fun submitAvatarSourceRgba(rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = stage(rgba.size)
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSubmitAvatarSourceRgba(handle, buf, width, height) == 0
+    }
 
     /** Stands the segmentation worker up from a raw model - a selfie or hair
      * segmenter .tflite; [model] is a direct buffer of the model bytes. Once

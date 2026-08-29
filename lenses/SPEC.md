@@ -157,7 +157,11 @@ face the node draws nothing, the standard capability degradation.
 one instance at each submitted body's torso, scaled by torso length and
 rolled by its tilt, so a body-anchored model fans out across a crowd (or
 rides the single tracked figure when the host submits none). Without a
-tracked body the node draws nothing.
+tracked body the node draws nothing. A body-anchored model that ships a glTF
+skin poses instead of placing: each joint moves to its tracked landmark and
+each limb bone rotates in the image plane toward the tracked joint below it,
+so a rigged avatar mocaps the tracked body (a monocular, in-plane pose; the
+single tracked figure drives it).
 `"anchor": "skeleton"` draws the model once per bone of every tracked body,
 each instance spanning the two joints of the bone (scaled to its length and
 oriented along it), so the model tiles into a whole rig over the figure.
@@ -185,6 +189,32 @@ per-vertex deltas, the weights taken from the named parameters' live values,
 so ramping a weight opens a blendshape (a smile, a blink). Each name must be
 a declared parameter, a target past the list contributes nothing, and with
 no `morph_weights` the mesh draws unmorphed.
+
+A face-anchored `model.gltf` node may add `"retarget": true` to turn the mesh
+into an avatar of the user's face: each morph target whose glTF name matches an
+ARKit blendshape (`jawOpen`, `eyeBlinkLeft`, and the rest) is driven each frame
+by that live blendshape, and the head pose already rides the tracked face. A
+target with no matching name still reads its `morph_weights` parameter, so a rig
+can mix retargeted expression with authored morphs. With no tracked face the
+mesh holds its rest shape. `retarget` is a `model.gltf` field only.
+
+The driving performance need not be the local live face. A host that injects
+faces through `goss_session_submit_faces` (blendshapes read off a source clip or
+another camera) drives a retarget avatar from that performance instead, so one
+selfie's avatar is reenacted by a separate source head.
+
+A `model.gltf` node may add `"talk": true` to drive its `jawOpen` morph target
+from the submitted audio, so the mesh mouths speech even with no tracked face: a
+gated envelope of the voiced (low) audio band opens the jaw on vowels and closes
+it on silence, overriding that one target's tracked or bound value. Combine
+`retarget` and `talk` to lip-sync a tracked face's avatar to its own voice.
+`talk` is a `model.gltf` field only.
+
+A tracked avatar renders in any of the engine's art styles by drawing it and
+adding a stylize node after it: a `stylize.pass` in `toon`, `sketch`, `emboss`
+or `crosshatch` mode restyles the avatar, and a diffusion restyle masked to the
+face channel repaints it, both while the avatar keeps tracking the driving
+expression. Style and liveness compose, so a stylized avatar is still live.
 
 A `model.gltf` node may add `"control": {"orbit", "dolly", "roll"}`, a
 turntable the recognized gestures steer: `orbit` spins the model with a drag
@@ -706,19 +736,27 @@ file. `"fps": 0` holds the first frame; `"loop": false` holds the last frame at
 the end instead of rewinding. Targets without a hardware decoder play a
 deterministic synthetic clip so the node still runs.
 
-A `"splat.cloud"` node draws 3D geometry a bundled model lifts from the camera
-frame. It carries a `"splat": {"model", "draw", "point", "r", "g", "b"}` block:
-`model` names the net under `assets/`, whose output is a flat list of xyz
-positions (its length a multiple of three, one point per triple). `"draw"` picks
-the form: `"points"` (the default) draws camera-facing billboards, a splat cloud,
-sized by `"point"` (pixels); `"mesh"` reads the output as a square grid and draws
-it as a connected 3D surface, one quad per grid cell. `r`, `g`, `b` are the color.
-The model runs on the inference rail like any author model, off the frame thread;
-the engine reads its latest points and draws them in a perspective view, so the
-submitted camera pose orbits the geometry. Until the model produces its first
-points the node holds the frame through, the standard capability degradation.
-This is the text-to-3D path: an image-to-geometry net turns the scene into a
-splat cloud or a mesh surface the lens composites like any other draw.
+A `"splat.cloud"` node draws 3D geometry a bundled model lifts from a frame.
+It carries a `"splat": {"model", "source", "draw", "point", "r", "g", "b",
+"colored"}` block: `model` names the net under `assets/`, whose output is a flat
+list of xyz positions (its length a multiple of three, one point per triple).
+With `"colored"` the model emits rgb after xyz per point (its length a multiple
+of six) and each splat draws in its own color instead of the node `r`, `g`, `b`,
+so a photoreal selfie avatar carries the photo's color per point. `"source"`
+picks the input: `"camera"` (the default) lifts the live frame each tick;
+`"selfie"` runs the model once over a still submitted through
+`goss_session_submit_avatar_source` and then holds the result, so a photoreal
+avatar is generated from one photo and stays put off the live camera. `"draw"`
+picks the form: `"points"` (the default) draws camera-facing billboards, a splat
+cloud, sized by `"point"` (pixels); `"mesh"` reads the output as a square grid and
+draws it as a connected 3D surface, one quad per grid cell. `r`, `g`, `b` are the
+color. The model runs on the inference rail like any author model, off the frame
+thread; the engine reads its latest points and draws them in a perspective view,
+so the submitted camera pose orbits the geometry. Until the model produces its
+first points the node holds the frame through, the standard capability
+degradation. This is the text-to-3D and selfie-avatar path: an image-to-geometry
+net turns a frame or a photo into a splat cloud or a mesh surface the lens
+composites like any other draw.
 
 A `"layout.composite"` node lets a lens drive the head composite instead of the
 host: it carries a `"layout": {"arrangement", "key", "chroma", "similarity",
@@ -1164,7 +1202,14 @@ material texture; a splat.cloud node lifts the camera frame to a 3D point
 set with a bundled model and draws it as a billboard cloud; a splat.cloud in mesh
 mode reads the model's points as a grid and draws them as a connected 3D surface;
 a diffusion node targeting a shader.pass binds its generated image to the material
-graph's generated sampler; and the prompt
+graph's generated sampler; a selfie-source splat.cloud generates its avatar from
+one submitted still through the avatar op and draws it off the per-frame camera;
+a retarget avatar is reenacted by an injected source performance, an open source
+jaw deforming the mesh where a closed one holds it at rest; a tracked avatar
+renders in a toon art style and stays live, tracking an injected jaw while
+differing from the un-stylized avatar; a colored splat.cloud reads a
+six-channel model at stride six and draws each point in its own color;
+and the prompt
 compiler emits a GLF manifest on device that activates as a lens and renders.
 The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output

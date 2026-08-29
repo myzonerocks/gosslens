@@ -402,6 +402,7 @@ pub const Renderer = struct {
         _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_POSITION, 3, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_TEXCOORD0, 3, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_TEXCOORD1, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_COLOR0, 4, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         c.bgfx_vertex_layout_end(&billboard_layout);
 
         // A bare vec4 - the particle state buffer's element the compute shader
@@ -2583,8 +2584,8 @@ pub const Renderer = struct {
     /// life, seed, velocity xy per vertex - eight floats) straight into the
     /// mesh; the writeBillboards output.
     pub fn updateParticleMeshFaded(mesh: ParticleMesh, faded: []const f32) void {
-        const count = @min(faded.len / 8, mesh.vertex_count);
-        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(faded.ptr, @intCast(count * 8 * @sizeOf(f32))));
+        const count = @min(faded.len / 12, mesh.vertex_count);
+        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(faded.ptr, @intCast(count * 12 * @sizeOf(f32))));
     }
 
     pub fn destroyParticleMesh(mesh: ParticleMesh) void {
