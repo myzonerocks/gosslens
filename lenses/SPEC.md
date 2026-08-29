@@ -781,6 +781,17 @@ passes key against), so a lens author's own segmenter drives the identical
 compositing the built-in segmenters do. A model whose bound tensor is not a
 square single-channel plane keeps driving its parameters and feeds no mask.
 
+An `ml.infer` node may carry a `"style"` block, `{"tensor", "sprite"}`, for a
+model that restyles the whole frame. The tensor is read as a square
+three-channel image, and each inference uploads it to the texture of the
+`sprite.2d` node named by `"sprite"`, so that sprite draws the model's output.
+A full-frame sprite makes the restyled frame the picture; a placed or
+partly-opaque sprite blends it in. The sprite ships no image of its own; its
+picture is whatever the model last produced. This is the neural style-transfer
+path: a restyle net loads like any other author model, runs off the frame
+thread under the same bounds, and draws through the sprite the composite chain
+already knows how to place, turn, and fade.
+
 The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, the beauty nodes, shader
@@ -1063,8 +1074,10 @@ animation), hair-recolor (segmentation; the hair mask channel), face-paint
 deterministic replay camera track. The byo-ml path is proven in the same
 harness: an `ml.infer` node runs a bundled TFLite segmenter and a bundled ONNX
 net, each driving a lens parameter from the frame; an author ONNX segmenter's
-output reaches the subject mask channel; and an `argmax` reduce reads a
-classifier's predicted class into a parameter. The conformance harness runs today on the host (macOS): it renders each
+output reaches the subject mask channel; an `argmax` reduce reads a
+classifier's predicted class into a parameter; a model output moves a sprite
+through its placement parameters; and a restyle net's output image draws
+through a sprite. The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

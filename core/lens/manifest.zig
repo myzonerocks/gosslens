@@ -850,16 +850,26 @@ pub const MlMask = struct {
     channel: u8 = 0,
 };
 
-/// An ml.infer node's model slot: the bundle-relative model file, the size the
-/// camera frame is resized to before inference (zero keeps the model's own
-/// input size), the output-to-parameter bindings a lens reads, and an optional
-/// output-to-mask binding for an author-supplied segmenter.
+/// Binds a whole output tensor of an ml.infer node as a stylized RGB image:
+/// the tensor is a three-channel image the engine uploads to the named
+/// sprite.2d node's texture each frame, so a model that restyles the frame
+/// (a neural style-transfer net) draws through that sprite over the camera.
+pub const MlStyle = struct {
+    tensor: u32 = 0,
+    sprite: []const u8,
+};
+
+/// An ml.infer node's model slot: the bundle-relative model file, the input
+/// size the camera frame is resized to (zero keeps the model's own), the
+/// output-to-parameter bindings a lens reads, and optional output-to-mask and
+/// output-to-sprite bindings for an author segmenter or a restyle net.
 pub const MlField = struct {
     model: []const u8,
     input_width: u32 = 0,
     input_height: u32 = 0,
     outputs: []const MlOutput,
     mask: ?MlMask = null,
+    style: ?MlStyle = null,
 };
 
 pub const Node = struct {
@@ -3121,12 +3131,32 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         }
         path.pop(mask_mark);
     }
+    var style: ?MlStyle = null;
+    if (getField(object, "style")) |sv| {
+        const style_mark = path.push("style");
+        if (sv != .object) {
+            try diags.add(path.slice(), "ml style must be an object", .{});
+        } else {
+            const sprite_id = if (getField(sv.object, "sprite")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (sprite_id.len == 0) {
+                try diags.add(path.slice(), "ml style needs a sprite to draw through", .{});
+            } else {
+                var st: MlStyle = .{ .sprite = try arena.dupe(u8, sprite_id) };
+                if (getField(sv.object, "tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) st.tensor = @intCast(v.integer);
+                }
+                style = st;
+            }
+        }
+        path.pop(style_mark);
+    }
     return .{
         .model = try arena.dupe(u8, model),
         .input_width = input_width,
         .input_height = input_height,
         .outputs = try outputs.toOwnedSlice(arena),
         .mask = mask,
+        .style = style,
     };
 }
 
@@ -4001,6 +4031,24 @@ test "an ml.infer node parses a mask binding to a named channel" {
     const mask = ml.mask orelse return error.TestUnexpectedResult;
     try t.expectEqual(@as(u32, 0), mask.tensor);
     try t.expectEqual(@as(u8, 2), mask.channel);
+}
+
+test "an ml.infer node parses a style binding to a sprite" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "restyle", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "style.onnx", "outputs": [],
+        \\      "style": {"tensor": 0, "sprite": "canvas"}}},
+        \\   {"id": "canvas", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const ml = manifest.nodes[0].ml orelse return error.TestUnexpectedResult;
+    const style = ml.style orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(u32, 0), style.tensor);
+    try t.expectEqualStrings("canvas", style.sprite);
 }
 
 test "an ml.infer mask with an unknown channel is rejected" {

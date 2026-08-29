@@ -151,6 +151,11 @@ pub fn argmaxOutput(ml: *MlInfer, tensor: u32) u32 {
     return ml.core.argmaxOutput(tensor);
 }
 
+/// Whether the model's image tensors are channel-first (NCHW).
+pub fn layoutIsNchw(ml: *MlInfer) bool {
+    return ml.core.layoutIsNchw();
+}
+
 /// Copies a whole output tensor into dst under the output lock, for a consumer
 /// that reads a full mask; false before the first publish or on a size mismatch.
 pub fn copyOutput(ml: *MlInfer, tensor: u32, dst: []f32) bool {

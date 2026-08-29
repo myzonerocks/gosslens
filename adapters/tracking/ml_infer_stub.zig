@@ -72,6 +72,11 @@ pub fn argmaxOutput(ml: *MlInfer, tensor: u32) u32 {
     return 0;
 }
 
+pub fn layoutIsNchw(ml: *MlInfer) bool {
+    _ = ml;
+    return false;
+}
+
 pub fn copyOutput(ml: *MlInfer, tensor: u32, dst: []f32) bool {
     _ = ml;
     _ = tensor;

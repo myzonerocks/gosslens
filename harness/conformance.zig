@@ -2379,6 +2379,111 @@ fn proveMlInferPlacement(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Emits an ONNX restyle net: a 1x1 conv with identity channel weights, so its
+/// output is a three-channel image the size of the input. A real style net
+/// would transform the colours; the identity proves the image path.
+fn buildOnnxStyleProbe(a: std.mem.Allocator) []const u8 {
+    const side: i64 = 8;
+    var w: OnnxPb = .{ .a = a };
+    inline for (.{ 3, 3, 1, 1 }) |d| w.varintField(1, d);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..3) |m| {
+        for (0..3) |cc| {
+            var b: [4]u8 = undefined;
+            std.mem.writeInt(u32, &b, @bitCast(@as(f32, if (m == cc) 1 else 0)), .little);
+            raw.appendSlice(a, &b) catch unreachable;
+        }
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const conv = onnxNode(a, "Conv", &.{ "x", "W" }, &.{"y"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ 3, 3, 1, 1 }));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 3, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+fn writeOnnxStyleLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-style","version":"1.0.0","display_name":"BYO Restyle","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"restyle","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[],"style":{"tensor":0,"sprite":"canvas"}}},
+        \\  {"id":"canvas","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
+        \\   "sprite":{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Runs the restyle bundle once and reports whether the model's output image
+/// reached the sprite that shows it. The upload is on the render path, so this
+/// feeds a frame and renders until the sprite's style texture appears.
+fn runStyleOnce(engine: *abi.Engine, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-style", "zig-out/ml-style".len) != .ok) {
+        std.debug.print("conformance: FAIL byo-ml restyle activation\n", .{});
+        return error.MlStyleActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlStyleTrackFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlStyleSubmitFailed;
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    return true;
+}
+
+/// Proves the neural style-transfer component: a model that restyles the frame
+/// draws its output image through a sprite. The sprite carries no image of its
+/// own; the model's output becomes its texture, on two runs.
+fn proveMlInferStyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxStyleProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-style/assets");
+    try writeOnnxStyleLens("zig-out/ml-style", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runStyleOnce(engine, person);
+    const drew_b = try runStyleOnce(engine, person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the restyle model's output never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a model that restyles the frame draws its output through a sprite via the ml.infer style binding\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -12691,6 +12796,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer cls");
     if (!try proveMlInferPlacement(gpa, engine)) return 1;
     watchHold("ml infer placement");
+    if (!try proveMlInferStyle(gpa, engine)) return 1;
+    watchHold("ml infer style");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

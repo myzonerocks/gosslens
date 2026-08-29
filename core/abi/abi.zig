@@ -1057,6 +1057,11 @@ pub const Session = struct {
     /// frames upload into, and the playback cursor, by graph index. Drawn in
     /// the sprite branch like an animated sprite, one decoded frame at a time.
     video_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, VideoPlayback) = .empty,
+    /// A sprite node the current inference of an ml.infer style binding drives:
+    /// its texture is the model's restyled frame, refreshed each render, drawn
+    /// in the sprite branch like a video texture. The texture itself is owned by
+    /// the ml worker; this maps only which sprite shows it.
+    ml_style_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// A sprite/text node's opacity parameter name (a slice into the lens
     /// manifest arena), when it binds one, so the draw reads a live opacity.
     sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
@@ -2772,6 +2777,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // uploading the next one into its dynamic texture.
                     advanceVideo(s, vid);
                     sprite_texture = vid.texture;
+                } else if (s.ml_style_textures.get(entry.graph_index)) |tex| {
+                    // A model that restyles the frame drives this sprite: its
+                    // texture is the model's latest output image.
+                    sprite_texture = tex;
                 } else if (s.sprite_anims.get(entry.graph_index)) |anim| {
                     // An animated sprite cycles its frames off the lens clock;
                     // wait until every frame has landed so the cycle is whole.
@@ -3637,6 +3646,7 @@ pub fn destroySession(session: *Session) void {
     session.scene_worker = null;
     destroyMlWorkers(session);
     session.ml_workers.deinit(session.engine.gpa);
+    session.ml_style_textures.deinit(session.engine.gpa);
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
     releaseCurrentFrame(session);
@@ -3933,6 +3943,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
         pollMlMasks(s);
+        pollMlStyle(s);
         pollSceneSegmentation(s);
         pollDepthOcclusion(s);
         pollLandmarkMattes(s);
@@ -4032,6 +4043,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollMlMasks(s);
+    pollMlStyle(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
@@ -4131,6 +4143,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
     pollMlMasks(s);
+    pollMlStyle(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
@@ -5933,6 +5946,12 @@ fn applyPlacementParams(s: *Session, node_index: graph.NodeIndex, rect: *[4]f32)
     if (pp[1].len > 0) rect[1] = lens.paramValue(pp[1]) orelse rect[1];
     if (pp[2].len > 0) rect[2] = lens.paramValue(pp[2]) orelse rect[2];
     if (pp[3].len > 0) rect[3] = lens.paramValue(pp[3]) orelse rect[3];
+}
+
+/// How many sprites currently show an ml.infer style output, so a headless
+/// proof can confirm a restyling model's image reached a sprite's texture.
+pub fn styleTextureCount(session: *Session) usize {
+    return session.ml_style_textures.count();
 }
 
 /// The first sprite/text node's rect after any bound placement parameters, so
@@ -8621,6 +8640,16 @@ const MlWorker = struct {
     mask_side: u32,
     mask_src: []f32,
     mask_dst: []f32,
+    /// A style binding routes a three-channel output image to a sprite's
+    /// texture. style_target is the sprite's node index, style_side its square
+    /// side, and the two scratch planes hold the raw floats and the packed
+    /// BGRA the dynamic texture takes. style_tex is created on first upload.
+    style_tensor: u32,
+    style_target: ?graph.NodeIndex,
+    style_side: u32,
+    style_f32: []f32,
+    style_bgra: []u8,
+    style_tex: render.TextureHandle,
 };
 
 /// Builds an inference worker for every ml.infer node from its bundled model,
@@ -8661,6 +8690,34 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             }
         }
 
+        // A style binding needs the bound tensor to be a square three-channel
+        // image and a sprite to draw it; otherwise the node only drives its
+        // parameters and mask.
+        var style_tensor: u32 = 0;
+        var style_target: ?graph.NodeIndex = null;
+        var style_side: u32 = 0;
+        var style_f32: []f32 = &.{};
+        var style_bgra: []u8 = &.{};
+        if (ml.style) |sb| {
+            const len = ml_infer.outputLen(worker, sb.tensor);
+            const side = isqrt(len / 3);
+            if (len > 0 and len % 3 == 0 and side * side == len / 3) {
+                if (spriteNodeIndex(lens, gpa, &session.lens_graph, sb.sprite)) |target| {
+                    if (gpa.alloc(f32, len)) |f| {
+                        if (gpa.alloc(u8, side * side * 4)) |bgra| {
+                            style_tensor = sb.tensor;
+                            style_target = target;
+                            style_side = @intCast(side);
+                            style_f32 = f;
+                            style_bgra = bgra;
+                        } else |_| {
+                            gpa.free(f);
+                        }
+                    } else |_| {}
+                }
+            }
+        }
+
         session.ml_workers.append(gpa, .{
             .worker = worker,
             .outputs = ml.outputs,
@@ -8668,13 +8725,32 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             .mask_side = mask_side,
             .mask_src = mask_src,
             .mask_dst = mask_dst,
+            .style_tensor = style_tensor,
+            .style_target = style_target,
+            .style_side = style_side,
+            .style_f32 = style_f32,
+            .style_bgra = style_bgra,
+            .style_tex = .{ .idx = render.invalid_handle },
         }) catch {
             if (mask_src.len > 0) gpa.free(mask_src);
             if (mask_dst.len > 0) gpa.free(mask_dst);
+            if (style_f32.len > 0) gpa.free(style_f32);
+            if (style_bgra.len > 0) gpa.free(style_bgra);
             ml_infer.destroy(worker);
             return;
         };
     }
+}
+
+/// The graph index of the sprite node whose id matches name, or null. The style
+/// binding names the sprite it draws through by that id.
+fn spriteNodeIndex(lens: *runtime.Lens, gpa: std.mem.Allocator, g: *graph.Graph, name: []const u8) ?graph.NodeIndex {
+    const sprites = lens.spriteNodes(gpa, g) catch return null;
+    defer gpa.free(sprites);
+    for (sprites) |sprite| {
+        if (std.mem.eql(u8, sprite.image_stem, name)) return sprite.graph_index;
+    }
+    return null;
 }
 
 /// Reads each ml.infer worker's outputs into the parameters it binds, so the
@@ -8758,14 +8834,56 @@ fn isqrt(n: usize) usize {
     return x;
 }
 
+/// Clamps an untrusted model value to a byte, rejecting a non-finite one to
+/// zero: NaN fails the first test, so a hostile model never poisons a texel.
+fn floatToU8(v: f32) u8 {
+    if (!(v > 0)) return 0;
+    if (v >= 1) return 255;
+    return @intFromFloat(v * 255.0);
+}
+
+/// Uploads each ml.infer style binding's output image to the sprite it drives,
+/// so a model that restyles the frame shows through that sprite. Render-path,
+/// like the mask poll: the texture upload needs the renderer.
+fn pollMlStyle(session: *Session) void {
+    for (session.ml_workers.items) |*mw| {
+        const target = mw.style_target orelse continue;
+        if (mw.style_f32.len == 0) continue;
+        if (!ml_infer.copyOutput(mw.worker, mw.style_tensor, mw.style_f32)) continue;
+        const side: usize = mw.style_side;
+        const plane = side * side;
+        const nchw = ml_infer.layoutIsNchw(mw.worker);
+        for (0..plane) |i| {
+            const rv = if (nchw) mw.style_f32[0 * plane + i] else mw.style_f32[i * 3 + 0];
+            const gv = if (nchw) mw.style_f32[1 * plane + i] else mw.style_f32[i * 3 + 1];
+            const bv = if (nchw) mw.style_f32[2 * plane + i] else mw.style_f32[i * 3 + 2];
+            mw.style_bgra[i * 4 + 0] = floatToU8(bv);
+            mw.style_bgra[i * 4 + 1] = floatToU8(gv);
+            mw.style_bgra[i * 4 + 2] = floatToU8(rv);
+            mw.style_bgra[i * 4 + 3] = 255;
+        }
+        if (mw.style_tex.idx == render.invalid_handle) {
+            mw.style_tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
+        }
+        render.Renderer.updateDynamicBgraTexture(mw.style_tex, @intCast(side), @intCast(side), mw.style_bgra);
+        session.ml_style_textures.put(session.engine.gpa, target, mw.style_tex) catch {};
+    }
+}
+
 fn destroyMlWorkers(session: *Session) void {
     const gpa = session.engine.gpa;
     for (session.ml_workers.items) |mw| {
         if (mw.mask_src.len > 0) gpa.free(mw.mask_src);
         if (mw.mask_dst.len > 0) gpa.free(mw.mask_dst);
+        if (mw.style_f32.len > 0) gpa.free(mw.style_f32);
+        if (mw.style_bgra.len > 0) gpa.free(mw.style_bgra);
+        if (mw.style_tex.idx != render.invalid_handle) {
+            if (session.engine.renderer) |*r| r.destroyTexture(mw.style_tex);
+        }
         ml_infer.destroy(mw.worker);
     }
     session.ml_workers.clearRetainingCapacity();
+    session.ml_style_textures.clearRetainingCapacity();
 }
 
 /// Starts a background load for every spliced model.gltf node's .glb

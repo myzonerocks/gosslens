@@ -237,6 +237,12 @@ pub const Core = struct {
         return core.outputs[tensor].len;
     }
 
+    /// Whether the model's image tensors are channel-first (NCHW). A style
+    /// output is read in the same layout the input declared.
+    pub fn layoutIsNchw(core: *const Core) bool {
+        return core.layout == .nchw;
+    }
+
     /// The index of the largest finite element of an output tensor, a
     /// classifier's predicted class; zero before the first publish or when the
     /// tensor holds no finite value.
