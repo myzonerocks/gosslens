@@ -8,6 +8,7 @@ const ml_engine = @import("ml_engine");
 const ml_sample = @import("ml_sample");
 const sampler = @import("sampler");
 const schedule = @import("diffusion_schedule");
+const flow = @import("optical_flow");
 const ml_tensor = @import("ml_tensor");
 
 pub const supported = true;
@@ -25,12 +26,14 @@ pub const Bytes = struct {
 };
 
 /// The sampler's few-step run: how many denoising steps, how much of the source
-/// frame to bury under noise (0 keeps it, 1 fully restyles), and the seed for
-/// the deterministic noise.
+/// frame to bury under noise (0 keeps it, 1 fully restyles), the seed for the
+/// deterministic noise, and the temporal coherence (0 off, else how strongly the
+/// flow-warped previous frame holds the restyle steady against flicker).
 pub const Config = struct {
     steps: u32 = 4,
     strength: f32 = 0.6,
     seed: u64 = 0,
+    coherence: f32 = 0,
 };
 
 pub const Core = struct {
@@ -60,6 +63,17 @@ pub const Core = struct {
     work_rgb: []f32,
     out_rgb: []f32,
     published: bool = false,
+
+    // Temporal-coherence scratch, non-empty only when coherence is on and an
+    // encoder is present (img2img). The flow runs at the output resolution.
+    coherence: f32,
+    flow_gray_prev: []f32,
+    flow_gray_curr: []f32,
+    flow_u: []f32,
+    flow_v: []f32,
+    warped_prev: []f32,
+    prev_out: []f32,
+    has_prev: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, bytes: Bytes, bounds: ml_tensor.Bounds, cfg: Config, threads: i32) CreateError!*Core {
         if (bytes.encoder.len > bounds.max_model_bytes or bytes.unet.len > bounds.max_model_bytes or bytes.decoder.len > bounds.max_model_bytes) {
@@ -164,6 +178,23 @@ pub const Core = struct {
         errdefer gpa.free(out_rgb);
         @memset(out_rgb, 0);
 
+        // Temporal coherence needs a camera to move against, so it runs only in
+        // img2img (an encoder present); its buffers are empty otherwise.
+        const coherence: f32 = if (enc_opt != null) std.math.clamp(cfg.coherence, 0, 1) else 0;
+        const out_grid: usize = @as(usize, out_sq.side) * out_sq.side;
+        const flow_gray_prev = if (coherence > 0) gpa.alloc(f32, out_grid) catch return error.OutOfMemory else try gpa.alloc(f32, 0);
+        errdefer gpa.free(flow_gray_prev);
+        const flow_gray_curr = if (coherence > 0) gpa.alloc(f32, out_grid) catch return error.OutOfMemory else try gpa.alloc(f32, 0);
+        errdefer gpa.free(flow_gray_curr);
+        const flow_u = if (coherence > 0) gpa.alloc(f32, out_grid) catch return error.OutOfMemory else try gpa.alloc(f32, 0);
+        errdefer gpa.free(flow_u);
+        const flow_v = if (coherence > 0) gpa.alloc(f32, out_grid) catch return error.OutOfMemory else try gpa.alloc(f32, 0);
+        errdefer gpa.free(flow_v);
+        const warped_prev = if (coherence > 0) gpa.alloc(f32, dec_out.len) catch return error.OutOfMemory else try gpa.alloc(f32, 0);
+        errdefer gpa.free(warped_prev);
+        const prev_out = if (coherence > 0) gpa.alloc(f32, dec_out.len) catch return error.OutOfMemory else try gpa.alloc(f32, 0);
+        errdefer gpa.free(prev_out);
+
         core.* = .{
             .gpa = gpa,
             .enc_bytes = enc_bytes,
@@ -188,12 +219,25 @@ pub const Core = struct {
             .cond = cond,
             .work_rgb = work_rgb,
             .out_rgb = out_rgb,
+            .coherence = coherence,
+            .flow_gray_prev = flow_gray_prev,
+            .flow_gray_curr = flow_gray_curr,
+            .flow_u = flow_u,
+            .flow_v = flow_v,
+            .warped_prev = warped_prev,
+            .prev_out = prev_out,
         };
         return core;
     }
 
     pub fn deinit(core: *Core) void {
         const gpa = core.gpa;
+        gpa.free(core.prev_out);
+        gpa.free(core.warped_prev);
+        gpa.free(core.flow_v);
+        gpa.free(core.flow_u);
+        gpa.free(core.flow_gray_curr);
+        gpa.free(core.flow_gray_prev);
         gpa.free(core.out_rgb);
         gpa.free(core.work_rgb);
         gpa.free(core.cond);
@@ -257,7 +301,26 @@ pub const Core = struct {
         const rgb = core.dec.outputFloats(0) catch return false;
         if (rgb.len != core.work_rgb.len) return false;
         @memcpy(core.work_rgb, rgb);
+        if (core.coherence > 0) core.stabilize();
         return true;
+    }
+
+    /// Warps the previous output by the flow between the last camera frame and
+    /// this one, then blends the fresh decode toward it, so a per-frame restyle
+    /// holds steady where content is still and follows it where it moves. The
+    /// first frame just seeds the history. img2img only; keeps its own buffers.
+    fn stabilize(core: *Core) void {
+        const side: usize = core.out_side;
+        const channels: usize = 3;
+        flow.toGrayResampled(core.nhwc_scratch, core.in_sq.side, false, channels, side, core.flow_gray_curr);
+        if (core.has_prev) {
+            flow.lucasKanade(core.flow_gray_prev, core.flow_gray_curr, side, 2, 1e-3, core.flow_u, core.flow_v);
+            flow.warp(core.prev_out, side, core.out_nchw, channels, core.flow_u, core.flow_v, core.warped_prev);
+            flow.blend(core.work_rgb, core.warped_prev, core.coherence);
+        }
+        @memcpy(core.prev_out, core.work_rgb);
+        @memcpy(core.flow_gray_prev, core.flow_gray_curr);
+        core.has_prev = true;
     }
 
     /// Copies the freshly computed image into the published buffer, so a reader

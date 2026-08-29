@@ -391,6 +391,7 @@ pub fn build(b: *std.Build) void {
     const ml_tensor_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/ml_tensor.zig"), .target = target, .optimize = optimize }) });
     const onnx_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("adapters/tracking/onnx.zig"), .target = target, .optimize = optimize }) });
     const diffusion_schedule_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/diffusion_schedule.zig"), .target = target, .optimize = optimize }) });
+    const optical_flow_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/optical_flow.zig"), .target = target, .optimize = optimize }) });
     const logic_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/lens/logic.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "trigger", .module = lens_trigger_module }} }) });
     const face_geometry_tests = b.addTest(.{ .root_module = face_geometry_core_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
@@ -436,6 +437,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(ml_tensor_tests).step);
     test_step.dependOn(&b.addRunArtifact(onnx_tests).step);
     test_step.dependOn(&b.addRunArtifact(diffusion_schedule_tests).step);
+    test_step.dependOn(&b.addRunArtifact(optical_flow_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
@@ -2354,6 +2356,11 @@ fn diffusionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         .target = target,
         .optimize = optimize,
     });
+    const optical_flow_mod = b.createModule(.{
+        .root_source_file = b.path("core/tracking/optical_flow.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const core_mod = b.createModule(.{
         .root_source_file = b.path("adapters/tracking/diffusion_core.zig"),
         .target = target,
@@ -2363,6 +2370,7 @@ fn diffusionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
             .{ .name = "ml_sample", .module = ml_sample_mod },
             .{ .name = "sampler", .module = sampler_mod },
             .{ .name = "diffusion_schedule", .module = schedule_mod },
+            .{ .name = "optical_flow", .module = optical_flow_mod },
             .{ .name = "ml_tensor", .module = ml_tensor_mod },
         },
     });

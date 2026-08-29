@@ -2522,22 +2522,25 @@ fn onnxConvModel(a: std.mem.Allocator, in_name: []const u8, cin: i64, cout: i64,
 
 /// A null encoder omits the encoder key, so the lens starts from pure noise
 /// (text to image); a non-null text_embedding ships and references a cond asset;
-/// a non-null sprite_mask keys the output sprite as a background greenscreen.
-fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: []const u8, text_embedding: ?[]const u8, sprite_mask: ?[]const u8) !void {
+/// a non-null sprite_mask keys the output sprite as a background greenscreen; a
+/// positive coherence turns on the flow-warped temporal filter.
+fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: []const u8, text_embedding: ?[]const u8, sprite_mask: ?[]const u8, coherence: f32) !void {
     const page = std.heap.page_allocator;
     const enc_field = if (enc != null) "\"encoder\":\"enc.onnx\"," else "";
     const cond_field = if (text_embedding != null) "\"text_embedding\":\"cond.bin\"," else "";
     const mask_field = if (sprite_mask) |m| try std.fmt.allocPrint(page, ",\"mask\":\"{s}\"", .{m}) else try page.dupe(u8, "");
     defer page.free(mask_field);
+    const coherence_field = if (coherence > 0) try std.fmt.allocPrint(page, ",\"coherence\":{d}", .{coherence}) else try page.dupe(u8, "");
+    defer page.free(coherence_field);
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
         \\ "nodes":[{{"id":"restyle","type":"diffusion","params":{{}},
-        \\   "diffusion":{{{s}{s}"unet":"unet.onnx","decoder":"dec.onnx","sprite":"canvas","steps":2,"strength":0.5}}}},
+        \\   "diffusion":{{{s}{s}"unet":"unet.onnx","decoder":"dec.onnx","sprite":"canvas","steps":2,"strength":0.5{s}}}}},
         \\  {{"id":"canvas","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},
         \\   "sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0{s}}}}}],
         \\ "triggers":[]}}
-    , .{ enc_field, cond_field, mask_field });
+    , .{ enc_field, cond_field, coherence_field, mask_field });
     defer page.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
@@ -2580,6 +2583,37 @@ fn runDiffusionOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, seg_
     return true;
 }
 
+/// Like runDiffusionOnce, but keeps feeding frames after the first restyle so a
+/// coherence lens runs a second compute and exercises the flow-warp-blend
+/// against its own history, then confirms it still holds a drawn texture.
+fn runCoherenceOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.DiffusionActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.DiffusionTrackFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.DiffusionSubmitFailed;
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    var more: usize = 0;
+    while (more < 4_000) : (more += 1) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    return abi.styleTextureCount(session) > 0;
+}
+
 /// Proves the diffusion restyle loop: a lens ships a VAE encoder, unet, and
 /// decoder, and the engine runs the img2img loop (encode, seed noise, a few
 /// denoise steps, decode) off the frame thread, drawing through a sprite.
@@ -2601,7 +2635,7 @@ fn proveMlInferDiffusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-diffusion/assets");
-    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec, null, null);
+    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec, null, null, 0);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2636,7 +2670,7 @@ fn proveMlInferText2Img(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     inline for (.{ 0.25, 0.5, 0.75, 1.0 }, 0..) |v, i| std.mem.writeInt(u32, cond_bytes[i * 4 ..][0..4], @bitCast(@as(f32, v)), .little);
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-text2img/assets");
-    try writeDiffusionLens("zig-out/ml-text2img", null, unet, dec, &cond_bytes, null);
+    try writeDiffusionLens("zig-out/ml-text2img", null, unet, dec, &cond_bytes, null, 0);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2669,7 +2703,7 @@ fn proveMlInferGreenscreen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-greenscreen/assets");
-    try writeDiffusionLens("zig-out/ml-greenscreen", null, unet, dec, null, "person");
+    try writeDiffusionLens("zig-out/ml-greenscreen", null, unet, dec, null, "person", 0);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2691,6 +2725,39 @@ fn proveMlInferGreenscreen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a diffusion lens keyed to the person channel composites its generated image as the background behind the segmented subject\n", .{});
+    return true;
+}
+
+/// Proves temporal coherence: an img2img diffusion lens with coherence on runs
+/// the optical-flow warp and blend against its own previous frame across a run
+/// of frames, and still draws the restyle through the sprite. The flow, warp,
+/// and blend math is unit-tested in core/tracking/optical_flow.zig.
+fn proveMlInferCoherence(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-coherence/assets");
+    try writeDiffusionLens("zig-out/ml-coherence", enc, unet, dec, null, null, 0.5);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    if (!try runCoherenceOnce(engine, "zig-out/ml-coherence", person)) {
+        std.debug.print("conformance: FAIL the coherence restyle never held a drawn frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an img2img diffusion lens with temporal coherence warps its previous frame by optical flow and blends it into the restyle, holding the sprite steady\n", .{});
     return true;
 }
 
@@ -13014,6 +13081,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer text2img");
     if (!try proveMlInferGreenscreen(gpa, engine)) return 1;
     watchHold("ml infer greenscreen");
+    if (!try proveMlInferCoherence(gpa, engine)) return 1;
+    watchHold("ml infer coherence");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

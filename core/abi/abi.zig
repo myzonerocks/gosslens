@@ -8965,7 +8965,7 @@ fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
 
         const target = spriteNodeIndex(lens, gpa, &session.lens_graph, df.sprite) orelse continue;
 
-        const worker = diffusion.create(gpa, .{ .encoder = enc, .unet = unet, .decoder = dec, .text_embedding = emb }, .{}, .{ .steps = df.steps, .strength = df.strength, .seed = df.seed }, 2) catch continue;
+        const worker = diffusion.create(gpa, .{ .encoder = enc, .unet = unet, .decoder = dec, .text_embedding = emb }, .{}, .{ .steps = df.steps, .strength = df.strength, .seed = df.seed, .coherence = df.coherence }, 2) catch continue;
         const side = diffusion.outputSide(worker);
         const len = diffusion.outputLen(worker);
         const rgb = gpa.alloc(f32, len) catch {

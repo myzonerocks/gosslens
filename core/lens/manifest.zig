@@ -890,6 +890,9 @@ pub const DiffusionField = struct {
     steps: u32 = 4,
     strength: f32 = 0.6,
     seed: u64 = 0,
+    /// Temporal coherence: 0 restyles each frame independently, higher values
+    /// hold the flow-warped previous frame against flicker (img2img only).
+    coherence: f32 = 0,
 };
 
 pub const Node = struct {
@@ -3141,6 +3144,9 @@ fn parseDiffusionField(diags: *Diagnostics, path: *PathStack, arena: std.mem.All
     }
     if (getField(object, "seed")) |v| {
         if (v == .integer and v.integer >= 0) field.seed = @intCast(v.integer);
+    }
+    if (getField(object, "coherence")) |v| {
+        field.coherence = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.coherence)), 0, 1);
     }
     return field;
 }

@@ -818,7 +818,15 @@ steps of the UNet on a fixed few-step schedule, and decodes the result. The
 UNet reads the latent, and, if it declares them, a timestep and a conditioning
 input; a `"text_embedding"` file supplies that conditioning, so a prompt encoded
 ahead of time steers the restyle. A `"seed"` fixes the noise, so the same lens
-and frame restyle the same way every run. The decoded image draws through the
+and frame restyle the same way every run. A `"coherence"` (0..1) turns on a
+temporal filter: the engine estimates the optical flow between the last camera
+frame and this one, warps the previous restyled frame by it so it lands aligned
+with the current one, and blends the fresh decode toward that warped history by
+the coherence amount. A per-frame restyle then holds steady where content is
+still and follows it where it moves, killing the flicker an independent
+frame-by-frame restyle shows. It applies to the image-to-image path only, where
+there is a moving camera to track; the flow runs at the decoder's resolution.
+The decoded image draws through the
 `"sprite"` the block names, the same way the style binding does, so the restyle
 composites like any other sprite. The loop runs off the frame thread and never
 blocks the render; the models are bounded and sandboxed like every author model.
@@ -1111,8 +1119,10 @@ through its placement parameters; a restyle net's output image draws through a
 sprite; a diffusion loop over a bundled encoder, unet, and decoder restyles
 the frame and draws it through a sprite; a diffusion lens with no encoder
 generates from seeded noise and a text embedding, drawing the image through a
-sprite; and a diffusion lens keyed to the person channel composites its
-generated image as the background behind the segmented subject. The conformance harness runs today on the host (macOS): it renders each
+sprite; a diffusion lens keyed to the person channel composites its
+generated image as the background behind the segmented subject; and an img2img
+diffusion lens with temporal coherence warps its previous frame by optical flow
+and blends it into the restyle, holding the sprite steady across frames. The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

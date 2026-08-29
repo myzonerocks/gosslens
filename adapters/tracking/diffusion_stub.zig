@@ -20,6 +20,7 @@ pub const Config = struct {
     steps: u32 = 4,
     strength: f32 = 0.6,
     seed: u64 = 0,
+    coherence: f32 = 0,
 };
 
 pub const Diffusion = struct {};
