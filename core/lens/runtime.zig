@@ -367,6 +367,9 @@ pub const SplatNode = struct {
     /// True draws the model's output as a connected grid mesh; false draws it as
     /// a billboard point cloud.
     mesh: bool,
+    /// True runs the model once on a submitted selfie (an avatar) rather than the
+    /// live camera each tick.
+    selfie: bool,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -1166,7 +1169,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .splat_cloud) continue;
             const sf = node.splat orelse continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .selfie = sf.source == .selfie });
         }
         return out.toOwnedSlice(gpa);
     }

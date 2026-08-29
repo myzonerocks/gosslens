@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 56u
+#define GOSS_ABI_MINOR 57u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -524,6 +524,12 @@ void goss_session_disable_segmentation(goss_session *session);
  * and returns immediately, dropping stale frames in favor of this one.
  * Feeds the segmentation worker the same frame if it is enabled too. */
 goss_status goss_session_track_frame(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride);
+
+/* Graph thread. Runs each selfie-source splat.cloud once over a submitted
+ * still (NV12, the layout track_frame takes), so a photoreal avatar is
+ * generated from one photo and then held. The worker publishes off the frame
+ * thread; a later render draws its points. GOSS_AGAIN with no selfie avatar. */
+goss_status goss_session_submit_avatar_source(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride);
 
 /* Graph thread. Reads the newest tracking result into caller memory.
  * Reports GOSS_AGAIN until the worker has published its first result. */

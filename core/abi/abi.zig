@@ -198,6 +198,7 @@ pub const abi_functions = [_][]const u8{
     "uint32_t goss_session_segmentation_channels(goss_session *session)",
     "goss_status goss_session_set_segmentation_class_mask(goss_session *session, uint32_t channel, const float *mask, uint32_t mask_len)",
     "goss_status goss_session_track_frame(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
+    "goss_status goss_session_submit_avatar_source(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
     "goss_status goss_session_face_result(goss_session *session, goss_face_result *out_result)",
     "goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count)",
     "goss_status goss_session_face_count(goss_session *session, uint32_t *out_count)",
@@ -6048,9 +6049,40 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
         diffusion.submitNv12(dw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     for (s.splat_workers.items) |sw| {
+        // A selfie avatar's model runs once off a submitted still, not the live
+        // camera, so the per-frame feed skips it.
+        if (sw.selfie) continue;
         ml_infer.submitNv12(sw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     return .ok;
+}
+
+/// Runs each selfie-source splat.cloud once over a submitted still (NV12, the
+/// same layout track_frame takes), so a photoreal avatar is generated from one
+/// photo and then held. The worker publishes off the frame thread; a later
+/// render draws its points. Again when the session has no selfie avatar.
+pub export fn goss_session_submit_avatar_source(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const y_plane = y orelse return .invalid_argument;
+    const uv_plane = uv orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
+    if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
+    const standard: math.color.Standard = switch (d.color_standard) {
+        0 => .bt601,
+        2 => .bt2020,
+        else => .bt709,
+    };
+    const range: math.color.Range = if (d.color_range == 1) .full else .video;
+    const conversion = math.color.yuvToRgb(standard, range);
+    var fed = false;
+    for (s.splat_workers.items) |sw| {
+        if (!sw.selfie) continue;
+        ml_infer.submitNv12(sw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        fed = true;
+    }
+    return if (fed) .ok else .again;
 }
 
 /// Reads the newest tracking result into caller memory. Reports again
@@ -9119,6 +9151,8 @@ const SplatWorker = struct {
     color: [3]f32,
     // True draws the points as a connected grid surface, false as billboards.
     mesh_draw: bool,
+    // True runs once on a submitted selfie (an avatar), not the live camera.
+    selfie: bool,
     positions: []f32,
     // The billboard mesh is created lazily on the first draw, since it needs the
     // renderer; null marks it not yet built.
@@ -9153,6 +9187,7 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .point = node.point,
             .color = node.color,
             .mesh_draw = node.mesh,
+            .selfie = node.selfie,
             .positions = positions,
         }) catch {
             gpa.free(positions);

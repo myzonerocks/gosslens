@@ -2903,16 +2903,17 @@ fn proveMlInferMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool 
     return true;
 }
 
-fn writeSplatLens(dir: []const u8, model: []const u8, mesh: bool) !void {
+fn writeSplatLens(dir: []const u8, model: []const u8, mesh: bool, selfie: bool) !void {
     const page = std.heap.page_allocator;
     const draw = if (mesh) "mesh" else "points";
+    const source = if (selfie) "selfie" else "camera";
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.ml-splat","version":"1.0.0","display_name":"BYO Splat","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
         \\ "nodes":[{{"id":"cloud","type":"splat.cloud","inputs":{{"frame":"camera"}},"params":{{}},
-        \\   "splat":{{"model":"splat.onnx","draw":"{s}","point":8.0,"r":0.9,"g":0.8,"b":0.3}}}}],
+        \\   "splat":{{"model":"splat.onnx","source":"{s}","draw":"{s}","point":8.0,"r":0.9,"g":0.8,"b":0.3}}}}],
         \\ "triggers":[]}}
-    , .{draw});
+    , .{ source, draw });
     defer page.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
@@ -2963,7 +2964,7 @@ fn proveMlInferSplat(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splat/assets");
-    try writeSplatLens("zig-out/ml-splat", model, false);
+    try writeSplatLens("zig-out/ml-splat", model, false, false);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2992,7 +2993,7 @@ fn proveMlInferSplatMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splatmesh/assets");
-    try writeSplatLens("zig-out/ml-splatmesh", model, true);
+    try writeSplatLens("zig-out/ml-splatmesh", model, true, false);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -3006,6 +3007,64 @@ fn proveMlInferSplatMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a splat.cloud in mesh mode reads the model's points as a grid and draws them as a connected 3D surface\n", .{});
+    return true;
+}
+
+/// Runs a selfie-source splat: the model is fed one still through the avatar op
+/// rather than the per-frame camera, so the cloud is generated once and held.
+fn runSelfieSplatOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.SplatActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    // The selfie feeds only through the avatar op; the per-frame camera does not
+    // drive it, so track_frame is never called here.
+    if (abi.goss_session_submit_avatar_source(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.AvatarSubmitFailed;
+    var polls: usize = 0;
+    while (abi.splatCloudReadyCount(session) == 0) {
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    var more: usize = 0;
+    while (more < 200) : (more += 1) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    return true;
+}
+
+/// Proves the photoreal selfie avatar: a splat.cloud with source:selfie runs its
+/// model once over a still submitted through goss_session_submit_avatar_source
+/// (not the live camera) and draws the generated cloud, so an avatar is built
+/// from one photo and held.
+fn proveMlInferSelfieAvatar(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-selfie/assets");
+    try writeSplatLens("zig-out/ml-selfie", model, false, true);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runSelfieSplatOnce(engine, "zig-out/ml-selfie", person);
+    const drew_b = try runSelfieSplatOnce(engine, "zig-out/ml-selfie", person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the selfie avatar never generated its cloud\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a selfie-source splat.cloud generates its avatar from one submitted still through the avatar op and draws it, off the per-frame camera\n", .{});
     return true;
 }
 
@@ -13382,6 +13441,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer splat");
     if (!try proveMlInferSplatMesh(gpa, engine)) return 1;
     watchHold("ml infer splat mesh");
+    if (!try proveMlInferSelfieAvatar(gpa, engine)) return 1;
+    watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;
     watchHold("compile prompt");
     if (!try proveScript(gpa, engine)) return 1;

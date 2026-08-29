@@ -70,6 +70,18 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+    internal external fun nativeSubmitAvatarSource(
+        session: Long,
+        yBuffer: ByteBuffer,
+        yStride: Int,
+        uvBuffer: ByteBuffer,
+        uvStride: Int,
+        width: Int,
+        height: Int,
+        colorStandard: Int,
+        colorRange: Int,
+        timestampUs: Long,
+    ): Int
     internal external fun nativeFaceResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeSubmitFaces(session: Long, faces: ByteBuffer, count: Int): Int
     internal external fun nativeFaceCount(session: Long): Int
@@ -872,6 +884,22 @@ class GossSession private constructor(
         colorRange: Int = Gosslens.RANGE_VIDEO,
         timestampUs: Long,
     ): Boolean = Gosslens.nativeTrackFrame(
+        handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
+    ) == 0
+
+    /** Runs each selfie-source splat.cloud once over one NV12 still, so a
+     * photoreal avatar is generated from a photo and then held off the camera. */
+    fun submitAvatarSource(
+        y: ByteBuffer,
+        yStride: Int,
+        uv: ByteBuffer,
+        uvStride: Int,
+        width: Int,
+        height: Int,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
+        timestampUs: Long,
+    ): Boolean = Gosslens.nativeSubmitAvatarSource(
         handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
     ) == 0
 
