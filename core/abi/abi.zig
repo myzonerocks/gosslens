@@ -8651,7 +8651,11 @@ fn pollMlOutputs(session: *Session) void {
         // default rather than being forced to zero every frame.
         if (!ml_infer.hasPublished(mw.worker)) continue;
         for (mw.outputs) |out| {
-            lens.setParam(out.param, ml_infer.readOutput(mw.worker, out.tensor, out.index));
+            const value: f32 = switch (out.reduce) {
+                .element => ml_infer.readOutput(mw.worker, out.tensor, out.index),
+                .argmax => @floatFromInt(ml_infer.argmaxOutput(mw.worker, out.tensor)),
+            };
+            lens.setParam(out.param, value);
         }
     }
 }

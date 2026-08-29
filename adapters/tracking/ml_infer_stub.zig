@@ -66,6 +66,12 @@ pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
     return 0;
 }
 
+pub fn argmaxOutput(ml: *MlInfer, tensor: u32) u32 {
+    _ = ml;
+    _ = tensor;
+    return 0;
+}
+
 pub fn copyOutput(ml: *MlInfer, tensor: u32, dst: []f32) bool {
     _ = ml;
     _ = tensor;

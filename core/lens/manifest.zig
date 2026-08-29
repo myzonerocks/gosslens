@@ -819,11 +819,18 @@ pub const LogicGraphSpec = struct {
     output_param: []const u8,
 };
 
-/// One output binding of an ml.infer node: the element at index of the model's
-/// output tensor drives the named parameter each inference.
+/// How an output binding reduces its tensor to the scalar it writes: element
+/// takes the value at index, argmax takes the index of the tensor's largest
+/// element (a classifier's predicted class).
+pub const MlReduce = enum { element, argmax };
+
+/// One output binding of an ml.infer node: a scalar drawn from the model's
+/// output tensor drives the named parameter each inference, either the element
+/// at index or, for a classifier, the argmax over the tensor.
 pub const MlOutput = struct {
     tensor: u32 = 0,
     index: u32 = 0,
+    reduce: MlReduce = .element,
     param: []const u8,
 };
 
@@ -3063,6 +3070,14 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
                 if (getField(o, "index")) |v| {
                     if (v == .integer and v.integer >= 0) out.index = @intCast(v.integer);
                 }
+                if (getField(o, "reduce")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        out.reduce = std.meta.stringToEnum(MlReduce, name) orelse blk: {
+                            try diags.add(path.slice(), "unknown ml output reduce '{s}'", .{name});
+                            break :blk .element;
+                        };
+                    }
+                }
                 try outputs.append(arena, out);
             }
         }
@@ -3916,6 +3931,24 @@ test "an ml.infer node parses its model slot and output bindings" {
     try t.expectEqual(@as(usize, 1), ml.outputs.len);
     try t.expectEqual(@as(u32, 5), ml.outputs[0].index);
     try t.expectEqualStrings("cat_score", ml.outputs[0].param);
+}
+
+test "an ml.infer output parses an argmax reduce" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "cls", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "cls.onnx",
+        \\      "outputs": [{"tensor": 0, "reduce": "argmax", "param": "label"},
+        \\                  {"tensor": 0, "index": 2, "param": "score"}]}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const ml = manifest.nodes[0].ml orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(usize, 2), ml.outputs.len);
+    try t.expectEqual(MlReduce.argmax, ml.outputs[0].reduce);
+    try t.expectEqual(MlReduce.element, ml.outputs[1].reduce);
 }
 
 test "an ml.infer node parses a mask binding to a named channel" {

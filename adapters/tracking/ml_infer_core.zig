@@ -237,6 +237,23 @@ pub const Core = struct {
         return core.outputs[tensor].len;
     }
 
+    /// The index of the largest finite element of an output tensor, a
+    /// classifier's predicted class; zero before the first publish or when the
+    /// tensor holds no finite value.
+    pub fn argmaxOutput(core: *const Core, tensor: u32) u32 {
+        if (!core.published or tensor >= core.output_count) return 0;
+        const buf = core.outputs[tensor];
+        var best: usize = 0;
+        var best_val = -std.math.inf(f32);
+        for (buf, 0..) |v, i| {
+            if (std.math.isFinite(v) and v > best_val) {
+                best_val = v;
+                best = i;
+            }
+        }
+        return @intCast(best);
+    }
+
     /// Copies a whole output tensor from the published copy into dst, for a
     /// consumer that reads a full mask rather than one element. False before the
     /// first publish or on a length mismatch, so a stale read never lands.

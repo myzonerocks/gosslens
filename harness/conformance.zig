@@ -1874,7 +1874,7 @@ fn writeMlInferLens(dir: []const u8, model: []const u8) !void {
 /// returns the parameter the model drove. Waits on the async worker's first
 /// publish by watching the sentinel default flip to a real value, which is
 /// magnitude-independent so it never races the inference result.
-fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, planes: Nv12Copy) !f32 {
+fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, param: []const u8, sentinel: f32, planes: Nv12Copy) !f32 {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
@@ -1885,19 +1885,19 @@ fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, planes: Nv12Copy
     const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
     const half_w = (planes.width + 1) / 2;
     const signals = std.mem.zeroes(abi.LensSignals);
-    var score: f32 = -999.0;
+    var value: f32 = sentinel;
     var polls: usize = 0;
-    while (score == -999.0) {
+    while (value == sentinel) {
         if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
             return error.MlTrackFrameFailed;
         }
         std.Thread.yield() catch {};
         _ = abi.goss_session_tick_lens(session, 16000, &signals);
-        _ = abi.goss_session_parameter_value(session, "score", "score".len, &score);
+        _ = abi.goss_session_parameter_value(session, param.ptr, param.len, &value);
         polls += 1;
         if (polls > 100_000_000) return error.MlInferTimedOut;
     }
-    return score;
+    return value;
 }
 
 /// Proves the bring-your-own model path through the real ABI: a bundled author
@@ -1923,9 +1923,9 @@ fn proveMlInfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
     defer gray.deinit(gpa);
 
-    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-lens", person);
-    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-lens", person);
-    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-lens", gray);
+    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, person);
+    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, person);
+    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, gray);
 
     if (!std.math.isFinite(person_a) or !std.math.isFinite(gray_score)) {
         std.debug.print("conformance: FAIL the byo model published a non-finite value\n", .{});
@@ -2019,7 +2019,7 @@ fn buildOnnxProbe(a: std.mem.Allocator) []const u8 {
     return model.buf.items;
 }
 
-const OnnxAttr = struct { name: []const u8, ints: []const i64 = &.{} };
+const OnnxAttr = struct { name: []const u8, ints: []const i64 = &.{}, i: ?i64 = null };
 
 fn onnxNode(a: std.mem.Allocator, op: []const u8, inputs: []const []const u8, outputs: []const []const u8, attrs: []const OnnxAttr) []const u8 {
     var nd: OnnxPb = .{ .a = a };
@@ -2029,6 +2029,7 @@ fn onnxNode(a: std.mem.Allocator, op: []const u8, inputs: []const []const u8, ou
     for (attrs) |at| {
         var ap: OnnxPb = .{ .a = a };
         ap.bytesField(1, at.name);
+        if (at.i) |iv| ap.varintField(3, iv);
         for (at.ints) |v| ap.varintField(8, v);
         nd.bytesField(5, ap.buf.items);
     }
@@ -2090,9 +2091,9 @@ fn proveMlInferOnnx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
     defer gray.deinit(gpa);
 
-    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", person);
-    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", person);
-    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", gray);
+    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, person);
+    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, person);
+    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, gray);
 
     if (!std.math.isFinite(person_a) or !std.math.isFinite(gray_score)) {
         std.debug.print("conformance: FAIL the onnx model published a non-finite value\n", .{});
@@ -2209,6 +2210,83 @@ fn proveMlInferSegMask(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF an author model bound as a mask drives the subject mask channel through the ml.infer node\n", .{});
+    return true;
+}
+
+/// Emits an ONNX classifier over three classes: channel means from a global
+/// average pool, then a bias that makes the winner class the largest logit, so
+/// the argmax is a known class regardless of the frame.
+fn buildOnnxClsProbe(a: std.mem.Allocator, winner: usize) []const u8 {
+    const side: i64 = 8;
+    var b: OnnxPb = .{ .a = a };
+    b.varintField(1, 3); // dims [3]
+    b.varintField(2, 1); // FLOAT
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..3) |i| {
+        var buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &buf, @bitCast(@as(f32, if (i == winner) 100 else 0)), .little);
+        raw.appendSlice(a, &buf) catch unreachable;
+    }
+    b.bytesField(9, raw.items);
+    b.bytesField(8, "B");
+
+    const pool = onnxNode(a, "GlobalAveragePool", &.{"x"}, &.{"p"}, &.{});
+    const flat = onnxNode(a, "Flatten", &.{"p"}, &.{"f"}, &.{.{ .name = "axis", .i = 1 }});
+    const add = onnxNode(a, "Add", &.{ "f", "B" }, &.{"y"}, &.{});
+
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, pool);
+    g.bytesField(1, flat);
+    g.bytesField(1, add);
+    g.bytesField(5, b.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 3 }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+fn writeOnnxClsLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-cls","version":"1.0.0","display_name":"BYO Classifier","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"label","type":"float","default":-1.0,"min":-1.0,"max":100.0}],
+        \\ "nodes":[{"id":"cls","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[{"tensor":0,"reduce":"argmax","param":"label"}]}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Proves the classification slot: an argmax reduce reads a classifier's
+/// predicted class into a parameter. Two models built to favour different
+/// classes each drive the parameter to their own class, so the label tracks the
+/// model's argmax rather than a fixed value.
+fn proveMlInferCls(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    for ([_]usize{ 1, 2 }) |winner| {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const model = buildOnnxClsProbe(arena.allocator(), winner);
+        try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-cls/assets");
+        try writeOnnxClsLens("zig-out/ml-cls", model);
+
+        const label = try runMlInferOnce(engine, "zig-out/ml-cls", "label", -1.0, person);
+        if (@as(usize, @intFromFloat(label)) != winner) {
+            std.debug.print("conformance: FAIL argmax reduce read class {d}, wanted {d}\n", .{ label, winner });
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF an argmax reduce reads a classifier's predicted class into a lens parameter\n", .{});
     return true;
 }
 
@@ -12520,6 +12598,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer onnx");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;
     watchHold("ml infer seg mask");
+    if (!try proveMlInferCls(gpa, engine)) return 1;
+    watchHold("ml infer cls");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

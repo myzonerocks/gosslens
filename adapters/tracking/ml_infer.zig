@@ -143,6 +143,14 @@ pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
     return ml.core.outputLen(tensor);
 }
 
+/// The predicted class of an output tensor (its argmax), thread-safe.
+pub fn argmaxOutput(ml: *MlInfer, tensor: u32) u32 {
+    const io = ml.io_state.io();
+    ml.out_mutex.lockUncancelable(io);
+    defer ml.out_mutex.unlock(io);
+    return ml.core.argmaxOutput(tensor);
+}
+
 /// Copies a whole output tensor into dst under the output lock, for a consumer
 /// that reads a full mask; false before the first publish or on a size mismatch.
 pub fn copyOutput(ml: *MlInfer, tensor: u32, dst: []f32) bool {
