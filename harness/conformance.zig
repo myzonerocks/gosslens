@@ -1853,6 +1853,99 @@ fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
+/// Writes a lens bundle whose ml.infer node runs a bundled author model, the
+/// way an author ships one. It binds the segmenter mask center (256x256, so
+/// 128*256+128 - foreground on a centered portrait, background on a blank frame)
+/// to a parameter defaulting to a sentinel the first inference overwrites.
+fn writeMlInferLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-infer","version":"1.0.0","display_name":"BYO Model","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
+        \\ "nodes":[{"id":"byo","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.tflite","outputs":[{"tensor":0,"index":32896,"param":"score"}]}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.tflite", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates the byo-ml bundle on a fresh session, feeds it one frame, and
+/// returns the parameter the model drove. Waits on the async worker's first
+/// publish by watching the sentinel default flip to a real value, which is
+/// magnitude-independent so it never races the inference result.
+fn runMlInferOnce(engine: *abi.Engine, planes: Nv12Copy) !f32 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-infer-lens", "zig-out/ml-infer-lens".len) != .ok) {
+        std.debug.print("conformance: FAIL byo-ml lens activation\n", .{});
+        return error.MlActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var score: f32 = -999.0;
+    var polls: usize = 0;
+    while (score == -999.0) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.MlTrackFrameFailed;
+        }
+        std.Thread.yield() catch {};
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "score", "score".len, &score);
+        polls += 1;
+        if (polls > 100_000_000) return error.MlInferTimedOut;
+    }
+    return score;
+}
+
+/// Proves the bring-your-own model path through the real ABI: a bundled author
+/// model runs on the camera frame off the render thread and drives a lens
+/// parameter. The value is finite, stable across two runs, and responds to the
+/// pixels (a portrait and a flat frame drive it apart), so it is real inference.
+fn proveMlInfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const model = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(32 << 20));
+    defer gpa.free(model);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-infer-lens/assets");
+    try writeMlInferLens("zig-out/ml-infer-lens", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    // A flat gray frame of the same size: a control with no subject, so its
+    // inference must differ from the portrait if the model truly ran on pixels.
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    const person_a = try runMlInferOnce(engine, person);
+    const person_b = try runMlInferOnce(engine, person);
+    const gray_score = try runMlInferOnce(engine, gray);
+
+    if (!std.math.isFinite(person_a) or !std.math.isFinite(gray_score)) {
+        std.debug.print("conformance: FAIL the byo model published a non-finite value\n", .{});
+        return false;
+    }
+    if (person_a != person_b) {
+        std.debug.print("conformance: FAIL byo inference is not deterministic ({d} vs {d})\n", .{ person_a, person_b });
+        return false;
+    }
+    if (@abs(person_a - gray_score) < 1e-4) {
+        std.debug.print("conformance: FAIL byo inference did not respond to the frame ({d} vs {d})\n", .{ person_a, gray_score });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a bundled author model runs through the ml.infer node and drives a lens parameter from the camera frame, deterministically\n", .{});
+    return true;
+}
+
 fn proveScript(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     _ = gpa;
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
@@ -12152,6 +12245,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("d tiled capture");
     if (!try proveColorManagedCapture(gpa, engine)) return 1;
     watchHold("color managed capture");
+    if (!try proveMlInfer(gpa, engine)) return 1;
+    watchHold("ml infer");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

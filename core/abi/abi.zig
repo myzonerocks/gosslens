@@ -15,6 +15,7 @@ const math = @import("math");
 const render = @import("render");
 const tracking = @import("tracking");
 const segmentation = @import("segmentation");
+const ml_infer = @import("ml_infer");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
 const png = @import("png");
@@ -630,6 +631,10 @@ pub const Session = struct {
     /// is handed to enableSceneSegmentation, so those channels stay the zero
     /// mask and poll for them costs nothing per frame.
     scene_worker: ?*segmentation.Segmentation = null,
+    /// The bring-your-own model workers an active lens's ml.infer nodes drive,
+    /// each holding its output-to-parameter bindings; built from the bundle at
+    /// activation, fed the camera frame, read into params each tick.
+    ml_workers: std.ArrayListUnmanaged(MlWorker) = .empty,
     /// Monotonic timestamp for still images fed to the segmenter through
     /// goss_session_submit_segmentation_image, so each submit orders after the
     /// last the way successive camera frames do.
@@ -3624,6 +3629,8 @@ pub fn destroySession(session: *Session) void {
     session.segmentation_worker = null;
     if (session.scene_worker) |worker| segmentation.destroy(worker);
     session.scene_worker = null;
+    destroyMlWorkers(session);
+    session.ml_workers.deinit(session.engine.gpa);
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
     releaseCurrentFrame(session);
@@ -5813,7 +5820,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null) return .again;
+    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -5838,6 +5845,9 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     }
     if (s.scene_worker) |worker| {
         segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    for (s.ml_workers.items) |mw| {
+        ml_infer.submitNv12(mw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     return .ok;
 }
@@ -7107,6 +7117,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroySpriteState(session);
     destroyMeshFaceState(session);
     destroyModelState(session);
+    destroyMlWorkers(session);
     destroyChainOrder(session);
     teardownScript(session);
     destroySounds(session);
@@ -8561,6 +8572,50 @@ fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     };
 }
 
+const MlWorker = struct {
+    worker: *ml_infer.MlInfer,
+    outputs: []const manifest.MlOutput,
+};
+
+/// Builds an inference worker for every ml.infer node from its bundled model,
+/// holding the node's output-to-parameter bindings. Best-effort per node: a
+/// missing, malformed, or oversized model leaves that node inert.
+fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const io = defaultIo();
+    for (lens.manifest.nodes) |node| {
+        const ml = node.ml orelse continue;
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, ml.model }) catch continue;
+        defer gpa.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        defer gpa.free(bytes);
+        const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
+        session.ml_workers.append(gpa, .{ .worker = worker, .outputs = ml.outputs }) catch {
+            ml_infer.destroy(worker);
+            return;
+        };
+    }
+}
+
+/// Reads each ml.infer worker's outputs into the parameters it binds, so the
+/// model's latest inference drives the lens. NaN-guarded in the core.
+fn pollMlOutputs(session: *Session) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    for (session.ml_workers.items) |mw| {
+        // Before the first inference the bound parameter keeps its authored
+        // default rather than being forced to zero every frame.
+        if (!ml_infer.hasPublished(mw.worker)) continue;
+        for (mw.outputs) |out| {
+            lens.setParam(out.param, ml_infer.readOutput(mw.worker, out.tensor, out.index));
+        }
+    }
+}
+
+fn destroyMlWorkers(session: *Session) void {
+    for (session.ml_workers.items) |mw| ml_infer.destroy(mw.worker);
+    session.ml_workers.clearRetainingCapacity();
+}
+
 /// Starts a background load for every spliced model.gltf node's .glb
 /// (assets/<stem>.glb) - mirrors createLutLoaders/createBlendLoaders
 /// exactly, one node type over.
@@ -9000,6 +9055,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createVideoLoaders(session, gpa, bundle_path);
     try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
+    createMlLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
@@ -9046,6 +9102,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroySpriteState(s);
     destroyMeshFaceState(s);
     destroyModelState(s);
+    destroyMlWorkers(s);
     destroyChainOrder(s);
     teardownScript(s);
     destroySounds(s);
@@ -9874,6 +9931,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     var event_view: [max_pending_events][]const u8 = undefined;
     for (0..s.pending_event_count) |i| event_view[i] = s.pending_event_buf[i][0..s.pending_event_len[i]];
     live_signals.events = event_view[0..s.pending_event_count];
+    // Each model's latest inference lands in its bound parameters first, so a
+    // script may read or override it and the effects see this tick's result.
+    pollMlOutputs(s);
     // The script drives parameters before triggers and ramps read them, so
     // its writes flow into this tick's effects.
     runScript(s, &live_signals);
