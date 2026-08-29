@@ -6,6 +6,7 @@ name: gates
 # fresh branch starts from main's warm world instead of a cold build.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
