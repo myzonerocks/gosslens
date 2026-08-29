@@ -1038,6 +1038,9 @@ pub const Session = struct {
     /// invert) - resolved once at activation since grade.pass ships no
     /// asset and needs no loader.
     grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [12]f32) = .empty,
+    /// The dark-channel dehaze strength of each spliced dehaze.pass node,
+    /// resolved once at activation like grade_params.
+    dehaze_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1913,6 +1916,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // A grade pass ships no asset either; its params are resolved
             // at activation, so it is ready once they are in place.
             .grade => s.grade_params.contains(entry.graph_index),
+            .dehaze => s.dehaze_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2165,6 +2169,23 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitGradePass(view_id, input_texture, grade);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .dehaze => {
+                const strength = s.dehaze_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const texel_w = 1.0 / @as(f32, @floatFromInt(width));
+                const texel_h = 1.0 / @as(f32, @floatFromInt(height));
+                r.submitDehazePass(view_id, input_texture, strength, texel_w, texel_h);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3735,6 +3756,7 @@ pub fn destroySession(session: *Session) void {
     session.model_controls.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
+    session.dehaze_params.deinit(session.engine.gpa);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
@@ -7241,6 +7263,7 @@ fn destroyBlendState(session: *Session) void {
     session.env_textures.clearRetainingCapacity();
     // grade.pass and bloom.pass hold only plain params, nothing to free.
     session.grade_params.clearRetainingCapacity();
+    session.dehaze_params.clearRetainingCapacity();
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
@@ -7812,6 +7835,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // activated from raw json, as on the web, gets its post-effects. Nodes
     // that need packaged assets stay not-ready until a directory load.
     createGradeParams(s, gpa) catch {};
+    createDehazeParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -7880,6 +7904,17 @@ fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(grades);
     for (grades) |g| {
         session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
+    }
+}
+
+/// Resolves every spliced dehaze.pass node's strength into session.dehaze_params
+/// once at activation - mirrors createGradeParams, no asset or loader.
+fn createDehazeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.dehazePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.dehaze_params.put(gpa, n.graph_index, n.strength) catch {};
     }
 }
 
@@ -9927,6 +9962,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     createDiffusionLoaders(session, gpa, bundle_path);
     createSplatLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
+    try createDehazeParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);

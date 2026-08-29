@@ -2674,6 +2674,97 @@ fn proveMlInferAux(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a dehaze.pass lens at a static strength (no asset).
+fn writeDehazeLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.dehaze","version":"1.0.0","display_name":"Dehaze","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"d","type":"dehaze.pass","inputs":{{"frame":"camera"}},"params":{{}},"dehaze":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Activates a full-frame post lens from `dir`, submits the frame, and captures
+/// the composited result; caller owns the returned RGBA.
+fn captureDehazeShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Sums the rgb bytes of a capture, a stand-in for its overall brightness.
+fn sumRgb(shot: []const u8) u64 {
+    var total: u64 = 0;
+    var i: usize = 0;
+    while (i + 4 <= shot.len) : (i += 4) {
+        total += @as(u64, shot[i]) + shot[i + 1] + shot[i + 2];
+    }
+    return total;
+}
+
+/// Proves the deterministic dehaze pass: a dehaze.pass lifts the atmospheric
+/// veil off a hazy frame. At strength 0 the frame is untouched; at strength 1
+/// the dark-channel transmission recovery pulls the bright veil down, so the
+/// output differs from the identity and is measurably darker.
+fn proveDehaze(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A bright, low-contrast hazy frame: a veil the dehaze pass lifts.
+    const hazy = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(hazy);
+    var p: usize = 0;
+    while (p + 4 <= hazy.len) : (p += 4) {
+        hazy[p + 0] = 190;
+        hazy[p + 1] = 200;
+        hazy[p + 2] = 210;
+        hazy[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = hazy }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dehaze-0");
+    try writeDehazeLens("zig-out/dehaze-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dehaze-1");
+    try writeDehazeLens("zig-out/dehaze-1", 1.0);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/dehaze-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/dehaze-1", planes);
+    defer gpa.free(shot1);
+
+    const changed = countDiff(shot0, shot1);
+    const bright0 = sumRgb(shot0);
+    const bright1 = sumRgb(shot1);
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL dehaze at strength 1 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (!(bright1 < bright0)) {
+        std.debug.print("conformance: FAIL dehaze did not darken the veiled frame ({d} vs {d})\n", .{ bright1, bright0 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a dehaze.pass lifts the atmospheric veil: strength 1 pulls the dark-channel transmission down, darkening a hazy frame where strength 0 leaves it untouched ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -13982,6 +14073,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer face restyle");
     if (!try proveMaskStrength(gpa, engine)) return 1;
     watchHold("mask strength");
+    if (!try proveDehaze(gpa, engine)) return 1;
+    watchHold("dehaze pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

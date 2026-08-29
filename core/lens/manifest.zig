@@ -266,6 +266,12 @@ pub const GradeField = struct {
     posterize: f32 = 0,
 };
 
+pub const DehazeField = struct {
+    /// A dehaze.pass node's strength (0..1): how strongly the dark-channel
+    /// transmission recovery lifts the atmospheric veil off the frame.
+    strength: f32 = 1,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -981,6 +987,8 @@ pub const Node = struct {
     morph_weights: []const []const u8 = &.{},
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
+    /// Set only on a dehaze.pass node: its dark-channel dehaze strength.
+    dehaze: ?DehazeField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -1854,6 +1862,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 grade_field = field;
             }
             path.pop(gmark);
+        }
+        var dehaze_field: ?DehazeField = null;
+        if (getField(object, "dehaze")) |dv| {
+            const dmark = path.push("dehaze");
+            if (!std.mem.eql(u8, node_type, "dehaze.pass")) {
+                try diags.add(path.slice(), "dehaze is a dehaze.pass field, found it on '{s}'", .{node_type});
+            } else if (dv != .object) {
+                try diags.add(path.slice(), "dehaze must be an object", .{});
+            } else {
+                var field: DehazeField = .{};
+                if (getField(dv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                dehaze_field = field;
+            }
+            path.pop(dmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3116,6 +3138,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .clip_weights = clip_weights,
             .morph_weights = morph_weights,
             .grade = grade_field,
+            .dehaze = dehaze_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,
