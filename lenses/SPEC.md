@@ -382,6 +382,15 @@ A `"glare.pass"` node is a specular-highlight rolloff post-effect. It carries a
 holds. Strength 0 leaves the frame untouched. Like `grade.pass` it ships no
 asset and is always ready.
 
+A `"vignette.pass"` node is a radial luma-gain post-effect. It carries a
+`"vignette": {"strength", "radius"}` block: the distance from the frame centre is
+rolled in from `radius` (0..1 of the half-diagonal, default 0.5, inside which the
+frame is untouched) out to the corner, and that falloff scales the gain
+`strength` (-1..1, default 0.5). A positive strength lifts the darkened corners,
+correcting a lens vignette; a negative strength sinks them for a stylistic one.
+Strength 0 leaves the frame untouched. Like `grade.pass` it ships no asset and is
+always ready.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1246,7 +1255,11 @@ where strength 0 leaves it untouched; a relight.pass lights the frame
 directionally, angle 0 brightening the right over the left where the uniform
 strength-0 frame stays even; a glare.pass recovers a blown highlight, strength 1
 pulling the bright region down toward the threshold where the normal region
-holds;
+holds; a vignette.pass applies a radial luma-gain, a positive strength lifting
+the corners and a negative sinking them where the centre inside the radius holds;
+a temporal ml.infer net feeds the previous output frame into its second input,
+a recurrent sum of the frame and its previous reading about twice a constant gray
+where the same graph on a zero reference reads it once;
 a diffusion loop over a bundled encoder, unet, and decoder restyles
 the frame and draws it through a sprite; a diffusion lens with no encoder
 generates from seeded noise and a text embedding, drawing the image through a

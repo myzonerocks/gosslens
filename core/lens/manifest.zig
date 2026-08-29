@@ -287,6 +287,15 @@ pub const GlareField = struct {
     threshold: f32 = 0.8,
 };
 
+pub const VignetteField = struct {
+    /// A vignette.pass node's radial luma-gain: `strength` scales the gain at the
+    /// corner (positive lifts a darkened lens vignette, negative sinks the edges
+    /// for a stylistic one), rolled in from `radius` (0..1 of the half-diagonal,
+    /// inside which the frame is untouched) out to the corner.
+    strength: f32 = 0.5,
+    radius: f32 = 0.5,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1012,6 +1021,8 @@ pub const Node = struct {
     relight: ?RelightField = null,
     /// Set only on a glare.pass node: its specular-highlight rolloff.
     glare: ?GlareField = null,
+    /// Set only on a vignette.pass node: its radial luma-gain.
+    vignette: ?VignetteField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -1929,6 +1940,21 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 glare_field = field;
             }
             path.pop(glmark);
+        }
+        var vignette_field: ?VignetteField = null;
+        if (getField(object, "vignette")) |vv| {
+            const vmark = path.push("vignette");
+            if (!std.mem.eql(u8, node_type, "vignette.pass")) {
+                try diags.add(path.slice(), "vignette is a vignette.pass field, found it on '{s}'", .{node_type});
+            } else if (vv != .object) {
+                try diags.add(path.slice(), "vignette must be an object", .{});
+            } else {
+                var field: VignetteField = .{};
+                if (getField(vv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), -1, 1);
+                if (getField(vv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0, 0.99);
+                vignette_field = field;
+            }
+            path.pop(vmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3194,6 +3220,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .dehaze = dehaze_field,
             .relight = relight_field,
             .glare = glare_field,
+            .vignette = vignette_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

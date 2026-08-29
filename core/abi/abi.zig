@@ -1047,6 +1047,9 @@ pub const Session = struct {
     /// The specular rolloff (strength, threshold) of each spliced glare.pass
     /// node, resolved once at activation.
     glare_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// The radial gain (strength, radius) of each spliced vignette.pass node,
+    /// resolved once at activation.
+    vignette_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1925,6 +1928,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .dehaze => s.dehaze_params.contains(entry.graph_index),
             .relight => s.relight_params.contains(entry.graph_index),
             .glare => s.glare_params.contains(entry.graph_index),
+            .vignette => s.vignette_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2224,6 +2228,21 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitGlarePass(view_id, input_texture, gp[0], gp[1]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .vignette => {
+                const vp = s.vignette_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitVignettePass(view_id, input_texture, vp[0], vp[1]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3797,6 +3816,7 @@ pub fn destroySession(session: *Session) void {
     session.dehaze_params.deinit(session.engine.gpa);
     session.relight_params.deinit(session.engine.gpa);
     session.glare_params.deinit(session.engine.gpa);
+    session.vignette_params.deinit(session.engine.gpa);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
@@ -7306,6 +7326,7 @@ fn destroyBlendState(session: *Session) void {
     session.dehaze_params.clearRetainingCapacity();
     session.relight_params.clearRetainingCapacity();
     session.glare_params.clearRetainingCapacity();
+    session.vignette_params.clearRetainingCapacity();
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
@@ -7880,6 +7901,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createDehazeParams(s, gpa) catch {};
     createRelightParams(s, gpa) catch {};
     createGlareParams(s, gpa) catch {};
+    createVignetteParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -7981,6 +8003,17 @@ fn createGlareParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(nodes);
     for (nodes) |n| {
         session.glare_params.put(gpa, n.graph_index, .{ n.strength, n.threshold }) catch {};
+    }
+}
+
+/// Resolves every spliced vignette.pass node's radial gain into
+/// session.vignette_params once at activation - mirrors createGlareParams.
+fn createVignetteParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.vignettePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.vignette_params.put(gpa, n.graph_index, .{ n.strength, n.radius }) catch {};
     }
 }
 
@@ -10035,6 +10068,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createDehazeParams(session, gpa);
     try createRelightParams(session, gpa);
     try createGlareParams(session, gpa);
+    try createVignetteParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);

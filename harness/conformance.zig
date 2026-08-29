@@ -3020,6 +3020,94 @@ fn proveGlare(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Sums the rgb bytes of a rectangular block of the 400x300 capture.
+fn sumBlock(shot: []const u8, x0: usize, y0: usize, x1: usize, y1: usize) u64 {
+    var total: u64 = 0;
+    const w: usize = 400;
+    var y: usize = y0;
+    while (y < y1) : (y += 1) {
+        var x: usize = x0;
+        while (x < x1) : (x += 1) {
+            const idx = (y * w + x) * 4;
+            total += @as(u64, shot[idx]) + shot[idx + 1] + shot[idx + 2];
+        }
+    }
+    return total;
+}
+
+/// Writes a vignette.pass lens at a static strength and radius (no asset).
+fn writeVignetteLens(dir: []const u8, strength: f32, radius: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.vignette","version":"1.0.0","display_name":"Vignette","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"v","type":"vignette.pass","inputs":{{"frame":"camera"}},"params":{{}},"vignette":{{"strength":{d:.3},"radius":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, radius });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the radial vignette gain: a uniform gray frame stays uniform at
+/// strength 0. A positive strength lifts the corners (correcting a lens
+/// vignette) while the centre inside the radius holds; a negative strength sinks
+/// them. The corner block moves the expected way and the centre barely does.
+fn proveVignette(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    var p: usize = 0;
+    while (p + 4 <= f.len) : (p += 4) {
+        f[p + 0] = 128;
+        f[p + 1] = 128;
+        f[p + 2] = 128;
+        f[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/vignette-0");
+    try writeVignetteLens("zig-out/vignette-0", 0.0, 0.3);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/vignette-pos");
+    try writeVignetteLens("zig-out/vignette-pos", 0.8, 0.3);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/vignette-neg");
+    try writeVignetteLens("zig-out/vignette-neg", -0.8, 0.3);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/vignette-0", planes);
+    defer gpa.free(shot0);
+    const shot_pos = try captureDehazeShot(gpa, engine, "zig-out/vignette-pos", planes);
+    defer gpa.free(shot_pos);
+    const shot_neg = try captureDehazeShot(gpa, engine, "zig-out/vignette-neg", planes);
+    defer gpa.free(shot_neg);
+
+    // Top-left corner (radially far, past the radius) versus a centre block.
+    const corner0 = sumBlock(shot0, 0, 0, 80, 60);
+    const corner_pos = sumBlock(shot_pos, 0, 0, 80, 60);
+    const corner_neg = sumBlock(shot_neg, 0, 0, 80, 60);
+    const center0 = sumBlock(shot0, 160, 120, 240, 180);
+    const center_pos = sumBlock(shot_pos, 160, 120, 240, 180);
+
+    const changed = countDiff(shot0, shot_pos);
+    const corner_lift = if (corner_pos > corner0) corner_pos - corner0 else 0;
+    const center_move = if (center_pos > center0) center_pos - center0 else center0 - center_pos;
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL vignette at strength 0.8 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (!(corner_pos > corner0) or !(corner_neg < corner0)) {
+        std.debug.print("conformance: FAIL vignette corner did not lift on positive and sink on negative (0 {d}, pos {d}, neg {d})\n", .{ corner0, corner_pos, corner_neg });
+        return false;
+    }
+    if (center_move * 4 > corner_lift) {
+        std.debug.print("conformance: FAIL vignette moved the centre inside the radius (centre move {d}, corner lift {d})\n", .{ center_move, corner_lift });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a vignette.pass applies a radial luma-gain: a positive strength lifts the corners and a negative sinks them while the centre inside the radius holds ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -14336,6 +14424,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("relight pass");
     if (!try proveGlare(gpa, engine)) return 1;
     watchHold("glare pass");
+    if (!try proveVignette(gpa, engine)) return 1;
+    watchHold("vignette pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
