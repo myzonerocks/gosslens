@@ -2520,31 +2520,39 @@ fn onnxConvModel(a: std.mem.Allocator, in_name: []const u8, cin: i64, cout: i64,
     return model.buf.items;
 }
 
-fn writeDiffusionLens(dir: []const u8, enc: []const u8, unet: []const u8, dec: []const u8) !void {
-    const manifest_json =
-        \\{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],
+/// A null encoder omits the encoder key, so the lens starts from pure noise
+/// (text to image); a non-null text_embedding ships and references a cond asset.
+fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: []const u8, text_embedding: ?[]const u8) !void {
+    const page = std.heap.page_allocator;
+    const enc_field = if (enc != null) "\"encoder\":\"enc.onnx\"," else "";
+    const cond_field = if (text_embedding != null) "\"text_embedding\":\"cond.bin\"," else "";
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
-        \\ "nodes":[{"id":"restyle","type":"diffusion","params":{},
-        \\   "diffusion":{"encoder":"enc.onnx","unet":"unet.onnx","decoder":"dec.onnx","sprite":"canvas","steps":2,"strength":0.5}},
-        \\  {"id":"canvas","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
-        \\   "sprite":{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}],
-        \\ "triggers":[]}
-    ;
-    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
-    defer std.heap.page_allocator.free(manifest_path);
+        \\ "nodes":[{{"id":"restyle","type":"diffusion","params":{{}},
+        \\   "diffusion":{{{s}{s}"unet":"unet.onnx","decoder":"dec.onnx","sprite":"canvas","steps":2,"strength":0.5}}}},
+        \\  {{"id":"canvas","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},
+        \\   "sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}}}],
+        \\ "triggers":[]}}
+    , .{ enc_field, cond_field });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
-    inline for (.{ .{ "enc.onnx", enc }, .{ "unet.onnx", unet }, .{ "dec.onnx", dec } }) |pair| {
-        const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/{s}", .{ dir, pair[0] });
-        defer std.heap.page_allocator.free(asset_path);
-        try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = pair[1] });
+    inline for (.{ .{ "enc.onnx", enc }, .{ "unet.onnx", @as(?[]const u8, unet) }, .{ "dec.onnx", @as(?[]const u8, dec) }, .{ "cond.bin", text_embedding } }) |pair| {
+        if (pair[1]) |data| {
+            const asset_path = try std.fmt.allocPrint(page, "{s}/assets/{s}", .{ dir, pair[0] });
+            defer page.free(asset_path);
+            try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = data });
+        }
     }
 }
 
-fn runDiffusionOnce(engine: *abi.Engine, planes: Nv12Copy) !bool {
+fn runDiffusionOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
-    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-diffusion", "zig-out/ml-diffusion".len) != .ok) {
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
         std.debug.print("conformance: FAIL diffusion lens activation\n", .{});
         return error.DiffusionActivationFailed;
     }
@@ -2585,20 +2593,55 @@ fn proveMlInferDiffusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-diffusion/assets");
-    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec);
+    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec, null);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
     const person = try rgbaToNv12(gpa, corpus.frame);
     defer person.deinit(gpa);
 
-    const drew_a = try runDiffusionOnce(engine, person);
-    const drew_b = try runDiffusionOnce(engine, person);
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-diffusion", person);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-diffusion", person);
     if (!drew_a or !drew_b) {
         std.debug.print("conformance: FAIL the diffusion restyle never reached the sprite\n", .{});
         return false;
     }
     std.debug.print("conformance: PROOF a diffusion loop over a bundled encoder, unet, and decoder restyles the frame and draws it through a sprite\n", .{});
+    return true;
+}
+
+/// Proves the text-to-image path: a diffusion lens ships only a unet and decoder
+/// (no encoder) plus a text embedding, so the engine starts from seeded noise
+/// rather than the camera frame and still draws a stable image through a sprite.
+fn proveMlInferText2Img(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+    // Four little-endian f32 conditioning values stand in for a text embedding.
+    var cond_bytes: [16]u8 = undefined;
+    inline for (.{ 0.25, 0.5, 0.75, 1.0 }, 0..) |v, i| std.mem.writeInt(u32, cond_bytes[i * 4 ..][0..4], @bitCast(@as(f32, v)), .little);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-text2img/assets");
+    try writeDiffusionLens("zig-out/ml-text2img", null, unet, dec, &cond_bytes);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-text2img", person);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-text2img", person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the text to image loop never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion lens with no encoder generates from seeded noise and a text embedding, drawing the image through a sprite\n", .{});
     return true;
 }
 
@@ -12918,6 +12961,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer style");
     if (!try proveMlInferDiffusion(gpa, engine)) return 1;
     watchHold("ml infer diffusion");
+    if (!try proveMlInferText2Img(gpa, engine)) return 1;
+    watchHold("ml infer text2img");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

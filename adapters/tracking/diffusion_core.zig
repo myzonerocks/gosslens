@@ -1,7 +1,7 @@
-//! The synchronous latent-diffusion restyle core: an author VAE-encoder, UNet,
-//! and VAE-decoder driven by an engine few-step schedule. It encodes the camera
-//! square to a latent, seeds it with deterministic noise at the img2img
-//! strength, denoises a few UNet steps, and decodes to an RGB image for a sprite.
+//! The synchronous latent-diffusion restyle core: an optional VAE-encoder, a
+//! UNet, and a VAE-decoder on an engine few-step schedule. With an encoder it
+//! restyles the camera frame (img2img); without one it starts from seeded noise
+//! (text to image). Denoises a few UNet steps and decodes RGB for a sprite.
 
 const std = @import("std");
 const ml_engine = @import("ml_engine");
@@ -38,7 +38,7 @@ pub const Core = struct {
     enc_bytes: []u8,
     unet_bytes: []u8,
     dec_bytes: []u8,
-    enc: ml_engine.Engine,
+    enc: ?ml_engine.Engine,
     unet: ml_engine.Engine,
     dec: ml_engine.Engine,
     sched: schedule.Schedule,
@@ -75,18 +75,10 @@ pub const Core = struct {
         const dec_bytes = gpa.dupe(u8, bytes.decoder) catch return error.OutOfMemory;
         errdefer gpa.free(dec_bytes);
 
-        var enc = ml_engine.Engine.init(gpa, enc_bytes, threads) catch return error.InvalidModel;
-        errdefer enc.deinit();
         var unet = ml_engine.Engine.init(gpa, unet_bytes, threads) catch return error.InvalidModel;
         errdefer unet.deinit();
         var dec = ml_engine.Engine.init(gpa, dec_bytes, threads) catch return error.InvalidModel;
         errdefer dec.deinit();
-
-        // The encoder takes one square RGB frame; its output is the latent.
-        if (enc.inputCount() != 1 or enc.outputCount() == 0) return error.InvalidModel;
-        var dims_buf: [8]i32 = undefined;
-        const in_dims = enc.inputDims(0, &dims_buf) catch return error.InvalidModel;
-        const in_sq = ml_sample.detectSquareRgb(in_dims) orelse return error.InvalidModel;
 
         // The UNet takes the latent (input 0), optionally a timestep (input 1)
         // and a conditioning embedding (input 2); the decoder takes the latent.
@@ -94,18 +86,40 @@ pub const Core = struct {
         if (unet_inputs == 0 or unet_inputs > 3 or unet.outputCount() == 0) return error.InvalidModel;
         if (dec.inputCount() != 1 or dec.outputCount() == 0) return error.InvalidModel;
 
+        var dims_buf: [8]i32 = undefined;
+
+        // With an encoder the loop restyles the camera frame (img2img); without
+        // one it generates from pure noise, and the latent length comes from the
+        // UNet's own latent input.
+        var enc_opt: ?ml_engine.Engine = null;
+        errdefer if (enc_opt) |*e| e.deinit();
+        var in_sq: ml_sample.Square = .{ .layout = .nhwc, .side = 0 };
+        var latent_len: usize = 0;
+        if (bytes.encoder.len > 0) {
+            enc_opt = ml_engine.Engine.init(gpa, enc_bytes, threads) catch return error.InvalidModel;
+            const enc = &enc_opt.?;
+            if (enc.inputCount() != 1 or enc.outputCount() == 0) return error.InvalidModel;
+            const in_dims = enc.inputDims(0, &dims_buf) catch return error.InvalidModel;
+            in_sq = ml_sample.detectSquareRgb(in_dims) orelse return error.InvalidModel;
+        } else {
+            latent_len = tensorLen(&unet, 0, &dims_buf);
+            if (latent_len == 0) return error.InvalidModel;
+        }
+
         const side: usize = in_sq.side;
-        const nhwc_scratch = gpa.alloc(f32, side * side * 3) catch return error.OutOfMemory;
+        const nhwc_scratch = if (side > 0) gpa.alloc(f32, side * side * 3) catch return error.OutOfMemory else try gpa.alloc(f32, 0);
         errdefer gpa.free(nhwc_scratch);
-        const nchw_scratch = if (in_sq.layout == .nchw) gpa.alloc(f32, side * side * 3) catch return error.OutOfMemory else try gpa.alloc(f32, 0);
+        const nchw_scratch = if (side > 0 and in_sq.layout == .nchw) gpa.alloc(f32, side * side * 3) catch return error.OutOfMemory else try gpa.alloc(f32, 0);
         errdefer gpa.free(nchw_scratch);
 
         // Warm the encoder over a zeroed frame to learn the latent length.
-        @memset(nhwc_scratch, 0);
-        ml_sample.writeSampled(&enc, 0, in_sq, nhwc_scratch, nchw_scratch) catch return error.InvalidModel;
-        enc.invoke() catch return error.InvalidModel;
-        const latent_len = (enc.outputFloats(0) catch return error.InvalidModel).len;
-        if (latent_len == 0) return error.InvalidModel;
+        if (enc_opt) |*enc| {
+            @memset(nhwc_scratch, 0);
+            ml_sample.writeSampled(enc, 0, in_sq, nhwc_scratch, nchw_scratch) catch return error.InvalidModel;
+            enc.invoke() catch return error.InvalidModel;
+            latent_len = (enc.outputFloats(0) catch return error.InvalidModel).len;
+            if (latent_len == 0) return error.InvalidModel;
+        }
 
         const latent = gpa.alloc(f32, latent_len) catch return error.OutOfMemory;
         errdefer gpa.free(latent);
@@ -155,7 +169,7 @@ pub const Core = struct {
             .enc_bytes = enc_bytes,
             .unet_bytes = unet_bytes,
             .dec_bytes = dec_bytes,
-            .enc = enc,
+            .enc = enc_opt,
             .unet = unet,
             .dec = dec,
             .sched = schedule.Schedule.init(1000, 0.00085, 0.012),
@@ -191,7 +205,7 @@ pub const Core = struct {
         gpa.free(core.nhwc_scratch);
         core.dec.deinit();
         core.unet.deinit();
-        core.enc.deinit();
+        if (core.enc) |*e| e.deinit();
         gpa.free(core.dec_bytes);
         gpa.free(core.unet_bytes);
         gpa.free(core.enc_bytes);
@@ -202,17 +216,24 @@ pub const Core = struct {
     /// work_rgb for publish(). Reuses every buffer, so a compute allocates
     /// nothing. False on any model failure, leaving the last result intact.
     pub fn compute(core: *Core, frame: sampler.Frame) bool {
-        ml_sample.writeFrame(&core.enc, 0, core.in_sq, frame, core.nhwc_scratch, core.nchw_scratch) catch return false;
-        core.enc.invoke() catch return false;
-        const latent_out = core.enc.outputFloats(0) catch return false;
-        if (latent_out.len != core.latent_len) return false;
-        @memcpy(core.latent, latent_out);
-
-        schedule.fillNoise(core.noise, core.cfg.seed);
         const train_last = core.sched.train_steps - 1;
-        const strength = std.math.clamp(core.cfg.strength, 0, 1);
-        const t_start: usize = @intFromFloat(strength * @as(f32, @floatFromInt(train_last)));
-        core.sched.addNoise(core.latent, core.noise, t_start, core.latent_t);
+        var t_start: usize = train_last;
+        if (core.enc) |*enc| {
+            // img2img: encode the frame, then bury the latent under noise up to
+            // the strength (0 keeps the frame, 1 approaches pure noise).
+            ml_sample.writeFrame(enc, 0, core.in_sq, frame, core.nhwc_scratch, core.nchw_scratch) catch return false;
+            enc.invoke() catch return false;
+            const latent_out = enc.outputFloats(0) catch return false;
+            if (latent_out.len != core.latent_len) return false;
+            @memcpy(core.latent, latent_out);
+            schedule.fillNoise(core.noise, core.cfg.seed);
+            const strength = std.math.clamp(core.cfg.strength, 0, 1);
+            t_start = @intFromFloat(strength * @as(f32, @floatFromInt(train_last)));
+            core.sched.addNoise(core.latent, core.noise, t_start, core.latent_t);
+        } else {
+            // text to image: start from pure noise and denoise the whole range.
+            schedule.fillNoise(core.latent_t, core.cfg.seed);
+        }
 
         const steps = @max(@min(core.cfg.steps, schedule.max_steps), 1);
         var i: u32 = 0;

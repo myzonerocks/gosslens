@@ -794,11 +794,15 @@ already knows how to place, turn, and fade.
 
 A `"diffusion"` node runs an on-device latent-diffusion restyle. Like the other
 behavior nodes it draws nothing itself; it carries a `"diffusion"` block naming
-three models the bundle ships under `assets/`: an `"encoder"` (a VAE that turns
-the frame into a latent), a `"unet"` (the denoiser), and a `"decoder"` (a VAE
-that turns a latent back into an image). Each frame the engine samples the
-camera square into the encoder, seeds the latent with deterministic noise up to
-the `"strength"` (0 keeps the frame, 1 fully restyles), runs `"steps"` denoise
+the models the bundle ships under `assets/`: a `"unet"` (the denoiser), a
+`"decoder"` (a VAE that turns a latent back into an image), and an optional
+`"encoder"` (a VAE that turns the frame into a latent). With an encoder the node
+restyles the camera frame (image to image); without one it starts from pure
+seeded noise and generates a still (text to image), sized by the decoder. When
+an encoder is present the engine samples the camera square into it each frame,
+seeds the latent with deterministic noise up to the `"strength"` (0 keeps the
+frame, 1 fully restyles); with no encoder it seeds the whole latent from noise
+and denoises the full range. It then runs `"steps"` denoise
 steps of the UNet on a fixed few-step schedule, and decodes the result. The
 UNet reads the latent, and, if it declares them, a timestep and a conditioning
 input; a `"text_embedding"` file supplies that conditioning, so a prompt encoded
@@ -1093,8 +1097,10 @@ net, each driving a lens parameter from the frame; an author ONNX segmenter's
 output reaches the subject mask channel; an `argmax` reduce reads a
 classifier's predicted class into a parameter; a model output moves a sprite
 through its placement parameters; a restyle net's output image draws through a
-sprite; and a diffusion loop over a bundled encoder, unet, and decoder restyles
-the frame and draws it through a sprite. The conformance harness runs today on the host (macOS): it renders each
+sprite; a diffusion loop over a bundled encoder, unet, and decoder restyles
+the frame and draws it through a sprite; and a diffusion lens with no encoder
+generates from seeded noise and a text embedding, drawing the image through a
+sprite. The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

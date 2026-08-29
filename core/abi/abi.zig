@@ -8925,8 +8925,10 @@ fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
     const lens = if (session.active_lens) |*l| l else return;
     for (lens.manifest.nodes) |node| {
         const df = node.diffusion orelse continue;
-        const enc = readBundleAsset(gpa, bundle_path, df.encoder) orelse continue;
-        defer gpa.free(enc);
+        // The encoder is optional: without one the loop starts from seeded noise
+        // (text to image) rather than the camera frame (img2img).
+        const enc: []u8 = if (df.encoder.len > 0) (readBundleAsset(gpa, bundle_path, df.encoder) orelse continue) else &.{};
+        defer if (enc.len > 0) gpa.free(enc);
         const unet = readBundleAsset(gpa, bundle_path, df.unet) orelse continue;
         defer gpa.free(unet);
         const dec = readBundleAsset(gpa, bundle_path, df.decoder) orelse continue;

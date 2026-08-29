@@ -3100,12 +3100,14 @@ fn parseLogicGraph(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
 }
 
 fn parseDiffusionField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?DiffusionField {
+    // The encoder is optional: with one the loop restyles the camera frame
+    // (img2img), without one it generates from pure noise (text to image).
     const encoder = if (getField(object, "encoder")) |v| (try expectString(diags, path, v) orelse "") else "";
     const unet = if (getField(object, "unet")) |v| (try expectString(diags, path, v) orelse "") else "";
     const decoder = if (getField(object, "decoder")) |v| (try expectString(diags, path, v) orelse "") else "";
     const sprite = if (getField(object, "sprite")) |v| (try expectString(diags, path, v) orelse "") else "";
-    if (encoder.len == 0 or unet.len == 0 or decoder.len == 0) {
-        try diags.add(path.slice(), "diffusion needs encoder, unet, and decoder model files", .{});
+    if (unet.len == 0 or decoder.len == 0) {
+        try diags.add(path.slice(), "diffusion needs unet and decoder model files", .{});
         return null;
     }
     if (sprite.len == 0) {
@@ -4128,7 +4130,7 @@ test "a diffusion node missing a model is rejected" {
     defer result.deinit();
     var found = false;
     for (result.diags.items) |d| {
-        if (std.mem.indexOf(u8, d.message, "diffusion needs encoder, unet, and decoder") != null) found = true;
+        if (std.mem.indexOf(u8, d.message, "diffusion needs unet and decoder") != null) found = true;
     }
     try t.expect(found);
 }
