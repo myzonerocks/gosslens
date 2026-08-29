@@ -157,6 +157,7 @@ pub const Renderer = struct {
     nv12_program: c.bgfx_program_handle_t,
     lut_program: c.bgfx_program_handle_t,
     blend_program: c.bgfx_program_handle_t,
+    blend_params_uniform: c.bgfx_uniform_handle_t,
     blur_program: c.bgfx_program_handle_t,
     dof_program: c.bgfx_program_handle_t,
     fog_program: c.bgfx_program_handle_t,
@@ -542,6 +543,7 @@ pub const Renderer = struct {
             .nv12_program = nv12_program,
             .lut_program = lut_program,
             .blend_program = blend_program,
+            .blend_params_uniform = c.bgfx_create_uniform("u_blendParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .blur_program = blur_program,
             .dof_program = dof_program,
             .fog_program = fog_program,
@@ -1266,6 +1268,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.nv12_program);
         c.bgfx_destroy_program(r.lut_program);
         c.bgfx_destroy_program(r.blend_program);
+        c.bgfx_destroy_uniform(r.blend_params_uniform);
         c.bgfx_destroy_program(r.blur_program);
         c.bgfx_destroy_program(r.dof_program);
         c.bgfx_destroy_program(r.fog_program);
@@ -1827,11 +1830,13 @@ pub const Renderer = struct {
     /// view_id: the frame on unit 0, the lens's own background image on
     /// unit 1, the session's current segmentation mask on unit 2, the
     /// one fixed blend_program every blend.pass node shares.
-    pub fn submitBlendPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, background_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t) void {
+    pub fn submitBlendPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, background_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, strength: f32) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(1, r.tex_background, background_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        var params = [4]f32{ strength, 0, 0, 0 };
+        c.bgfx_set_uniform(r.blend_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.blend_program, 0, c.BGFX_DISCARD_ALL);
     }

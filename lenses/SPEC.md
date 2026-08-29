@@ -693,6 +693,12 @@ way, so a bundled image, a video, or a generative texture (a diffusion or
 With no live segmentation the sprite stays hidden and the camera holds through,
 either way. A sprite with no `mask` draws over the frame at its rect as usual.
 
+In `over` mode a `"mask_strength"` (0 to 1, default 1) mixes the restyle onto its
+region: 1 is the full restyle, 0 holds the camera, and a value between is a
+partial blend, so a de-age, beauty, or harmonization restyle dials in by degree.
+`"mask_strength_param"` binds it to a live parameter for a slider. `behind` mode
+ignores it and keys at full strength (a greenscreen is not a partial blend).
+
 A sprite carries an optional `"interaction"` block so a finger can move it:
 `{"drag", "pinch", "rotate", "tap_event"}`. With `"drag"` a single finger that
 goes down on the sprite slides it, with `"pinch"` two fingers scale it about
@@ -1196,7 +1202,10 @@ generated image as the background behind the segmented subject; an img2img
 diffusion lens with temporal coherence warps its previous frame by optical flow
 and blends it into the restyle, holding the sprite steady across frames; and an
 img2img diffusion lens masked to the face_skin channel in over mode composites
-its restyle onto the face matte and holds the camera elsewhere; a diffusion
+its restyle onto the face matte and holds the camera elsewhere; a masked-over
+sprite mixes onto its region by mask_strength, the masked region moving from
+camera at 0 to the full restyle at 1 while the region outside it never changes
+with strength; a diffusion
 node targeting a mesh.face node binds its generated image as the face mesh's
 material texture; a splat.cloud node lifts the camera frame to a 3D point
 set with a bundled model and draws it as a billboard cloud; a splat.cloud in mesh

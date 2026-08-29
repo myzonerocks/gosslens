@@ -354,6 +354,9 @@ pub const SpriteNode = struct {
     /// false fills behind the region (greenscreen), true fills over it (restyle).
     mask_channel: ?u8,
     mask_over: bool,
+    /// Over-mode restyle strength (0..1) and its optional live parameter name.
+    mask_strength: f32,
+    mask_strength_param: []const u8,
 };
 
 /// One splat.cloud node ready for the caller to load and draw - which graph node
@@ -1156,7 +1159,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over, .mask_strength = sp.mask_strength, .mask_strength_param = sp.mask_strength_param });
         }
         return out.toOwnedSlice(gpa);
     }

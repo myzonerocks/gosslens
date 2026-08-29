@@ -340,12 +340,13 @@ pub const Renderer = struct {
         _ = lut_texture;
     }
 
-    pub fn submitBlendPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, background_texture: TextureHandle, mask_texture: TextureHandle) void {
+    pub fn submitBlendPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, background_texture: TextureHandle, mask_texture: TextureHandle, strength: f32) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
         _ = background_texture;
         _ = mask_texture;
+        _ = strength;
     }
 
     pub fn submitBlurPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, step: [2]f32) void {

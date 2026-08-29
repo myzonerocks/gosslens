@@ -680,6 +680,10 @@ pub const SpriteField = struct {
     /// (a greenscreen behind the subject), `over` fills where it is on (a
     /// restyle of that region, e.g. a generative face onto the face matte).
     mask_mode: SpriteMaskMode = .behind,
+    /// Over-mode only: how strongly the restyle mixes onto its region, 0 leaves
+    /// the frame and 1 is the full restyle; `mask_strength_param` binds it live.
+    mask_strength: f32 = 1,
+    mask_strength_param: []const u8 = "",
 };
 
 pub const SpriteMaskMode = enum { behind, over };
@@ -2460,6 +2464,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     if (try expectString(diags, path, v)) |name| {
                         if (std.mem.eql(u8, name, "behind")) field.mask_mode = .behind else if (std.mem.eql(u8, name, "over")) field.mask_mode = .over else try diags.add(path.slice(), "sprite mask_mode is 'behind' or 'over', found '{s}'", .{name});
                     }
+                }
+                if (getField(sv.object, "mask_strength")) |v| field.mask_strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.mask_strength)), 0.0, 1.0);
+                if (getField(sv.object, "mask_strength_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.mask_strength_param = try arena.dupe(u8, s);
                 }
                 if (getField(sv.object, "interaction")) |iv| {
                     if (iv == .object) {

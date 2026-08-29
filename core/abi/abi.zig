@@ -527,7 +527,7 @@ const PendingGlbCollider = struct {
 
 /// A masked sprite's segmentation key: the channel and whether the sprite fills
 /// over that region (a restyle) or behind it (a greenscreen).
-const SpriteMask = struct { channel: u8, over: bool };
+const SpriteMask = struct { channel: u8, over: bool, strength: f32 = 1 };
 
 pub const Session = struct {
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
@@ -1092,6 +1092,9 @@ pub const Session = struct {
     /// and whether the sprite fills behind that region (greenscreen) or over it
     /// (a restyle). The generative background and full-face restyle ride this.
     sprite_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteMask) = .empty,
+    /// A masked sprite's over-mode strength parameter name, so a slider mixes
+    /// the restyle onto its region live (a partial de-age, beauty, harmonize).
+    sprite_mask_strength_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
     /// A model.gltf node's live turntable control, when it declares one, so the
     /// gestures orbit, dolly and roll it each tick.
     model_controls: std.AutoHashMapUnmanaged(graph.NodeIndex, ModelControlState) = .empty,
@@ -2662,7 +2665,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
+                r.submitBlendPass(view_id, input_texture, background_texture, mask_texture, 1.0);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2932,9 +2935,17 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // and its background input where off, so the two roles swap by
                     // mode: over puts the sprite on the mask, behind puts it off.
                     if (mask.over) {
-                        r.submitBlendPass(view_id, sprite_texture, input_texture, mask_texture);
+                        // Over mode mixes the restyle onto the region by a strength
+                        // (static, or a live slider); behind is a hard key at one.
+                        var strength = mask.strength;
+                        if (s.sprite_mask_strength_params.get(entry.graph_index)) |pname| {
+                            if (s.active_lens) |*lens| {
+                                if (lens.paramValue(pname)) |v| strength = std.math.clamp(v, 0, 1);
+                            }
+                        }
+                        r.submitBlendPass(view_id, sprite_texture, input_texture, mask_texture, strength);
                     } else {
-                        r.submitBlendPass(view_id, input_texture, sprite_texture, mask_texture);
+                        r.submitBlendPass(view_id, input_texture, sprite_texture, mask_texture, 1.0);
                     }
                     if (output) |target| {
                         input_texture = target.texture;
@@ -3720,6 +3731,7 @@ pub fn destroySession(session: *Session) void {
     session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
     session.sprite_masks.deinit(session.engine.gpa);
+    session.sprite_mask_strength_params.deinit(session.engine.gpa);
     session.model_controls.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
@@ -7284,6 +7296,7 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
     session.sprite_masks.clearRetainingCapacity();
+    session.sprite_mask_strength_params.clearRetainingCapacity();
     session.model_controls.clearRetainingCapacity();
     var anim_it = session.sprite_anims.valueIterator();
     while (anim_it.next()) |anim| {
@@ -8499,7 +8512,10 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
         }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
-        if (sprite.mask_channel) |channel| session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over }) catch {};
+        if (sprite.mask_channel) |channel| {
+            session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over, .strength = sprite.mask_strength }) catch {};
+            if (sprite.mask_strength_param.len > 0) session.sprite_mask_strength_params.put(gpa, sprite.graph_index, sprite.mask_strength_param) catch {};
+        }
         // An animated GIF upgrades the node to a video texture; a node with no
         // GIF falls through to the still or image-sequence PNG path.
         if (tryStartGifSprite(session, gpa, bundle_path, sprite)) continue;

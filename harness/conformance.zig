@@ -2833,6 +2833,145 @@ fn proveMlInferFaceRestyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a masked-over sprite.2d lens whose solid sprite mixes onto the
+/// face_skin channel by a static mask_strength, plus its one solid png asset.
+fn writeMaskStrengthLens(dir: []const u8, png_bytes: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.mask-strength","version":"1.0.0","display_name":"Mask Strength","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"tint","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},
+        \\   "sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0,"opacity":1.0,"mask":"face_skin","mask_mode":"over","mask_strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/tint.png", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = png_bytes });
+}
+
+/// Activates a mask-strength lens, injects the half face_skin matte, and
+/// captures the composited frame; caller owns the returned RGBA.
+fn captureMaskLens(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, mask: *const [abi.segmentation_mask_len]f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    // Land the sprite png, then hold the injected matte across the drawn frames.
+    for (0..8) |_| {
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    for (0..5) |_| {
+        abi.injectMaskChannel(session, 4, mask);
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Counts differing bytes over one clear region of the 400-wide capture: side 0
+/// is the left fifth-to-two-fifths (well inside the masked half), side 1 the
+/// right two columns (well outside). The middle band spans the mask's upsampled
+/// soft edge and is skipped, so neither region straddles the transition.
+fn halfDiff(a: []const u8, b: []const u8, side: usize) usize {
+    var changed: usize = 0;
+    const w: usize = 400;
+    const h: usize = 300;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        const x0: usize = if (side == 0) 0 else (w * 3) / 5;
+        const x1: usize = if (side == 0) (w * 2) / 5 else w;
+        var x: usize = x0;
+        while (x < x1) : (x += 1) {
+            const idx = (y * w + x) * 4;
+            if (!std.mem.eql(u8, a[idx .. idx + 4], b[idx .. idx + 4])) changed += 1;
+        }
+    }
+    return changed;
+}
+
+/// Proves the masked-composite strength knob: a masked-over sprite mixes onto
+/// its region by mask_strength. At 0 the region holds the camera, at 1 it is
+/// the full restyle, at 0.5 it differs from both; outside the mask nothing
+/// changes with strength, so the knob scales only the masked region.
+fn proveMaskStrength(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    // A solid blue full-frame sprite, distinct from any camera pixel.
+    const blue = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    defer gpa.free(blue);
+    var i: usize = 0;
+    while (i < blue.len) : (i += 4) {
+        blue[i + 0] = 0;
+        blue[i + 1] = 0;
+        blue[i + 2] = 255;
+        blue[i + 3] = 255;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, blue, 400, 300);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mask-strength-0/assets");
+    try writeMaskStrengthLens("zig-out/mask-strength-0", png_bytes.items, 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mask-strength-50/assets");
+    try writeMaskStrengthLens("zig-out/mask-strength-50", png_bytes.items, 0.5);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mask-strength-100/assets");
+    try writeMaskStrengthLens("zig-out/mask-strength-100", png_bytes.items, 1.0);
+
+    // Left half of the face_skin channel on, right half off.
+    const mask = try gpa.alloc(f32, abi.segmentation_mask_len);
+    defer gpa.free(mask);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        mask[row * mask_side + col] = if (col < mask_side / 2) 1.0 else 0.0;
+    };
+    const mask_arr: *const [abi.segmentation_mask_len]f32 = @ptrCast(mask.ptr);
+
+    const shot0 = try captureMaskLens(gpa, engine, "zig-out/mask-strength-0", planes, mask_arr);
+    defer gpa.free(shot0);
+    const shot50 = try captureMaskLens(gpa, engine, "zig-out/mask-strength-50", planes, mask_arr);
+    defer gpa.free(shot50);
+    const shot100 = try captureMaskLens(gpa, engine, "zig-out/mask-strength-100", planes, mask_arr);
+    defer gpa.free(shot100);
+
+    const masked_full = halfDiff(shot0, shot100, 0); // strength 1 vs 0, masked region
+    const masked_half_lo = halfDiff(shot50, shot0, 0); // 0.5 vs 0
+    const masked_half_hi = halfDiff(shot50, shot100, 0); // 0.5 vs 1
+    const outside_lo = halfDiff(shot0, shot50, 1); // outside mask, 0 vs 0.5
+    const outside_hi = halfDiff(shot0, shot100, 1); // outside mask, 0 vs 1
+
+    if (masked_full == 0) {
+        std.debug.print("conformance: FAIL mask_strength: the masked region did not change between strength 0 and 1\n", .{});
+        return false;
+    }
+    if (masked_half_lo == 0 or masked_half_hi == 0) {
+        std.debug.print("conformance: FAIL mask_strength: strength 0.5 matched an endpoint in the masked region\n", .{});
+        return false;
+    }
+    if (outside_lo != 0 or outside_hi != 0) {
+        std.debug.print("conformance: FAIL mask_strength: the region outside the mask changed with strength ({d}, {d})\n", .{ outside_lo, outside_hi });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a masked-over sprite mixes onto its region by mask_strength: the masked region moves from camera at 0 to the full restyle at 1 with 0.5 between ({d} pixels), while outside the mask nothing changes with strength\n", .{masked_full});
+    return true;
+}
+
 /// Proves text-to-material: a diffusion node targets a mesh.face node, so its
 /// generated image binds as the face mesh's material texture rather than a
 /// bundled png. The generated texture reaches the mesh's material slot; the mesh
@@ -13647,6 +13786,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer coherence");
     if (!try proveMlInferFaceRestyle(gpa, engine)) return 1;
     watchHold("ml infer face restyle");
+    if (!try proveMaskStrength(gpa, engine)) return 1;
+    watchHold("mask strength");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
