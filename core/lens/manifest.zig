@@ -296,6 +296,15 @@ pub const VignetteField = struct {
     radius: f32 = 0.5,
 };
 
+pub const LowLightField = struct {
+    /// A lowlight.pass node's night lift: `strength` (0..1) raises the shadows
+    /// with a gamma curve while holding the highlights, and `denoise` (0..1)
+    /// blends the shadows toward their neighbourhood to damp the noise a lift
+    /// exposes. Both 0 leaves the frame untouched.
+    strength: f32 = 0.6,
+    denoise: f32 = 0.5,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1023,6 +1032,8 @@ pub const Node = struct {
     glare: ?GlareField = null,
     /// Set only on a vignette.pass node: its radial luma-gain.
     vignette: ?VignetteField = null,
+    /// Set only on a lowlight.pass node: its shadow lift and denoise.
+    lowlight: ?LowLightField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -1955,6 +1966,21 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 vignette_field = field;
             }
             path.pop(vmark);
+        }
+        var lowlight_field: ?LowLightField = null;
+        if (getField(object, "lowlight")) |lv| {
+            const lmark = path.push("lowlight");
+            if (!std.mem.eql(u8, node_type, "lowlight.pass")) {
+                try diags.add(path.slice(), "lowlight is a lowlight.pass field, found it on '{s}'", .{node_type});
+            } else if (lv != .object) {
+                try diags.add(path.slice(), "lowlight must be an object", .{});
+            } else {
+                var field: LowLightField = .{};
+                if (getField(lv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(lv.object, "denoise")) |v| field.denoise = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.denoise)), 0, 1);
+                lowlight_field = field;
+            }
+            path.pop(lmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3221,6 +3247,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .relight = relight_field,
             .glare = glare_field,
             .vignette = vignette_field,
+            .lowlight = lowlight_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

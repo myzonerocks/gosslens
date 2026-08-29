@@ -391,6 +391,13 @@ correcting a lens vignette; a negative strength sinks them for a stylistic one.
 Strength 0 leaves the frame untouched. Like `grade.pass` it ships no asset and is
 always ready.
 
+A `"lowlight.pass"` node is a night-mode lift post-effect. It carries a
+`"lowlight": {"strength", "denoise"}` block: a shadow-weighted blur of each
+pixel's neighbourhood damps the noise that lives in dark regions by `denoise`
+(0..1, default 0.5), then a gamma curve raises the shadows by `strength` (0..1,
+default 0.6) while holding the highlights near white. With both 0 the frame is
+untouched. Like `grade.pass` it ships no asset and is always ready.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1257,6 +1264,8 @@ strength-0 frame stays even; a glare.pass recovers a blown highlight, strength 1
 pulling the bright region down toward the threshold where the normal region
 holds; a vignette.pass applies a radial luma-gain, a positive strength lifting
 the corners and a negative sinking them where the centre inside the radius holds;
+a lowlight.pass lifts a dark noisy region far more than it moves a highlight and
+cuts the shadow noise, where the strength-0 denoise-0 control is untouched;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

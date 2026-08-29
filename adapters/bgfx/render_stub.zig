@@ -516,6 +516,16 @@ pub const Renderer = struct {
         _ = radius;
     }
 
+    pub fn submitLowLightPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, strength: f32, denoise: f32, texel_w: f32, texel_h: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = strength;
+        _ = denoise;
+        _ = texel_w;
+        _ = texel_h;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
@@ -1030,6 +1040,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadVignetteProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadLowLightProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

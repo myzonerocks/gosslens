@@ -3108,6 +3108,104 @@ fn proveVignette(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Sums the absolute rgb step between horizontally adjacent pixels over a
+/// vertical third of the 400x300 capture, a stand-in for its high-frequency
+/// noise. side 0 is the left third, 2 the right.
+fn roughnessThird(shot: []const u8, side: usize) u64 {
+    var total: u64 = 0;
+    const w: usize = 400;
+    const h: usize = 300;
+    const x0: usize = if (side == 0) 0 else (w * 2) / 3;
+    const x1: usize = if (side == 0) w / 3 else w;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        var x: usize = x0;
+        while (x + 1 < x1) : (x += 1) {
+            const a = (y * w + x) * 4;
+            const b = (y * w + x + 1) * 4;
+            inline for (0..3) |ch| {
+                const da: i32 = @as(i32, shot[a + ch]) - @as(i32, shot[b + ch]);
+                total += @abs(da);
+            }
+        }
+    }
+    return total;
+}
+
+/// Writes a lowlight.pass lens at a static lift strength and denoise (no asset).
+fn writeLowLightLens(dir: []const u8, strength: f32, denoise: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.lowlight","version":"1.0.0","display_name":"Low Light","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"l","type":"lowlight.pass","inputs":{{"frame":"camera"}},"params":{{}},"lowlight":{{"strength":{d:.3},"denoise":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, denoise });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the low-light night lift: a dark noisy region and a bright region. At
+/// strength 1 with denoise the shadows lift far more than the highlights hold,
+/// and the shadow noise (adjacent-pixel step) drops; the 0/0 control is
+/// untouched.
+fn proveLowLight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        // Left half: a dark 1px checkerboard (noisy shadow). Right half: a bright
+        // near-flat region (the highlight to hold).
+        const v: u8 = if (col < width / 2) (if ((row + col) % 2 == 0) @as(u8, 20) else 60) else 235;
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/lowlight-0");
+    try writeLowLightLens("zig-out/lowlight-0", 0.0, 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/lowlight-1");
+    try writeLowLightLens("zig-out/lowlight-1", 1.0, 0.8);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/lowlight-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/lowlight-1", planes);
+    defer gpa.free(shot1);
+
+    const shadow0 = sumThird(shot0, 0);
+    const shadow1 = sumThird(shot1, 0);
+    const high0 = sumThird(shot0, 2);
+    const high1 = sumThird(shot1, 2);
+    const rough0 = roughnessThird(shot0, 0);
+    const rough1 = roughnessThird(shot1, 0);
+
+    const changed = countDiff(shot0, shot1);
+    const shadow_lift = if (shadow1 > shadow0) shadow1 - shadow0 else 0;
+    const high_move = if (high1 > high0) high1 - high0 else high0 - high1;
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL lowlight at strength 1 left the frame identical to the 0/0 control\n", .{});
+        return false;
+    }
+    if (!(shadow1 > shadow0) or shadow_lift < high_move * 3) {
+        std.debug.print("conformance: FAIL lowlight did not lift the shadows far more than the highlights held (shadow lift {d}, highlight move {d})\n", .{ shadow_lift, high_move });
+        return false;
+    }
+    // A substantial cut proves the denoise; the exact fraction tracks the
+    // shadow-weight curve, and the lift re-expands what noise remains.
+    if (!(rough1 * 3 < rough0 * 2)) {
+        std.debug.print("conformance: FAIL lowlight denoise did not cut the shadow noise (rough {d} -> {d})\n", .{ rough0, rough1 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a lowlight.pass lifts the shadows far more than it moves the highlights and cuts the shadow noise substantially ({d} pixels changed, roughness {d} -> {d})\n", .{ changed, rough0, rough1 });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -14426,6 +14524,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("glare pass");
     if (!try proveVignette(gpa, engine)) return 1;
     watchHold("vignette pass");
+    if (!try proveLowLight(gpa, engine)) return 1;
+    watchHold("lowlight pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
