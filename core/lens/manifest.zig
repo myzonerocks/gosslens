@@ -264,6 +264,10 @@ pub const GradeField = struct {
     grayscale: f32 = 0,
     invert: f32 = 0,
     posterize: f32 = 0,
+    /// An optional mask channel: with one named, the grade applies only inside
+    /// that region (a teeth-whiten, an eye-brighten, a skin-tone lift); with none
+    /// the whole frame is graded.
+    mask_channel: ?u8 = null,
 };
 
 pub const DehazeField = struct {
@@ -1913,6 +1917,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(gv.object, "grayscale")) |v| field.grayscale = @floatCast(numberOf(v) orelse field.grayscale);
                 if (getField(gv.object, "invert")) |v| field.invert = @floatCast(numberOf(v) orelse field.invert);
                 if (getField(gv.object, "posterize")) |v| field.posterize = @floatCast(numberOf(v) orelse field.posterize);
+                if (getField(gv.object, "mask")) |v| {
+                    if (v == .string) {
+                        if (maskChannelIndex(v.string)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "grade mask names an unknown channel '{s}'", .{v.string});
+                    }
+                }
                 grade_field = field;
             }
             path.pop(gmark);

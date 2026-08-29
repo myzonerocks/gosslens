@@ -477,11 +477,13 @@ pub const Renderer = struct {
         _ = aspect;
     }
 
-    pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [12]f32) void {
+    pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [12]f32, mask_texture: TextureHandle, masked: bool) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
         _ = grade;
+        _ = mask_texture;
+        _ = masked;
     }
 
     pub fn submitDehazePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, strength: f32, texel_w: f32, texel_h: f32) void {

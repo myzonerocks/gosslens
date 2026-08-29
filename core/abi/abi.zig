@@ -1039,6 +1039,9 @@ pub const Session = struct {
     /// invert) - resolved once at activation since grade.pass ships no
     /// asset and needs no loader.
     grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [12]f32) = .empty,
+    /// The mask channel of each grade.pass node that scopes its grade to a
+    /// region; a node absent here grades the whole frame.
+    grade_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     /// The dark-channel dehaze strength of each spliced dehaze.pass node,
     /// resolved once at activation like grade_params.
     dehaze_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
@@ -2199,7 +2202,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitGradePass(view_id, input_texture, grade);
+                // A named channel scopes the grade to its mask; an absent class
+                // serves the zero mask, so the grade fades to nothing there.
+                const masked = s.grade_masks.get(entry.graph_index);
+                const mask_tex = if (masked) |channel|
+                    (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
+                else
+                    r.zero_mask_texture;
+                r.submitGradePass(view_id, input_texture, grade, mask_tex, masked != null);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3869,6 +3879,7 @@ pub fn destroySession(session: *Session) void {
     session.model_controls.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
+    session.grade_masks.deinit(session.engine.gpa);
     session.dehaze_params.deinit(session.engine.gpa);
     session.relight_params.deinit(session.engine.gpa);
     session.glare_params.deinit(session.engine.gpa);
@@ -7403,6 +7414,7 @@ fn destroyBlendState(session: *Session) void {
     session.env_textures.clearRetainingCapacity();
     // grade.pass and bloom.pass hold only plain params, nothing to free.
     session.grade_params.clearRetainingCapacity();
+    session.grade_masks.clearRetainingCapacity();
     session.dehaze_params.clearRetainingCapacity();
     session.relight_params.clearRetainingCapacity();
     session.glare_params.clearRetainingCapacity();
@@ -8054,6 +8066,7 @@ fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(grades);
     for (grades) |g| {
         session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
+        if (g.mask_channel) |channel| session.grade_masks.put(gpa, g.graph_index, channel) catch {};
     }
 }
 

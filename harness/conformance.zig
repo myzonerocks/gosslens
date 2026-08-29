@@ -3795,6 +3795,80 @@ fn proveMaskStrength(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a grade.pass lens that inverts the frame, optionally scoped to the
+/// face_skin channel (no asset).
+fn writeGradeMaskLens(dir: []const u8, invert: f32, masked: bool) !void {
+    const page = std.heap.page_allocator;
+    const mask_field = if (masked) ",\"mask\":\"face_skin\"" else "";
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.grade-mask","version":"1.0.0","display_name":"Grade Mask","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"g","type":"grade.pass","inputs":{{"frame":"camera"}},"params":{{}},"grade":{{"invert":{d:.3}{s}}}}}],
+        \\ "triggers":[]}}
+    , .{ invert, mask_field });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the masked grade: a grade.pass that names a channel grades only inside
+/// it. An invert scoped to a half face_skin mask flips the masked region and
+/// leaves the rest byte-identical, where the same invert with no mask flips the
+/// whole frame including that outside region.
+fn proveMaskedGrade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/grade-plain");
+    try writeGradeMaskLens("zig-out/grade-plain", 0.0, false);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/grade-masked");
+    try writeGradeMaskLens("zig-out/grade-masked", 1.0, true);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/grade-full");
+    try writeGradeMaskLens("zig-out/grade-full", 1.0, false);
+
+    // Left two fifths of the face_skin channel on (screen x < 160), well clear
+    // of the outside sample region (x >= 240) so no soft edge reaches it.
+    const mask = try gpa.alloc(f32, abi.segmentation_mask_len);
+    defer gpa.free(mask);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        mask[row * mask_side + col] = if (col < (mask_side * 2) / 5) 1.0 else 0.0;
+    };
+    const mask_arr: *const [abi.segmentation_mask_len]f32 = @ptrCast(mask.ptr);
+
+    const plain = try captureMaskLens(gpa, engine, "zig-out/grade-plain", planes, mask_arr);
+    defer gpa.free(plain);
+    const masked = try captureMaskLens(gpa, engine, "zig-out/grade-masked", planes, mask_arr);
+    defer gpa.free(masked);
+    const full = try captureMaskLens(gpa, engine, "zig-out/grade-full", planes, mask_arr);
+    defer gpa.free(full);
+
+    const masked_inside = halfDiff(masked, plain, 0); // masked grade, inside the mask
+    const masked_outside = halfDiff(masked, plain, 1); // masked grade, outside the mask
+    const full_inside = halfDiff(full, plain, 0); // unmasked grade, inside region
+    const full_outside = halfDiff(full, plain, 1); // unmasked grade, outside region
+    // Inside the mask the grade lands in full, matching the unmasked grade; the
+    // outside is strongly attenuated by the mask (a soft feathered edge, so a
+    // small residual near the boundary is expected, not the full change).
+    if (masked_inside < full_inside) {
+        std.debug.print("conformance: FAIL masked grade did not fully grade inside the mask ({d} vs unmasked {d})\n", .{ masked_inside, full_inside });
+        return false;
+    }
+    if (full_outside == 0) {
+        std.debug.print("conformance: FAIL the unmasked grade left the outside region unchanged, so the mask proved nothing\n", .{});
+        return false;
+    }
+    if (masked_outside * 10 >= full_outside) {
+        std.debug.print("conformance: FAIL masked grade did not attenuate the outside region ({d} vs unmasked {d})\n", .{ masked_outside, full_outside });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a grade.pass naming a channel grades inside it and attenuates outside it: an invert scoped to a face_skin mask flips the masked region in full ({d} pixels, matching the unmasked grade) while the outside falls to under a tenth ({d} vs {d})\n", .{ masked_inside, masked_outside, full_outside });
+    return true;
+}
+
 /// Proves text-to-material: a diffusion node targets a mesh.face node, so its
 /// generated image binds as the face mesh's material texture rather than a
 /// bundled png. The generated texture reaches the mesh's material slot; the mesh
@@ -14617,6 +14691,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer face restyle");
     if (!try proveMaskStrength(gpa, engine)) return 1;
     watchHold("mask strength");
+    if (!try proveMaskedGrade(gpa, engine)) return 1;
+    watchHold("masked grade");
     if (!try proveDehaze(gpa, engine)) return 1;
     watchHold("dehaze pass");
     if (!try proveRelight(gpa, engine)) return 1;

@@ -436,6 +436,8 @@ pub const VideoNode = struct {
 pub const GradePassNode = struct {
     graph_index: graph.NodeIndex,
     grade: [12]f32,
+    /// An optional mask channel scoping the grade to a region; null grades all.
+    mask_channel: ?u8 = null,
 };
 
 /// One dehaze.pass node ready for the caller to draw - which graph node it is
@@ -824,7 +826,7 @@ pub const Lens = struct {
                 gr.exposure, gr.contrast, gr.saturation, gr.temperature,
                 gr.brightness, hue_rad,   gr.tint,       gr.grayscale,
                 gr.invert,    gr.posterize, 0,           0,
-            } });
+            }, .mask_channel = gr.mask_channel });
         }
         return out.toOwnedSlice(gpa);
     }

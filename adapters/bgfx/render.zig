@@ -2159,10 +2159,15 @@ pub const Renderer = struct {
     /// the frame on unit 0 and its color adjustment in u_grade (three vec4:
     /// tone, white balance with hue, then posterize and invert), the one
     /// fixed grade_program every grade.pass node shares.
-    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [12]f32) void {
+    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [12]f32, mask_texture: c.bgfx_texture_handle_t, masked: bool) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
-        c.bgfx_set_uniform(r.grade_params_uniform, &grade, 3);
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        // The free u_grade[2].z slot carries the mask enable, so a masked grade
+        // blends only inside the channel and an unmasked one grades the frame.
+        var packed_grade = grade;
+        packed_grade[10] = if (masked) 1 else 0;
+        c.bgfx_set_uniform(r.grade_params_uniform, &packed_grade, 3);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.grade_program, 0, c.BGFX_DISCARD_ALL);
     }

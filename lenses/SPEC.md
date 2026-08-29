@@ -354,6 +354,12 @@ empty block leaves the frame untouched. Like `blur.pass` it ships no asset
 and is always ready; it lets a lens warm, cool, brighten, desaturate,
 posterize or invert without authoring a LUT.
 
+A `grade` block may also name a `"mask"` channel (one of the segmentation mask
+channels, such as `teeth`, `sclera`, or `face_skin`), scoping the grade to that
+region: the graded result blends over the original by the channel's soft mask,
+so a whitening grade lands on the teeth or a skin-tone lift on the face while the
+rest of the frame is untouched. With no `mask` the whole frame is graded.
+
 A `"bloom.pass"` node is a glow post-effect. It carries a `"bloom":
 {"threshold", "intensity"}` block: it extracts the frame's highlights - what
 sits above `threshold` in luma - blurs them, and adds that blurred glow back
@@ -1276,6 +1282,8 @@ a lowlight.pass lifts a dark noisy region far more than it moves a highlight and
 cuts the shadow noise, where the strength-0 denoise-0 control is untouched;
 an undistort.pass applies the submitted radial map, a positive k1 shrinking a
 centred disk and a negative growing it, where no intrinsics leaves it inert;
+a grade.pass naming a channel grades inside its mask in full and attenuates
+outside it, where the unmasked grade changes that outside too;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;
