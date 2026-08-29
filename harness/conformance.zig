@@ -2520,35 +2520,53 @@ fn onnxConvModel(a: std.mem.Allocator, in_name: []const u8, cin: i64, cout: i64,
     return model.buf.items;
 }
 
-/// A null encoder omits the encoder key, so the lens starts from pure noise
-/// (text to image); a non-null text_embedding ships and references a cond asset;
-/// a non-null sprite_mask keys the output sprite as a background greenscreen; a
-/// positive coherence turns on the flow-warped temporal filter.
-fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: []const u8, text_embedding: ?[]const u8, sprite_mask: ?[]const u8, sprite_mask_over: bool, coherence: f32) !void {
+/// The knobs a diffusion reference lens varies. A null encoder starts from pure
+/// noise (text to image); a text_embedding ships a cond asset; a sprite_mask
+/// keys the output; coherence turns on the temporal filter; target_mesh draws
+/// the generated texture through a mesh.face material instead of a sprite.
+const DiffusionLensSpec = struct {
+    dir: []const u8,
+    enc: ?[]const u8 = null,
+    unet: []const u8,
+    dec: []const u8,
+    text_embedding: ?[]const u8 = null,
+    sprite_mask: ?[]const u8 = null,
+    sprite_mask_over: bool = false,
+    coherence: f32 = 0,
+    target_mesh: bool = false,
+};
+
+fn writeDiffusionLens(spec: DiffusionLensSpec) !void {
     const page = std.heap.page_allocator;
-    const enc_field = if (enc != null) "\"encoder\":\"enc.onnx\"," else "";
-    const cond_field = if (text_embedding != null) "\"text_embedding\":\"cond.bin\"," else "";
-    const mode = if (sprite_mask_over) ",\"mask_mode\":\"over\"" else "";
-    const mask_field = if (sprite_mask) |m| try std.fmt.allocPrint(page, ",\"mask\":\"{s}\"{s}", .{ m, mode }) else try page.dupe(u8, "");
+    const enc_field = if (spec.enc != null) "\"encoder\":\"enc.onnx\"," else "";
+    const cond_field = if (spec.text_embedding != null) "\"text_embedding\":\"cond.bin\"," else "";
+    const mode = if (spec.sprite_mask_over) ",\"mask_mode\":\"over\"" else "";
+    const mask_field = if (spec.sprite_mask) |m| try std.fmt.allocPrint(page, ",\"mask\":\"{s}\"{s}", .{ m, mode }) else try page.dupe(u8, "");
     defer page.free(mask_field);
-    const coherence_field = if (coherence > 0) try std.fmt.allocPrint(page, ",\"coherence\":{d}", .{coherence}) else try page.dupe(u8, "");
+    const coherence_field = if (spec.coherence > 0) try std.fmt.allocPrint(page, ",\"coherence\":{d}", .{spec.coherence}) else try page.dupe(u8, "");
     defer page.free(coherence_field);
+    // The target node the diffusion draws through: a full-frame sprite, or a
+    // face mesh that samples the generated texture as its material.
+    const target_node = if (spec.target_mesh)
+        "{\"id\":\"canvas\",\"type\":\"mesh.face\",\"inputs\":{\"frame\":\"camera\"},\"params\":{}}"
+    else
+        try std.fmt.allocPrint(page, "{{\"id\":\"canvas\",\"type\":\"sprite.2d\",\"inputs\":{{\"frame\":\"camera\"}},\"params\":{{}}, \"sprite\":{{\"x\":0.0,\"y\":0.0,\"w\":1.0,\"h\":1.0{s}}}}}", .{mask_field});
+    defer if (!spec.target_mesh) page.free(target_node);
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
         \\ "nodes":[{{"id":"restyle","type":"diffusion","params":{{}},
         \\   "diffusion":{{{s}{s}"unet":"unet.onnx","decoder":"dec.onnx","sprite":"canvas","steps":2,"strength":0.5{s}}}}},
-        \\  {{"id":"canvas","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},
-        \\   "sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0{s}}}}}],
+        \\  {s}],
         \\ "triggers":[]}}
-    , .{ enc_field, cond_field, coherence_field, mask_field });
+    , .{ enc_field, cond_field, coherence_field, target_node });
     defer page.free(manifest_json);
-    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{spec.dir});
     defer page.free(manifest_path);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
-    inline for (.{ .{ "enc.onnx", enc }, .{ "unet.onnx", @as(?[]const u8, unet) }, .{ "dec.onnx", @as(?[]const u8, dec) }, .{ "cond.bin", text_embedding } }) |pair| {
+    inline for (.{ .{ "enc.onnx", spec.enc }, .{ "unet.onnx", @as(?[]const u8, spec.unet) }, .{ "dec.onnx", @as(?[]const u8, spec.dec) }, .{ "cond.bin", spec.text_embedding } }) |pair| {
         if (pair[1]) |data| {
-            const asset_path = try std.fmt.allocPrint(page, "{s}/assets/{s}", .{ dir, pair[0] });
+            const asset_path = try std.fmt.allocPrint(page, "{s}/assets/{s}", .{ spec.dir, pair[0] });
             defer page.free(asset_path);
             try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = data });
         }
@@ -2638,7 +2656,7 @@ fn proveMlInferDiffusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-diffusion/assets");
-    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec, null, null, false, 0);
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-diffusion", .enc = enc, .unet = unet, .dec = dec });
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2673,7 +2691,7 @@ fn proveMlInferText2Img(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     inline for (.{ 0.25, 0.5, 0.75, 1.0 }, 0..) |v, i| std.mem.writeInt(u32, cond_bytes[i * 4 ..][0..4], @bitCast(@as(f32, v)), .little);
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-text2img/assets");
-    try writeDiffusionLens("zig-out/ml-text2img", null, unet, dec, &cond_bytes, null, false, 0);
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-text2img", .unet = unet, .dec = dec, .text_embedding = &cond_bytes });
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2706,7 +2724,7 @@ fn proveMlInferGreenscreen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-greenscreen/assets");
-    try writeDiffusionLens("zig-out/ml-greenscreen", null, unet, dec, null, "person", false, 0);
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-greenscreen", .unet = unet, .dec = dec, .sprite_mask = "person" });
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2749,7 +2767,7 @@ fn proveMlInferCoherence(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-coherence/assets");
-    try writeDiffusionLens("zig-out/ml-coherence", enc, unet, dec, null, null, false, 0.5);
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-coherence", .enc = enc, .unet = unet, .dec = dec, .coherence = 0.5 });
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2782,7 +2800,7 @@ fn proveMlInferFaceRestyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-facerestyle/assets");
-    try writeDiffusionLens("zig-out/ml-facerestyle", enc, unet, dec, null, "face_skin", true, 0);
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-facerestyle", .enc = enc, .unet = unet, .dec = dec, .sprite_mask = "face_skin", .sprite_mask_over = true });
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2807,6 +2825,41 @@ fn proveMlInferFaceRestyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF an img2img diffusion lens masked to the face_skin channel in over mode composites its restyle onto the face matte and holds the camera elsewhere\n", .{});
+    return true;
+}
+
+/// Proves text-to-material: a diffusion node targets a mesh.face node, so its
+/// generated image binds as the face mesh's material texture rather than a
+/// bundled png. The generated texture reaches the mesh's material slot; the mesh
+/// then warps it over the tracked face like any authored face texture.
+fn proveMlInferMaterial(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-material/assets");
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-material", .enc = enc, .unet = unet, .dec = dec, .target_mesh = true });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-material", person, null);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-material", person, null);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the generated material never reached the face mesh\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion node targeting a mesh.face node binds its generated image as the face mesh's material texture\n", .{});
     return true;
 }
 
@@ -13134,6 +13187,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer coherence");
     if (!try proveMlInferFaceRestyle(gpa, engine)) return 1;
     watchHold("ml infer face restyle");
+    if (!try proveMlInferMaterial(gpa, engine)) return 1;
+    watchHold("ml infer material");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

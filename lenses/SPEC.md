@@ -843,7 +843,10 @@ draws, LUT passes, compositing,
 the draw board, the layout composite, the 2D sprite, the 2D text, the
 `video.texture` node, `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
-the bottom; without a tracked face the node draws nothing, the standard
+the bottom, or by a generative node's output when a diffusion or `ml.infer`
+style node targets it, so a prompt-generated image lands as the face material
+(a text-to-material on the face mesh); without a tracked face the node draws
+nothing, the standard
 capability degradation - `paint.face`, the same face-mesh texture warp
 masked to a face region and blended onto the skin by opacity and mode,
 `face.swap`, a donor face warped through the mesh and feathered into the
@@ -1126,7 +1129,9 @@ generated image as the background behind the segmented subject; an img2img
 diffusion lens with temporal coherence warps its previous frame by optical flow
 and blends it into the restyle, holding the sprite steady across frames; and an
 img2img diffusion lens masked to the face_skin channel in over mode composites
-its restyle onto the face matte and holds the camera elsewhere. The conformance harness runs today on the host (macOS): it renders each
+its restyle onto the face matte and holds the camera elsewhere; and a diffusion
+node targeting a mesh.face node binds its generated image as the face mesh's
+material texture. The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

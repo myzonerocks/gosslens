@@ -1942,7 +1942,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .blend => s.blend_textures.contains(entry.graph_index),
             // Like blend's mask: the face is a capability input whose
             // absence degrades (no draw), never blocks the chain.
-            .mesh => s.mesh_face_textures.contains(entry.graph_index),
+            .mesh => s.mesh_face_textures.contains(entry.graph_index) or s.ml_style_textures.contains(entry.graph_index),
             // The lash strip ships no asset; its params resolve at activation
             // and it rides the tracked face, so it holds the frame through
             // with no face rather than blocking the chain.
@@ -2640,7 +2640,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .mesh => {
-                const mesh_texture = s.mesh_face_textures.get(entry.graph_index) orelse continue;
+                // A generative node targeting this mesh drives its material: its
+                // texture is the face albedo, a text-to-material on the face mesh.
+                const mesh_texture = s.ml_style_textures.get(entry.graph_index) orelse s.mesh_face_textures.get(entry.graph_index) orelse continue;
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -8760,7 +8762,7 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             const len = ml_infer.outputLen(worker, sb.tensor);
             const side = isqrt(len / 3);
             if (len > 0 and len % 3 == 0 and side * side == len / 3) {
-                if (spriteNodeIndex(lens, gpa, &session.lens_graph, sb.sprite)) |target| {
+                if (generativeTargetNodeIndex(lens, gpa, &session.lens_graph, sb.sprite)) |target| {
                     if (gpa.alloc(f32, len)) |f| {
                         if (gpa.alloc(u8, side * side * 4)) |bgra| {
                             style_tensor = sb.tensor;
@@ -8800,13 +8802,19 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
     }
 }
 
-/// The graph index of the sprite node whose id matches name, or null. The style
-/// binding names the sprite it draws through by that id.
-fn spriteNodeIndex(lens: *runtime.Lens, gpa: std.mem.Allocator, g: *graph.Graph, name: []const u8) ?graph.NodeIndex {
+/// Resolves the node a generative texture draws through, by its id. A sprite.2d
+/// draws it as a 2D image (or a masked background); a mesh.face samples it as
+/// the face material, so a generated texture lands on the face mesh.
+fn generativeTargetNodeIndex(lens: *runtime.Lens, gpa: std.mem.Allocator, g: *graph.Graph, name: []const u8) ?graph.NodeIndex {
     const sprites = lens.spriteNodes(gpa, g) catch return null;
     defer gpa.free(sprites);
     for (sprites) |sprite| {
         if (std.mem.eql(u8, sprite.image_stem, name)) return sprite.graph_index;
+    }
+    const meshes = lens.meshFaceNodes(gpa, g) catch return null;
+    defer gpa.free(meshes);
+    for (meshes) |mesh| {
+        if (std.mem.eql(u8, mesh.texture_stem, name)) return mesh.graph_index;
     }
     return null;
 }
@@ -8980,7 +8988,7 @@ fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
         const emb: []u8 = if (df.text_embedding.len > 0) (readBundleAsset(gpa, bundle_path, df.text_embedding) orelse &.{}) else &.{};
         defer if (emb.len > 0) gpa.free(emb);
 
-        const target = spriteNodeIndex(lens, gpa, &session.lens_graph, df.sprite) orelse continue;
+        const target = generativeTargetNodeIndex(lens, gpa, &session.lens_graph, df.sprite) orelse continue;
 
         const worker = diffusion.create(gpa, .{ .encoder = enc, .unet = unet, .decoder = dec, .text_embedding = emb }, .{}, .{ .steps = df.steps, .strength = df.strength, .seed = df.seed, .coherence = df.coherence }, 2) catch continue;
         const side = diffusion.outputSide(worker);
