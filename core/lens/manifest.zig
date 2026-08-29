@@ -908,6 +908,10 @@ pub const MlField = struct {
     /// second input, for a net conditioned on a reference (makeup, style, or
     /// identity transfer). Empty for a one-input model.
     aux_reference: []const u8 = "",
+    /// A two-input net whose second input is the previous output frame, for a
+    /// recurrent pass that fuses across time (denoise, stabilize, upscale).
+    /// Mutually exclusive with aux_reference.
+    temporal: bool = false,
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -3416,14 +3420,24 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         path.pop(style_mark);
     }
     var aux_reference: []const u8 = "";
+    var temporal = false;
     if (getField(object, "aux")) |av| {
         const aux_mark = path.push("aux");
         if (av != .object) {
             try diags.add(path.slice(), "ml aux must be an object", .{});
-        } else if (getField(av.object, "reference")) |v| {
-            aux_reference = try expectString(diags, path, v) orelse "";
+        } else {
+            if (getField(av.object, "reference")) |v| {
+                aux_reference = try expectString(diags, path, v) orelse "";
+            }
+            if (getField(av.object, "temporal")) |v| {
+                temporal = v == .bool and v.bool;
+            }
         }
         path.pop(aux_mark);
+    }
+    if (temporal and aux_reference.len > 0) {
+        try diags.add(path.slice(), "ml aux cannot set both reference and temporal", .{});
+        temporal = false;
     }
     return .{
         .model = try arena.dupe(u8, model),
@@ -3433,6 +3447,7 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         .mask = mask,
         .style = style,
         .aux_reference = try arena.dupe(u8, aux_reference),
+        .temporal = temporal,
     };
 }
 

@@ -54,6 +54,35 @@ fn setupAux(gpa: std.mem.Allocator, engine: *ml_engine.Engine, rgba: []const u8,
     return .{ .sq = sq, .tensor = tensor, .nchw_scratch = scratch, .pixels = pixels, .width = width, .height = height };
 }
 
+/// The second input of a temporal model: input 1 must be a square RGB the same
+/// size as input 0 (both the frame), so the previous frame swaps in cleanly.
+/// `prev` holds the last frame's sampled NHWC plane, zeroed at first.
+const TemporalPlane = struct {
+    sq: ml_sample.Square,
+    nchw_scratch: []f32,
+    prev: []f32,
+
+    fn deinit(self: TemporalPlane, gpa: std.mem.Allocator) void {
+        gpa.free(self.nchw_scratch);
+        gpa.free(self.prev);
+    }
+};
+
+fn setupTemporal(gpa: std.mem.Allocator, engine: *ml_engine.Engine, input_side: u32) CreateError!TemporalPlane {
+    var dims_buf: [8]i32 = undefined;
+    const dims = engine.inputDims(1, &dims_buf) catch return error.InvalidModel;
+    const sq = ml_sample.detectSquareRgb(dims) orelse return error.InvalidModel;
+    if (sq.side != input_side) return error.InvalidModel;
+    const scratch = if (sq.layout == .nchw)
+        gpa.alloc(f32, @as(usize, sq.side) * sq.side * 3) catch return error.OutOfMemory
+    else
+        gpa.alloc(f32, 0) catch return error.OutOfMemory;
+    errdefer gpa.free(scratch);
+    const prev = gpa.alloc(f32, @as(usize, sq.side) * sq.side * 3) catch return error.OutOfMemory;
+    @memset(prev, 0);
+    return .{ .sq = sq, .nchw_scratch = scratch, .prev = prev };
+}
+
 /// A loaded author model: its backend engine, the reused RGB input plane, and
 /// an owned copy of each output tensor so a reader never touches the live
 /// engine output the next invoke overwrites. Outputs read zero until publish.
@@ -77,6 +106,13 @@ pub const Core = struct {
     aux_pixels: []u8 = &.{},
     aux_width: u32 = 0,
     aux_height: u32 = 0,
+    /// Temporal mode: input 1 is the PREVIOUS frame, held here as the last
+    /// frame's sampled NHWC plane and swapped in each compute, so a two-input
+    /// model fuses the current and previous frame (interpolation, temporal
+    /// denoise). Mutually exclusive with the reference aux above.
+    temporal: bool = false,
+    prev_input1: []f32 = &.{},
+    prev_valid: bool = false,
     output_count: u32,
     outputs: [max_outputs][]f32,
     published: bool = false,
@@ -84,7 +120,7 @@ pub const Core = struct {
     /// Loads the model under the sandbox bounds. Rejects a model whose input is
     /// not one square RGB image (NHWC or NCHW), whose output count is outside
     /// the bound, or whose bytes or tensors exceed the bounds.
-    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32) CreateError!*Core {
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*Core {
         const core = gpa.create(Core) catch return error.OutOfMemory;
         errdefer gpa.destroy(core);
 
@@ -116,12 +152,19 @@ pub const Core = struct {
             try gpa.alloc(f32, 0);
         errdefer gpa.free(nchw_scratch);
 
-        // A two-input model conditions on a bundled reference sampled into input
-        // 1; a one-input model leaves aux null.
+        // A two-input model reads a second plane: a temporal model takes the
+        // previous frame, otherwise a bundled reference. A one-input model
+        // leaves both null.
         var aux: ?AuxPlane = null;
         errdefer if (aux) |a| a.deinit(gpa);
+        var temp: ?TemporalPlane = null;
+        errdefer if (temp) |t| t.deinit(gpa);
         if (in_count == 2) {
-            aux = try setupAux(gpa, &engine, aux_rgba orelse return error.InvalidModel, aux_width, aux_height);
+            if (temporal) {
+                temp = try setupTemporal(gpa, &engine, input_side);
+            } else {
+                aux = try setupAux(gpa, &engine, aux_rgba orelse return error.InvalidModel, aux_width, aux_height);
+            }
         }
 
         // The largest tensor and the tensor count feed the sandbox admission,
@@ -136,6 +179,10 @@ pub const Core = struct {
             const ref = sampler.Frame{ .pixels = .{ .rgba8 = a.pixels }, .width = a.width, .height = a.height };
             ml_sample.writeFrame(&engine, 1, a.sq, ref, a.tensor, a.nchw_scratch) catch return error.InvalidModel;
             largest = @max(largest, a.tensor.len * @sizeOf(f32));
+        }
+        if (temp) |t| {
+            ml_sample.writeSampled(&engine, 1, t.sq, t.prev, t.nchw_scratch) catch return error.InvalidModel;
+            largest = @max(largest, t.prev.len * @sizeOf(f32));
         }
         engine.invoke() catch return error.InvalidModel;
         for (0..out_count) |i| {
@@ -162,12 +209,14 @@ pub const Core = struct {
             .input_side = input_side,
             .input_tensor = input_tensor,
             .nchw_scratch = nchw_scratch,
-            .aux_sq = if (aux) |a| a.sq else null,
+            .aux_sq = if (aux) |a| a.sq else if (temp) |t| t.sq else null,
             .aux_tensor = if (aux) |a| a.tensor else &.{},
-            .aux_nchw_scratch = if (aux) |a| a.nchw_scratch else &.{},
+            .aux_nchw_scratch = if (aux) |a| a.nchw_scratch else if (temp) |t| t.nchw_scratch else &.{},
             .aux_pixels = if (aux) |a| a.pixels else &.{},
             .aux_width = if (aux) |a| a.width else 0,
             .aux_height = if (aux) |a| a.height else 0,
+            .temporal = temporal,
+            .prev_input1 = if (temp) |t| t.prev else &.{},
             .output_count = @intCast(out_count),
             .outputs = outputs,
         };
@@ -181,6 +230,7 @@ pub const Core = struct {
         gpa.free(core.aux_tensor);
         gpa.free(core.aux_nchw_scratch);
         gpa.free(core.aux_pixels);
+        gpa.free(core.prev_input1);
         gpa.free(core.nchw_scratch);
         gpa.free(core.input_tensor);
         gpa.free(core.model_bytes);
@@ -193,10 +243,21 @@ pub const Core = struct {
     pub fn compute(core: *Core, frame: sampler.Frame) bool {
         ml_sample.writeFrame(&core.engine, 0, core.in_sq, frame, core.input_tensor, core.nchw_scratch) catch return false;
         if (core.aux_sq) |sq| {
-            const ref = sampler.Frame{ .pixels = .{ .rgba8 = core.aux_pixels }, .width = core.aux_width, .height = core.aux_height };
-            ml_sample.writeFrame(&core.engine, 1, sq, ref, core.aux_tensor, core.aux_nchw_scratch) catch return false;
+            if (core.temporal) {
+                // Input 1 is the previous frame; the first frame is its own
+                // previous so a cold start is not a black plane.
+                const src = if (core.prev_valid) core.prev_input1 else core.input_tensor;
+                ml_sample.writeSampled(&core.engine, 1, sq, src, core.aux_nchw_scratch) catch return false;
+            } else {
+                const ref = sampler.Frame{ .pixels = .{ .rgba8 = core.aux_pixels }, .width = core.aux_width, .height = core.aux_height };
+                ml_sample.writeFrame(&core.engine, 1, sq, ref, core.aux_tensor, core.aux_nchw_scratch) catch return false;
+            }
         }
         core.engine.invoke() catch return false;
+        if (core.temporal) {
+            @memcpy(core.prev_input1, core.input_tensor);
+            core.prev_valid = true;
+        }
         return true;
     }
 

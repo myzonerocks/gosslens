@@ -880,6 +880,14 @@ conditioned on a reference (a makeup, style, or identity transfer). A model that
 declares two inputs requires the reference and is otherwise rejected at load; a
 one-input model ignores the block. The frame is always the first input.
 
+The second input may instead be the previous output frame, through
+`"aux": {"temporal": true}`. The engine holds the last frame's sampled plane and
+feeds it into the model's second input each inference, so a recurrent net fuses
+the current frame with the one before it (temporal denoise, upscale, or
+stabilize). The second input must be the same square size as the first; the very
+first frame is its own previous, so a cold start is not a black plane.
+`temporal` and `reference` are mutually exclusive.
+
 An `ml.infer` node may carry a `"style"` block, `{"tensor", "sprite"}`, for a
 model that restyles the whole frame. The tensor is read as a square
 three-channel image, and each inference uploads it to the texture of the

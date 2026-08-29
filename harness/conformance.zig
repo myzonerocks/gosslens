@@ -2674,6 +2674,119 @@ fn proveMlInferAux(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a style lens whose ml.infer node reads the previous output frame into
+/// its second input (aux.temporal), plus the model. No reference png: input 1 is
+/// the last frame, not a bundled image.
+fn writeOnnxTemporalLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-temporal","version":"1.0.0","display_name":"BYO Temporal","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"restyle","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[],"aux":{"temporal":true},"style":{"tensor":0,"sprite":"canvas"}}},
+        \\  {"id":"canvas","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
+        \\   "sprite":{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates a style lens, feeds one constant frame until its output texture
+/// lands, then holds the frame long enough for the recurrent second input to
+/// settle, and captures the composited result. Caller owns the returned RGBA.
+fn captureStyleSteady(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return error.StyleNeverLanded;
+    }
+    // The frame is constant, so a handful more computes settle the previous-frame
+    // input onto that same frame before the capture reads the steady output.
+    for (0..48) |_| {
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves the temporal second input: a recurrent Add(frame, previous) fed a
+/// constant gray settles input 1 onto that gray and reads about twice the gray;
+/// the control is the same graph on a black reference (a zero input 1) reading
+/// the gray once, so the brighter temporal output proves the previous frame.
+fn proveMlInferTemporal(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxAuxProbe(arena.allocator(), 8);
+
+    // A uniform mid-gray frame, dim enough that twice its value stays unclamped.
+    const gray = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(gray);
+    var p: usize = 0;
+    while (p + 4 <= gray.len) : (p += 4) {
+        gray[p + 0] = 90;
+        gray[p + 1] = 90;
+        gray[p + 2] = 90;
+        gray[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = gray }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    // The control: the same two-input graph conditioned on a black reference, so
+    // its second input is a zero plane rather than the previous frame.
+    const black = try gpa.alloc(u8, @as(usize, 32) * 32 * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    var i: usize = 3;
+    while (i < black.len) : (i += 4) black[i] = 255;
+    var black_png: std.ArrayList(u8) = .empty;
+    defer black_png.deinit(gpa);
+    try png.encodeRgba(gpa, &black_png, black, 32, 32);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-temporal/assets");
+    try writeOnnxTemporalLens("zig-out/ml-temporal", model);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-temporal-ref/assets");
+    try writeOnnxAuxLens("zig-out/ml-temporal-ref", model, black_png.items);
+
+    const temporal_shot = try captureStyleSteady(gpa, engine, "zig-out/ml-temporal", planes);
+    defer gpa.free(temporal_shot);
+    const ref_shot = try captureStyleSteady(gpa, engine, "zig-out/ml-temporal-ref", planes);
+    defer gpa.free(ref_shot);
+
+    const temporal_sum = sumRgb(temporal_shot);
+    const ref_sum = sumRgb(ref_shot);
+    // The recurrent output carries the gray twice; the zero-reference control
+    // carries it once. Require a clear margin above the once-gray control.
+    if (temporal_sum <= ref_sum + ref_sum / 2) {
+        std.debug.print("conformance: FAIL temporal sum {d} not clearly above the zero-reference {d}\n", .{ temporal_sum, ref_sum });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a temporal ml.infer net feeds the previous output frame into its second input: a recurrent sum of the frame and its previous reads about twice a constant gray, measurably brighter than the same graph on a zero reference\n", .{});
+    return true;
+}
+
 /// Writes a dehaze.pass lens at a static strength (no asset).
 fn writeDehazeLens(dir: []const u8, strength: f32) !void {
     const page = std.heap.page_allocator;
@@ -14203,6 +14316,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer super-res");
     if (!try proveMlInferAux(gpa, engine)) return 1;
     watchHold("ml infer aux reference");
+    if (!try proveMlInferTemporal(gpa, engine)) return 1;
+    watchHold("ml infer temporal");
     if (!try proveMlInferDiffusion(gpa, engine)) return 1;
     watchHold("ml infer diffusion");
     if (!try proveMlInferText2Img(gpa, engine)) return 1;
