@@ -337,9 +337,11 @@ pub const SpriteNode = struct {
     fps: f32,
     /// The direct-manipulation gestures this sprite responds to.
     interaction: manifest.Interaction,
-    /// A segmentation channel that keys the sprite as a background behind the
-    /// subject; null draws the sprite over the frame at its rect.
+    /// A segmentation channel that keys the sprite full-frame; null draws the
+    /// sprite over the frame at its rect. mask_over selects the composite:
+    /// false fills behind the region (greenscreen), true fills over it (restyle).
     mask_channel: ?u8,
+    mask_over: bool,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -1123,7 +1125,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over });
         }
         return out.toOwnedSlice(gpa);
     }

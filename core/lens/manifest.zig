@@ -673,12 +673,16 @@ pub const SpriteField = struct {
     /// unbounded number of textures.
     frames: u32 = 1,
     fps: f32 = 12.0,
-    /// A segmentation channel that keys the sprite as a background behind the
-    /// subject it names (a greenscreen): the sprite fills where the channel is
-    /// off and the camera shows where it is on, full-frame. Null draws the
-    /// sprite over the frame at its rect as usual.
+    /// A segmentation channel that keys the sprite full-frame against the region
+    /// it names. Null draws the sprite over the frame at its rect as usual.
     mask_channel: ?u8 = null,
+    /// How a masked sprite composites: `behind` fills where the channel is off
+    /// (a greenscreen behind the subject), `over` fills where it is on (a
+    /// restyle of that region, e.g. a generative face onto the face matte).
+    mask_mode: SpriteMaskMode = .behind,
 };
+
+pub const SpriteMaskMode = enum { behind, over };
 
 pub const max_sprite_frames = 64;
 
@@ -2419,6 +2423,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(sv.object, "mask")) |v| {
                     if (try expectString(diags, path, v)) |name| {
                         if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "sprite mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                if (getField(sv.object, "mask_mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.mem.eql(u8, name, "behind")) field.mask_mode = .behind else if (std.mem.eql(u8, name, "over")) field.mask_mode = .over else try diags.add(path.slice(), "sprite mask_mode is 'behind' or 'over', found '{s}'", .{name});
                     }
                 }
                 if (getField(sv.object, "interaction")) |iv| {

@@ -650,16 +650,18 @@ sticker animates without a param or a frame count. Until its image decodes
 (all frames, for an animated sprite) the node holds the frame through, never
 blocking the chain.
 
-A `"mask"` names a segmentation channel and turns the sprite into a background
-behind the subject that channel marks (a greenscreen): the camera shows where
-the channel is on and the sprite fills the frame where it is off, composited
-full-frame the way `blend.pass` swaps a background image. It keys any sprite
-source the same way, so a bundled image, a video, or a generative texture (a
-diffusion or `ml.infer` style node targeting the sprite) becomes the
-replaced background. Naming the `person` channel restyles the room behind a
-selfie; with no live segmentation the mask reads all-subject, so the camera
-holds through and the sprite stays hidden. A sprite with no `mask` draws over
-the frame at its rect as usual.
+A `"mask"` names a segmentation channel and keys the sprite full-frame against
+the region it marks, composited the way `blend.pass` swaps a background. A
+`"mask_mode"` picks the side: `"behind"` (the default) fills the sprite where
+the channel is off and shows the camera where it is on, a greenscreen behind the
+subject; `"over"` fills the sprite where the channel is on and shows the camera
+where it is off, a restyle of that region. It keys any sprite source the same
+way, so a bundled image, a video, or a generative texture (a diffusion or
+`ml.infer` style node targeting the sprite) becomes the replaced content:
+`"mask": "person"` restyles the room behind a selfie, and `"mask": "face_skin",
+"mask_mode": "over"` lays a generative restyle onto the face and nowhere else.
+With no live segmentation the sprite stays hidden and the camera holds through,
+either way. A sprite with no `mask` draws over the frame at its rect as usual.
 
 A sprite carries an optional `"interaction"` block so a finger can move it:
 `{"drag", "pinch", "rotate", "tap_event"}`. With `"drag"` a single finger that
@@ -1120,9 +1122,11 @@ sprite; a diffusion loop over a bundled encoder, unet, and decoder restyles
 the frame and draws it through a sprite; a diffusion lens with no encoder
 generates from seeded noise and a text embedding, drawing the image through a
 sprite; a diffusion lens keyed to the person channel composites its
-generated image as the background behind the segmented subject; and an img2img
+generated image as the background behind the segmented subject; an img2img
 diffusion lens with temporal coherence warps its previous frame by optical flow
-and blends it into the restyle, holding the sprite steady across frames. The conformance harness runs today on the host (macOS): it renders each
+and blends it into the restyle, holding the sprite steady across frames; and an
+img2img diffusion lens masked to the face_skin channel in over mode composites
+its restyle onto the face matte and holds the camera elsewhere. The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

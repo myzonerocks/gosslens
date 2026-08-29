@@ -522,6 +522,10 @@ const PendingGlbCollider = struct {
     restitution: f32,
 };
 
+/// A masked sprite's segmentation key: the channel and whether the sprite fills
+/// over that region (a restyle) or behind it (a greenscreen).
+const SpriteMask = struct { channel: u8, over: bool };
+
 pub const Session = struct {
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
     /// once fed, its level and beat outrank the host's tick value.
@@ -1077,10 +1081,10 @@ pub const Session = struct {
     /// A sprite.2d node's live interaction transform, when it declares one, so
     /// the recognized gestures drag and scale it and a tap on it fires an event.
     sprite_interactions: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteInteraction) = .empty,
-    /// A sprite.2d node's segmentation channel, when it keys one, so the sprite
-    /// composites as a background behind that subject instead of drawing over
-    /// the frame. The generative-background greenscreen rides this.
-    sprite_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// A sprite.2d node's segmentation key, when it declares one: the channel
+    /// and whether the sprite fills behind that region (greenscreen) or over it
+    /// (a restyle). The generative background and full-face restyle ride this.
+    sprite_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteMask) = .empty,
     /// A model.gltf node's live turntable control, when it declares one, so the
     /// gestures orbit, dolly and roll it each tick.
     model_controls: std.AutoHashMapUnmanaged(graph.NodeIndex, ModelControlState) = .empty,
@@ -2800,12 +2804,18 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 } else {
                     sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
                 }
-                if (s.sprite_masks.get(entry.graph_index)) |channel| {
-                    // A masked sprite composites full-frame as a background
-                    // behind the segmented subject (a greenscreen): the camera
-                    // shows where the channel is on and the sprite fills where it
-                    // is off, so a generated image restyles only the background.
-                    const mask_texture = if (channel == 0) s.segmentation_texture orelse r.default_mask_texture else s.segmentation_class_textures[channel] orelse r.default_mask_texture;
+                if (s.sprite_masks.get(entry.graph_index)) |mask| {
+                    // A masked sprite composites full-frame against a channel:
+                    // behind keeps the camera on the region and fills the sprite
+                    // off it (greenscreen); over fills the sprite on the region
+                    // and keeps the camera off it (a restyle onto the face matte).
+                    const channel = mask.channel;
+                    // With no live segmentation the sprite hides either way: behind
+                    // falls back to all-foreground (camera fills), over to the zero
+                    // mask (camera fills), so a missing matte never floods the frame.
+                    const fallback = if (mask.over) r.zero_mask_texture else r.default_mask_texture;
+                    const live = if (channel == 0) s.segmentation_texture else s.segmentation_class_textures[channel];
+                    const mask_texture = live orelse fallback;
                     drawn += 1;
                     const view_id = next_view_id;
                     next_view_id += 1;
@@ -2813,7 +2823,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                     r.tile = if (is_final) s.capture_tile else null;
                     if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                    r.submitBlendPass(view_id, input_texture, sprite_texture, mask_texture);
+                    // The blend program keeps its color input where the mask is on
+                    // and its background input where off, so the two roles swap by
+                    // mode: over puts the sprite on the mask, behind puts it off.
+                    if (mask.over) {
+                        r.submitBlendPass(view_id, sprite_texture, input_texture, mask_texture);
+                    } else {
+                        r.submitBlendPass(view_id, input_texture, sprite_texture, mask_texture);
+                    }
                     if (output) |target| {
                         input_texture = target.texture;
                         if (!is_final) next_slot += 1;
@@ -8255,7 +8272,7 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
         }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
-        if (sprite.mask_channel) |channel| session.sprite_masks.put(gpa, sprite.graph_index, channel) catch {};
+        if (sprite.mask_channel) |channel| session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over }) catch {};
         // An animated GIF upgrades the node to a video texture; a node with no
         // GIF falls through to the still or image-sequence PNG path.
         if (tryStartGifSprite(session, gpa, bundle_path, sprite)) continue;

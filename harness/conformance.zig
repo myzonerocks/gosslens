@@ -2524,11 +2524,12 @@ fn onnxConvModel(a: std.mem.Allocator, in_name: []const u8, cin: i64, cout: i64,
 /// (text to image); a non-null text_embedding ships and references a cond asset;
 /// a non-null sprite_mask keys the output sprite as a background greenscreen; a
 /// positive coherence turns on the flow-warped temporal filter.
-fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: []const u8, text_embedding: ?[]const u8, sprite_mask: ?[]const u8, coherence: f32) !void {
+fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: []const u8, text_embedding: ?[]const u8, sprite_mask: ?[]const u8, sprite_mask_over: bool, coherence: f32) !void {
     const page = std.heap.page_allocator;
     const enc_field = if (enc != null) "\"encoder\":\"enc.onnx\"," else "";
     const cond_field = if (text_embedding != null) "\"text_embedding\":\"cond.bin\"," else "";
-    const mask_field = if (sprite_mask) |m| try std.fmt.allocPrint(page, ",\"mask\":\"{s}\"", .{m}) else try page.dupe(u8, "");
+    const mode = if (sprite_mask_over) ",\"mask_mode\":\"over\"" else "";
+    const mask_field = if (sprite_mask) |m| try std.fmt.allocPrint(page, ",\"mask\":\"{s}\"{s}", .{ m, mode }) else try page.dupe(u8, "");
     defer page.free(mask_field);
     const coherence_field = if (coherence > 0) try std.fmt.allocPrint(page, ",\"coherence\":{d}", .{coherence}) else try page.dupe(u8, "");
     defer page.free(coherence_field);
@@ -2554,7 +2555,9 @@ fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: 
     }
 }
 
-fn runDiffusionOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, seg_mask: ?[]const f32) !bool {
+const SegInject = struct { channel: usize, mask: []const f32 };
+
+fn runDiffusionOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, seg: ?SegInject) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
@@ -2562,10 +2565,10 @@ fn runDiffusionOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, seg_
         std.debug.print("conformance: FAIL diffusion lens activation\n", .{});
         return error.DiffusionActivationFailed;
     }
-    if (seg_mask) |m| {
+    if (seg) |inj| {
         // The set_segmentation_mask ABI is web-only; on host the mask is injected
-        // straight into the person channel the segmentation worker would fill.
-        abi.injectMaskChannel(session, 0, @ptrCast(m.ptr));
+        // straight into the channel the segmentation worker would fill.
+        abi.injectMaskChannel(session, inj.channel, @ptrCast(inj.mask.ptr));
     }
     const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
     const half_w = (planes.width + 1) / 2;
@@ -2635,7 +2638,7 @@ fn proveMlInferDiffusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-diffusion/assets");
-    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec, null, null, 0);
+    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec, null, null, false, 0);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2670,7 +2673,7 @@ fn proveMlInferText2Img(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     inline for (.{ 0.25, 0.5, 0.75, 1.0 }, 0..) |v, i| std.mem.writeInt(u32, cond_bytes[i * 4 ..][0..4], @bitCast(@as(f32, v)), .little);
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-text2img/assets");
-    try writeDiffusionLens("zig-out/ml-text2img", null, unet, dec, &cond_bytes, null, 0);
+    try writeDiffusionLens("zig-out/ml-text2img", null, unet, dec, &cond_bytes, null, false, 0);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2703,7 +2706,7 @@ fn proveMlInferGreenscreen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-greenscreen/assets");
-    try writeDiffusionLens("zig-out/ml-greenscreen", null, unet, dec, null, "person", 0);
+    try writeDiffusionLens("zig-out/ml-greenscreen", null, unet, dec, null, "person", false, 0);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2718,8 +2721,8 @@ fn proveMlInferGreenscreen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         mask[row * mask_side + col] = if (col < mask_side / 2) 1.0 else 0.0;
     };
 
-    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-greenscreen", person, mask);
-    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-greenscreen", person, mask);
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-greenscreen", person, .{ .channel = 0, .mask = mask });
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-greenscreen", person, .{ .channel = 0, .mask = mask });
     if (!drew_a or !drew_b) {
         std.debug.print("conformance: FAIL the generative greenscreen never reached the sprite\n", .{});
         return false;
@@ -2746,7 +2749,7 @@ fn proveMlInferCoherence(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-coherence/assets");
-    try writeDiffusionLens("zig-out/ml-coherence", enc, unet, dec, null, null, 0.5);
+    try writeDiffusionLens("zig-out/ml-coherence", enc, unet, dec, null, null, false, 0.5);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2758,6 +2761,52 @@ fn proveMlInferCoherence(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF an img2img diffusion lens with temporal coherence warps its previous frame by optical flow and blends it into the restyle, holding the sprite steady\n", .{});
+    return true;
+}
+
+/// Proves the full-face restyle: an img2img diffusion lens feeds a sprite keyed
+/// to the face_skin channel in `over` mode, so the generated restyle composites
+/// only where the face matte is on and the camera holds everywhere else, the
+/// masked-to-the-face path a real-time generative face filter rides.
+fn proveMlInferFaceRestyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-facerestyle/assets");
+    try writeDiffusionLens("zig-out/ml-facerestyle", enc, unet, dec, null, "face_skin", true, 0);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    // An oval face matte on the face_skin channel: the restyle lands inside it
+    // and the camera holds outside, so the filter stays on the face.
+    const mask = try a.alloc(f32, abi.segmentation_mask_len);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    const half: f32 = @floatFromInt(mask_side / 2);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        const dx = (@as(f32, @floatFromInt(col)) - half) / half;
+        const dy = (@as(f32, @floatFromInt(row)) - half) / half;
+        mask[row * mask_side + col] = if (dx * dx + dy * dy < 0.36) 1.0 else 0.0;
+    };
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-facerestyle", person, .{ .channel = 4, .mask = mask });
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-facerestyle", person, .{ .channel = 4, .mask = mask });
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the full-face restyle never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an img2img diffusion lens masked to the face_skin channel in over mode composites its restyle onto the face matte and holds the camera elsewhere\n", .{});
     return true;
 }
 
@@ -13083,6 +13132,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer greenscreen");
     if (!try proveMlInferCoherence(gpa, engine)) return 1;
     watchHold("ml infer coherence");
+    if (!try proveMlInferFaceRestyle(gpa, engine)) return 1;
+    watchHold("ml infer face restyle");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;
