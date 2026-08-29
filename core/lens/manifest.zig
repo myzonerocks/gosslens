@@ -660,6 +660,13 @@ pub const SpriteField = struct {
     /// a param_ramp can fade the sprite or a beat trigger pulse it. Empty
     /// leaves the static opacity in force.
     opacity_param: []const u8 = "",
+    /// Parameter names whose live values override the rect each frame, so a
+    /// model output (a detected box, a tracked keypoint through an ml.infer
+    /// node) can move and size the sprite. Empty leaves the static rect.
+    x_param: []const u8 = "",
+    y_param: []const u8 = "",
+    w_param: []const u8 = "",
+    h_param: []const u8 = "",
     /// Frame count for an animated sprite: 1 (default) draws assets/<id>.png
     /// once; N>1 loads assets/<id>_0.png..assets/<id>_(N-1).png and cycles
     /// them at `fps` off the lens clock. Capped so a lens cannot ask for an
@@ -2357,6 +2364,18 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(sv.object, "opacity_param")) |v| {
                     if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
                 }
+                if (getField(sv.object, "x_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.x_param = try arena.dupe(u8, s);
+                }
+                if (getField(sv.object, "y_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.y_param = try arena.dupe(u8, s);
+                }
+                if (getField(sv.object, "w_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.w_param = try arena.dupe(u8, s);
+                }
+                if (getField(sv.object, "h_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.h_param = try arena.dupe(u8, s);
+                }
                 if (getField(sv.object, "frames")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= max_sprite_frames) {
                         field.frames = @intCast(v.integer);
@@ -3878,6 +3897,22 @@ test "a sprite.2d node parses its rect and opacity" {
     try t.expectApproxEqAbs(@as(f32, 0.25), sp.x, 0.001);
     try t.expectApproxEqAbs(@as(f32, 0.5), sp.w, 0.001);
     try t.expectApproxEqAbs(@as(f32, 0.8), sp.opacity, 0.001);
+}
+
+test "a sprite.2d node parses its placement parameters" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "marker", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {},
+        \\    "sprite": {"x": 0.0, "y": 0.0, "w": 0.2, "h": 0.2, "x_param": "box_x", "y_param": "box_y"}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings("box_x", sp.x_param);
+    try t.expectEqualStrings("box_y", sp.y_param);
+    try t.expectEqualStrings("", sp.w_param);
 }
 
 test "a sprite.2d node parses its interaction block" {

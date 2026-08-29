@@ -1060,6 +1060,10 @@ pub const Session = struct {
     /// A sprite/text node's opacity parameter name (a slice into the lens
     /// manifest arena), when it binds one, so the draw reads a live opacity.
     sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
+    /// A sprite.2d node's rect parameter names (x, y, w, h; empty where
+    /// unbound), slices into the manifest arena, so a model output driving those
+    /// parameters moves and sizes the sprite each frame.
+    sprite_placement_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4][]const u8) = .empty,
     /// A sprite.2d node's live interaction transform, when it declares one, so
     /// the recognized gestures drag and scale it and a tap on it fires an event.
     sprite_interactions: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteInteraction) = .empty,
@@ -2779,6 +2783,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
                 }
                 var rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
+                applyPlacementParams(s, entry.graph_index, rect[0..4]);
                 // An interactive sprite draws at its dragged and scaled rect,
                 // keeping its own opacity, and turned by any live rotation.
                 var sprite_rotation: f32 = 0;
@@ -3535,6 +3540,7 @@ pub fn destroySession(session: *Session) void {
     session.video_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
+    session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
     session.model_controls.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
@@ -5917,6 +5923,31 @@ pub fn loadsPending(session: ?*Session) u32 {
 pub const segmentation_mask_side = segmentation.mask_side;
 pub const segmentation_mask_len = segmentation.mask_len;
 
+/// Overrides a sprite's rect axes with any bound placement parameters, the
+/// live position a model output or ramp drives. An unbound axis keeps its
+/// static value. Shared by the draw path and the headless slot proof.
+fn applyPlacementParams(s: *Session, node_index: graph.NodeIndex, rect: *[4]f32) void {
+    const pp = s.sprite_placement_params.get(node_index) orelse return;
+    const lens = if (s.active_lens) |*l| l else return;
+    if (pp[0].len > 0) rect[0] = lens.paramValue(pp[0]) orelse rect[0];
+    if (pp[1].len > 0) rect[1] = lens.paramValue(pp[1]) orelse rect[1];
+    if (pp[2].len > 0) rect[2] = lens.paramValue(pp[2]) orelse rect[2];
+    if (pp[3].len > 0) rect[3] = lens.paramValue(pp[3]) orelse rect[3];
+}
+
+/// The first sprite/text node's rect after any bound placement parameters, so
+/// a headless proof can read where a parameter-driven sprite lands without a
+/// pixel readback. Null when the active lens draws no sprite.
+pub fn firstSpriteEffectiveRect(session: *Session) ?[4]f32 {
+    var it = session.sprite_rects.iterator();
+    if (it.next()) |e| {
+        var rect = [4]f32{ e.value_ptr[0], e.value_ptr[1], e.value_ptr[2], e.value_ptr[3] };
+        applyPlacementParams(session, e.key_ptr.*, &rect);
+        return rect;
+    }
+    return null;
+}
+
 /// Uploads a mask straight into a channel's texture: the custom-segmenter mask
 /// binding feeds an author model's output here, and a headless proof pushes a
 /// synthetic mask the same way. Channel zero is the subject texture, the rest
@@ -6971,6 +7002,7 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
     session.sprite_opacity_params.clearRetainingCapacity();
+    session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
     session.model_controls.clearRetainingCapacity();
     var anim_it = session.sprite_anims.valueIterator();
@@ -8160,6 +8192,9 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
     for (sprites) |sprite| {
         session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
         if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
+        if (sprite.x_param.len > 0 or sprite.y_param.len > 0 or sprite.w_param.len > 0 or sprite.h_param.len > 0) {
+            session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
+        }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
         // An animated GIF upgrades the node to a video texture; a node with no
         // GIF falls through to the still or image-sequence PNG path.

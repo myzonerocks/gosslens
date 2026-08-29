@@ -324,6 +324,12 @@ pub const SpriteNode = struct {
     /// A parameter name whose live value overrides opacity each frame, or
     /// empty for the static opacity.
     opacity_param: []const u8,
+    /// Parameter names whose live values override the rect each frame, or empty
+    /// for the static rect. A model output driving these moves the sprite.
+    x_param: []const u8,
+    y_param: []const u8,
+    w_param: []const u8,
+    h_param: []const u8,
     /// Frame count and rate for an animated sprite; frames == 1 is static.
     frames: u32,
     fps: f32,
@@ -1112,7 +1118,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction });
         }
         return out.toOwnedSlice(gpa);
     }

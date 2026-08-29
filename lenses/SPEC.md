@@ -634,8 +634,14 @@ all optional and defaulting to the full frame at full opacity. The image
 alpha-composites within the rect over whatever the chain has drawn so far,
 so a sprite reads as a sticker or badge pinned to the frame. An
 `"opacity_param"` names a parameter whose live value overrides the opacity
-each frame, so a param_ramp fades the sprite or a beat trigger pulses it. A
-`"frames"` count above one makes the sprite animated: it loads
+each frame, so a param_ramp fades the sprite or a beat trigger pulses it.
+`"x_param"`, `"y_param"`, `"w_param"`, and `"h_param"` do the same for the
+rect: each names a parameter whose live value overrides that axis each frame,
+so a value flowing into it moves and sizes the sprite. An unbound axis keeps
+its static value. This is how a lens anchors a sprite to something a model
+found: an `ml.infer` node writes a detected box's center or a tracked
+keypoint's position into a parameter, and the sprite bound to it follows.
+A `"frames"` count above one makes the sprite animated: it loads
 `assets/<id>_0.png` through `assets/<id>_(frames-1).png` and cycles them at
 `"fps"` off the lens clock. Shipping the image as an animated GIF at
 `assets/<id>.gif` instead plays the clip as a video texture: the engine
@@ -742,6 +748,38 @@ recognized, and `onEvent(lens, name)` for each host event fired that tick
 (the same names `event('name')` triggers read). Every handler receives the
 same `lens` with its signals and params, and a handler the script omits is
 simply not called, so a lens wires only the moments it cares about.
+
+An `ml.infer` node runs a model the lens ships and turns its output into lens
+state. Like `script` and `logic.graph` it draws nothing and never joins the
+composite chain; it carries an `"ml"` block whose `"model"` names a file under
+`assets/` in the bundle. The file is a TFLite (LiteRT) or ONNX net, chosen by
+its own bytes, and it takes one square RGB image the engine fills by sampling
+the camera frame into the model's input at whichever channel order the model
+declares. Inference runs off the frame thread, so a heavy model never blocks
+the render loop; the bindings below read the newest completed result and hold
+their default until the first one lands. An author model is untrusted content
+like the rest of the bundle: its size, tensor count, and tensor sizes are
+bounded, and every value read back is finiteness-guarded, so a hostile or
+oversized model fails to load rather than reaching the frame.
+
+The `"outputs"` array binds scalars from the model into parameters. Each entry
+names a `"param"` and reads from output `"tensor"` (default 0) either the value
+at `"index"` (the default `"reduce"` of `"element"`) or, with
+`"reduce": "argmax"`, the index of the tensor's largest element - a
+classifier's predicted class. The value is written to the parameter each
+inference, clamped to the parameter's declared range like any other write.
+A detector or a pose model reaches a lens through these bindings too: it
+writes a detected box's coordinates or a keypoint's position into parameters,
+and a sprite's placement parameters (or a shader) read them to follow the
+found object.
+
+An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
+that binds a whole output tensor as a segmentation mask. The tensor is read as
+a square single-channel image, resampled to the engine's mask resolution, and
+fed to the named mask `"channel"` (the same channel names the beauty and shader
+passes key against), so a lens author's own segmenter drives the identical
+compositing the built-in segmenters do. A model whose bound tensor is not a
+square single-channel plane keeps driving its parameters and feeds no mask.
 
 The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
@@ -1022,7 +1060,11 @@ background-swap (segmentation), trigger-anim (none; a timer-driven glTF
 animation), hair-recolor (segmentation; the hair mask channel), face-paint
 (face; a `mesh.face` texture warp), and face-mask (face; a glTF model on
 `"anchor": "face"`). world-anchor (world) is proven separately on the
-deterministic replay camera track. The conformance harness runs today on the host (macOS): it renders each
+deterministic replay camera track. The byo-ml path is proven in the same
+harness: an `ml.infer` node runs a bundled TFLite segmenter and a bundled ONNX
+net, each driving a lens parameter from the frame; an author ONNX segmenter's
+output reaches the subject mask channel; and an `argmax` reduce reads a
+classifier's predicted class into a parameter. The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

@@ -2290,6 +2290,95 @@ fn proveMlInferCls(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeOnnxPlaceLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-place","version":"1.0.0","display_name":"BYO Anchor","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"px","type":"float","default":-1.0,"min":-1.0,"max":3.0}],
+        \\ "nodes":[{"id":"detect","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[{"tensor":0,"index":0,"param":"px"}]}},
+        \\  {"id":"marker","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
+        \\   "sprite":{"x":0.0,"y":0.0,"w":0.2,"h":0.2,"x_param":"px"}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+const PlaceResult = struct { px: f32, rect: [4]f32 };
+
+/// Runs the anchor bundle once: feeds a frame, waits on the model's first
+/// result, and reads back where the parameter-driven sprite lands.
+fn runPlaceOnce(engine: *abi.Engine, planes: Nv12Copy) !PlaceResult {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-place", "zig-out/ml-place".len) != .ok) {
+        std.debug.print("conformance: FAIL byo-ml anchor activation\n", .{});
+        return error.MlPlaceActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var px: f32 = -1.0;
+    var polls: usize = 0;
+    while (px == -1.0) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlPlaceTrackFailed;
+        std.Thread.yield() catch {};
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "px", "px".len, &px);
+        polls += 1;
+        if (polls > 100_000_000) return error.MlPlaceTimedOut;
+    }
+    const rect = abi.firstSpriteEffectiveRect(session) orelse return error.MlPlaceNoSprite;
+    return .{ .px = px, .rect = rect };
+}
+
+/// Proves the detection/pose anchor path: a model output drives a sprite's
+/// placement parameter, so the sprite tracks what the model found. The sprite's
+/// static x is zero; the bound parameter moves it to the model's value, and a
+/// portrait and a flat frame move it to different places.
+fn proveMlInferPlacement(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-place/assets");
+    try writeOnnxPlaceLens("zig-out/ml-place", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    const on_person = try runPlaceOnce(engine, person);
+    const on_gray = try runPlaceOnce(engine, gray);
+
+    // The sprite's x tracks the bound parameter, which the model drove off the
+    // static zero to its own output.
+    if (@abs(on_person.rect[0] - on_person.px) > 1e-6) {
+        std.debug.print("conformance: FAIL the sprite x {d} did not track its placement parameter {d}\n", .{ on_person.rect[0], on_person.px });
+        return false;
+    }
+    if (!(on_person.rect[0] > 0.01)) {
+        std.debug.print("conformance: FAIL the placement parameter did not move the sprite off its static x ({d})\n", .{on_person.rect[0]});
+        return false;
+    }
+    if (@abs(on_person.rect[0] - on_gray.rect[0]) < 1e-4) {
+        std.debug.print("conformance: FAIL the anchor did not track the frame ({d} vs {d})\n", .{ on_person.rect[0], on_gray.rect[0] });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a model output drives a sprite's placement parameter, the detection and pose anchor path\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -12600,6 +12689,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer seg mask");
     if (!try proveMlInferCls(gpa, engine)) return 1;
     watchHold("ml infer cls");
+    if (!try proveMlInferPlacement(gpa, engine)) return 1;
+    watchHold("ml infer placement");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;
