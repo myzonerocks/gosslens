@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 58u
+#define GOSS_ABI_MINOR 59u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -575,6 +575,12 @@ goss_status goss_session_body_result_at(goss_session *session, uint32_t index, g
  * metres per pixel, row major, with the near and far metres that bound it.
  * A zero size clears it. Kept for depth occlusion against the content. */
 goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far);
+
+/* Graph thread. Submits the camera intrinsics an undistort.pass corrects for:
+ * the focal lengths and principal point in pixels of the submitted frame, and
+ * the radial distortion coefficients (k1, k2 read; further terms ignored). A
+ * zero focal length or zero coefficient count clears them. */
+goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len);
 
 /* Segments a host-provided still RGBA image (width*height*4 bytes, row-major):
  * converts it to NV12 and feeds the running segmenter, so the next render

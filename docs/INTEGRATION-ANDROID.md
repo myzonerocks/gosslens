@@ -224,6 +224,17 @@ pixel, row major, with the near and far range it spans:
 
 An empty array clears it. The engine keeps the latest map for the occlusion pass.
 
+## Camera intrinsics
+
+If the camera reports its calibration, feed it once so an `undistort.pass` can
+straighten wide-angle lens distortion. The focal lengths and principal point are
+in pixels of the submitted frame, followed by the radial coefficients (k1, k2):
+
+    val i = frame.camera.imageIntrinsics       // CameraIntrinsics
+    session.submitCameraIntrinsics(i.focalLength[0], i.focalLength[1], i.principalPoint[0], i.principalPoint[1], floatArrayOf(k1, k2))
+
+An empty array clears them, leaving an `undistort.pass` inert.
+
 ## Geofilters
 
 A lens can gate on place. Feed a location fix and describe the region the lens

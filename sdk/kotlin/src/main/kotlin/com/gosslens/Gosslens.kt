@@ -89,6 +89,7 @@ object Gosslens {
     internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
+    internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
     internal external fun nativeSubmitSegmentationImage(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeSetMakeupReference(session: Long, rgba: ByteBuffer, width: Int, height: Int, landmarks: ByteBuffer, count: Int): Int
     internal external fun nativeBodyCount(session: Long): Int
@@ -1055,6 +1056,18 @@ class GossSession private constructor(
         buf.asFloatBuffer().put(depth)
         buf.rewind()
         return Gosslens.nativeSubmitDepth(handle, buf, width, height, near, far) == 0
+    }
+
+    /** Submits the camera intrinsics an undistort.pass corrects for: the focal
+     * lengths and principal point in pixels of the submitted frame, and the
+     * radial distortion coefficients (k1, k2 read). An empty array or zero
+     * focal length clears them, leaving an undistort.pass inert. */
+    fun submitCameraIntrinsics(fx: Float, fy: Float, cx: Float, cy: Float, distortion: FloatArray): Boolean {
+        if (distortion.isEmpty()) return Gosslens.nativeSubmitCameraIntrinsics(handle, 0f, 0f, 0f, 0f, stage(4), 0) == 0
+        val buf = stage(distortion.size * 4)
+        buf.asFloatBuffer().put(distortion)
+        buf.rewind()
+        return Gosslens.nativeSubmitCameraIntrinsics(handle, fx, fy, cx, cy, buf, distortion.size) == 0
     }
 
     /** Segments a host-provided still image through the running segmenter:

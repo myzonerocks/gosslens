@@ -491,6 +491,14 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitDepth(env: *JniEnv, cls: jobjec
     return @intFromEnum(abi.goss_session_submit_depth(sessionFromHandle(session), depth, @intCast(@max(width, 0)), @intCast(@max(height, 0)), near, far));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitCameraIntrinsics(env: *JniEnv, cls: jobject, session: i64, fx: f32, fy: f32, cx: f32, cy: f32, distortion_buffer: jobject, distortion_len: i32) i32 {
+    _ = cls;
+    if (distortion_len == 0) return @intFromEnum(abi.goss_session_submit_camera_intrinsics(sessionFromHandle(session), 0, 0, 0, 0, null, 0));
+    const bytes = getDirectBufferAddress(env, distortion_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const distortion: [*]const f32 = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_submit_camera_intrinsics(sessionFromHandle(session), fx, fy, cx, cy, distortion, @intCast(@max(distortion_len, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSubmitSegmentationImage(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, width: i32, height: i32) i32 {
     _ = cls;
     if (width == 0 or height == 0) return @intFromEnum(abi.Status.invalid_argument);

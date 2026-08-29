@@ -208,6 +208,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
+    "goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)",
     "goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_set_makeup_reference(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height, const float *landmarks, uint32_t landmark_count)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
@@ -1053,6 +1054,19 @@ pub const Session = struct {
     /// The lift and denoise (strength, denoise) of each spliced lowlight.pass
     /// node, resolved once at activation.
     lowlight_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// The correction strength of each spliced undistort.pass node, resolved
+    /// once at activation. The radial map itself rides the submitted intrinsics.
+    undistort_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The camera intrinsics an undistort.pass corrects for: the two radial
+    /// coefficients, the principal point in pixels of the submitted frame
+    /// (normalized against the working size at draw), the pixel aspect (fx/fy),
+    /// and whether any have been submitted. Inert with none submitted.
+    intrinsics_set: bool = false,
+    intrinsics_k1: f32 = 0,
+    intrinsics_k2: f32 = 0,
+    intrinsics_cx: f32 = 0,
+    intrinsics_cy: f32 = 0,
+    intrinsics_aspect: f32 = 1,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1933,6 +1947,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .glare => s.glare_params.contains(entry.graph_index),
             .vignette => s.vignette_params.contains(entry.graph_index),
             .lowlight => s.lowlight_params.contains(entry.graph_index),
+            .undistort => s.undistort_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2264,6 +2279,26 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const texel_w = 1.0 / @as(f32, @floatFromInt(width));
                 const texel_h = 1.0 / @as(f32, @floatFromInt(height));
                 r.submitLowLightPass(view_id, input_texture, lp[0], lp[1], texel_w, texel_h);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .undistort => {
+                const strength = s.undistort_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // Inert until intrinsics are submitted; then the principal point
+                // normalizes against the working size the frame is sampled at.
+                const eff = if (s.intrinsics_set) strength else 0;
+                const cx = if (s.intrinsics_set and width > 0) s.intrinsics_cx / @as(f32, @floatFromInt(width)) else 0.5;
+                const cy = if (s.intrinsics_set and height > 0) s.intrinsics_cy / @as(f32, @floatFromInt(height)) else 0.5;
+                r.submitUndistortPass(view_id, input_texture, s.intrinsics_k1, s.intrinsics_k2, eff, s.intrinsics_aspect, cx, cy);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3839,6 +3874,7 @@ pub fn destroySession(session: *Session) void {
     session.glare_params.deinit(session.engine.gpa);
     session.vignette_params.deinit(session.engine.gpa);
     session.lowlight_params.deinit(session.engine.gpa);
+    session.undistort_params.deinit(session.engine.gpa);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
@@ -6465,6 +6501,28 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
     return .ok;
 }
 
+/// Submits the camera intrinsics an undistort.pass corrects for: the focal
+/// lengths and principal point in pixels of the submitted frame, and the radial
+/// distortion coefficients (k1, k2 read; further terms ignored). A zero focal
+/// length or zero coefficient count clears them, leaving an undistort.pass inert.
+pub export fn goss_session_submit_camera_intrinsics(session: ?*Session, fx: f32, fy: f32, cx: f32, cy: f32, distortion: ?[*]const f32, distortion_len: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (fx <= 0 or fy <= 0 or distortion_len == 0) {
+        s.intrinsics_set = false;
+        s.intrinsics_k1 = 0;
+        s.intrinsics_k2 = 0;
+        return .ok;
+    }
+    const coeffs = distortion orelse return .invalid_argument;
+    s.intrinsics_k1 = coeffs[0];
+    s.intrinsics_k2 = if (distortion_len >= 2) coeffs[1] else 0;
+    s.intrinsics_cx = cx;
+    s.intrinsics_cy = cy;
+    s.intrinsics_aspect = fx / fy;
+    s.intrinsics_set = true;
+    return .ok;
+}
+
 /// Segments a host-provided still RGBA image: converts it to NV12 and feeds
 /// the running segmenter, so the next render picks up the mask the same way a
 /// camera frame would. again when no segmenter is enabled.
@@ -7350,6 +7408,7 @@ fn destroyBlendState(session: *Session) void {
     session.glare_params.clearRetainingCapacity();
     session.vignette_params.clearRetainingCapacity();
     session.lowlight_params.clearRetainingCapacity();
+    session.undistort_params.clearRetainingCapacity();
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
@@ -7926,6 +7985,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createGlareParams(s, gpa) catch {};
     createVignetteParams(s, gpa) catch {};
     createLowLightParams(s, gpa) catch {};
+    createUndistortParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -8049,6 +8109,17 @@ fn createLowLightParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(nodes);
     for (nodes) |n| {
         session.lowlight_params.put(gpa, n.graph_index, .{ n.strength, n.denoise }) catch {};
+    }
+}
+
+/// Resolves every spliced undistort.pass node's correction strength into
+/// session.undistort_params once at activation - mirrors createLowLightParams.
+fn createUndistortParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.undistortPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.undistort_params.put(gpa, n.graph_index, n.strength) catch {};
     }
 }
 
@@ -10105,6 +10176,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createGlareParams(session, gpa);
     try createVignetteParams(session, gpa);
     try createLowLightParams(session, gpa);
+    try createUndistortParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);

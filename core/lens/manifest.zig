@@ -305,6 +305,13 @@ pub const LowLightField = struct {
     denoise: f32 = 0.5,
 };
 
+pub const UndistortField = struct {
+    /// An undistort.pass node's `strength` (0..1) blends toward the lens-corrected
+    /// sample. The radial coefficients and principal point come from the camera
+    /// intrinsics the host submits; with none submitted the node is inert.
+    strength: f32 = 1,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1034,6 +1041,8 @@ pub const Node = struct {
     vignette: ?VignetteField = null,
     /// Set only on a lowlight.pass node: its shadow lift and denoise.
     lowlight: ?LowLightField = null,
+    /// Set only on an undistort.pass node: its correction strength.
+    undistort: ?UndistortField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -1981,6 +1990,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 lowlight_field = field;
             }
             path.pop(lmark);
+        }
+        var undistort_field: ?UndistortField = null;
+        if (getField(object, "undistort")) |uv| {
+            const umark = path.push("undistort");
+            if (!std.mem.eql(u8, node_type, "undistort.pass")) {
+                try diags.add(path.slice(), "undistort is an undistort.pass field, found it on '{s}'", .{node_type});
+            } else if (uv != .object) {
+                try diags.add(path.slice(), "undistort must be an object", .{});
+            } else {
+                var field: UndistortField = .{};
+                if (getField(uv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                undistort_field = field;
+            }
+            path.pop(umark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3248,6 +3271,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .glare = glare_field,
             .vignette = vignette_field,
             .lowlight = lowlight_field,
+            .undistort = undistort_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

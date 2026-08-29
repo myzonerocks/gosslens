@@ -398,6 +398,14 @@ pixel's neighbourhood damps the noise that lives in dark regions by `denoise`
 default 0.6) while holding the highlights near white. With both 0 the frame is
 untouched. Like `grade.pass` it ships no asset and is always ready.
 
+An `"undistort.pass"` node is a lens-distortion correction post-effect. It
+carries an `"undistort": {"strength"}` block (0..1, default 1) that blends toward
+the corrected sample. The radial coefficients and principal point come from the
+camera intrinsics the host submits through the ABI, not the manifest: for each
+output pixel the sampler reads the input at the radius the true point sits at,
+`r_d = r*(1 + k1 r^2 + k2 r^4)`, straightening a barrel or pincushion frame. With
+no intrinsics submitted the node is inert. It ships no asset and is always ready.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1266,6 +1274,8 @@ holds; a vignette.pass applies a radial luma-gain, a positive strength lifting
 the corners and a negative sinking them where the centre inside the radius holds;
 a lowlight.pass lifts a dark noisy region far more than it moves a highlight and
 cuts the shadow noise, where the strength-0 denoise-0 control is untouched;
+an undistort.pass applies the submitted radial map, a positive k1 shrinking a
+centred disk and a negative growing it, where no intrinsics leaves it inert;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

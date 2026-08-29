@@ -3206,6 +3206,107 @@ fn proveLowLight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes an undistort.pass lens at a static correction strength (no asset).
+fn writeUndistortLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.undistort","version":"1.0.0","display_name":"Undistort","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"u","type":"undistort.pass","inputs":{{"frame":"camera"}},"params":{{}},"undistort":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Activates an undistort lens, submits the given intrinsics (an empty
+/// distortion clears them), holds the frame, and captures the composited result.
+fn captureUndistortShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, fx: f32, cx: f32, cy: f32, distortion: []const f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    _ = abi.goss_session_submit_camera_intrinsics(session, fx, fx, cx, cy, if (distortion.len == 0) null else distortion.ptr, @intCast(distortion.len));
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Counts the bright (near-white) pixels of a capture, a stand-in for a white
+/// region's area.
+fn brightArea(shot: []const u8) u64 {
+    var count: u64 = 0;
+    var i: usize = 0;
+    while (i + 4 <= shot.len) : (i += 4) {
+        if (@as(u32, shot[i]) + shot[i + 1] + shot[i + 2] > 600) count += 1;
+    }
+    return count;
+}
+
+/// Proves the intrinsics-driven undistort: a centred white disk on black. A
+/// positive k1 samples the input further out for a given output radius, so the
+/// disk shrinks; a negative k1 magnifies it. The submitted coefficient drives
+/// the effect, and with no intrinsics the node is inert.
+fn proveUndistort(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const u = @as(f32, @floatFromInt(col)) / @as(f32, width) - 0.5;
+        const v = @as(f32, @floatFromInt(row)) / @as(f32, height) - 0.5;
+        const white = (u * u + v * v) < 0.3 * 0.3;
+        const val: u8 = if (white) 255 else 0;
+        f[idx + 0] = val;
+        f[idx + 1] = val;
+        f[idx + 2] = val;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/undistort");
+    try writeUndistortLens("zig-out/undistort", 1.0);
+
+    // The principal point at the frame centre, a square pixel aspect, and the
+    // radial coefficient submitted three ways.
+    const shrink = [_]f32{ 0.6, 0.0 };
+    const grow = [_]f32{ -0.6, 0.0 };
+    const none = [_]f32{};
+    const shot_shrink = try captureUndistortShot(gpa, engine, "zig-out/undistort", planes, 400, 200, 150, &shrink);
+    defer gpa.free(shot_shrink);
+    const shot_grow = try captureUndistortShot(gpa, engine, "zig-out/undistort", planes, 400, 200, 150, &grow);
+    defer gpa.free(shot_grow);
+    const shot_none = try captureUndistortShot(gpa, engine, "zig-out/undistort", planes, 0, 0, 0, &none);
+    defer gpa.free(shot_none);
+
+    const area_shrink = brightArea(shot_shrink);
+    const area_grow = brightArea(shot_grow);
+    const area_none = brightArea(shot_none);
+    if (!(area_shrink < area_none)) {
+        std.debug.print("conformance: FAIL undistort with a positive k1 did not shrink the disk (shrink {d}, none {d})\n", .{ area_shrink, area_none });
+        return false;
+    }
+    if (!(area_grow > area_none)) {
+        std.debug.print("conformance: FAIL undistort with a negative k1 did not grow the disk (grow {d}, none {d})\n", .{ area_grow, area_none });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an undistort.pass applies the submitted radial map: a positive k1 shrinks a centred disk and a negative grows it, where no intrinsics leaves it inert (areas {d} < {d} < {d})\n", .{ area_shrink, area_none, area_grow });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -14526,6 +14627,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("vignette pass");
     if (!try proveLowLight(gpa, engine)) return 1;
     watchHold("lowlight pass");
+    if (!try proveUndistort(gpa, engine)) return 1;
+    watchHold("undistort pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

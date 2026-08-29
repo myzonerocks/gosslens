@@ -248,6 +248,20 @@ extension GossSession {
         }
     }
 
+    /// Submits the camera intrinsics an undistort.pass corrects for: the focal
+    /// lengths and principal point in pixels of the submitted frame, and the
+    /// radial distortion coefficients (k1, k2 read). An empty array or zero
+    /// focal length clears them, leaving an undistort.pass inert.
+    public func submitCameraIntrinsics(fx: Float, fy: Float, cx: Float, cy: Float, distortion: [Float]) throws {
+        if distortion.isEmpty {
+            try checked(goss_session_submit_camera_intrinsics(handle, 0, 0, 0, 0, nil, 0))
+            return
+        }
+        try distortion.withUnsafeBufferPointer { buf in
+            try checked(goss_session_submit_camera_intrinsics(handle, fx, fy, cx, cy, buf.baseAddress, UInt32(buf.count)))
+        }
+    }
+
     /// Segments a host-provided still image through the running segmenter:
     /// rgba is width by height RGBA8 pixels, row major. The mask reaches the
     /// active lens the way a camera frame's would. Throws again with no

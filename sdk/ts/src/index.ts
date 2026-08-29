@@ -1489,6 +1489,20 @@ export class GossSession {
     this.mod.ccall("goss_session_submit_depth", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, width, height, near, far]);
   }
 
+  /// Submits the camera intrinsics an undistort.pass corrects for: the focal
+  /// lengths and principal point in pixels of the submitted frame, and the
+  /// radial distortion coefficients (k1, k2 read). An empty array or zero focal
+  /// length clears them, leaving an undistort.pass inert.
+  submitCameraIntrinsics(fx: number, fy: number, cx: number, cy: number, distortion: Float32Array): void {
+    if (distortion.length === 0) {
+      this.mod.ccall("goss_session_submit_camera_intrinsics", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, 0, 0, 0, 0, 0, 0]);
+      return;
+    }
+    const ptr = this.scratch(distortion.length * 4);
+    this.mod.HEAPF32.set(distortion, ptr >> 2);
+    this.mod.ccall("goss_session_submit_camera_intrinsics", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, fx, fy, cx, cy, ptr, distortion.length]);
+  }
+
   /// Segments a host-provided still image through the running segmenter: rgba
   /// is width by height RGBA8 pixels, row major. The mask reaches the active
   /// lens the way a camera frame's would.

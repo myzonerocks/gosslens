@@ -195,6 +195,17 @@ map is metres per pixel, row major, with the near and far range it spans:
 
 An empty array clears it. The engine keeps the latest map for the occlusion pass.
 
+## Camera intrinsics
+
+If the camera reports its calibration, feed it once so an `undistort.pass` can
+straighten wide-angle lens distortion. The focal lengths and principal point are
+in pixels of the submitted frame, followed by the radial coefficients (k1, k2):
+
+    let m = frame.camera.intrinsics          // ARCamera.intrinsics, column major
+    try session.submitCameraIntrinsics(fx: m[0][0], fy: m[1][1], cx: m[2][0], cy: m[2][1], distortion: [k1, k2])
+
+An empty array clears them, leaving an `undistort.pass` inert.
+
 ## Segmentation
 
 A lens's passes name the region they act on by one of sixteen mask channels:

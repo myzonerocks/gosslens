@@ -526,6 +526,18 @@ pub const Renderer = struct {
         _ = texel_h;
     }
 
+    pub fn submitUndistortPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, k1: f32, k2: f32, strength: f32, aspect: f32, cx: f32, cy: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = k1;
+        _ = k2;
+        _ = strength;
+        _ = aspect;
+        _ = cx;
+        _ = cy;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
@@ -1044,6 +1056,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadLowLightProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadUndistortProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 
