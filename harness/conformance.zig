@@ -2521,20 +2521,23 @@ fn onnxConvModel(a: std.mem.Allocator, in_name: []const u8, cin: i64, cout: i64,
 }
 
 /// A null encoder omits the encoder key, so the lens starts from pure noise
-/// (text to image); a non-null text_embedding ships and references a cond asset.
-fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: []const u8, text_embedding: ?[]const u8) !void {
+/// (text to image); a non-null text_embedding ships and references a cond asset;
+/// a non-null sprite_mask keys the output sprite as a background greenscreen.
+fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: []const u8, text_embedding: ?[]const u8, sprite_mask: ?[]const u8) !void {
     const page = std.heap.page_allocator;
     const enc_field = if (enc != null) "\"encoder\":\"enc.onnx\"," else "";
     const cond_field = if (text_embedding != null) "\"text_embedding\":\"cond.bin\"," else "";
+    const mask_field = if (sprite_mask) |m| try std.fmt.allocPrint(page, ",\"mask\":\"{s}\"", .{m}) else try page.dupe(u8, "");
+    defer page.free(mask_field);
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
         \\ "nodes":[{{"id":"restyle","type":"diffusion","params":{{}},
         \\   "diffusion":{{{s}{s}"unet":"unet.onnx","decoder":"dec.onnx","sprite":"canvas","steps":2,"strength":0.5}}}},
         \\  {{"id":"canvas","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},
-        \\   "sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}}}],
+        \\   "sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0{s}}}}}],
         \\ "triggers":[]}}
-    , .{ enc_field, cond_field });
+    , .{ enc_field, cond_field, mask_field });
     defer page.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
@@ -2548,13 +2551,18 @@ fn writeDiffusionLens(dir: []const u8, enc: ?[]const u8, unet: []const u8, dec: 
     }
 }
 
-fn runDiffusionOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
+fn runDiffusionOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, seg_mask: ?[]const f32) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
     if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
         std.debug.print("conformance: FAIL diffusion lens activation\n", .{});
         return error.DiffusionActivationFailed;
+    }
+    if (seg_mask) |m| {
+        // The set_segmentation_mask ABI is web-only; on host the mask is injected
+        // straight into the person channel the segmentation worker would fill.
+        abi.injectMaskChannel(session, 0, @ptrCast(m.ptr));
     }
     const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
     const half_w = (planes.width + 1) / 2;
@@ -2593,15 +2601,15 @@ fn proveMlInferDiffusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-diffusion/assets");
-    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec, null);
+    try writeDiffusionLens("zig-out/ml-diffusion", enc, unet, dec, null, null);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
     const person = try rgbaToNv12(gpa, corpus.frame);
     defer person.deinit(gpa);
 
-    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-diffusion", person);
-    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-diffusion", person);
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-diffusion", person, null);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-diffusion", person, null);
     if (!drew_a or !drew_b) {
         std.debug.print("conformance: FAIL the diffusion restyle never reached the sprite\n", .{});
         return false;
@@ -2628,20 +2636,61 @@ fn proveMlInferText2Img(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     inline for (.{ 0.25, 0.5, 0.75, 1.0 }, 0..) |v, i| std.mem.writeInt(u32, cond_bytes[i * 4 ..][0..4], @bitCast(@as(f32, v)), .little);
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-text2img/assets");
-    try writeDiffusionLens("zig-out/ml-text2img", null, unet, dec, &cond_bytes);
+    try writeDiffusionLens("zig-out/ml-text2img", null, unet, dec, &cond_bytes, null);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
     const person = try rgbaToNv12(gpa, corpus.frame);
     defer person.deinit(gpa);
 
-    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-text2img", person);
-    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-text2img", person);
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-text2img", person, null);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-text2img", person, null);
     if (!drew_a or !drew_b) {
         std.debug.print("conformance: FAIL the text to image loop never reached the sprite\n", .{});
         return false;
     }
     std.debug.print("conformance: PROOF a diffusion lens with no encoder generates from seeded noise and a text embedding, drawing the image through a sprite\n", .{});
+    return true;
+}
+
+/// Proves the generative-background greenscreen: a text-to-image diffusion lens
+/// feeds a sprite keyed to the person channel, so the generated image composites
+/// as the background behind the subject the segmentation mask marks, keeping the
+/// camera where the subject is and the generated image everywhere else.
+fn proveMlInferGreenscreen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-greenscreen/assets");
+    try writeDiffusionLens("zig-out/ml-greenscreen", null, unet, dec, null, "person");
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    // A half-and-half subject mask: the left half reads as the subject (kept from
+    // the camera), the right half as background (filled by the generated image).
+    const mask = try a.alloc(f32, abi.segmentation_mask_len);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        mask[row * mask_side + col] = if (col < mask_side / 2) 1.0 else 0.0;
+    };
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-greenscreen", person, mask);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-greenscreen", person, mask);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the generative greenscreen never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion lens keyed to the person channel composites its generated image as the background behind the segmented subject\n", .{});
     return true;
 }
 
@@ -12963,6 +13012,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer diffusion");
     if (!try proveMlInferText2Img(gpa, engine)) return 1;
     watchHold("ml infer text2img");
+    if (!try proveMlInferGreenscreen(gpa, engine)) return 1;
+    watchHold("ml infer greenscreen");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

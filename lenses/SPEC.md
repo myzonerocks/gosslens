@@ -650,6 +650,17 @@ sticker animates without a param or a frame count. Until its image decodes
 (all frames, for an animated sprite) the node holds the frame through, never
 blocking the chain.
 
+A `"mask"` names a segmentation channel and turns the sprite into a background
+behind the subject that channel marks (a greenscreen): the camera shows where
+the channel is on and the sprite fills the frame where it is off, composited
+full-frame the way `blend.pass` swaps a background image. It keys any sprite
+source the same way, so a bundled image, a video, or a generative texture (a
+diffusion or `ml.infer` style node targeting the sprite) becomes the
+replaced background. Naming the `person` channel restyles the room behind a
+selfie; with no live segmentation the mask reads all-subject, so the camera
+holds through and the sprite stays hidden. A sprite with no `mask` draws over
+the frame at its rect as usual.
+
 A sprite carries an optional `"interaction"` block so a finger can move it:
 `{"drag", "pinch", "rotate", "tap_event"}`. With `"drag"` a single finger that
 goes down on the sprite slides it, with `"pinch"` two fingers scale it about
@@ -1098,9 +1109,10 @@ output reaches the subject mask channel; an `argmax` reduce reads a
 classifier's predicted class into a parameter; a model output moves a sprite
 through its placement parameters; a restyle net's output image draws through a
 sprite; a diffusion loop over a bundled encoder, unet, and decoder restyles
-the frame and draws it through a sprite; and a diffusion lens with no encoder
+the frame and draws it through a sprite; a diffusion lens with no encoder
 generates from seeded noise and a text embedding, drawing the image through a
-sprite. The conformance harness runs today on the host (macOS): it renders each
+sprite; and a diffusion lens keyed to the person channel composites its
+generated image as the background behind the segmented subject. The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

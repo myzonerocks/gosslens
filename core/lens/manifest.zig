@@ -673,6 +673,11 @@ pub const SpriteField = struct {
     /// unbounded number of textures.
     frames: u32 = 1,
     fps: f32 = 12.0,
+    /// A segmentation channel that keys the sprite as a background behind the
+    /// subject it names (a greenscreen): the sprite fills where the channel is
+    /// off and the camera shows where it is on, full-frame. Null draws the
+    /// sprite over the frame at its rect as usual.
+    mask_channel: ?u8 = null,
 };
 
 pub const max_sprite_frames = 64;
@@ -2408,6 +2413,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     } else try diags.add(path.slice(), "sprite frames must be an integer 1..{d}", .{max_sprite_frames});
                 }
                 if (getField(sv.object, "fps")) |v| field.fps = @floatCast(numberOf(v) orelse field.fps);
+                if (getField(sv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "sprite mask names an unknown channel '{s}'", .{name});
+                    }
+                }
                 if (getField(sv.object, "interaction")) |iv| {
                     if (iv == .object) {
                         var it: Interaction = .{};

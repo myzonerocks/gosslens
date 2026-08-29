@@ -1077,6 +1077,10 @@ pub const Session = struct {
     /// A sprite.2d node's live interaction transform, when it declares one, so
     /// the recognized gestures drag and scale it and a tap on it fires an event.
     sprite_interactions: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteInteraction) = .empty,
+    /// A sprite.2d node's segmentation channel, when it keys one, so the sprite
+    /// composites as a background behind that subject instead of drawing over
+    /// the frame. The generative-background greenscreen rides this.
+    sprite_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
     /// A model.gltf node's live turntable control, when it declares one, so the
     /// gestures orbit, dolly and roll it each tick.
     model_controls: std.AutoHashMapUnmanaged(graph.NodeIndex, ModelControlState) = .empty,
@@ -1956,7 +1960,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // once all its frames have); until then it holds the frame
             // through, never blocking the chain.
             .sprite => s.sprite_textures.contains(entry.graph_index) or s.text3d_meshes.contains(entry.graph_index) or
-                s.video_textures.contains(entry.graph_index) or
+                s.video_textures.contains(entry.graph_index) or s.ml_style_textures.contains(entry.graph_index) or
                 (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
         };
         if (ready) ready_count += 1;
@@ -2796,6 +2800,26 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 } else {
                     sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
                 }
+                if (s.sprite_masks.get(entry.graph_index)) |channel| {
+                    // A masked sprite composites full-frame as a background
+                    // behind the segmented subject (a greenscreen): the camera
+                    // shows where the channel is on and the sprite fills where it
+                    // is off, so a generated image restyles only the background.
+                    const mask_texture = if (channel == 0) s.segmentation_texture orelse r.default_mask_texture else s.segmentation_class_textures[channel] orelse r.default_mask_texture;
+                    drawn += 1;
+                    const view_id = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    r.tile = if (is_final) s.capture_tile else null;
+                    if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                    r.submitBlendPass(view_id, input_texture, sprite_texture, mask_texture);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 var rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
                 applyPlacementParams(s, entry.graph_index, rect[0..4]);
                 // An interactive sprite draws at its dragged and scaled rect,
@@ -3556,6 +3580,7 @@ pub fn destroySession(session: *Session) void {
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
+    session.sprite_masks.deinit(session.engine.gpa);
     session.model_controls.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
@@ -7036,6 +7061,7 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_opacity_params.clearRetainingCapacity();
     session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
+    session.sprite_masks.clearRetainingCapacity();
     session.model_controls.clearRetainingCapacity();
     var anim_it = session.sprite_anims.valueIterator();
     while (anim_it.next()) |anim| {
@@ -8229,6 +8255,7 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
         }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
+        if (sprite.mask_channel) |channel| session.sprite_masks.put(gpa, sprite.graph_index, channel) catch {};
         // An animated GIF upgrades the node to a video texture; a node with no
         // GIF falls through to the still or image-sequence PNG path.
         if (tryStartGifSprite(session, gpa, bundle_path, sprite)) continue;
