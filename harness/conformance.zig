@@ -2568,6 +2568,112 @@ fn proveMlInferSuperRes(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A reference-conditioned probe: Add(frame, reference), two square-RGB inputs
+/// to one output, so a net that consumes a second input plane is exercised. Add
+/// is symmetric, so the proof holds whichever input the engine orders first.
+fn buildOnnxAuxProbe(a: std.mem.Allocator, side: i64) []const u8 {
+    const add = onnxNode(a, "Add", &.{ "x", "ref" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, add);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "ref", &.{ 1, 3, side, side }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, 3, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a style lens whose ml.infer node conditions on a bundled reference
+/// image (aux.reference), plus the model and the reference png.
+fn writeOnnxAuxLens(dir: []const u8, model: []const u8, ref_png: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-aux","version":"1.0.0","display_name":"BYO Aux","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"restyle","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[],"aux":{"reference":"ref"},"style":{"tensor":0,"sprite":"canvas"}}},
+        \\  {"id":"canvas","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
+        \\   "sprite":{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+    const ref_path = try std.fmt.allocPrint(page, "{s}/assets/ref.png", .{dir});
+    defer page.free(ref_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = ref_path, .data = ref_png });
+}
+
+/// Whether a style lens from `dir` produces its texture within a bounded number
+/// of frames; false means its worker never loaded (the negative control).
+fn styleReadyBounded(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return false;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    for (0..600) |_| {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (abi.styleTextureCount(session) > 0) return true;
+    }
+    return false;
+}
+
+/// Proves the reference-conditioned second input: a two-input net (frame plus a
+/// bundled reference) feeds both inputs and draws through the style sprite; the
+/// negative control proves the reference is required, the same two-input model
+/// with no reference rejected at load and never drawing.
+fn proveMlInferAux(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxAuxProbe(arena.allocator(), 8);
+
+    const ref = try gpa.alloc(u8, @as(usize, 32) * 32 * 4);
+    defer gpa.free(ref);
+    var i: usize = 0;
+    while (i < ref.len) : (i += 4) {
+        ref[i + 0] = 40;
+        ref[i + 1] = 80;
+        ref[i + 2] = 120;
+        ref[i + 3] = 255;
+    }
+    var ref_png: std.ArrayList(u8) = .empty;
+    defer ref_png.deinit(gpa);
+    try png.encodeRgba(gpa, &ref_png, ref, 32, 32);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-aux/assets");
+    try writeOnnxAuxLens("zig-out/ml-aux", model, ref_png.items);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-aux-noref/assets");
+    try writeOnnxStyleLens("zig-out/ml-aux-noref", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const with_ref = try runStyleSideOnce(engine, "zig-out/ml-aux", person);
+    if (with_ref == 0) {
+        std.debug.print("conformance: FAIL a two-input reference net never drew\n", .{});
+        return false;
+    }
+    const no_ref = try styleReadyBounded(engine, "zig-out/ml-aux-noref", person);
+    if (no_ref) {
+        std.debug.print("conformance: FAIL a two-input model with no reference still loaded\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a two-input ml.infer net conditions on a bundled reference: with the reference it feeds both inputs and draws, and the same model with no reference is rejected at load\n", .{});
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -13862,6 +13968,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer style");
     if (!try proveMlInferSuperRes(gpa, engine)) return 1;
     watchHold("ml infer super-res");
+    if (!try proveMlInferAux(gpa, engine)) return 1;
+    watchHold("ml infer aux reference");
     if (!try proveMlInferDiffusion(gpa, engine)) return 1;
     watchHold("ml infer diffusion");
     if (!try proveMlInferText2Img(gpa, engine)) return 1;

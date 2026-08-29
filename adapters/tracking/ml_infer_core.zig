@@ -16,6 +16,44 @@ pub const CreateError = error{ Unsupported, InvalidModel, ModelRejected, OutOfMe
 /// The most output tensors a byo-ml model may expose, a bound not a promise.
 pub const max_outputs = 8;
 
+/// The second input plane of a two-input (reference-conditioned) model: its
+/// square, the sample scratch, and the owned reference RGBA the core resamples
+/// into input 1 each compute. Built by setupAux with live errdefers so a
+/// partial allocation never leaks; deinit frees all three.
+const AuxPlane = struct {
+    sq: ml_sample.Square,
+    tensor: []f32,
+    nchw_scratch: []f32,
+    pixels: []u8,
+    width: u32,
+    height: u32,
+
+    fn deinit(self: AuxPlane, gpa: std.mem.Allocator) void {
+        gpa.free(self.tensor);
+        gpa.free(self.nchw_scratch);
+        gpa.free(self.pixels);
+    }
+};
+
+/// Builds the aux plane for a two-input model: input 1 must be one square-RGB
+/// image, and the caller must ship a reference at least width*height*4 bytes.
+fn setupAux(gpa: std.mem.Allocator, engine: *ml_engine.Engine, rgba: []const u8, width: u32, height: u32) CreateError!AuxPlane {
+    const need = @as(usize, width) * height * 4;
+    if (width == 0 or height == 0 or rgba.len < need) return error.InvalidModel;
+    var dims_buf: [8]i32 = undefined;
+    const dims = engine.inputDims(1, &dims_buf) catch return error.InvalidModel;
+    const sq = ml_sample.detectSquareRgb(dims) orelse return error.InvalidModel;
+    const tensor = gpa.alloc(f32, @as(usize, sq.side) * sq.side * 3) catch return error.OutOfMemory;
+    errdefer gpa.free(tensor);
+    const scratch = if (sq.layout == .nchw)
+        gpa.alloc(f32, @as(usize, sq.side) * sq.side * 3) catch return error.OutOfMemory
+    else
+        gpa.alloc(f32, 0) catch return error.OutOfMemory;
+    errdefer gpa.free(scratch);
+    const pixels = gpa.dupe(u8, rgba[0..need]) catch return error.OutOfMemory;
+    return .{ .sq = sq, .tensor = tensor, .nchw_scratch = scratch, .pixels = pixels, .width = width, .height = height };
+}
+
 /// A loaded author model: its backend engine, the reused RGB input plane, and
 /// an owned copy of each output tensor so a reader never touches the live
 /// engine output the next invoke overwrites. Outputs read zero until publish.
@@ -29,6 +67,16 @@ pub const Core = struct {
     /// Planar scratch the NHWC sample transposes into for an NCHW model; empty
     /// for an NHWC model, which writes its input tensor straight through.
     nchw_scratch: []f32,
+    /// An optional second input plane: a bundled reference image the model is
+    /// conditioned on (makeup, style, or identity transfer). Set only when the
+    /// model declares two square-RGB inputs. aux_pixels is the owned reference
+    /// RGBA the core resamples into input 1 each compute.
+    aux_sq: ?ml_sample.Square = null,
+    aux_tensor: []f32 = &.{},
+    aux_nchw_scratch: []f32 = &.{},
+    aux_pixels: []u8 = &.{},
+    aux_width: u32 = 0,
+    aux_height: u32 = 0,
     output_count: u32,
     outputs: [max_outputs][]f32,
     published: bool = false,
@@ -36,7 +84,7 @@ pub const Core = struct {
     /// Loads the model under the sandbox bounds. Rejects a model whose input is
     /// not one square RGB image (NHWC or NCHW), whose output count is outside
     /// the bound, or whose bytes or tensors exceed the bounds.
-    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*Core {
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32) CreateError!*Core {
         const core = gpa.create(Core) catch return error.OutOfMemory;
         errdefer gpa.destroy(core);
 
@@ -52,7 +100,7 @@ pub const Core = struct {
 
         const in_count = engine.inputCount();
         const out_count = engine.outputCount();
-        if (in_count != 1) return error.InvalidModel;
+        if (in_count < 1 or in_count > 2) return error.InvalidModel;
         if (out_count == 0 or out_count > max_outputs) return error.InvalidModel;
 
         var in_dims_buf: [8]i32 = undefined;
@@ -68,6 +116,14 @@ pub const Core = struct {
             try gpa.alloc(f32, 0);
         errdefer gpa.free(nchw_scratch);
 
+        // A two-input model conditions on a bundled reference sampled into input
+        // 1; a one-input model leaves aux null.
+        var aux: ?AuxPlane = null;
+        errdefer if (aux) |a| a.deinit(gpa);
+        if (in_count == 2) {
+            aux = try setupAux(gpa, &engine, aux_rgba orelse return error.InvalidModel, aux_width, aux_height);
+        }
+
         // The largest tensor and the tensor count feed the sandbox admission,
         // so an oversized or many-tensor model never allocates its buffers. A
         // warm-up over zeroed input discovers every output length across both
@@ -76,6 +132,11 @@ pub const Core = struct {
         var largest: u64 = @as(u64, input_side) * input_side * 3 * @sizeOf(f32);
         @memset(input_tensor, 0);
         ml_sample.writeSampled(&engine, 0, in_sq, input_tensor, nchw_scratch) catch return error.InvalidModel;
+        if (aux) |a| {
+            const ref = sampler.Frame{ .pixels = .{ .rgba8 = a.pixels }, .width = a.width, .height = a.height };
+            ml_sample.writeFrame(&engine, 1, a.sq, ref, a.tensor, a.nchw_scratch) catch return error.InvalidModel;
+            largest = @max(largest, a.tensor.len * @sizeOf(f32));
+        }
         engine.invoke() catch return error.InvalidModel;
         for (0..out_count) |i| {
             const floats = engine.outputFloats(i) catch return error.InvalidModel;
@@ -101,6 +162,12 @@ pub const Core = struct {
             .input_side = input_side,
             .input_tensor = input_tensor,
             .nchw_scratch = nchw_scratch,
+            .aux_sq = if (aux) |a| a.sq else null,
+            .aux_tensor = if (aux) |a| a.tensor else &.{},
+            .aux_nchw_scratch = if (aux) |a| a.nchw_scratch else &.{},
+            .aux_pixels = if (aux) |a| a.pixels else &.{},
+            .aux_width = if (aux) |a| a.width else 0,
+            .aux_height = if (aux) |a| a.height else 0,
             .output_count = @intCast(out_count),
             .outputs = outputs,
         };
@@ -111,6 +178,9 @@ pub const Core = struct {
         const gpa = core.gpa;
         for (core.outputs[0..core.output_count]) |buf| gpa.free(buf);
         core.engine.deinit();
+        gpa.free(core.aux_tensor);
+        gpa.free(core.aux_nchw_scratch);
+        gpa.free(core.aux_pixels);
         gpa.free(core.nchw_scratch);
         gpa.free(core.input_tensor);
         gpa.free(core.model_bytes);
@@ -122,6 +192,10 @@ pub const Core = struct {
     /// so a compute allocates nothing.
     pub fn compute(core: *Core, frame: sampler.Frame) bool {
         ml_sample.writeFrame(&core.engine, 0, core.in_sq, frame, core.input_tensor, core.nchw_scratch) catch return false;
+        if (core.aux_sq) |sq| {
+            const ref = sampler.Frame{ .pixels = .{ .rgba8 = core.aux_pixels }, .width = core.aux_width, .height = core.aux_height };
+            ml_sample.writeFrame(&core.engine, 1, sq, ref, core.aux_tensor, core.aux_nchw_scratch) catch return false;
+        }
         core.engine.invoke() catch return false;
         return true;
     }

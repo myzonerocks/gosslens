@@ -852,6 +852,13 @@ passes key against), so a lens author's own segmenter drives the identical
 compositing the built-in segmenters do. A model whose bound tensor is not a
 square single-channel plane keeps driving its parameters and feeds no mask.
 
+An `ml.infer` node may carry an `"aux": {"reference"}` block for a model that
+takes a second input: a bundled reference image (`assets/<reference>.png`)
+sampled into the model's second square-RGB input every inference, so a net is
+conditioned on a reference (a makeup, style, or identity transfer). A model that
+declares two inputs requires the reference and is otherwise rejected at load; a
+one-input model ignores the block. The frame is always the first input.
+
 An `ml.infer` node may carry a `"style"` block, `{"tensor", "sprite"}`, for a
 model that restyles the whole frame. The tensor is read as a square
 three-channel image, and each inference uploads it to the texture of the
@@ -1203,6 +1210,8 @@ classifier's predicted class into a parameter; a model output moves a sprite
 through its placement parameters; a restyle net's output image draws through a
 sprite; a super-resolution net whose output is a larger square than its input
 draws through the style sprite at the enlarged side (16 from an 8 input);
+a two-input ml.infer net conditions on a bundled reference, feeding both inputs
+and drawing, where the same model with no reference is rejected at load;
 a diffusion loop over a bundled encoder, unet, and decoder restyles
 the frame and draws it through a sprite; a diffusion lens with no encoder
 generates from seeded noise and a text embedding, drawing the image through a

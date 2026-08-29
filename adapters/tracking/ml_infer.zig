@@ -40,11 +40,11 @@ pub const MlInfer = struct {
 };
 
 /// Stands the core up under the sandbox bounds and starts the worker.
-pub fn create(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*MlInfer {
+pub fn create(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32) CreateError!*MlInfer {
     const ml = gpa.create(MlInfer) catch return error.OutOfMemory;
     errdefer gpa.destroy(ml);
 
-    const core = try Core.init(gpa, model_bytes, bounds, threads);
+    const core = try Core.init(gpa, model_bytes, bounds, threads, aux_rgba, aux_width, aux_height);
     errdefer core.deinit();
 
     ml.* = .{

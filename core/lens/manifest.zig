@@ -883,6 +883,10 @@ pub const MlField = struct {
     outputs: []const MlOutput,
     mask: ?MlMask = null,
     style: ?MlStyle = null,
+    /// A bundled reference image (assets/<stem>.png) sampled into the model's
+    /// second input, for a net conditioned on a reference (makeup, style, or
+    /// identity transfer). Empty for a one-input model.
+    aux_reference: []const u8 = "",
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -3337,6 +3341,16 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         }
         path.pop(style_mark);
     }
+    var aux_reference: []const u8 = "";
+    if (getField(object, "aux")) |av| {
+        const aux_mark = path.push("aux");
+        if (av != .object) {
+            try diags.add(path.slice(), "ml aux must be an object", .{});
+        } else if (getField(av.object, "reference")) |v| {
+            aux_reference = try expectString(diags, path, v) orelse "";
+        }
+        path.pop(aux_mark);
+    }
     return .{
         .model = try arena.dupe(u8, model),
         .input_width = input_width,
@@ -3344,6 +3358,7 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         .outputs = try outputs.toOwnedSlice(arena),
         .mask = mask,
         .style = style,
+        .aux_reference = try arena.dupe(u8, aux_reference),
     };
 }
 

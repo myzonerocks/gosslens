@@ -8976,7 +8976,21 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
         defer gpa.free(path);
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
         defer gpa.free(bytes);
-        const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
+        // A two-input model conditions on a bundled reference image; decode it
+        // and hand it to the worker, which samples it into the model's input 1.
+        // create copies the reference, so the decode is freed on this return.
+        const worker = blk: {
+            if (ml.aux_reference.len > 0) {
+                const ref_path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, ml.aux_reference }) catch continue;
+                defer gpa.free(ref_path);
+                const ref_bytes = std.Io.Dir.cwd().readFileAlloc(io, ref_path, gpa, .limited(4 * 1024 * 1024)) catch continue;
+                defer gpa.free(ref_bytes);
+                const dec = image.decode(gpa, ref_bytes) catch continue;
+                defer gpa.free(dec.rgba);
+                break :blk ml_infer.create(gpa, bytes, .{}, 2, dec.rgba, @intCast(dec.width), @intCast(dec.height)) catch continue;
+            }
+            break :blk ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0) catch continue;
+        };
 
         // A mask binding needs the bound tensor to be a square single-channel
         // plane; anything else leaves the node driving only its parameters.
@@ -9237,7 +9251,7 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     for (splats) |node| {
         const bytes = readBundleAsset(gpa, bundle_path, node.model) orelse continue;
         defer gpa.free(bytes);
-        const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
+        const worker = ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0) catch continue;
         const len = ml_infer.outputLen(worker, 0);
         // A colored cloud's model emits xyz then rgb per point, so its output is
         // a multiple of six; a plain one emits xyz only, a multiple of three.
