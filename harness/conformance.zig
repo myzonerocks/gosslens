@@ -2484,6 +2484,90 @@ fn proveMlInferStyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A super-resolution probe: an identity 1x1 conv, then a Concat along height
+/// and a Concat along width, so a side-S input yields a 2S x 2S output, the
+/// enlarge a real super-resolution net performs.
+fn buildOnnxSuperResProbe(a: std.mem.Allocator, side: i64) []const u8 {
+    var w: OnnxPb = .{ .a = a };
+    inline for (.{ 3, 3, 1, 1 }) |d| w.varintField(1, d);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..3) |m| for (0..3) |cc| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(@as(f32, if (m == cc) 1 else 0)), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    };
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const conv = onnxNode(a, "Conv", &.{ "x", "W" }, &.{"y"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    const cat_h = onnxNode(a, "Concat", &.{ "y", "y" }, &.{"y2"}, &.{.{ .name = "axis", .i = 2 }});
+    const cat_w = onnxNode(a, "Concat", &.{ "y2", "y2" }, &.{"out"}, &.{.{ .name = "axis", .i = 3 }});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(1, cat_h);
+    g.bytesField(1, cat_w);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ 3, 3, 1, 1 }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, 3, 2 * side, 2 * side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Runs a style lens from `dir` until its output texture lands, then reports the
+/// style texture's square side (0 if it never landed).
+fn runStyleSideOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !u32 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.MlStyleActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+    _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return 0;
+    }
+    return abi.styleTextureSide(session);
+}
+
+/// Proves super-resolution: a model whose output is a larger square than its
+/// input draws through the style sprite at that enlarged side, so the upscaled
+/// image reaches the pipeline. The synthetic net doubles an 8-side input to 16.
+fn proveMlInferSuperRes(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxSuperResProbe(arena.allocator(), 8);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-superres/assets");
+    try writeOnnxStyleLens("zig-out/ml-superres", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const side_a = try runStyleSideOnce(engine, "zig-out/ml-superres", person);
+    const side_b = try runStyleSideOnce(engine, "zig-out/ml-superres", person);
+    if (side_a != 16 or side_b != 16) {
+        std.debug.print("conformance: FAIL super-resolution output side {d}/{d}, wanted 16 (2x the 8 input)\n", .{ side_a, side_b });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a super-resolution model whose output is a larger square than its input draws through the style sprite at the enlarged side (16 from an 8 input)\n", .{});
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -13776,6 +13860,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer placement");
     if (!try proveMlInferStyle(gpa, engine)) return 1;
     watchHold("ml infer style");
+    if (!try proveMlInferSuperRes(gpa, engine)) return 1;
+    watchHold("ml infer super-res");
     if (!try proveMlInferDiffusion(gpa, engine)) return 1;
     watchHold("ml infer diffusion");
     if (!try proveMlInferText2Img(gpa, engine)) return 1;

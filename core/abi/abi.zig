@@ -6216,6 +6216,16 @@ pub fn styleTextureCount(session: *Session) usize {
     return session.ml_style_textures.count();
 }
 
+/// The square side of the first style worker's output texture, so a proof can
+/// assert a super-resolution model draws at a larger side than its input. Zero
+/// when no style worker is loaded.
+pub fn styleTextureSide(session: *Session) u32 {
+    for (session.ml_workers.items) |mw| {
+        if (mw.style_target != null and mw.style_side > 0) return mw.style_side;
+    }
+    return 0;
+}
+
 /// How many splat.cloud workers have produced their first point set, so a
 /// headless proof can wait for the cloud to become drawable.
 pub fn splatCloudReadyCount(session: *Session) usize {

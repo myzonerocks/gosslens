@@ -863,6 +863,13 @@ path: a restyle net loads like any other author model, runs off the frame
 thread under the same bounds, and draws through the sprite the composite chain
 already knows how to place, turn, and fade.
 
+The style output is read at whatever square side the model emits, so the same
+binding carries an enhancement whose output is larger than its input: a
+super-resolution, denoise, deblur, dehaze, or glare-removal net draws its result
+through the sprite at the enlarged side. The preview draws it at the swap chain's
+size, so the extra detail of an upscale is fully preserved down the capture path;
+pair a super-resolution lens with a high-resolution capture to keep it.
+
 A `"diffusion"` node runs an on-device latent-diffusion restyle. Like the other
 behavior nodes it draws nothing itself; it carries a `"diffusion"` block naming
 the models the bundle ships under `assets/`: a `"unet"` (the denoiser), a
@@ -1194,7 +1201,9 @@ net, each driving a lens parameter from the frame; an author ONNX segmenter's
 output reaches the subject mask channel; an `argmax` reduce reads a
 classifier's predicted class into a parameter; a model output moves a sprite
 through its placement parameters; a restyle net's output image draws through a
-sprite; a diffusion loop over a bundled encoder, unet, and decoder restyles
+sprite; a super-resolution net whose output is a larger square than its input
+draws through the style sprite at the enlarged side (16 from an 8 input);
+a diffusion loop over a bundled encoder, unet, and decoder restyles
 the frame and draws it through a sprite; a diffusion lens with no encoder
 generates from seeded noise and a text embedding, drawing the image through a
 sprite; a diffusion lens keyed to the person channel composites its
