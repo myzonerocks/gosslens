@@ -10214,10 +10214,47 @@ fn jointTargetPixel(landmarks: *const [pose.landmark_count * 3]f32, target: Join
     };
 }
 
-/// Fills the rig's joint palette for one tracked body: each mapped joint
-/// moves to its landmark, brought into mesh space by the anchor inverse
-/// so the anchor the draw re-applies cancels and lands it there.
-/// Unmapped joints and a singular anchor hold the bind pose.
+/// The landmark down-chain of a joint's own landmark: the next joint along the
+/// limb, so a bone's tracked direction can be measured. Null for a leaf (hand,
+/// foot, head) or a non-point target, which then rotates with its parent alone.
+fn childLandmark(target: JointTarget) ?u8 {
+    const point = switch (target) {
+        .point => |i| i,
+        else => return null,
+    };
+    return switch (point) {
+        11 => 13, // left shoulder -> elbow
+        13 => 15, // left elbow -> wrist
+        12 => 14, // right shoulder -> elbow
+        14 => 16, // right elbow -> wrist
+        23 => 25, // left hip -> knee
+        25 => 27, // left knee -> ankle
+        24 => 26, // right hip -> knee
+        26 => 28, // right knee -> ankle
+        else => null,
+    };
+}
+
+/// The bind (rest) mesh-space position of the joint whose target lands on
+/// `landmark`, read from the inverse of its inverse-bind matrix. Null when no
+/// joint drives that landmark, so a bone with no bound child skips rotation.
+fn childBindPosition(rig: *const SkinnedRig, landmark: u8) ?math.Vec3 {
+    for (rig.joint_targets, rig.skin.inverse_bind) |target, ibm| {
+        const point = switch (target) {
+            .point => |i| i,
+            else => continue,
+        };
+        if (point != landmark) continue;
+        const world = math.Mat4.inverse(ibm) orelse return null;
+        return .{ world.cols[3][0], world.cols[3][1], world.cols[3][2] };
+    }
+    return null;
+}
+
+/// Fills the rig's joint palette for one tracked body: each mapped joint moves
+/// to its landmark (the anchor inverse cancels the anchor the draw re-applies),
+/// and a joint with a tracked child bone also rotates in the image plane so a
+/// bent limb bends. Unmapped joints and a singular anchor hold the bind pose.
 fn buildBodySkinPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark_count * 3]f32, anchor_full: math.Mat4) void {
     const inv = math.Mat4.inverse(anchor_full) orelse {
         for (rig.palette) |*p| p.* = math.Mat4.identity;
@@ -10228,8 +10265,32 @@ fn buildBodySkinPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark
             p.* = math.Mat4.identity;
             continue;
         };
-        p.* = math.Mat4.translation(inv.mulPoint(pixel)).mul(ibm);
+        const tracked_pos = inv.mulPoint(pixel);
+        p.* = boneRotatedPalette(rig, landmarks, inv, target, ibm, tracked_pos) orelse
+            math.Mat4.translation(tracked_pos).mul(ibm);
     }
+}
+
+/// The palette for a limb joint carrying its bone's tracked in-plane rotation:
+/// T(tracked) * Rz(theta) * T(-bind), theta the angle from the bind bone
+/// direction to the tracked one. Null (fall back to translation) when there is
+/// no bound child bone or a direction is degenerate, so noise never rotates it.
+fn boneRotatedPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark_count * 3]f32, inv: math.Mat4, target: JointTarget, ibm: math.Mat4, tracked_pos: math.Vec3) ?math.Mat4 {
+    const child = childLandmark(target) orelse return null;
+    const child_pixel = jointTargetPixel(landmarks, .{ .point = child }) orelse return null;
+    const tracked_child = inv.mulPoint(child_pixel);
+    const bind_world = math.Mat4.inverse(ibm) orelse return null;
+    const bind_pos: math.Vec3 = .{ bind_world.cols[3][0], bind_world.cols[3][1], bind_world.cols[3][2] };
+    const bind_child = childBindPosition(rig, child) orelse return null;
+
+    const td: [2]f32 = .{ tracked_child[0] - tracked_pos[0], tracked_child[1] - tracked_pos[1] };
+    const bd: [2]f32 = .{ bind_child[0] - bind_pos[0], bind_child[1] - bind_pos[1] };
+    const tl = @sqrt(td[0] * td[0] + td[1] * td[1]);
+    const bl = @sqrt(bd[0] * bd[0] + bd[1] * bd[1]);
+    if (!(tl > 1e-4) or !(bl > 1e-4)) return null;
+    const theta = std.math.atan2(td[1], td[0]) - std.math.atan2(bd[1], bd[0]);
+    if (!(theta == theta)) return null;
+    return math.Mat4.translation(tracked_pos).mul(math.Mat4.rotationZ(theta)).mul(math.Mat4.translation(.{ -bind_pos[0], -bind_pos[1], -bind_pos[2] }));
 }
 
 /// Stands a skinned rig up from a decoded model: a dynamic render mesh,
@@ -10296,6 +10357,40 @@ test "buildBodySkinPalette lands a mapped joint on its landmark" {
     const placed = anchor.mul(palette[0]).mulPoint(.{ 0, 0, 0 });
     try t.expectApproxEqAbs(@as(f32, 200), placed[0], 0.001);
     try t.expectApproxEqAbs(@as(f32, 120), placed[1], 0.001);
+}
+
+test "buildBodySkinPalette rotates a limb joint by its bent bone" {
+    // A two-joint forearm rig: joint 0 the left elbow (landmark 13, child the
+    // wrist 15), joint 1 the wrist. Bind pose hangs the forearm straight down.
+    var inverse_bind = [_]math.Mat4{
+        math.Mat4.translation(.{ -100, -100, 0 }), // elbow bind at (100,100)
+        math.Mat4.translation(.{ -100, -200, 0 }), // wrist bind at (100,200)
+    };
+    var targets = [_]JointTarget{ .{ .point = 13 }, .{ .point = 15 } };
+    var palette: [2]math.Mat4 = undefined;
+    const rig: SkinnedRig = .{
+        .mesh = undefined,
+        .skin = .{ .joint_count = 2, .inverse_bind = &inverse_bind, .joint_names = &.{}, .vertex_joints = &.{}, .vertex_weights = &.{} },
+        .rest = &.{},
+        .skinned = &.{},
+        .palette = &palette,
+        .joint_targets = &targets,
+    };
+    var lm: [pose.landmark_count * 3]f32 = @splat(0);
+    // Tracked: elbow at (200,200), wrist out to the right (300,200) - the
+    // forearm now points along +x, a quarter turn from the bind's +y.
+    lm[13 * 3] = 200;
+    lm[13 * 3 + 1] = 200;
+    lm[15 * 3] = 300;
+    lm[15 * 3 + 1] = 200;
+    buildBodySkinPalette(&rig, &lm, math.Mat4.identity);
+    // A bind point 10 units down the forearm (toward the wrist) rotates to 10
+    // units along +x once the bone is bent, not straight down as translation
+    // alone would leave it.
+    const along_bind: math.Vec3 = .{ 100, 110, 0 };
+    const placed = palette[0].mulPoint(along_bind);
+    try t.expectApproxEqAbs(@as(f32, 210), placed[0], 0.01);
+    try t.expectApproxEqAbs(@as(f32, 200), placed[1], 0.01);
 }
 
 const body_history = 64;

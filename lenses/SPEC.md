@@ -157,7 +157,11 @@ face the node draws nothing, the standard capability degradation.
 one instance at each submitted body's torso, scaled by torso length and
 rolled by its tilt, so a body-anchored model fans out across a crowd (or
 rides the single tracked figure when the host submits none). Without a
-tracked body the node draws nothing.
+tracked body the node draws nothing. A body-anchored model that ships a glTF
+skin poses instead of placing: each joint moves to its tracked landmark and
+each limb bone rotates in the image plane toward the tracked joint below it,
+so a rigged avatar mocaps the tracked body (a monocular, in-plane pose; the
+single tracked figure drives it).
 `"anchor": "skeleton"` draws the model once per bone of every tracked body,
 each instance spanning the two joints of the bone (scaled to its length and
 oriented along it), so the model tiles into a whole rig over the figure.
