@@ -387,6 +387,7 @@ pub fn build(b: *std.Build) void {
     const lash_mesh_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = target, .optimize = optimize }) });
     const gesture_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/input/gesture.zig"), .target = target, .optimize = optimize }) });
     const ml_tensor_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/ml_tensor.zig"), .target = target, .optimize = optimize }) });
+    const onnx_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("adapters/tracking/onnx.zig"), .target = target, .optimize = optimize }) });
     const logic_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/lens/logic.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "trigger", .module = lens_trigger_module }} }) });
     const face_geometry_tests = b.addTest(.{ .root_module = face_geometry_core_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
@@ -430,6 +431,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(gesture_tests).step);
     test_step.dependOn(&b.addRunArtifact(logic_tests).step);
     test_step.dependOn(&b.addRunArtifact(ml_tensor_tests).step);
+    test_step.dependOn(&b.addRunArtifact(onnx_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
