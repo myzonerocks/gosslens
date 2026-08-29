@@ -1111,6 +1111,16 @@ the load-bearing security property: **lenses are untrusted content, and
 untrusted content only ever flows through typed, bounded, validated data -
 never through code.**
 
+A lens can be authored on device from a text prompt. `goss_compile_prompt` reads
+a short prompt and emits a GLF manifest composing the engine's asset-free
+post-effect nodes: colour-grade words (warm, cool, bright, moody, mono) pick a
+single grade, and look words add a blur, bloom, fog, edge outline, or sketch
+stylize. The nodes emit in a fixed chain order whatever the word order, so the
+same prompt always yields the same manifest, and a prompt naming no look still
+grades gently rather than emitting an empty lens. The result is ordinary GLF a
+caller inspects, saves, or hands straight to `goss_session_activate_lens`; the
+bundle needs no assets, so the manifest is the whole lens.
+
 ## 9. Conformance
 
 The reference set (`lenses/reference/`) carries at least one bundle
@@ -1143,8 +1153,10 @@ and blends it into the restyle, holding the sprite steady across frames; and an
 img2img diffusion lens masked to the face_skin channel in over mode composites
 its restyle onto the face matte and holds the camera elsewhere; a diffusion
 node targeting a mesh.face node binds its generated image as the face mesh's
-material texture; and a splat.cloud node lifts the camera frame to a 3D point
-set with a bundled model and draws it as a billboard cloud. The conformance harness runs today on the host (macOS): it renders each
+material texture; a splat.cloud node lifts the camera frame to a 3D point
+set with a bundled model and draws it as a billboard cloud; and the prompt
+compiler emits a GLF manifest on device that activates as a lens and renders.
+The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

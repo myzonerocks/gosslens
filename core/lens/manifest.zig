@@ -4428,3 +4428,198 @@ test "scene classes append at the frozen mask-channel tail" {
     try t.expectEqual(building_channel, maskChannelIndex("building").?);
     try t.expectEqual(@as(usize, 25), mask_channels.len);
 }
+
+/// The on-device prompt-to-lens compiler: it turns a short text prompt into a
+/// GLF manifest composing the engine's asset-free post-effect nodes, so a lens
+/// is authored from words with no upload and no round trip. The output is plain
+/// GLF a caller can inspect, save, or hand straight to activate.
+pub const prompt = struct {
+    /// A colour-grade look. At most one grades the frame, so competing words
+    /// resolve to the first the prompt names.
+    const Grade = enum { none, warm, cool, bright, moody, mono };
+
+    /// The recognized looks, filled by scanning the prompt's words. Each effect
+    /// is a single asset-free node, so the emitted bundle needs no assets.
+    const Recipe = struct {
+        grade: Grade = .none,
+        bloom: bool = false,
+        blur: bool = false,
+        fog: bool = false,
+        edge: bool = false,
+        stylize: bool = false,
+
+        fn empty(self: Recipe) bool {
+            return self.grade == .none and !self.bloom and !self.blur and !self.fog and !self.edge and !self.stylize;
+        }
+    };
+
+    fn isWordChar(ch: u8) bool {
+        return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9');
+    }
+
+    fn eqIgnoreCase(word: []const u8, lower: []const u8) bool {
+        if (word.len != lower.len) return false;
+        for (word, lower) |w, l| {
+            const wl = if (w >= 'A' and w <= 'Z') w + 32 else w;
+            if (wl != l) return false;
+        }
+        return true;
+    }
+
+    /// Folds one prompt word into the recipe. The grade slot keeps the first
+    /// look a word claims; the post effects each latch on independently.
+    fn applyWord(recipe: *Recipe, word: []const u8) void {
+        const warm = [_][]const u8{ "warm", "vintage", "sepia", "sunset", "golden", "cozy" };
+        const cool = [_][]const u8{ "cool", "cold", "icy", "winter", "blue" };
+        const bright = [_][]const u8{ "bright", "vivid", "pop", "vibrant", "punchy" };
+        const moody = [_][]const u8{ "moody", "dark", "dramatic", "cinematic", "noir" };
+        const mono = [_][]const u8{ "mono", "bw", "grayscale", "greyscale", "monochrome" };
+        const bloom = [_][]const u8{ "glow", "bloom", "dreamy", "soft", "ethereal" };
+        const blur = [_][]const u8{ "blur", "hazy", "haze", "smooth" };
+        const fog = [_][]const u8{ "fog", "foggy", "mist", "misty" };
+        const edge = [_][]const u8{ "cartoon", "toon", "comic", "ink", "outline" };
+        const stylize = [_][]const u8{ "sketch", "hatch", "pencil", "crosshatch", "drawn" };
+
+        if (recipe.grade == .none) {
+            for (warm) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .warm;
+                return;
+            };
+            for (cool) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .cool;
+                return;
+            };
+            for (bright) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .bright;
+                return;
+            };
+            for (moody) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .moody;
+                return;
+            };
+            for (mono) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .mono;
+                return;
+            };
+        }
+        for (bloom) |w| {
+            if (eqIgnoreCase(word, w)) recipe.bloom = true;
+        }
+        for (blur) |w| {
+            if (eqIgnoreCase(word, w)) recipe.blur = true;
+        }
+        for (fog) |w| {
+            if (eqIgnoreCase(word, w)) recipe.fog = true;
+        }
+        for (edge) |w| {
+            if (eqIgnoreCase(word, w)) recipe.edge = true;
+        }
+        for (stylize) |w| {
+            if (eqIgnoreCase(word, w)) recipe.stylize = true;
+        }
+    }
+
+    fn scan(text: []const u8) Recipe {
+        var recipe: Recipe = .{};
+        var i: usize = 0;
+        while (i < text.len) {
+            while (i < text.len and !isWordChar(text[i])) i += 1;
+            const start = i;
+            while (i < text.len and isWordChar(text[i])) i += 1;
+            if (i > start) applyWord(&recipe, text[start..i]);
+        }
+        return recipe;
+    }
+
+    fn gradeBlock(grade: Grade) []const u8 {
+        return switch (grade) {
+            .warm => "\"grade\": {\"exposure\": 0.1, \"contrast\": 1.1, \"saturation\": 1.2, \"temperature\": 0.06}",
+            .cool => "\"grade\": {\"exposure\": 0.0, \"contrast\": 1.1, \"saturation\": 1.1, \"temperature\": -0.06}",
+            .bright => "\"grade\": {\"exposure\": 0.2, \"contrast\": 1.15, \"saturation\": 1.3, \"temperature\": 0.0}",
+            .moody => "\"grade\": {\"exposure\": -0.15, \"contrast\": 1.4, \"saturation\": 0.9, \"temperature\": -0.02}",
+            .mono => "\"grade\": {\"exposure\": 0.0, \"contrast\": 1.2, \"saturation\": 0.0, \"temperature\": 0.0}",
+            .none => "\"grade\": {\"exposure\": 0.05, \"contrast\": 1.05, \"saturation\": 1.1, \"temperature\": 0.0}",
+        };
+    }
+
+    fn emitNode(w: *std.Io.Writer, first: *bool, id: []const u8, node_type: []const u8, block: ?[]const u8) !void {
+        if (!first.*) try w.writeAll(",\n  ");
+        first.* = false;
+        try w.print("{{\"id\": \"{s}\", \"type\": \"{s}\", \"inputs\": {{\"frame\": \"camera\"}}, \"params\": {{}}", .{ id, node_type });
+        if (block) |b| try w.print(", {s}", .{b});
+        try w.writeAll("}");
+    }
+
+    /// Compiles `text` into a GLF manifest string. The nodes emit in a fixed
+    /// effect order regardless of word order, so the same prompt always yields
+    /// the same bundle. A prompt that names no look still grades gently, so the
+    /// compiler never emits an empty lens. The caller owns the returned bytes.
+    pub fn compile(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+        var recipe = scan(text);
+        if (recipe.empty()) recipe.grade = .none; // the gentle default look
+
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        errdefer out.deinit();
+        const w = &out.writer;
+        try w.writeAll(
+            \\{"glf": "1.0", "id": "goss.prompt.compiled", "version": "1.0.0", "display_name": "Prompt Lens", "engine_compat": ">=0.5", "capabilities": [], "parameters": [],
+            \\ "nodes": [
+        );
+        var first = true;
+        // Grade always emits (the default look when the prompt named none), then
+        // the post effects follow in a stable chain order.
+        try emitNode(w, &first, "grade", "grade.pass", gradeBlock(recipe.grade));
+        if (recipe.blur) try emitNode(w, &first, "blur", "blur.pass", null);
+        if (recipe.bloom) try emitNode(w, &first, "bloom", "bloom.pass", "\"bloom\": {\"threshold\": 0.6, \"intensity\": 0.8}");
+        if (recipe.fog) try emitNode(w, &first, "fog", "fog.pass", "\"fog\": {\"color\": [0.8, 0.85, 0.9], \"density\": 1.2}");
+        if (recipe.edge) try emitNode(w, &first, "edge", "edge.pass", "\"edge\": {\"mode\": \"canny\", \"low_threshold\": 0.1, \"high_threshold\": 0.5, \"blur_radius\": 4.0}");
+        if (recipe.stylize) try emitNode(w, &first, "stylize", "stylize.pass", "\"stylize\": {\"mode\": \"crosshatch\", \"strength\": 1.0}");
+        try w.writeAll("], \"triggers\": []}");
+        return out.toOwnedSlice();
+    }
+};
+
+test "prompt compiles to the looks it names" {
+    const gpa = std.testing.allocator;
+    const json = try prompt.compile(gpa, "warm dreamy cartoon");
+    defer gpa.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"grade.pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"temperature\": 0.06") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"bloom.pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"edge.pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"blur.pass\"") == null);
+}
+
+test "prompt word order does not change the bundle" {
+    const gpa = std.testing.allocator;
+    const a = try prompt.compile(gpa, "cool blur glow");
+    defer gpa.free(a);
+    const b = try prompt.compile(gpa, "glow cool blur");
+    defer gpa.free(b);
+    try std.testing.expectEqualStrings(a, b);
+}
+
+test "prompt first grade word wins" {
+    const gpa = std.testing.allocator;
+    const json = try prompt.compile(gpa, "warm cool");
+    defer gpa.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"temperature\": 0.06") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"temperature\": -0.06") == null);
+}
+
+test "prompt unrecognized still grades gently" {
+    const gpa = std.testing.allocator;
+    const json = try prompt.compile(gpa, "zzz qqq");
+    defer gpa.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"grade.pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"bloom.pass\"") == null);
+}
+
+test "prompt output parses as a valid lens" {
+    const gpa = std.testing.allocator;
+    const json = try prompt.compile(gpa, "cinematic glow foggy sketch");
+    defer gpa.free(json);
+    var parsed = try parseOk(json);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.nodes.len >= 2);
+}

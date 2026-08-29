@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 55u
+#define GOSS_ABI_MINOR 56u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -836,6 +836,12 @@ goss_status goss_session_activate_lens(goss_session *session, const uint8_t *man
  * packaged bundle was already proven to compile by the validator, so a
  * load failure here is a runtime anomaly, not an authoring error. */
 goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len);
+
+/* Compiles a text prompt into a GLF lens manifest on device, writing it into
+ * out_buf and its byte length into out_len. A NULL out_buf (or too small an
+ * out_cap) reports the length only, so the caller sizes a buffer and calls
+ * again, then inspects, saves, or activates the result with no assets needed. */
+goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len);
 
 /* Graph thread. Unsplices the active lens and frees everything its
  * activation allocated. Accepts no active lens and does nothing. */

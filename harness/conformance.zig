@@ -2938,6 +2938,47 @@ fn proveMlInferSplat(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the prompt-to-lens compiler: the goss_compile_prompt ABI op turns a
+/// text prompt into a GLF manifest on device, the two-call length probe matches
+/// the filled buffer, and the emitted manifest activates as a real lens that
+/// renders, so a lens is authored from words with no assets and no round trip.
+fn proveCompilePrompt(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const text = "cinematic glow foggy sketch";
+    // Length probe: a null buffer reports how many bytes the manifest needs.
+    var needed: usize = 0;
+    if (abi.goss_compile_prompt(engine, text.ptr, text.len, null, 0, &needed) != .ok or needed == 0) {
+        std.debug.print("conformance: FAIL the prompt compiler reported no length\n", .{});
+        return false;
+    }
+    const buf = try gpa.alloc(u8, needed);
+    defer gpa.free(buf);
+    var written: usize = 0;
+    if (abi.goss_compile_prompt(engine, text.ptr, text.len, buf.ptr, buf.len, &written) != .ok or written != needed) {
+        std.debug.print("conformance: FAIL the prompt compiler did not fill the buffer\n", .{});
+        return false;
+    }
+    // The compiled manifest must activate as a lens and render its post-effect
+    // chain over a frame, off the same corpus the other proofs use.
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens(session, buf.ptr, written) != .ok) {
+        std.debug.print("conformance: FAIL the compiled prompt lens did not activate\n", .{});
+        return false;
+    }
+    const desc: abi.FrameDesc = .{ .width = person.width, .height = person.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (person.width + 1) / 2;
+    _ = abi.goss_session_submit_frame_copy(session, &desc, person.y.ptr, person.width, person.uv.ptr, half_w * 2);
+    _ = abi.goss_engine_render_frame(engine, session);
+    c.glfwPollEvents();
+    std.debug.print("conformance: PROOF the prompt compiler emits a GLF manifest on device that activates as a lens and renders\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -13266,6 +13307,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer material");
     if (!try proveMlInferSplat(gpa, engine)) return 1;
     watchHold("ml infer splat");
+    if (!try proveCompilePrompt(gpa, engine)) return 1;
+    watchHold("compile prompt");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

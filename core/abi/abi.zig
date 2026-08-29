@@ -224,6 +224,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle)",
     "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
     "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
+    "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -7550,6 +7551,24 @@ pub export fn goss_session_pull_haptic(session: ?*Session, out_style: ?*u32, out
     s.haptic_read += 1;
     if (out_style) |o| o.* = @intFromEnum(ev.style);
     if (out_intensity) |o| o.* = ev.intensity;
+    return .ok;
+}
+
+/// Compiles a text prompt into a GLF lens manifest on device, writing it into
+/// out_buf and its length into out_len. A null out_buf (or too small an out_cap)
+/// reports the length only, so the caller sizes a buffer then calls again; the
+/// manifest is the same every call and needs no assets, so it is the whole lens.
+pub export fn goss_compile_prompt(engine: ?*Engine, prompt: ?[*]const u8, prompt_len: usize, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const e = engine orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (prompt == null and prompt_len != 0) return .invalid_argument;
+    const text: []const u8 = if (prompt) |p| p[0..prompt_len] else &.{};
+    const json = manifest.prompt.compile(e.gpa, text) catch return .out_of_memory;
+    defer e.gpa.free(json);
+    out_len_ptr.* = json.len;
+    if (out_buf) |buf| {
+        if (out_cap >= json.len) @memcpy(buf[0..json.len], json);
+    }
     return .ok;
 }
 
