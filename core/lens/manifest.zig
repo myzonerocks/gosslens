@@ -899,6 +899,18 @@ pub const DiffusionField = struct {
     coherence: f32 = 0,
 };
 
+pub const SplatField = struct {
+    /// A splat.cloud node lifts the camera frame into a 3D point cloud with a
+    /// bundled model whose output is a flat list of xyz positions, drawn as
+    /// camera-facing billboards. The model runs on the inference rail like any
+    /// author model; `point` is the billboard size in pixels and r,g,b its color.
+    model: []const u8,
+    point: f32 = 6.0,
+    r: f32 = 0.9,
+    g: f32 = 0.85,
+    b: f32 = 0.8,
+};
+
 pub const Node = struct {
     id: []const u8,
     type: []const u8,
@@ -921,6 +933,8 @@ pub const Node = struct {
     /// Set on an ml.infer node: the bring-your-own model slot.
     ml: ?MlField = null,
     diffusion: ?DiffusionField = null,
+    /// Set on a splat.cloud node: the model that lifts the frame to a point cloud.
+    splat: ?SplatField = null,
     /// Set when the manifest gives the node a rigid body.
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
@@ -2988,6 +3002,18 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(diff_mark);
         }
+        var splat_field: ?SplatField = null;
+        if (getField(object, "splat")) |sv| {
+            const splat_mark = path.push("splat");
+            if (!std.mem.eql(u8, node_type, "splat.cloud")) {
+                try diags.add(path.slice(), "splat is a splat.cloud field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "splat must be an object", .{});
+            } else {
+                splat_field = try parseSplatField(diags, path, arena, sv.object);
+            }
+            path.pop(splat_mark);
+        }
 
         const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
         const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
@@ -3031,6 +3057,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .logic_graph = logic_graph_spec,
             .ml = ml_field,
             .diffusion = diffusion_field,
+            .splat = splat_field,
             .body_anchor = body_anchor,
             .skeleton_anchor = skeleton_anchor,
             .world_anchor = world_anchor,
@@ -3157,6 +3184,20 @@ fn parseDiffusionField(diags: *Diagnostics, path: *PathStack, arena: std.mem.All
     if (getField(object, "coherence")) |v| {
         field.coherence = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.coherence)), 0, 1);
     }
+    return field;
+}
+
+fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?SplatField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "splat needs a model file", .{});
+        return null;
+    }
+    var field: SplatField = .{ .model = try arena.dupe(u8, model) };
+    if (getField(object, "point")) |v| field.point = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.point)), 1, 64);
+    if (getField(object, "r")) |v| field.r = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.r)), 0, 1);
+    if (getField(object, "g")) |v| field.g = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.g)), 0, 1);
+    if (getField(object, "b")) |v| field.b = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.b)), 0, 1);
     return field;
 }
 

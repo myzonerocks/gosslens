@@ -706,6 +706,18 @@ file. `"fps": 0` holds the first frame; `"loop": false` holds the last frame at
 the end instead of rewinding. Targets without a hardware decoder play a
 deterministic synthetic clip so the node still runs.
 
+A `"splat.cloud"` node draws a 3D point cloud a bundled model lifts from the
+camera frame. It carries a `"splat": {"model", "point", "r", "g", "b"}` block:
+`model` names the net under `assets/`, whose output is a flat list of xyz
+positions (its length a multiple of three, one point per triple); `point` is the
+billboard size in pixels and `r`, `g`, `b` the point color. The model runs on the
+inference rail like any author model, off the frame thread; the engine reads its
+latest points and draws them as camera-facing billboards in a perspective view,
+so the submitted camera pose orbits the cloud. Until the model produces its first
+points the node holds the frame through, the standard capability degradation.
+This is the text-to-3D path: an image-to-geometry net turns the scene into a
+splat cloud the lens composites like any other draw.
+
 A `"layout.composite"` node lets a lens drive the head composite instead of the
 host: it carries a `"layout": {"arrangement", "key", "chroma", "similarity",
 "opacity"}` block where arrangement is one of `custom`, `side_by_side`,
@@ -1129,9 +1141,10 @@ generated image as the background behind the segmented subject; an img2img
 diffusion lens with temporal coherence warps its previous frame by optical flow
 and blends it into the restyle, holding the sprite steady across frames; and an
 img2img diffusion lens masked to the face_skin channel in over mode composites
-its restyle onto the face matte and holds the camera elsewhere; and a diffusion
+its restyle onto the face matte and holds the camera elsewhere; a diffusion
 node targeting a mesh.face node binds its generated image as the face mesh's
-material texture. The conformance harness runs today on the host (macOS): it renders each
+material texture; and a splat.cloud node lifts the camera frame to a 3D point
+set with a bundled model and draws it as a billboard cloud. The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

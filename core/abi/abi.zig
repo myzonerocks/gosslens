@@ -644,6 +644,7 @@ pub const Session = struct {
     /// each drawing its decoded frame through a sprite; built from the bundle at
     /// activation, fed the camera frame, uploaded to their sprite each render.
     diffusion_workers: std.ArrayListUnmanaged(DiffusionWorker) = .empty,
+    splat_workers: std.ArrayListUnmanaged(SplatWorker) = .empty,
     /// Monotonic timestamp for still images fed to the segmenter through
     /// goss_session_submit_segmentation_image, so each submit orders after the
     /// last the way successive camera frames do.
@@ -1966,6 +1967,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .sprite => s.sprite_textures.contains(entry.graph_index) or s.text3d_meshes.contains(entry.graph_index) or
                 s.video_textures.contains(entry.graph_index) or s.ml_style_textures.contains(entry.graph_index) or
                 (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
+            // A splat cloud is ready once its model has produced its first point
+            // set; until then it holds the frame through like any pending draw.
+            .splat => if (splatWorkerFor(s, entry.graph_index)) |sw| ml_infer.hasPublished(sw.worker) else false,
         };
         if (ready) ready_count += 1;
     }
@@ -2659,6 +2663,48 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         r.submitFaceMesh(view_id, input_texture, mesh_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), 1.0);
                     }
                 }
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .splat => {
+                const sw = splatWorkerFor(s, entry.graph_index) orelse continue;
+                if (!ml_infer.hasPublished(sw.worker)) continue;
+                if (!ml_infer.copyOutput(sw.worker, 0, sw.positions)) continue;
+                const mesh = sw.mesh orelse blk: {
+                    const m = r.createParticleMesh(sw.count * 6, true) catch continue;
+                    sw.mesh = m;
+                    break :blk m;
+                };
+                drawn += 1;
+                const blit_view = next_view_id;
+                next_view_id += 1;
+                const mesh_view = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                const rect_w = if (output != null and !is_final) width else output_width;
+                const rect_h = if (output != null and !is_final) height else output_height;
+                if (output) |target| {
+                    render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                    render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                } else {
+                    render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                    render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                }
+                // Expand the model's points into camera-facing billboards and draw
+                // them as a 3D cloud over the passed-through frame.
+                if (frameStage(s, sw.count * 6 * 8)) |verts| {
+                    writeSplatBillboards(sw.positions, sw.count, verts);
+                    render.Renderer.updateParticleMeshFaded(mesh, verts);
+                }
+                r.tile = if (is_final) s.capture_tile else null;
+                const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                const base_color: [4]f32 = .{ sw.color[0], sw.color[1], sw.color[2], 1.0 };
+                const particle_params: [4]f32 = .{ sw.point / @as(f32, @floatFromInt(rect_w)), sw.point / @as(f32, @floatFromInt(rect_h)), 1.0, 0.0 };
+                const particle_fx: [4]f32 = .{ 1, 1, 0, 0 };
+                r.submitParticles(blit_view, mesh_view, input_texture, mesh, base_color, base_color, aspect_ratio, true, particle_params, particle_fx, false, r.defaultSpriteTexture());
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3697,6 +3743,8 @@ pub fn destroySession(session: *Session) void {
     session.ml_workers.deinit(session.engine.gpa);
     destroyDiffusionWorkers(session);
     session.diffusion_workers.deinit(session.engine.gpa);
+    destroySplatWorkers(session);
+    session.splat_workers.deinit(session.engine.gpa);
     session.ml_style_textures.deinit(session.engine.gpa);
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
@@ -5896,7 +5944,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.diffusion_workers.items.len == 0) return .again;
+    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.diffusion_workers.items.len == 0 and s.splat_workers.items.len == 0) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -5927,6 +5975,9 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     }
     for (s.diffusion_workers.items) |dw| {
         diffusion.submitNv12(dw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    for (s.splat_workers.items) |sw| {
+        ml_infer.submitNv12(sw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     return .ok;
 }
@@ -6009,6 +6060,16 @@ fn applyPlacementParams(s: *Session, node_index: graph.NodeIndex, rect: *[4]f32)
 /// proof can confirm a restyling model's image reached a sprite's texture.
 pub fn styleTextureCount(session: *Session) usize {
     return session.ml_style_textures.count();
+}
+
+/// How many splat.cloud workers have produced their first point set, so a
+/// headless proof can wait for the cloud to become drawable.
+pub fn splatCloudReadyCount(session: *Session) usize {
+    var n: usize = 0;
+    for (session.splat_workers.items) |sw| {
+        if (ml_infer.hasPublished(sw.worker)) n += 1;
+    }
+    return n;
 }
 
 /// The first sprite/text node's rect after any bound placement parameters, so
@@ -7232,6 +7293,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyModelState(session);
     destroyMlWorkers(session);
     destroyDiffusionWorkers(session);
+    destroySplatWorkers(session);
     destroyChainOrder(session);
     teardownScript(session);
     destroySounds(session);
@@ -8952,6 +9014,94 @@ fn destroyMlWorkers(session: *Session) void {
     session.ml_style_textures.clearRetainingCapacity();
 }
 
+const SplatWorker = struct {
+    worker: *ml_infer.MlInfer,
+    target: graph.NodeIndex,
+    count: u32,
+    point: f32,
+    color: [3]f32,
+    positions: []f32,
+    // The billboard mesh is created lazily on the first draw, since it needs the
+    // renderer; null marks it not yet built.
+    mesh: ?render.Renderer.ParticleMesh = null,
+};
+
+/// Builds a point-cloud worker for every splat.cloud node from its bundled
+/// model, whose output is a flat list of xyz positions. Best-effort per node: a
+/// missing model, or an output that is not a multiple of three, leaves it inert.
+fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const splats = lens.splatNodes(gpa, &session.lens_graph) catch return;
+    defer gpa.free(splats);
+    for (splats) |node| {
+        const bytes = readBundleAsset(gpa, bundle_path, node.model) orelse continue;
+        defer gpa.free(bytes);
+        const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
+        const len = ml_infer.outputLen(worker, 0);
+        if (len == 0 or len % 3 != 0) {
+            ml_infer.destroy(worker);
+            continue;
+        }
+        const count: u32 = @intCast(len / 3);
+        const positions = gpa.alloc(f32, len) catch {
+            ml_infer.destroy(worker);
+            continue;
+        };
+        session.splat_workers.append(gpa, .{
+            .worker = worker,
+            .target = node.graph_index,
+            .count = count,
+            .point = node.point,
+            .color = node.color,
+            .positions = positions,
+        }) catch {
+            gpa.free(positions);
+            ml_infer.destroy(worker);
+        };
+    }
+}
+
+fn destroySplatWorkers(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.splat_workers.items) |sw| {
+        if (sw.mesh) |m| render.Renderer.destroyParticleMesh(m);
+        gpa.free(sw.positions);
+        ml_infer.destroy(sw.worker);
+    }
+    session.splat_workers.clearRetainingCapacity();
+}
+
+fn splatWorkerFor(session: *Session, idx: graph.NodeIndex) ?*SplatWorker {
+    for (session.splat_workers.items) |*sw| {
+        if (sw.target == idx) return sw;
+    }
+    return null;
+}
+
+/// Expands a flat xyz list into billboard vertices the faded particle program
+/// draws: six per point (two triangles), each eight floats (position, corner,
+/// life, seed, velocity). A splat is fully alive and still, so life is one and
+/// the velocity zero; the point holds its place while the camera orbits it.
+fn writeSplatBillboards(positions: []const f32, count: u32, out: []f32) void {
+    const corners = [6]f32{ 0, 1, 2, 0, 2, 3 };
+    for (0..count) |i| {
+        const px = positions[i * 3 + 0];
+        const py = positions[i * 3 + 1];
+        const pz = positions[i * 3 + 2];
+        for (corners, 0..) |corner, k| {
+            const base = (i * 6 + k) * 8;
+            out[base + 0] = px;
+            out[base + 1] = py;
+            out[base + 2] = pz;
+            out[base + 3] = corner;
+            out[base + 4] = 1.0;
+            out[base + 5] = @floatFromInt(i % 256);
+            out[base + 6] = 0;
+            out[base + 7] = 0;
+        }
+    }
+}
+
 const DiffusionWorker = struct {
     worker: *diffusion.Diffusion,
     target: graph.NodeIndex,
@@ -9498,6 +9648,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createModelLoaders(session, gpa, bundle_path);
     createMlLoaders(session, gpa, bundle_path);
     createDiffusionLoaders(session, gpa, bundle_path);
+    createSplatLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
@@ -9546,6 +9697,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyModelState(s);
     destroyMlWorkers(s);
     destroyDiffusionWorkers(s);
+    destroySplatWorkers(s);
     destroyChainOrder(s);
     teardownScript(s);
     destroySounds(s);

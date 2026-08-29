@@ -2863,6 +2863,81 @@ fn proveMlInferMaterial(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeSplatLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-splat","version":"1.0.0","display_name":"BYO Splat","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"cloud","type":"splat.cloud","inputs":{"frame":"camera"},"params":{},
+        \\   "splat":{"model":"splat.onnx","point":8.0,"r":0.9,"g":0.8,"b":0.3}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/splat.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+fn runSplatOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.SplatActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SplatTrackFailed;
+    var polls: usize = 0;
+    while (abi.splatCloudReadyCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    // Keep rendering a few frames so the cloud's billboard draw runs against the
+    // published points, exercising the whole splat path.
+    var more: usize = 0;
+    while (more < 200) : (more += 1) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    return true;
+}
+
+/// Proves text-to-3D: a splat.cloud node runs a bundled model that lifts the
+/// camera frame into a 3D point set, and the engine draws it as camera-facing
+/// billboards. A synthetic 3->3 conv stands in for the depth-lift net, turning
+/// the sampled frame into one point per cell.
+fn proveMlInferSplat(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    // 3->3 identity conv: each cell's rgb becomes an xyz point.
+    const w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splat/assets");
+    try writeSplatLens("zig-out/ml-splat", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runSplatOnce(engine, "zig-out/ml-splat", person);
+    const drew_b = try runSplatOnce(engine, "zig-out/ml-splat", person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the splat cloud never produced its points\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a splat.cloud node lifts the camera frame to a 3D point set with a bundled model and draws it as a billboard cloud\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -13189,6 +13264,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer face restyle");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
+    if (!try proveMlInferSplat(gpa, engine)) return 1;
+    watchHold("ml infer splat");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

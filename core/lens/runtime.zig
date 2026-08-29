@@ -37,7 +37,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -77,6 +77,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "sprite.2d")) return .sprite_2d;
     if (std.mem.eql(u8, type_str, "text.2d")) return .text_2d;
     if (std.mem.eql(u8, type_str, "video.texture")) return .video_texture;
+    if (std.mem.eql(u8, type_str, "splat.cloud")) return .splat_cloud;
     return null;
 }
 
@@ -110,7 +111,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
     };
 }
 
@@ -217,6 +218,9 @@ const LensNode = struct {
     /// .video_texture only: the clip source, rect, opacity, and playback rate
     /// the node decodes and draws at.
     video: ?manifest.VideoField = null,
+    /// .splat_cloud only: the model that lifts the frame to a point cloud and
+    /// the billboard size and color it draws the splats with.
+    splat: ?manifest.SplatField = null,
     /// .model_gltf only: microseconds since play_animation last fired
     /// for this node, null if it never has. Advances every tick() the
     /// same way a ramp does - once a trigger starts it, not before.
@@ -342,6 +346,16 @@ pub const SpriteNode = struct {
     /// false fills behind the region (greenscreen), true fills over it (restyle).
     mask_channel: ?u8,
     mask_over: bool,
+};
+
+/// One splat.cloud node ready for the caller to load and draw - which graph node
+/// it is, the model (assets/<model>) that lifts the frame to a point cloud, and
+/// the billboard size and rgb color the splats draw with.
+pub const SplatNode = struct {
+    graph_index: graph.NodeIndex,
+    model: []const u8,
+    point: f32,
+    color: [3]f32,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -531,7 +545,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
 
 /// One matte.hair source node ready for the caller to draw - which graph node
 /// it is, and its guided-filter parameters packed for the refine pass (radius,
@@ -1130,6 +1144,22 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every splat.cloud node this lens spliced, in execution order, each
+    /// carrying the model that lifts the frame to a point cloud and the
+    /// billboard size and color it draws with.
+    pub fn splatNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]SplatNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(SplatNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .splat_cloud) continue;
+            const sf = node.splat orelse continue;
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b } });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every text.2d node this lens spliced, in execution order, each
     /// carrying its string, rect, opacity, and color - the caller
     /// rasterizes the string and draws it like a sprite.
@@ -1201,6 +1231,7 @@ pub const Lens = struct {
                 .face_swap => .face_swap,
                 .draw_board => .draw_board,
                 .sprite_2d, .text_2d, .video_texture => .sprite,
+                .splat_cloud => .splat,
                 else => continue,
             };
             try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
@@ -1431,6 +1462,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .sprite = if (node_type == .sprite_2d) node.sprite else null,
             .text = if (node_type == .text_2d) node.text else null,
             .video = if (node_type == .video_texture) node.video else null,
+            .splat = if (node_type == .splat_cloud) node.splat else null,
             .grade = if (node_type == .grade_pass) node.grade else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .dof = if (node_type == .dof_pass) node.dof else null,
