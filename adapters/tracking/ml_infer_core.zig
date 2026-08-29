@@ -4,8 +4,7 @@
 //! owned buffers. The worker wraps it off the frame thread; the web calls direct.
 
 const std = @import("std");
-const runtime = @import("runtime");
-const onnx = @import("onnx");
+const ml_engine = @import("ml_engine");
 const sampler = @import("sampler");
 const ml_tensor = @import("ml_tensor");
 
@@ -16,58 +15,9 @@ pub const CreateError = error{ Unsupported, InvalidModel, ModelRejected, OutOfMe
 /// The most output tensors a byo-ml model may expose, a bound not a promise.
 pub const max_outputs = 8;
 
-/// The two model formats a lens may ship, each behind its own engine but the
-/// same surface, so the core drives either identically.
-const Backend = union(enum) {
-    tflite: runtime.Engine,
-    onnx: onnx.Engine,
-};
-
 /// How a model lays out its image input. The sampler writes interleaved RGB
 /// (NHWC); an NCHW model takes the same pixels transposed to planar.
 const Layout = enum { nhwc, nchw };
-
-fn backendDeinit(b: *Backend) void {
-    switch (b.*) {
-        inline else => |*e| e.deinit(),
-    }
-}
-
-fn backendInputCount(b: *const Backend) usize {
-    return switch (b.*) {
-        inline else => |*e| e.inputCount(),
-    };
-}
-
-fn backendOutputCount(b: *const Backend) usize {
-    return switch (b.*) {
-        inline else => |*e| e.outputCount(),
-    };
-}
-
-fn backendInputDims(b: *const Backend, dims: []i32) anyerror![]i32 {
-    return switch (b.*) {
-        inline else => |*e| e.inputDims(0, dims),
-    };
-}
-
-fn backendWriteInput(b: *Backend, bytes: []const u8) anyerror!void {
-    return switch (b.*) {
-        inline else => |*e| e.writeInput(0, bytes),
-    };
-}
-
-fn backendInvoke(b: *Backend) anyerror!void {
-    return switch (b.*) {
-        inline else => |*e| e.invoke(),
-    };
-}
-
-fn backendOutputFloats(b: *const Backend, index: usize) anyerror![]const f32 {
-    return switch (b.*) {
-        inline else => |*e| e.outputFloats(index),
-    };
-}
 
 /// A loaded author model: its backend engine, the reused RGB input plane, and
 /// an owned copy of each output tensor so a reader never touches the live
@@ -75,7 +25,7 @@ fn backendOutputFloats(b: *const Backend, index: usize) anyerror![]const f32 {
 pub const Core = struct {
     gpa: std.mem.Allocator,
     model_bytes: []u8,
-    backend: Backend,
+    engine: ml_engine.Engine,
     layout: Layout,
     input_side: u32,
     input_tensor: []f32,
@@ -100,22 +50,16 @@ pub const Core = struct {
         const owned_bytes = gpa.dupe(u8, model_bytes) catch return error.OutOfMemory;
         errdefer gpa.free(owned_bytes);
 
-        // A TFLite flatbuffer carries "TFL3" at offset 4; anything else is
-        // treated as an ONNX protobuf and rejected by its own parser if not.
-        const is_tflite = owned_bytes.len >= 8 and std.mem.eql(u8, owned_bytes[4..8], "TFL3");
-        var backend: Backend = if (is_tflite)
-            .{ .tflite = runtime.Engine.init(owned_bytes, threads) catch return error.InvalidModel }
-        else
-            .{ .onnx = onnx.Engine.init(gpa, owned_bytes) catch return error.InvalidModel };
-        errdefer backendDeinit(&backend);
+        var engine = ml_engine.Engine.init(gpa, owned_bytes, threads) catch return error.InvalidModel;
+        errdefer engine.deinit();
 
-        const in_count = backendInputCount(&backend);
-        const out_count = backendOutputCount(&backend);
+        const in_count = engine.inputCount();
+        const out_count = engine.outputCount();
         if (in_count != 1) return error.InvalidModel;
         if (out_count == 0 or out_count > max_outputs) return error.InvalidModel;
 
         var in_dims_buf: [8]i32 = undefined;
-        const in_dims = backendInputDims(&backend, &in_dims_buf) catch return error.InvalidModel;
+        const in_dims = engine.inputDims(0, &in_dims_buf) catch return error.InvalidModel;
         if (in_dims.len != 4) return error.InvalidModel;
         var layout: Layout = undefined;
         var side: i32 = 0;
@@ -137,30 +81,18 @@ pub const Core = struct {
         errdefer gpa.free(nchw_scratch);
 
         // The largest tensor and the tensor count feed the sandbox admission,
-        // so an oversized or many-tensor model never allocates its buffers.
+        // so an oversized or many-tensor model never allocates its buffers. A
+        // warm-up over zeroed input discovers every output length across both
+        // backends and validates that each op resolves at load.
         var output_lens: [max_outputs]usize = @splat(0);
         var largest: u64 = @as(u64, input_side) * input_side * 3 * @sizeOf(f32);
-        switch (backend) {
-            .tflite => |*eng| {
-                for (0..out_count) |i| {
-                    const tensor = runtime.c.TfLiteInterpreterGetOutputTensor(eng.interpreter, @intCast(i)) orelse return error.InvalidModel;
-                    const bytes = runtime.c.TfLiteTensorByteSize(tensor);
-                    output_lens[i] = bytes / @sizeOf(f32);
-                    largest = @max(largest, bytes);
-                }
-            },
-            .onnx => {
-                // ONNX output shapes are dynamic; a warm-up over zeroed input
-                // discovers them and validates every op resolves at load.
-                @memset(input_tensor, 0);
-                writeSampledInput(&backend, layout, input_side, input_tensor, nchw_scratch) catch return error.InvalidModel;
-                backendInvoke(&backend) catch return error.InvalidModel;
-                for (0..out_count) |i| {
-                    const floats = backendOutputFloats(&backend, i) catch return error.InvalidModel;
-                    output_lens[i] = floats.len;
-                    largest = @max(largest, floats.len * @sizeOf(f32));
-                }
-            },
+        @memset(input_tensor, 0);
+        writeSampledInput(&engine, layout, input_side, input_tensor, nchw_scratch) catch return error.InvalidModel;
+        engine.invoke() catch return error.InvalidModel;
+        for (0..out_count) |i| {
+            const floats = engine.outputFloats(i) catch return error.InvalidModel;
+            output_lens[i] = floats.len;
+            largest = @max(largest, floats.len * @sizeOf(f32));
         }
         if (!bounds.admits(owned_bytes.len, in_count + out_count, largest)) return error.ModelRejected;
 
@@ -176,7 +108,7 @@ pub const Core = struct {
         core.* = .{
             .gpa = gpa,
             .model_bytes = owned_bytes,
-            .backend = backend,
+            .engine = engine,
             .layout = layout,
             .input_side = input_side,
             .input_tensor = input_tensor,
@@ -190,7 +122,7 @@ pub const Core = struct {
     pub fn deinit(core: *Core) void {
         const gpa = core.gpa;
         for (core.outputs[0..core.output_count]) |buf| gpa.free(buf);
-        backendDeinit(&core.backend);
+        core.engine.deinit();
         gpa.free(core.nchw_scratch);
         gpa.free(core.input_tensor);
         gpa.free(core.model_bytes);
@@ -202,8 +134,8 @@ pub const Core = struct {
     /// so a compute allocates nothing.
     pub fn compute(core: *Core, frame: sampler.Frame) bool {
         sampler.sampleRegion(frame, sampler.frameSquare(frame.width, frame.height), .unit, core.input_side, core.input_tensor);
-        writeSampledInput(&core.backend, core.layout, core.input_side, core.input_tensor, core.nchw_scratch) catch return false;
-        backendInvoke(&core.backend) catch return false;
+        writeSampledInput(&core.engine, core.layout, core.input_side, core.input_tensor, core.nchw_scratch) catch return false;
+        core.engine.invoke() catch return false;
         return true;
     }
 
@@ -211,7 +143,7 @@ pub const Core = struct {
     /// sees a stable copy rather than the output the next invoke overwrites.
     pub fn publish(core: *Core) void {
         for (0..core.output_count) |i| {
-            const src = backendOutputFloats(&core.backend, i) catch continue;
+            const src = core.engine.outputFloats(i) catch continue;
             const dst = core.outputs[i];
             if (src.len == dst.len) @memcpy(dst, src);
         }
@@ -275,9 +207,9 @@ pub const Core = struct {
 /// Writes the sampled RGB into the model's input tensor in its own layout: an
 /// NHWC model takes the interleaved sample straight through; an NCHW model
 /// takes it transposed to planar channels through the scratch buffer.
-fn writeSampledInput(backend: *Backend, layout: Layout, side: u32, nhwc: []const f32, nchw_scratch: []f32) anyerror!void {
+fn writeSampledInput(engine: *ml_engine.Engine, layout: Layout, side: u32, nhwc: []const f32, nchw_scratch: []f32) anyerror!void {
     switch (layout) {
-        .nhwc => try backendWriteInput(backend, std.mem.sliceAsBytes(nhwc)),
+        .nhwc => try engine.writeInput(0, std.mem.sliceAsBytes(nhwc)),
         .nchw => {
             const s: usize = side;
             const plane = s * s;
@@ -289,7 +221,7 @@ fn writeSampledInput(backend: *Backend, layout: Layout, side: u32, nhwc: []const
                     nchw_scratch[2 * plane + y * s + x] = nhwc[px + 2];
                 }
             }
-            try backendWriteInput(backend, std.mem.sliceAsBytes(nchw_scratch));
+            try engine.writeInput(0, std.mem.sliceAsBytes(nchw_scratch));
         },
     }
 }

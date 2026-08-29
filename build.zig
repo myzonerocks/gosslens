@@ -388,6 +388,7 @@ pub fn build(b: *std.Build) void {
     const gesture_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/input/gesture.zig"), .target = target, .optimize = optimize }) });
     const ml_tensor_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/ml_tensor.zig"), .target = target, .optimize = optimize }) });
     const onnx_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("adapters/tracking/onnx.zig"), .target = target, .optimize = optimize }) });
+    const diffusion_schedule_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/diffusion_schedule.zig"), .target = target, .optimize = optimize }) });
     const logic_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/lens/logic.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "trigger", .module = lens_trigger_module }} }) });
     const face_geometry_tests = b.addTest(.{ .root_module = face_geometry_core_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
@@ -432,6 +433,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(logic_tests).step);
     test_step.dependOn(&b.addRunArtifact(ml_tensor_tests).step);
     test_step.dependOn(&b.addRunArtifact(onnx_tests).step);
+    test_step.dependOn(&b.addRunArtifact(diffusion_schedule_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
@@ -746,10 +748,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "runtime", .module = runtime_module },
+                .{ .name = "ml_engine", .module = mlEngineModule(b, target, optimize, runtime_module) },
                 .{ .name = "sampler", .module = sampler_module },
                 .{ .name = "ml_tensor", .module = ml_tensor_module },
-                .{ .name = "onnx", .module = onnxModule(b, target, optimize) },
             },
         });
         const ml_infer_module = b.createModule(.{
@@ -1317,10 +1318,9 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
-                    .{ .name = "runtime", .module = runtime_conformance },
+                    .{ .name = "ml_engine", .module = mlEngineModule(b, target, optimize, runtime_conformance) },
                     .{ .name = "sampler", .module = sampler_module },
                     .{ .name = "ml_tensor", .module = ml_tensor_conformance },
-                    .{ .name = "onnx", .module = onnxModule(b, target, optimize) },
                 },
             });
             const ml_infer_conformance = b.createModule(.{
@@ -1711,10 +1711,9 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
             .target = android_target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "runtime", .module = runtime_android },
+                .{ .name = "ml_engine", .module = mlEngineModule(b, android_target, optimize, runtime_android) },
                 .{ .name = "sampler", .module = tracking_cores_android.sampler },
                 .{ .name = "ml_tensor", .module = ml_tensor_android },
-                .{ .name = "onnx", .module = onnxModule(b, android_target, optimize) },
             },
         });
         const ml_infer_android = b.createModule(.{
@@ -2293,6 +2292,20 @@ fn onnxModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .root_source_file = b.path("adapters/tracking/onnx.zig"),
         .target = target,
         .optimize = optimize,
+    });
+}
+
+/// The shared inference engine over both backends, taking the variant's runtime
+/// module and a fresh onnx module.
+fn mlEngineModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, runtime_mod: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_engine.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "runtime", .module = runtime_mod },
+            .{ .name = "onnx", .module = onnxModule(b, target, optimize) },
+        },
     });
 }
 
@@ -3812,10 +3825,9 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             .target = ios_target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "runtime", .module = runtime_ios },
+                .{ .name = "ml_engine", .module = mlEngineModule(b, ios_target, optimize, runtime_ios) },
                 .{ .name = "sampler", .module = tracking_cores_ios.sampler },
                 .{ .name = "ml_tensor", .module = ml_tensor_ios },
-                .{ .name = "onnx", .module = onnxModule(b, ios_target, optimize) },
             },
         });
         const ml_infer_ios = b.createModule(.{
