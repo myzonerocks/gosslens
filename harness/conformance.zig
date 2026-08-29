@@ -11988,6 +11988,80 @@ fn proveMorphBlend(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Captures the face-reenact avatar deformed by one injected source face. The
+/// caller owns the returned RGBA; the source performance is held across the
+/// rendered frames since no tracker overwrites the submitted faces.
+fn captureReenactShot(gpa: std.mem.Allocator, engine: *abi.Engine, session: *abi.Session, planes: Nv12Copy, faces: []const abi.FaceResult) ![]u8 {
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (abi.goss_session_submit_faces(session, faces.ptr, @intCast(faces.len)) != .ok) return error.SubmitFacesFailed;
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves one-shot head reenactment: a source face injected through
+/// goss_session_submit_faces (not the local live face) carries jawOpen, and the
+/// face-reenact lens binds its jawOpen morph target to it, so a wide-open source
+/// jaw deforms the avatar mesh where a closed one holds it at rest, same still.
+fn proveHeadReenact(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/face-reenact";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len) != .ok) {
+        std.debug.print("conformance: FAIL face-reenact lens activation\n", .{});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    // Land the async .glb before either capture so both read a drawn mesh and
+    // only the driven pose differs.
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+    pumpUntilLoaded(engine, session);
+
+    // blendshape_names[25] is jawOpen, pinned by a face module test.
+    const jaw_open = 25;
+    var closed = std.mem.zeroes(abi.FaceResult);
+    closed.presence = 1.0;
+    closed.landmark_count_out = @intCast(closed.landmarks.len / 3);
+    closed.blendshapes[jaw_open] = 0.05;
+    var open = closed;
+    open.blendshapes[jaw_open] = 0.9;
+
+    const shot_closed = try captureReenactShot(gpa, engine, session, planes, &[_]abi.FaceResult{closed});
+    defer gpa.free(shot_closed);
+    const shot_open = try captureReenactShot(gpa, engine, session, planes, &[_]abi.FaceResult{open});
+    defer gpa.free(shot_open);
+
+    var changed: usize = 0;
+    var i: usize = 0;
+    while (i + 4 <= shot_closed.len) : (i += 4) {
+        if (!std.mem.eql(u8, shot_closed[i .. i + 4], shot_open[i .. i + 4])) changed += 1;
+    }
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL head-reenact: the injected source jaw left the avatar mesh unchanged\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a retarget avatar is reenacted by an injected source performance: an open source jaw deforms the mesh where a closed one holds it at rest ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
 /// Proves a sprite.2d node draws its image over the frame. The static
 /// Renders frames until every async image and model load has landed, so a
 /// screenshot reads a deterministic frame no matter how the loader threads were
@@ -13227,6 +13301,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("anim mixer blend");
     if (!try proveMorphBlend(gpa, engine)) return 1;
     watchHold("morph blend");
+    if (!try proveHeadReenact(gpa, engine)) return 1;
+    watchHold("head reenact");
     if (!try proveSpriteDraw(gpa, engine)) return 1;
     watchHold("sprite overlay");
     if (!try proveTextDraw(gpa, engine)) return 1;

@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.face-reenact",
+  "version": "1.0.0",
+  "display_name": "Face Reenact",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "face", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "retarget": true}
+  ],
+  "triggers": []
+}

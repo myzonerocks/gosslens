@@ -198,6 +198,11 @@ target with no matching name still reads its `morph_weights` parameter, so a rig
 can mix retargeted expression with authored morphs. With no tracked face the
 mesh holds its rest shape. `retarget` is a `model.gltf` field only.
 
+The driving performance need not be the local live face. A host that injects
+faces through `goss_session_submit_faces` (blendshapes read off a source clip or
+another camera) drives a retarget avatar from that performance instead, so one
+selfie's avatar is reenacted by a separate source head.
+
 A `model.gltf` node may add `"talk": true` to drive its `jawOpen` morph target
 from the submitted audio, so the mesh mouths speech even with no tracked face: a
 gated envelope of the voiced (low) audio band opens the jaw on vowels and closes
@@ -1190,6 +1195,8 @@ mode reads the model's points as a grid and draws them as a connected 3D surface
 a diffusion node targeting a shader.pass binds its generated image to the material
 graph's generated sampler; a selfie-source splat.cloud generates its avatar from
 one submitted still through the avatar op and draws it off the per-frame camera;
+a retarget avatar is reenacted by an injected source performance, an open source
+jaw deforming the mesh where a closed one holds it at rest;
 and the prompt
 compiler emits a GLF manifest on device that activates as a lens and renders.
 The conformance harness runs today on the host (macOS): it renders each
