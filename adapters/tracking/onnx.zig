@@ -170,7 +170,8 @@ pub const Engine = struct {
     result_table: std.StringHashMapUnmanaged(Tensor) = .empty,
 
     /// Parses model_bytes into an executable graph. The bytes are copied into
-    /// the graph arena, so the caller need not keep them.
+    /// the graph arena and every name and weight references that copy, so the
+    /// caller need not keep the original alive.
     pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8) Error!Engine {
         const graph_arena = gpa.create(std.heap.ArenaAllocator) catch return error.OutOfMemory;
         errdefer gpa.destroy(graph_arena);
@@ -183,7 +184,8 @@ pub const Engine = struct {
         errdefer run_arena.deinit();
 
         const arena = graph_arena.allocator();
-        const parsed = try parseModel(arena, model_bytes);
+        const owned = arena.dupe(u8, model_bytes) catch return error.OutOfMemory;
+        const parsed = try parseModel(arena, owned);
 
         // A graph input backed by an initializer is a constant, not a fed
         // input; only the truly external inputs get a fed slot.

@@ -1850,9 +1850,6 @@ fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-/// Proves a script node: the sandboxed script reads a signal and writes a
-/// lens parameter each tick, deterministically, and the host reads it back
-/// through the ABI. The scripting section's end-to-end proof.
 /// Writes a lens bundle whose ml.infer node runs a bundled author model, the
 /// way an author ships one. It binds the segmenter mask center (256x256, so
 /// 128*256+128 - foreground on a centered portrait, background on a blank frame)
@@ -1877,11 +1874,11 @@ fn writeMlInferLens(dir: []const u8, model: []const u8) !void {
 /// returns the parameter the model drove. Waits on the async worker's first
 /// publish by watching the sentinel default flip to a real value, which is
 /// magnitude-independent so it never races the inference result.
-fn runMlInferOnce(engine: *abi.Engine, planes: Nv12Copy) !f32 {
+fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, planes: Nv12Copy) !f32 {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
-    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-infer-lens", "zig-out/ml-infer-lens".len) != .ok) {
+    if (abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len) != .ok) {
         std.debug.print("conformance: FAIL byo-ml lens activation\n", .{});
         return error.MlActivationFailed;
     }
@@ -1926,9 +1923,9 @@ fn proveMlInfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
     defer gray.deinit(gpa);
 
-    const person_a = try runMlInferOnce(engine, person);
-    const person_b = try runMlInferOnce(engine, person);
-    const gray_score = try runMlInferOnce(engine, gray);
+    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-lens", person);
+    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-lens", person);
+    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-lens", gray);
 
     if (!std.math.isFinite(person_a) or !std.math.isFinite(gray_score)) {
         std.debug.print("conformance: FAIL the byo model published a non-finite value\n", .{});
@@ -1946,6 +1943,176 @@ fn proveMlInfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A minimal ONNX protobuf emitter, enough to hand-build the one net the ONNX
+/// proof runs; the engine's own tests cover general parsing. Fields are written
+/// with explicit wire tags the way the reader expects them.
+const OnnxPb = struct {
+    buf: std.ArrayList(u8) = .empty,
+    a: std.mem.Allocator,
+
+    fn varint(p: *OnnxPb, v_in: u64) void {
+        var v = v_in;
+        while (true) {
+            var byte: u8 = @truncate(v & 0x7f);
+            v >>= 7;
+            if (v != 0) byte |= 0x80;
+            p.buf.append(p.a, byte) catch unreachable;
+            if (v == 0) break;
+        }
+    }
+    fn tag(p: *OnnxPb, field: u32, wire: u3) void {
+        p.varint((@as(u64, field) << 3) | wire);
+    }
+    fn f32field(p: *OnnxPb, field: u32, value: f32) void {
+        p.tag(field, 5);
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(value), .little);
+        p.buf.appendSlice(p.a, &b) catch unreachable;
+    }
+    fn varintField(p: *OnnxPb, field: u32, value: i64) void {
+        p.tag(field, 0);
+        p.varint(@bitCast(value));
+    }
+    fn bytesField(p: *OnnxPb, field: u32, value: []const u8) void {
+        p.tag(field, 2);
+        p.varint(value.len);
+        p.buf.appendSlice(p.a, value) catch unreachable;
+    }
+};
+
+/// Emits an ONNX net that sums the three input channels (a 1x1 conv with unit
+/// weights) then averages the plane, so its one output is the frame's mean
+/// brightness. NCHW input [1,3,8,8] exercises the core's channel transpose.
+fn buildOnnxProbe(a: std.mem.Allocator) []const u8 {
+    const side: i64 = 8;
+    // W initializer [1,3,1,1] of ones.
+    var w: OnnxPb = .{ .a = a };
+    inline for (.{ 1, 3, 1, 1 }) |d| w.varintField(1, d);
+    w.varintField(2, 1); // FLOAT
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..3) |_| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(@as(f32, 1)), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+
+    const conv = onnxNode(a, "Conv", &.{ "x", "W" }, &.{"h"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    const pool = onnxNode(a, "GlobalAveragePool", &.{"h"}, &.{"y"}, &.{});
+
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(1, pool);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ 1, 3, 1, 1 }));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 1, 1, 1 }));
+
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7); // ir_version
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+const OnnxAttr = struct { name: []const u8, ints: []const i64 = &.{} };
+
+fn onnxNode(a: std.mem.Allocator, op: []const u8, inputs: []const []const u8, outputs: []const []const u8, attrs: []const OnnxAttr) []const u8 {
+    var nd: OnnxPb = .{ .a = a };
+    for (inputs) |i| nd.bytesField(1, i);
+    for (outputs) |o| nd.bytesField(2, o);
+    nd.bytesField(4, op);
+    for (attrs) |at| {
+        var ap: OnnxPb = .{ .a = a };
+        ap.bytesField(1, at.name);
+        for (at.ints) |v| ap.varintField(8, v);
+        nd.bytesField(5, ap.buf.items);
+    }
+    return nd.buf.items;
+}
+
+fn onnxValueInfo(a: std.mem.Allocator, name: []const u8, dims: []const i64) []const u8 {
+    var shape: OnnxPb = .{ .a = a };
+    for (dims) |d| {
+        var dim: OnnxPb = .{ .a = a };
+        dim.varintField(1, d);
+        shape.bytesField(1, dim.buf.items);
+    }
+    var tt: OnnxPb = .{ .a = a };
+    tt.bytesField(2, shape.buf.items);
+    var typ: OnnxPb = .{ .a = a };
+    typ.bytesField(1, tt.buf.items);
+    var vi: OnnxPb = .{ .a = a };
+    vi.bytesField(1, name);
+    vi.bytesField(2, typ.buf.items);
+    return vi.buf.items;
+}
+
+fn writeOnnxLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-infer-onnx","version":"1.0.0","display_name":"BYO ONNX","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
+        \\ "nodes":[{"id":"byo","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[{"tensor":0,"index":0,"param":"score"}]}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Proves the ONNX backend of the same ml.infer node: a bundled ONNX net loads
+/// on the engine's own runtime and drives a lens parameter from the frame,
+/// finite, stable across runs, and responsive to the pixels. The model file
+/// ends in .onnx, so the core routes it to the ONNX engine, not TFLite.
+fn proveMlInferOnnx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-infer-onnx/assets");
+    try writeOnnxLens("zig-out/ml-infer-onnx", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", person);
+    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", person);
+    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", gray);
+
+    if (!std.math.isFinite(person_a) or !std.math.isFinite(gray_score)) {
+        std.debug.print("conformance: FAIL the onnx model published a non-finite value\n", .{});
+        return false;
+    }
+    if (person_a != person_b) {
+        std.debug.print("conformance: FAIL onnx inference is not deterministic ({d} vs {d})\n", .{ person_a, person_b });
+        return false;
+    }
+    if (@abs(person_a - gray_score) < 1e-4) {
+        std.debug.print("conformance: FAIL onnx inference did not respond to the frame ({d} vs {d})\n", .{ person_a, gray_score });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a bundled ONNX net runs through the ml.infer node and drives a lens parameter from the camera frame, deterministically\n", .{});
+    return true;
+}
+
+/// Proves a script node: the sandboxed script reads a signal and writes a
+/// lens parameter each tick, deterministically, and the host reads it back
+/// through the ABI. The scripting section's end-to-end proof.
 fn proveScript(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     _ = gpa;
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
@@ -12247,6 +12414,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("color managed capture");
     if (!try proveMlInfer(gpa, engine)) return 1;
     watchHold("ml infer");
+    if (!try proveMlInferOnnx(gpa, engine)) return 1;
+    watchHold("ml infer onnx");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

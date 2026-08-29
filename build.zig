@@ -749,6 +749,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "runtime", .module = runtime_module },
                 .{ .name = "sampler", .module = sampler_module },
                 .{ .name = "ml_tensor", .module = ml_tensor_module },
+                .{ .name = "onnx", .module = onnxModule(b, target, optimize) },
             },
         });
         const ml_infer_module = b.createModule(.{
@@ -1319,6 +1320,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "runtime", .module = runtime_conformance },
                     .{ .name = "sampler", .module = sampler_module },
                     .{ .name = "ml_tensor", .module = ml_tensor_conformance },
+                    .{ .name = "onnx", .module = onnxModule(b, target, optimize) },
                 },
             });
             const ml_infer_conformance = b.createModule(.{
@@ -1712,6 +1714,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
                 .{ .name = "runtime", .module = runtime_android },
                 .{ .name = "sampler", .module = tracking_cores_android.sampler },
                 .{ .name = "ml_tensor", .module = ml_tensor_android },
+                .{ .name = "onnx", .module = onnxModule(b, android_target, optimize) },
             },
         });
         const ml_infer_android = b.createModule(.{
@@ -2280,6 +2283,14 @@ fn segmentationStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optim
 fn mlTensorModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("core/tracking/ml_tensor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn onnxModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/onnx.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -3804,6 +3815,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
                 .{ .name = "runtime", .module = runtime_ios },
                 .{ .name = "sampler", .module = tracking_cores_ios.sampler },
                 .{ .name = "ml_tensor", .module = ml_tensor_ios },
+                .{ .name = "onnx", .module = onnxModule(b, ios_target, optimize) },
             },
         });
         const ml_infer_ios = b.createModule(.{
