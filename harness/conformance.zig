@@ -3038,6 +3038,30 @@ fn runSelfieSplatOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !b
     return true;
 }
 
+/// The web selfie path: feeds one RGBA still through the avatar RGBA op rather
+/// than the NV12 op, so the same cloud is generated from a canvas byte buffer.
+fn runSelfieSplatRgbaOnce(engine: *abi.Engine, dir: []const u8, rgba: []const u8, w: u32, h: u32) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.SplatActivationFailed;
+    if (abi.goss_session_submit_avatar_source_rgba(session, rgba.ptr, w, h) != .ok) return error.AvatarSubmitFailed;
+    var polls: usize = 0;
+    while (abi.splatCloudReadyCount(session) == 0) {
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    var more: usize = 0;
+    while (more < 200) : (more += 1) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    return true;
+}
+
 /// Proves the photoreal selfie avatar: a splat.cloud with source:selfie runs its
 /// model once over a still submitted through goss_session_submit_avatar_source
 /// (not the live camera) and draws the generated cloud, so an avatar is built
@@ -3064,7 +3088,15 @@ fn proveMlInferSelfieAvatar(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         std.debug.print("conformance: FAIL the selfie avatar never generated its cloud\n", .{});
         return false;
     }
-    std.debug.print("conformance: PROOF a selfie-source splat.cloud generates its avatar from one submitted still through the avatar op and draws it, off the per-frame camera\n", .{});
+    // The web selfie path: the same still submitted as an RGBA buffer through the
+    // RGBA sibling op generates the cloud the same way.
+    const rgba = corpus.frame.pixels.rgba8;
+    const drew_rgba = try runSelfieSplatRgbaOnce(engine, "zig-out/ml-selfie", rgba, corpus.frame.width, corpus.frame.height);
+    if (!drew_rgba) {
+        std.debug.print("conformance: FAIL the selfie avatar never generated its cloud from an RGBA still\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a selfie-source splat.cloud generates its avatar from one submitted still through the avatar op (NV12 and RGBA) and draws it, off the per-frame camera\n", .{});
     return true;
 }
 

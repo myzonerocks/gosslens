@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 57u
+#define GOSS_ABI_MINOR 58u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -530,6 +530,11 @@ goss_status goss_session_track_frame(goss_session *session, const goss_frame_des
  * generated from one photo and then held. The worker publishes off the frame
  * thread; a later render draws its points. GOSS_AGAIN with no selfie avatar. */
 goss_status goss_session_submit_avatar_source(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride);
+
+/* Graph thread. The web selfie path: converts one host RGBA still to NV12 and
+ * runs each selfie-source splat.cloud once over it, the RGBA sibling of
+ * goss_session_submit_avatar_source. GOSS_AGAIN with no selfie avatar. */
+goss_status goss_session_submit_avatar_source_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height);
 
 /* Graph thread. Reads the newest tracking result into caller memory.
  * Reports GOSS_AGAIN until the worker has published its first result. */

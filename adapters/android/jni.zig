@@ -499,6 +499,14 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitSegmentationImage(env: *JniEnv,
     return @intFromEnum(abi.goss_session_submit_segmentation_image(sessionFromHandle(session), rgba, @intCast(@max(width, 0)), @intCast(@max(height, 0))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitAvatarSourceRgba(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, width: i32, height: i32) i32 {
+    _ = cls;
+    if (width == 0 or height == 0) return @intFromEnum(abi.Status.invalid_argument);
+    const bytes = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const rgba: [*]const u8 = @ptrCast(bytes);
+    return @intFromEnum(abi.goss_session_submit_avatar_source_rgba(sessionFromHandle(session), rgba, @intCast(@max(width, 0)), @intCast(@max(height, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSetMakeupReference(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, width: i32, height: i32, landmarks_buffer: jobject, count: i32) i32 {
     _ = cls;
     if (count == 0) return @intFromEnum(abi.goss_session_set_makeup_reference(sessionFromHandle(session), null, 0, 0, null, 0));

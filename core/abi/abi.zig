@@ -199,6 +199,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_set_segmentation_class_mask(goss_session *session, uint32_t channel, const float *mask, uint32_t mask_len)",
     "goss_status goss_session_track_frame(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
     "goss_status goss_session_submit_avatar_source(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
+    "goss_status goss_session_submit_avatar_source_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_face_result(goss_session *session, goss_face_result *out_result)",
     "goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count)",
     "goss_status goss_session_face_count(goss_session *session, uint32_t *out_count)",
@@ -651,6 +652,9 @@ pub const Session = struct {
     /// goss_session_submit_segmentation_image, so each submit orders after the
     /// last the way successive camera frames do.
     segmentation_image_seq: i64 = 0,
+    /// Monotonic timestamp for each goss_session_submit_avatar_source_rgba still,
+    /// so an RGBA selfie orders after the last the way a camera frame would.
+    avatar_source_seq: i64 = 0,
     /// The most recent mask, uploaded as a real GPU texture the same way
     /// a lut.pass asset is - a raw byte array has no reason to cross the
     /// frozen ABI surface when nothing outside the render thread ever
@@ -6083,6 +6087,41 @@ pub export fn goss_session_submit_avatar_source(session: ?*Session, desc: ?*cons
         fed = true;
     }
     return if (fed) .ok else .again;
+}
+
+/// The web selfie path: converts one host RGBA still to NV12 and runs each
+/// selfie-source splat.cloud once over it, the RGBA sibling of
+/// goss_session_submit_avatar_source. again when the session has no selfie
+/// avatar, so the caller only pays the convert when a worker will consume it.
+pub export fn goss_session_submit_avatar_source_rgba(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const pixels = rgba orelse return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    var any = false;
+    for (s.splat_workers.items) |sw| {
+        if (sw.selfie) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return .again;
+    const gpa = s.engine.gpa;
+    const w: usize = width;
+    const h: usize = height;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    const y_out = gpa.alloc(u8, w * h) catch return .out_of_memory;
+    defer gpa.free(y_out);
+    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return .out_of_memory;
+    defer gpa.free(uv_out);
+    image.argbToNv12(pixels[0 .. w * h * 4], @intCast(w), @intCast(h), .bt601, .full, y_out, uv_out) catch return .unsupported;
+    const conversion = math.color.yuvToRgb(.bt601, .full);
+    s.avatar_source_seq += 1;
+    for (s.splat_workers.items) |sw| {
+        if (!sw.selfie) continue;
+        ml_infer.submitNv12(sw.worker, width, height, s.avatar_source_seq, conversion, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
+    }
+    return .ok;
 }
 
 /// Reads the newest tracking result into caller memory. Reports again

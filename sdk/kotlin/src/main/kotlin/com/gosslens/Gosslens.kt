@@ -82,6 +82,7 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+    internal external fun nativeSubmitAvatarSourceRgba(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeFaceResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeSubmitFaces(session: Long, faces: ByteBuffer, count: Int): Int
     internal external fun nativeFaceCount(session: Long): Int
@@ -902,6 +903,15 @@ class GossSession private constructor(
     ): Boolean = Gosslens.nativeSubmitAvatarSource(
         handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
     ) == 0
+
+    /** The RGBA sibling of submitAvatarSource: runs each selfie-source splat
+     * once over one width by height RGBA8 still, row major. */
+    fun submitAvatarSourceRgba(rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = stage(rgba.size)
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSubmitAvatarSourceRgba(handle, buf, width, height) == 0
+    }
 
     /** Stands the segmentation worker up from a raw model - a selfie or hair
      * segmenter .tflite; [model] is a direct buffer of the model bytes. Once
