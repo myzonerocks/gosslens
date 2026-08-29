@@ -138,6 +138,20 @@ pub fn hasPublished(ml: *MlInfer) bool {
     return ml.core.published;
 }
 
+/// The element count of an output tensor, for a mask reader sizing its copy.
+pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
+    return ml.core.outputLen(tensor);
+}
+
+/// Copies a whole output tensor into dst under the output lock, for a consumer
+/// that reads a full mask; false before the first publish or on a size mismatch.
+pub fn copyOutput(ml: *MlInfer, tensor: u32, dst: []f32) bool {
+    const io = ml.io_state.io();
+    ml.out_mutex.lockUncancelable(io);
+    defer ml.out_mutex.unlock(io);
+    return ml.core.copyOutput(tensor, dst);
+}
+
 pub fn outputCount(ml: *MlInfer) u32 {
     return ml.core.output_count;
 }

@@ -827,14 +827,25 @@ pub const MlOutput = struct {
     param: []const u8,
 };
 
+/// Binds a whole output tensor of an ml.infer node as a segmentation mask: the
+/// tensor is a single-channel image the engine resamples to the mask resolution
+/// and feeds to the named mask channel, so a lens author's own segmenter drives
+/// the same compositing the built-in segmenters do.
+pub const MlMask = struct {
+    tensor: u32 = 0,
+    channel: u8 = 0,
+};
+
 /// An ml.infer node's model slot: the bundle-relative model file, the size the
 /// camera frame is resized to before inference (zero keeps the model's own
-/// input size), and the output-to-parameter bindings a lens reads.
+/// input size), the output-to-parameter bindings a lens reads, and an optional
+/// output-to-mask binding for an author-supplied segmenter.
 pub const MlField = struct {
     model: []const u8,
     input_width: u32 = 0,
     input_height: u32 = 0,
     outputs: []const MlOutput,
+    mask: ?MlMask = null,
 };
 
 pub const Node = struct {
@@ -3056,11 +3067,32 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
             }
         }
     }
+    var mask: ?MlMask = null;
+    if (getField(object, "mask")) |mv| {
+        const mask_mark = path.push("mask");
+        if (mv != .object) {
+            try diags.add(path.slice(), "ml mask must be an object", .{});
+        } else {
+            var m: MlMask = .{};
+            if (getField(mv.object, "tensor")) |v| {
+                if (v == .integer and v.integer >= 0) m.tensor = @intCast(v.integer);
+            }
+            const channel_name = if (getField(mv.object, "channel")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (maskChannelIndex(channel_name)) |channel| {
+                m.channel = channel;
+                mask = m;
+            } else {
+                try diags.add(path.slice(), "ml mask needs a known channel, found '{s}'", .{channel_name});
+            }
+        }
+        path.pop(mask_mark);
+    }
     return .{
         .model = try arena.dupe(u8, model),
         .input_width = input_width,
         .input_height = input_height,
         .outputs = try outputs.toOwnedSlice(arena),
+        .mask = mask,
     };
 }
 
@@ -3884,6 +3916,41 @@ test "an ml.infer node parses its model slot and output bindings" {
     try t.expectEqual(@as(usize, 1), ml.outputs.len);
     try t.expectEqual(@as(u32, 5), ml.outputs[0].index);
     try t.expectEqualStrings("cat_score", ml.outputs[0].param);
+}
+
+test "an ml.infer node parses a mask binding to a named channel" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "seg", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "seg.onnx", "outputs": [],
+        \\      "mask": {"tensor": 0, "channel": "hair"}}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const ml = manifest.nodes[0].ml orelse return error.TestUnexpectedResult;
+    const mask = ml.mask orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(u32, 0), mask.tensor);
+    try t.expectEqual(@as(u8, 2), mask.channel);
+}
+
+test "an ml.infer mask with an unknown channel is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "seg", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "seg.onnx", "outputs": [],
+        \\      "mask": {"tensor": 0, "channel": "not_a_channel"}}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "ml mask needs a known channel") != null) found = true;
+    }
+    try t.expect(found);
 }
 
 test "a sprite.2d node with no sprite block defaults to full frame" {

@@ -60,6 +60,19 @@ pub fn hasPublished(ml: *MlInfer) bool {
     return false;
 }
 
+pub fn outputLen(ml: *MlInfer, tensor: u32) usize {
+    _ = ml;
+    _ = tensor;
+    return 0;
+}
+
+pub fn copyOutput(ml: *MlInfer, tensor: u32, dst: []f32) bool {
+    _ = ml;
+    _ = tensor;
+    _ = dst;
+    return false;
+}
+
 pub fn outputCount(ml: *MlInfer) u32 {
     _ = ml;
     return 0;

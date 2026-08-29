@@ -229,6 +229,24 @@ pub const Core = struct {
         if (!std.math.isFinite(value)) return 0;
         return value;
     }
+
+    /// The element count of an output tensor, so a mask reader can size its
+    /// copy; zero for an out-of-range tensor.
+    pub fn outputLen(core: *const Core, tensor: u32) usize {
+        if (tensor >= core.output_count) return 0;
+        return core.outputs[tensor].len;
+    }
+
+    /// Copies a whole output tensor from the published copy into dst, for a
+    /// consumer that reads a full mask rather than one element. False before the
+    /// first publish or on a length mismatch, so a stale read never lands.
+    pub fn copyOutput(core: *const Core, tensor: u32, dst: []f32) bool {
+        if (!core.published or tensor >= core.output_count) return false;
+        const buf = core.outputs[tensor];
+        if (buf.len != dst.len) return false;
+        @memcpy(dst, buf);
+        return true;
+    }
 };
 
 /// Writes the sampled RGB into the model's input tensor in its own layout: an

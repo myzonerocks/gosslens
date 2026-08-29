@@ -3926,6 +3926,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollSpriteLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
+        pollMlMasks(s);
         pollSceneSegmentation(s);
         pollDepthOcclusion(s);
         pollLandmarkMattes(s);
@@ -4024,6 +4025,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollMlMasks(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
@@ -4122,6 +4124,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollMlMasks(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
@@ -5914,9 +5917,10 @@ pub fn loadsPending(session: ?*Session) u32 {
 pub const segmentation_mask_side = segmentation.mask_side;
 pub const segmentation_mask_len = segmentation.mask_len;
 
-/// Test-only: pushes a synthetic mask straight into a channel's texture so a
-/// headless proof can gate a pass on a known region with no tracking model.
-/// Channel zero is the subject texture, the rest are class textures.
+/// Uploads a mask straight into a channel's texture: the custom-segmenter mask
+/// binding feeds an author model's output here, and a headless proof pushes a
+/// synthetic mask the same way. Channel zero is the subject texture, the rest
+/// are class textures.
 pub fn injectMaskChannel(session: *Session, channel: usize, mask: *const [segmentation.mask_len]f32) void {
     if (channel == 0) {
         session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
@@ -8575,11 +8579,19 @@ fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []
 const MlWorker = struct {
     worker: *ml_infer.MlInfer,
     outputs: []const manifest.MlOutput,
+    /// A mask binding routes a whole output tensor to a mask channel; null when
+    /// the node only drives parameters. mask_side is the model mask's square
+    /// side, and the two scratch planes hold its raw and resampled copies.
+    mask: ?manifest.MlMask,
+    mask_side: u32,
+    mask_src: []f32,
+    mask_dst: []f32,
 };
 
 /// Builds an inference worker for every ml.infer node from its bundled model,
-/// holding the node's output-to-parameter bindings. Best-effort per node: a
-/// missing, malformed, or oversized model leaves that node inert.
+/// holding the node's output-to-parameter and output-to-mask bindings.
+/// Best-effort per node: a missing, malformed, or oversized model leaves that
+/// node inert.
 fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
     const lens = if (session.active_lens) |*l| l else return;
     const io = defaultIo();
@@ -8590,7 +8602,40 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
         defer gpa.free(bytes);
         const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
-        session.ml_workers.append(gpa, .{ .worker = worker, .outputs = ml.outputs }) catch {
+
+        // A mask binding needs the bound tensor to be a square single-channel
+        // plane; anything else leaves the node driving only its parameters.
+        var mask: ?manifest.MlMask = null;
+        var mask_side: u32 = 0;
+        var mask_src: []f32 = &.{};
+        var mask_dst: []f32 = &.{};
+        if (ml.mask) |mb| {
+            const len = ml_infer.outputLen(worker, mb.tensor);
+            const side = isqrt(len);
+            if (len > 0 and side * side == len) {
+                if (gpa.alloc(f32, len)) |src| {
+                    if (gpa.alloc(f32, segmentation.mask_len)) |dst| {
+                        mask = mb;
+                        mask_side = @intCast(side);
+                        mask_src = src;
+                        mask_dst = dst;
+                    } else |_| {
+                        gpa.free(src);
+                    }
+                } else |_| {}
+            }
+        }
+
+        session.ml_workers.append(gpa, .{
+            .worker = worker,
+            .outputs = ml.outputs,
+            .mask = mask,
+            .mask_side = mask_side,
+            .mask_src = mask_src,
+            .mask_dst = mask_dst,
+        }) catch {
+            if (mask_src.len > 0) gpa.free(mask_src);
+            if (mask_dst.len > 0) gpa.free(mask_dst);
             ml_infer.destroy(worker);
             return;
         };
@@ -8611,8 +8656,76 @@ fn pollMlOutputs(session: *Session) void {
     }
 }
 
+/// Uploads each ml.infer mask binding's output as its channel's mask texture,
+/// resampled to the mask resolution, so an author's own segmenter drives the
+/// same compositing the built-in segmenters feed. Render-path, like the
+/// built-in mask poll: the upload needs the renderer.
+fn pollMlMasks(session: *Session) void {
+    for (session.ml_workers.items) |mw| {
+        const mask = mw.mask orelse continue;
+        if (mw.mask_src.len == 0) continue;
+        if (!ml_infer.copyOutput(mw.worker, mask.tensor, mw.mask_src)) continue;
+        resampleMask(mw.mask_src, mw.mask_side, mw.mask_dst);
+        injectMaskChannel(session, mask.channel, mw.mask_dst[0..segmentation.mask_len]);
+    }
+}
+
+/// Bilinearly resamples a square single-channel mask to the mask resolution, so
+/// any model output size feeds the fixed-size mask texture.
+fn resampleMask(src: []const f32, side: u32, dst: []f32) void {
+    const ms: usize = segmentation.mask_side;
+    const s: usize = side;
+    if (s == 0) return;
+    if (s == ms) {
+        @memcpy(dst[0..segmentation.mask_len], src[0..segmentation.mask_len]);
+        return;
+    }
+    const scale = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(ms));
+    for (0..ms) |y| {
+        const fy = (@as(f32, @floatFromInt(y)) + 0.5) * scale - 0.5;
+        const fy0 = @floor(fy);
+        const wy = fy - fy0;
+        const y0 = clampIdx(fy0, s);
+        const y1 = clampIdx(fy0 + 1, s);
+        for (0..ms) |x| {
+            const fx = (@as(f32, @floatFromInt(x)) + 0.5) * scale - 0.5;
+            const fx0 = @floor(fx);
+            const wx = fx - fx0;
+            const x0 = clampIdx(fx0, s);
+            const x1 = clampIdx(fx0 + 1, s);
+            const a = src[y0 * s + x0];
+            const b = src[y0 * s + x1];
+            const c = src[y1 * s + x0];
+            const d = src[y1 * s + x1];
+            const top = a + (b - a) * wx;
+            const bot = c + (d - c) * wx;
+            dst[y * ms + x] = top + (bot - top) * wy;
+        }
+    }
+}
+
+fn clampIdx(v: f32, n: usize) usize {
+    if (v <= 0) return 0;
+    const i: usize = @intFromFloat(v);
+    return @min(i, n - 1);
+}
+
+/// Integer floor square root, guarded against float rounding at the boundary.
+fn isqrt(n: usize) usize {
+    if (n == 0) return 0;
+    var x: usize = @intFromFloat(@sqrt(@as(f64, @floatFromInt(n))));
+    while (x * x > n) x -= 1;
+    while ((x + 1) * (x + 1) <= n) x += 1;
+    return x;
+}
+
 fn destroyMlWorkers(session: *Session) void {
-    for (session.ml_workers.items) |mw| ml_infer.destroy(mw.worker);
+    const gpa = session.engine.gpa;
+    for (session.ml_workers.items) |mw| {
+        if (mw.mask_src.len > 0) gpa.free(mw.mask_src);
+        if (mw.mask_dst.len > 0) gpa.free(mw.mask_dst);
+        ml_infer.destroy(mw.worker);
+    }
     session.ml_workers.clearRetainingCapacity();
 }
 
