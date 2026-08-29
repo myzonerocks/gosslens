@@ -4,6 +4,13 @@
 
 const std = @import("std");
 
+/// A `texture` node with this name binds to a generative node's output rather
+/// than a bundled asset: a diffusion or ml.infer style node targeting the
+/// shader.pass drives it, so a generated map feeds the material graph. It lowers
+/// to a fixed sampler stage the host binds the generative texture to.
+pub const generative_texture_name = "generated";
+pub const generative_stage: u32 = 1;
+
 /// The value a node's single output carries. A wire only connects
 /// matching types; the validator rejects a mismatch.
 pub const ValueType = enum { float, vec2, vec3, vec4, sampler };
@@ -380,8 +387,14 @@ pub fn emitFragment(gpa: std.mem.Allocator, graph: Graph, types: []const ValueTy
     for (graph.nodes) |node| {
         switch (node.kind) {
             .texture => {
-                writer.print("SAMPLER2D(s_{s}, {d});\n", .{ node.name, next_sampler }) catch return error.OutOfMemory;
-                next_sampler += 1;
+                // The reserved generative texture binds to a fixed host stage;
+                // every other texture takes the next sequential sampler slot.
+                if (std.mem.eql(u8, node.name, generative_texture_name)) {
+                    writer.print("SAMPLER2D(s_{s}, {d});\n", .{ node.name, generative_stage }) catch return error.OutOfMemory;
+                } else {
+                    writer.print("SAMPLER2D(s_{s}, {d});\n", .{ node.name, next_sampler }) catch return error.OutOfMemory;
+                    next_sampler += 1;
+                }
             },
             .uniform => writer.print("uniform vec4 u_{s};\n", .{node.name}) catch return error.OutOfMemory,
             .time => uses_time = true,

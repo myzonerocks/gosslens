@@ -1850,6 +1850,1206 @@ fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a lens bundle whose ml.infer node runs a bundled author model, the
+/// way an author ships one. It binds the segmenter mask center (256x256, so
+/// 128*256+128 - foreground on a centered portrait, background on a blank frame)
+/// to a parameter defaulting to a sentinel the first inference overwrites.
+fn writeMlInferLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-infer","version":"1.0.0","display_name":"BYO Model","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
+        \\ "nodes":[{"id":"byo","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.tflite","outputs":[{"tensor":0,"index":32896,"param":"score"}]}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.tflite", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates the byo-ml bundle on a fresh session, feeds it one frame, and
+/// returns the parameter the model drove. Waits on the async worker's first
+/// publish by watching the sentinel default flip to a real value, which is
+/// magnitude-independent so it never races the inference result.
+fn runMlInferOnce(engine: *abi.Engine, bundle_path: []const u8, param: []const u8, sentinel: f32, planes: Nv12Copy) !f32 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len) != .ok) {
+        std.debug.print("conformance: FAIL byo-ml lens activation\n", .{});
+        return error.MlActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var value: f32 = sentinel;
+    var polls: usize = 0;
+    while (value == sentinel) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.MlTrackFrameFailed;
+        }
+        std.Thread.yield() catch {};
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, param.ptr, param.len, &value);
+        polls += 1;
+        if (polls > 100_000_000) return error.MlInferTimedOut;
+    }
+    return value;
+}
+
+/// Proves the bring-your-own model path through the real ABI: a bundled author
+/// model runs on the camera frame off the render thread and drives a lens
+/// parameter. The value is finite, stable across two runs, and responds to the
+/// pixels (a portrait and a flat frame drive it apart), so it is real inference.
+fn proveMlInfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const model = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(32 << 20));
+    defer gpa.free(model);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-infer-lens/assets");
+    try writeMlInferLens("zig-out/ml-infer-lens", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    // A flat gray frame of the same size: a control with no subject, so its
+    // inference must differ from the portrait if the model truly ran on pixels.
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, person);
+    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, person);
+    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-lens", "score", -999.0, gray);
+
+    if (!std.math.isFinite(person_a) or !std.math.isFinite(gray_score)) {
+        std.debug.print("conformance: FAIL the byo model published a non-finite value\n", .{});
+        return false;
+    }
+    if (person_a != person_b) {
+        std.debug.print("conformance: FAIL byo inference is not deterministic ({d} vs {d})\n", .{ person_a, person_b });
+        return false;
+    }
+    if (@abs(person_a - gray_score) < 1e-4) {
+        std.debug.print("conformance: FAIL byo inference did not respond to the frame ({d} vs {d})\n", .{ person_a, gray_score });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a bundled author model runs through the ml.infer node and drives a lens parameter from the camera frame, deterministically\n", .{});
+    return true;
+}
+
+/// A minimal ONNX protobuf emitter, enough to hand-build the one net the ONNX
+/// proof runs; the engine's own tests cover general parsing. Fields are written
+/// with explicit wire tags the way the reader expects them.
+const OnnxPb = struct {
+    buf: std.ArrayList(u8) = .empty,
+    a: std.mem.Allocator,
+
+    fn varint(p: *OnnxPb, v_in: u64) void {
+        var v = v_in;
+        while (true) {
+            var byte: u8 = @truncate(v & 0x7f);
+            v >>= 7;
+            if (v != 0) byte |= 0x80;
+            p.buf.append(p.a, byte) catch unreachable;
+            if (v == 0) break;
+        }
+    }
+    fn tag(p: *OnnxPb, field: u32, wire: u3) void {
+        p.varint((@as(u64, field) << 3) | wire);
+    }
+    fn f32field(p: *OnnxPb, field: u32, value: f32) void {
+        p.tag(field, 5);
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(value), .little);
+        p.buf.appendSlice(p.a, &b) catch unreachable;
+    }
+    fn varintField(p: *OnnxPb, field: u32, value: i64) void {
+        p.tag(field, 0);
+        p.varint(@bitCast(value));
+    }
+    fn bytesField(p: *OnnxPb, field: u32, value: []const u8) void {
+        p.tag(field, 2);
+        p.varint(value.len);
+        p.buf.appendSlice(p.a, value) catch unreachable;
+    }
+};
+
+/// Emits an ONNX net that sums the three input channels (a 1x1 conv with unit
+/// weights) then averages the plane, so its one output is the frame's mean
+/// brightness. NCHW input [1,3,8,8] exercises the core's channel transpose.
+fn buildOnnxProbe(a: std.mem.Allocator) []const u8 {
+    const side: i64 = 8;
+    // W initializer [1,3,1,1] of ones.
+    var w: OnnxPb = .{ .a = a };
+    inline for (.{ 1, 3, 1, 1 }) |d| w.varintField(1, d);
+    w.varintField(2, 1); // FLOAT
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..3) |_| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(@as(f32, 1)), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+
+    const conv = onnxNode(a, "Conv", &.{ "x", "W" }, &.{"h"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    const pool = onnxNode(a, "GlobalAveragePool", &.{"h"}, &.{"y"}, &.{});
+
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(1, pool);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ 1, 3, 1, 1 }));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 1, 1, 1 }));
+
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7); // ir_version
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+const OnnxAttr = struct { name: []const u8, ints: []const i64 = &.{}, i: ?i64 = null };
+
+fn onnxNode(a: std.mem.Allocator, op: []const u8, inputs: []const []const u8, outputs: []const []const u8, attrs: []const OnnxAttr) []const u8 {
+    var nd: OnnxPb = .{ .a = a };
+    for (inputs) |i| nd.bytesField(1, i);
+    for (outputs) |o| nd.bytesField(2, o);
+    nd.bytesField(4, op);
+    for (attrs) |at| {
+        var ap: OnnxPb = .{ .a = a };
+        ap.bytesField(1, at.name);
+        if (at.i) |iv| ap.varintField(3, iv);
+        for (at.ints) |v| ap.varintField(8, v);
+        nd.bytesField(5, ap.buf.items);
+    }
+    return nd.buf.items;
+}
+
+fn onnxValueInfo(a: std.mem.Allocator, name: []const u8, dims: []const i64) []const u8 {
+    var shape: OnnxPb = .{ .a = a };
+    for (dims) |d| {
+        var dim: OnnxPb = .{ .a = a };
+        dim.varintField(1, d);
+        shape.bytesField(1, dim.buf.items);
+    }
+    var tt: OnnxPb = .{ .a = a };
+    tt.bytesField(2, shape.buf.items);
+    var typ: OnnxPb = .{ .a = a };
+    typ.bytesField(1, tt.buf.items);
+    var vi: OnnxPb = .{ .a = a };
+    vi.bytesField(1, name);
+    vi.bytesField(2, typ.buf.items);
+    return vi.buf.items;
+}
+
+fn writeOnnxLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-infer-onnx","version":"1.0.0","display_name":"BYO ONNX","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
+        \\ "nodes":[{"id":"byo","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[{"tensor":0,"index":0,"param":"score"}]}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Proves the ONNX backend of the same ml.infer node: a bundled ONNX net loads
+/// on the engine's own runtime and drives a lens parameter from the frame,
+/// finite, stable across runs, and responsive to the pixels. The model file
+/// ends in .onnx, so the core routes it to the ONNX engine, not TFLite.
+fn proveMlInferOnnx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-infer-onnx/assets");
+    try writeOnnxLens("zig-out/ml-infer-onnx", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    const person_a = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, person);
+    const person_b = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, person);
+    const gray_score = try runMlInferOnce(engine, "zig-out/ml-infer-onnx", "score", -999.0, gray);
+
+    if (!std.math.isFinite(person_a) or !std.math.isFinite(gray_score)) {
+        std.debug.print("conformance: FAIL the onnx model published a non-finite value\n", .{});
+        return false;
+    }
+    if (person_a != person_b) {
+        std.debug.print("conformance: FAIL onnx inference is not deterministic ({d} vs {d})\n", .{ person_a, person_b });
+        return false;
+    }
+    if (@abs(person_a - gray_score) < 1e-4) {
+        std.debug.print("conformance: FAIL onnx inference did not respond to the frame ({d} vs {d})\n", .{ person_a, gray_score });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a bundled ONNX net runs through the ml.infer node and drives a lens parameter from the camera frame, deterministically\n", .{});
+    return true;
+}
+
+/// Emits an ONNX segmenter: a 1x1 conv collapses the three input channels to a
+/// single-channel mask the size of the input, the shape an author's own
+/// segmenter would produce for the mask slot.
+fn buildOnnxSegProbe(a: std.mem.Allocator) []const u8 {
+    const side: i64 = 16;
+    var w: OnnxPb = .{ .a = a };
+    inline for (.{ 1, 3, 1, 1 }) |d| w.varintField(1, d);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..3) |_| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(@as(f32, 1)), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const conv = onnxNode(a, "Conv", &.{ "x", "W" }, &.{"y"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ 1, 3, 1, 1 }));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 1, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+fn writeOnnxSegLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-seg","version":"1.0.0","display_name":"BYO Segmenter","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"seg","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[],"mask":{"tensor":0,"channel":"person"}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Runs the segmenter bundle once and reports whether the author model's mask
+/// reached the subject mask texture. The upload is on the render path, so this
+/// feeds a frame and renders until the texture appears, the way the built-in
+/// segmenter proof waits on its mask.
+fn runMlSegOnce(engine: *abi.Engine, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-infer-seg", "zig-out/ml-infer-seg".len) != .ok) {
+        std.debug.print("conformance: FAIL byo-ml segmenter activation\n", .{});
+        return error.MlSegActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlSegTrackFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlSegSubmitFailed;
+    var polls: usize = 0;
+    while (session.segmentation_texture == null) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    return true;
+}
+
+/// Proves the segmentation slot of the ml.infer node: an author's own model,
+/// bound as a mask, drives the same subject mask texture the built-in segmenters
+/// feed. The texture is empty until inference and then populates, on two runs.
+fn proveMlInferSegMask(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxSegProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-infer-seg/assets");
+    try writeOnnxSegLens("zig-out/ml-infer-seg", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const uploaded_a = try runMlSegOnce(engine, person);
+    const uploaded_b = try runMlSegOnce(engine, person);
+    if (!uploaded_a or !uploaded_b) {
+        std.debug.print("conformance: FAIL the author segmenter mask never reached the mask texture\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an author model bound as a mask drives the subject mask channel through the ml.infer node\n", .{});
+    return true;
+}
+
+/// Emits an ONNX classifier over three classes: channel means from a global
+/// average pool, then a bias that makes the winner class the largest logit, so
+/// the argmax is a known class regardless of the frame.
+fn buildOnnxClsProbe(a: std.mem.Allocator, winner: usize) []const u8 {
+    const side: i64 = 8;
+    var b: OnnxPb = .{ .a = a };
+    b.varintField(1, 3); // dims [3]
+    b.varintField(2, 1); // FLOAT
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..3) |i| {
+        var buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &buf, @bitCast(@as(f32, if (i == winner) 100 else 0)), .little);
+        raw.appendSlice(a, &buf) catch unreachable;
+    }
+    b.bytesField(9, raw.items);
+    b.bytesField(8, "B");
+
+    const pool = onnxNode(a, "GlobalAveragePool", &.{"x"}, &.{"p"}, &.{});
+    const flat = onnxNode(a, "Flatten", &.{"p"}, &.{"f"}, &.{.{ .name = "axis", .i = 1 }});
+    const add = onnxNode(a, "Add", &.{ "f", "B" }, &.{"y"}, &.{});
+
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, pool);
+    g.bytesField(1, flat);
+    g.bytesField(1, add);
+    g.bytesField(5, b.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 3 }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+fn writeOnnxClsLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-cls","version":"1.0.0","display_name":"BYO Classifier","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"label","type":"float","default":-1.0,"min":-1.0,"max":100.0}],
+        \\ "nodes":[{"id":"cls","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[{"tensor":0,"reduce":"argmax","param":"label"}]}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Proves the classification slot: an argmax reduce reads a classifier's
+/// predicted class into a parameter. Two models built to favour different
+/// classes each drive the parameter to their own class, so the label tracks the
+/// model's argmax rather than a fixed value.
+fn proveMlInferCls(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    for ([_]usize{ 1, 2 }) |winner| {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const model = buildOnnxClsProbe(arena.allocator(), winner);
+        try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-cls/assets");
+        try writeOnnxClsLens("zig-out/ml-cls", model);
+
+        const label = try runMlInferOnce(engine, "zig-out/ml-cls", "label", -1.0, person);
+        if (@as(usize, @intFromFloat(label)) != winner) {
+            std.debug.print("conformance: FAIL argmax reduce read class {d}, wanted {d}\n", .{ label, winner });
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF an argmax reduce reads a classifier's predicted class into a lens parameter\n", .{});
+    return true;
+}
+
+fn writeOnnxPlaceLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-place","version":"1.0.0","display_name":"BYO Anchor","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"px","type":"float","default":-1.0,"min":-1.0,"max":3.0}],
+        \\ "nodes":[{"id":"detect","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[{"tensor":0,"index":0,"param":"px"}]}},
+        \\  {"id":"marker","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
+        \\   "sprite":{"x":0.0,"y":0.0,"w":0.2,"h":0.2,"x_param":"px"}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+const PlaceResult = struct { px: f32, rect: [4]f32 };
+
+/// Runs the anchor bundle once: feeds a frame, waits on the model's first
+/// result, and reads back where the parameter-driven sprite lands.
+fn runPlaceOnce(engine: *abi.Engine, planes: Nv12Copy) !PlaceResult {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-place", "zig-out/ml-place".len) != .ok) {
+        std.debug.print("conformance: FAIL byo-ml anchor activation\n", .{});
+        return error.MlPlaceActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var px: f32 = -1.0;
+    var polls: usize = 0;
+    while (px == -1.0) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlPlaceTrackFailed;
+        std.Thread.yield() catch {};
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "px", "px".len, &px);
+        polls += 1;
+        if (polls > 100_000_000) return error.MlPlaceTimedOut;
+    }
+    const rect = abi.firstSpriteEffectiveRect(session) orelse return error.MlPlaceNoSprite;
+    return .{ .px = px, .rect = rect };
+}
+
+/// Proves the detection/pose anchor path: a model output drives a sprite's
+/// placement parameter, so the sprite tracks what the model found. The sprite's
+/// static x is zero; the bound parameter moves it to the model's value, and a
+/// portrait and a flat frame move it to different places.
+fn proveMlInferPlacement(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-place/assets");
+    try writeOnnxPlaceLens("zig-out/ml-place", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    const on_person = try runPlaceOnce(engine, person);
+    const on_gray = try runPlaceOnce(engine, gray);
+
+    // The sprite's x tracks the bound parameter, which the model drove off the
+    // static zero to its own output.
+    if (@abs(on_person.rect[0] - on_person.px) > 1e-6) {
+        std.debug.print("conformance: FAIL the sprite x {d} did not track its placement parameter {d}\n", .{ on_person.rect[0], on_person.px });
+        return false;
+    }
+    if (!(on_person.rect[0] > 0.01)) {
+        std.debug.print("conformance: FAIL the placement parameter did not move the sprite off its static x ({d})\n", .{on_person.rect[0]});
+        return false;
+    }
+    if (@abs(on_person.rect[0] - on_gray.rect[0]) < 1e-4) {
+        std.debug.print("conformance: FAIL the anchor did not track the frame ({d} vs {d})\n", .{ on_person.rect[0], on_gray.rect[0] });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a model output drives a sprite's placement parameter, the detection and pose anchor path\n", .{});
+    return true;
+}
+
+/// Emits an ONNX restyle net: a 1x1 conv with identity channel weights, so its
+/// output is a three-channel image the size of the input. A real style net
+/// would transform the colours; the identity proves the image path.
+fn buildOnnxStyleProbe(a: std.mem.Allocator) []const u8 {
+    const side: i64 = 8;
+    var w: OnnxPb = .{ .a = a };
+    inline for (.{ 3, 3, 1, 1 }) |d| w.varintField(1, d);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..3) |m| {
+        for (0..3) |cc| {
+            var b: [4]u8 = undefined;
+            std.mem.writeInt(u32, &b, @bitCast(@as(f32, if (m == cc) 1 else 0)), .little);
+            raw.appendSlice(a, &b) catch unreachable;
+        }
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const conv = onnxNode(a, "Conv", &.{ "x", "W" }, &.{"y"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ 3, 3, 1, 1 }));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 3, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+fn writeOnnxStyleLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-style","version":"1.0.0","display_name":"BYO Restyle","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"restyle","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[],"style":{"tensor":0,"sprite":"canvas"}}},
+        \\  {"id":"canvas","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
+        \\   "sprite":{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Runs the restyle bundle once and reports whether the model's output image
+/// reached the sprite that shows it. The upload is on the render path, so this
+/// feeds a frame and renders until the sprite's style texture appears.
+fn runStyleOnce(engine: *abi.Engine, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-style", "zig-out/ml-style".len) != .ok) {
+        std.debug.print("conformance: FAIL byo-ml restyle activation\n", .{});
+        return error.MlStyleActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlStyleTrackFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlStyleSubmitFailed;
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    return true;
+}
+
+/// Proves the neural style-transfer component: a model that restyles the frame
+/// draws its output image through a sprite. The sprite carries no image of its
+/// own; the model's output becomes its texture, on two runs.
+fn proveMlInferStyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxStyleProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-style/assets");
+    try writeOnnxStyleLens("zig-out/ml-style", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runStyleOnce(engine, person);
+    const drew_b = try runStyleOnce(engine, person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the restyle model's output never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a model that restyles the frame draws its output through a sprite via the ml.infer style binding\n", .{});
+    return true;
+}
+
+/// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
+/// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
+/// its encoder, unet, and decoder from this.
+fn onnxConvModel(a: std.mem.Allocator, in_name: []const u8, cin: i64, cout: i64, side: i64, weights: []const f32, extra_inputs: []const []const u8) []const u8 {
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, cout);
+    w.varintField(1, cin);
+    w.varintField(1, 1);
+    w.varintField(1, 1);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (weights) |v| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(v), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const conv = onnxNode(a, "Conv", &.{ in_name, "W" }, &.{"y"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, in_name, &.{ 1, cin, side, side }));
+    for (extra_inputs) |ei| g.bytesField(11, ei);
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ cout, cin, 1, 1 }));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, cout, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// The knobs a diffusion reference lens varies. A null encoder starts from pure
+/// noise (text to image); a text_embedding ships a cond asset; a sprite_mask
+/// keys the output; coherence turns on the temporal filter; target_mesh draws
+/// the generated texture through a mesh.face material instead of a sprite.
+const DiffusionLensSpec = struct {
+    dir: []const u8,
+    enc: ?[]const u8 = null,
+    unet: []const u8,
+    dec: []const u8,
+    text_embedding: ?[]const u8 = null,
+    sprite_mask: ?[]const u8 = null,
+    sprite_mask_over: bool = false,
+    coherence: f32 = 0,
+    target_mesh: bool = false,
+    target_material: bool = false,
+};
+
+fn writeDiffusionLens(spec: DiffusionLensSpec) !void {
+    const page = std.heap.page_allocator;
+    const enc_field = if (spec.enc != null) "\"encoder\":\"enc.onnx\"," else "";
+    const cond_field = if (spec.text_embedding != null) "\"text_embedding\":\"cond.bin\"," else "";
+    const mode = if (spec.sprite_mask_over) ",\"mask_mode\":\"over\"" else "";
+    const mask_field = if (spec.sprite_mask) |m| try std.fmt.allocPrint(page, ",\"mask\":\"{s}\"{s}", .{ m, mode }) else try page.dupe(u8, "");
+    defer page.free(mask_field);
+    const coherence_field = if (spec.coherence > 0) try std.fmt.allocPrint(page, ",\"coherence\":{d}", .{spec.coherence}) else try page.dupe(u8, "");
+    defer page.free(coherence_field);
+    // The target node the diffusion draws through: a full-frame sprite, a face
+    // mesh that samples the generated texture as its material, or a shader.pass
+    // whose material graph samples the reserved `generated` texture.
+    const literal_target = spec.target_mesh or spec.target_material;
+    const target_node = if (spec.target_mesh)
+        "{\"id\":\"canvas\",\"type\":\"mesh.face\",\"inputs\":{\"frame\":\"camera\"},\"params\":{}}"
+    else if (spec.target_material)
+        "{\"id\":\"canvas\",\"type\":\"shader.pass\",\"inputs\":{\"frame\":\"camera\"},\"params\":{},\"material\":{\"output\":3,\"nodes\":[{\"kind\":\"uv\"},{\"kind\":\"texture\",\"name\":\"generated\"},{\"kind\":\"sample\",\"inputs\":[1,0]},{\"kind\":\"output\",\"inputs\":[2]}]}}"
+    else
+        try std.fmt.allocPrint(page, "{{\"id\":\"canvas\",\"type\":\"sprite.2d\",\"inputs\":{{\"frame\":\"camera\"}},\"params\":{{}}, \"sprite\":{{\"x\":0.0,\"y\":0.0,\"w\":1.0,\"h\":1.0{s}}}}}", .{mask_field});
+    defer if (!literal_target) page.free(target_node);
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"restyle","type":"diffusion","params":{{}},
+        \\   "diffusion":{{{s}{s}"unet":"unet.onnx","decoder":"dec.onnx","sprite":"canvas","steps":2,"strength":0.5{s}}}}},
+        \\  {s}],
+        \\ "triggers":[]}}
+    , .{ enc_field, cond_field, coherence_field, target_node });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{spec.dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    inline for (.{ .{ "enc.onnx", spec.enc }, .{ "unet.onnx", @as(?[]const u8, spec.unet) }, .{ "dec.onnx", @as(?[]const u8, spec.dec) }, .{ "cond.bin", spec.text_embedding } }) |pair| {
+        if (pair[1]) |data| {
+            const asset_path = try std.fmt.allocPrint(page, "{s}/assets/{s}", .{ spec.dir, pair[0] });
+            defer page.free(asset_path);
+            try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = data });
+        }
+    }
+}
+
+const SegInject = struct { channel: usize, mask: []const f32 };
+
+fn runDiffusionOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, seg: ?SegInject) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+        std.debug.print("conformance: FAIL diffusion lens activation\n", .{});
+        return error.DiffusionActivationFailed;
+    }
+    if (seg) |inj| {
+        // The set_segmentation_mask ABI is web-only; on host the mask is injected
+        // straight into the channel the segmentation worker would fill.
+        abi.injectMaskChannel(session, inj.channel, @ptrCast(inj.mask.ptr));
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.DiffusionTrackFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.DiffusionSubmitFailed;
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    return true;
+}
+
+/// Like runDiffusionOnce, but keeps feeding frames after the first restyle so a
+/// coherence lens runs a second compute and exercises the flow-warp-blend
+/// against its own history, then confirms it still holds a drawn texture.
+fn runCoherenceOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.DiffusionActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.DiffusionTrackFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.DiffusionSubmitFailed;
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    var more: usize = 0;
+    while (more < 4_000) : (more += 1) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    return abi.styleTextureCount(session) > 0;
+}
+
+/// Proves the diffusion restyle loop: a lens ships a VAE encoder, unet, and
+/// decoder, and the engine runs the img2img loop (encode, seed noise, a few
+/// denoise steps, decode) off the frame thread, drawing through a sprite.
+/// Synthetic same-size models stand in for real weights; the engine ships the loop.
+fn proveMlInferDiffusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    // encoder 3->4: output channel m mirrors input channel m % 3.
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    // unet 4->4 identity: the noise estimate the schedule steps against.
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    // decoder 4->3: keep the first three latent channels as rgb.
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-diffusion/assets");
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-diffusion", .enc = enc, .unet = unet, .dec = dec });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-diffusion", person, null);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-diffusion", person, null);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the diffusion restyle never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion loop over a bundled encoder, unet, and decoder restyles the frame and draws it through a sprite\n", .{});
+    return true;
+}
+
+/// Proves the text-to-image path: a diffusion lens ships only a unet and decoder
+/// (no encoder) plus a text embedding, so the engine starts from seeded noise
+/// rather than the camera frame and still draws a stable image through a sprite.
+fn proveMlInferText2Img(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+    // Four little-endian f32 conditioning values stand in for a text embedding.
+    var cond_bytes: [16]u8 = undefined;
+    inline for (.{ 0.25, 0.5, 0.75, 1.0 }, 0..) |v, i| std.mem.writeInt(u32, cond_bytes[i * 4 ..][0..4], @bitCast(@as(f32, v)), .little);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-text2img/assets");
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-text2img", .unet = unet, .dec = dec, .text_embedding = &cond_bytes });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-text2img", person, null);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-text2img", person, null);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the text to image loop never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion lens with no encoder generates from seeded noise and a text embedding, drawing the image through a sprite\n", .{});
+    return true;
+}
+
+/// Proves the generative-background greenscreen: a text-to-image diffusion lens
+/// feeds a sprite keyed to the person channel, so the generated image composites
+/// as the background behind the subject the segmentation mask marks, keeping the
+/// camera where the subject is and the generated image everywhere else.
+fn proveMlInferGreenscreen(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-greenscreen/assets");
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-greenscreen", .unet = unet, .dec = dec, .sprite_mask = "person" });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    // A half-and-half subject mask: the left half reads as the subject (kept from
+    // the camera), the right half as background (filled by the generated image).
+    const mask = try a.alloc(f32, abi.segmentation_mask_len);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        mask[row * mask_side + col] = if (col < mask_side / 2) 1.0 else 0.0;
+    };
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-greenscreen", person, .{ .channel = 0, .mask = mask });
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-greenscreen", person, .{ .channel = 0, .mask = mask });
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the generative greenscreen never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion lens keyed to the person channel composites its generated image as the background behind the segmented subject\n", .{});
+    return true;
+}
+
+/// Proves temporal coherence: an img2img diffusion lens with coherence on runs
+/// the optical-flow warp and blend against its own previous frame across a run
+/// of frames, and still draws the restyle through the sprite. The flow, warp,
+/// and blend math is unit-tested in core/tracking/optical_flow.zig.
+fn proveMlInferCoherence(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-coherence/assets");
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-coherence", .enc = enc, .unet = unet, .dec = dec, .coherence = 0.5 });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    if (!try runCoherenceOnce(engine, "zig-out/ml-coherence", person)) {
+        std.debug.print("conformance: FAIL the coherence restyle never held a drawn frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an img2img diffusion lens with temporal coherence warps its previous frame by optical flow and blends it into the restyle, holding the sprite steady\n", .{});
+    return true;
+}
+
+/// Proves the full-face restyle: an img2img diffusion lens feeds a sprite keyed
+/// to the face_skin channel in `over` mode, so the generated restyle composites
+/// only where the face matte is on and the camera holds everywhere else, the
+/// masked-to-the-face path a real-time generative face filter rides.
+fn proveMlInferFaceRestyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-facerestyle/assets");
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-facerestyle", .enc = enc, .unet = unet, .dec = dec, .sprite_mask = "face_skin", .sprite_mask_over = true });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    // An oval face matte on the face_skin channel: the restyle lands inside it
+    // and the camera holds outside, so the filter stays on the face.
+    const mask = try a.alloc(f32, abi.segmentation_mask_len);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    const half: f32 = @floatFromInt(mask_side / 2);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        const dx = (@as(f32, @floatFromInt(col)) - half) / half;
+        const dy = (@as(f32, @floatFromInt(row)) - half) / half;
+        mask[row * mask_side + col] = if (dx * dx + dy * dy < 0.36) 1.0 else 0.0;
+    };
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-facerestyle", person, .{ .channel = 4, .mask = mask });
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-facerestyle", person, .{ .channel = 4, .mask = mask });
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the full-face restyle never reached the sprite\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an img2img diffusion lens masked to the face_skin channel in over mode composites its restyle onto the face matte and holds the camera elsewhere\n", .{});
+    return true;
+}
+
+/// Proves text-to-material: a diffusion node targets a mesh.face node, so its
+/// generated image binds as the face mesh's material texture rather than a
+/// bundled png. The generated texture reaches the mesh's material slot; the mesh
+/// then warps it over the tracked face like any authored face texture.
+fn proveMlInferMaterial(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-material/assets");
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-material", .enc = enc, .unet = unet, .dec = dec, .target_mesh = true });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-material", person, null);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-material", person, null);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the generated material never reached the face mesh\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion node targeting a mesh.face node binds its generated image as the face mesh's material texture\n", .{});
+    return true;
+}
+
+/// Proves text-to-texture into the shader material graph: a diffusion node
+/// targets a shader.pass whose material graph samples the reserved `generated`
+/// texture, so the generated map is bound to that sampler and the material
+/// draws it. The generated texture reaches the shader.pass target.
+fn proveMlInferMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-materialgraph/assets");
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-materialgraph", .enc = enc, .unet = unet, .dec = dec, .target_material = true });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-materialgraph", person, null);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-materialgraph", person, null);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the generated texture never reached the material graph\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion node targeting a shader.pass binds its generated image to the material graph's generated sampler\n", .{});
+    return true;
+}
+
+fn writeSplatLens(dir: []const u8, model: []const u8, mesh: bool) !void {
+    const page = std.heap.page_allocator;
+    const draw = if (mesh) "mesh" else "points";
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.ml-splat","version":"1.0.0","display_name":"BYO Splat","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"cloud","type":"splat.cloud","inputs":{{"frame":"camera"}},"params":{{}},
+        \\   "splat":{{"model":"splat.onnx","draw":"{s}","point":8.0,"r":0.9,"g":0.8,"b":0.3}}}}],
+        \\ "triggers":[]}}
+    , .{draw});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/splat.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+fn runSplatOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.SplatActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SplatTrackFailed;
+    var polls: usize = 0;
+    while (abi.splatCloudReadyCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    // Keep rendering a few frames so the cloud's billboard draw runs against the
+    // published points, exercising the whole splat path.
+    var more: usize = 0;
+    while (more < 200) : (more += 1) {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    return true;
+}
+
+/// Proves text-to-3D: a splat.cloud node runs a bundled model that lifts the
+/// camera frame into a 3D point set, and the engine draws it as camera-facing
+/// billboards. A synthetic 3->3 conv stands in for the depth-lift net, turning
+/// the sampled frame into one point per cell.
+fn proveMlInferSplat(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    // 3->3 identity conv: each cell's rgb becomes an xyz point.
+    const w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splat/assets");
+    try writeSplatLens("zig-out/ml-splat", model, false);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runSplatOnce(engine, "zig-out/ml-splat", person);
+    const drew_b = try runSplatOnce(engine, "zig-out/ml-splat", person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the splat cloud never produced its points\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a splat.cloud node lifts the camera frame to a 3D point set with a bundled model and draws it as a billboard cloud\n", .{});
+    return true;
+}
+
+/// Proves the text-to-3D mesh draw: a splat.cloud in mesh mode reads the model's
+/// output as a square grid of points and draws it as a connected 3D surface, the
+/// mesh sibling of the billboard cloud. The synthetic model emits a full grid.
+fn proveMlInferSplatMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splatmesh/assets");
+    try writeSplatLens("zig-out/ml-splatmesh", model, true);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runSplatOnce(engine, "zig-out/ml-splatmesh", person);
+    const drew_b = try runSplatOnce(engine, "zig-out/ml-splatmesh", person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the splat mesh never produced its surface\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a splat.cloud in mesh mode reads the model's points as a grid and draws them as a connected 3D surface\n", .{});
+    return true;
+}
+
+/// Proves the prompt-to-lens compiler: the goss_compile_prompt ABI op turns a
+/// text prompt into a GLF manifest on device, the two-call length probe matches
+/// the filled buffer, and the emitted manifest activates as a real lens that
+/// renders, so a lens is authored from words with no assets and no round trip.
+fn proveCompilePrompt(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const text = "cinematic glow foggy sketch";
+    // Length probe: a null buffer reports how many bytes the manifest needs.
+    var needed: usize = 0;
+    if (abi.goss_compile_prompt(engine, text.ptr, text.len, null, 0, &needed) != .ok or needed == 0) {
+        std.debug.print("conformance: FAIL the prompt compiler reported no length\n", .{});
+        return false;
+    }
+    const buf = try gpa.alloc(u8, needed);
+    defer gpa.free(buf);
+    var written: usize = 0;
+    if (abi.goss_compile_prompt(engine, text.ptr, text.len, buf.ptr, buf.len, &written) != .ok or written != needed) {
+        std.debug.print("conformance: FAIL the prompt compiler did not fill the buffer\n", .{});
+        return false;
+    }
+    // The compiled manifest must activate as a lens and render its post-effect
+    // chain over a frame, off the same corpus the other proofs use.
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens(session, buf.ptr, written) != .ok) {
+        std.debug.print("conformance: FAIL the compiled prompt lens did not activate\n", .{});
+        return false;
+    }
+    const desc: abi.FrameDesc = .{ .width = person.width, .height = person.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (person.width + 1) / 2;
+    _ = abi.goss_session_submit_frame_copy(session, &desc, person.y.ptr, person.width, person.uv.ptr, half_w * 2);
+    _ = abi.goss_engine_render_frame(engine, session);
+    c.glfwPollEvents();
+    std.debug.print("conformance: PROOF the prompt compiler emits a GLF manifest on device that activates as a lens and renders\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -12152,6 +13352,38 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("d tiled capture");
     if (!try proveColorManagedCapture(gpa, engine)) return 1;
     watchHold("color managed capture");
+    if (!try proveMlInfer(gpa, engine)) return 1;
+    watchHold("ml infer");
+    if (!try proveMlInferOnnx(gpa, engine)) return 1;
+    watchHold("ml infer onnx");
+    if (!try proveMlInferSegMask(gpa, engine)) return 1;
+    watchHold("ml infer seg mask");
+    if (!try proveMlInferCls(gpa, engine)) return 1;
+    watchHold("ml infer cls");
+    if (!try proveMlInferPlacement(gpa, engine)) return 1;
+    watchHold("ml infer placement");
+    if (!try proveMlInferStyle(gpa, engine)) return 1;
+    watchHold("ml infer style");
+    if (!try proveMlInferDiffusion(gpa, engine)) return 1;
+    watchHold("ml infer diffusion");
+    if (!try proveMlInferText2Img(gpa, engine)) return 1;
+    watchHold("ml infer text2img");
+    if (!try proveMlInferGreenscreen(gpa, engine)) return 1;
+    watchHold("ml infer greenscreen");
+    if (!try proveMlInferCoherence(gpa, engine)) return 1;
+    watchHold("ml infer coherence");
+    if (!try proveMlInferFaceRestyle(gpa, engine)) return 1;
+    watchHold("ml infer face restyle");
+    if (!try proveMlInferMaterial(gpa, engine)) return 1;
+    watchHold("ml infer material");
+    if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
+    watchHold("ml infer material graph");
+    if (!try proveMlInferSplat(gpa, engine)) return 1;
+    watchHold("ml infer splat");
+    if (!try proveMlInferSplatMesh(gpa, engine)) return 1;
+    watchHold("ml infer splat mesh");
+    if (!try proveCompilePrompt(gpa, engine)) return 1;
+    watchHold("compile prompt");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveAudio(gpa, engine)) return 1;

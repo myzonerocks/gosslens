@@ -15,6 +15,8 @@ const math = @import("math");
 const render = @import("render");
 const tracking = @import("tracking");
 const segmentation = @import("segmentation");
+const ml_infer = @import("ml_infer");
+const diffusion = @import("diffusion");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
 const png = @import("png");
@@ -222,6 +224,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle)",
     "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
     "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
+    "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -520,6 +523,10 @@ const PendingGlbCollider = struct {
     restitution: f32,
 };
 
+/// A masked sprite's segmentation key: the channel and whether the sprite fills
+/// over that region (a restyle) or behind it (a greenscreen).
+const SpriteMask = struct { channel: u8, over: bool };
+
 pub const Session = struct {
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
     /// once fed, its level and beat outrank the host's tick value.
@@ -630,6 +637,15 @@ pub const Session = struct {
     /// is handed to enableSceneSegmentation, so those channels stay the zero
     /// mask and poll for them costs nothing per frame.
     scene_worker: ?*segmentation.Segmentation = null,
+    /// The bring-your-own model workers an active lens's ml.infer nodes drive,
+    /// each holding its output-to-parameter bindings; built from the bundle at
+    /// activation, fed the camera frame, read into params each tick.
+    ml_workers: std.ArrayListUnmanaged(MlWorker) = .empty,
+    /// The diffusion restyle workers an active lens's diffusion nodes drive,
+    /// each drawing its decoded frame through a sprite; built from the bundle at
+    /// activation, fed the camera frame, uploaded to their sprite each render.
+    diffusion_workers: std.ArrayListUnmanaged(DiffusionWorker) = .empty,
+    splat_workers: std.ArrayListUnmanaged(SplatWorker) = .empty,
     /// Monotonic timestamp for still images fed to the segmenter through
     /// goss_session_submit_segmentation_image, so each submit orders after the
     /// last the way successive camera frames do.
@@ -1052,12 +1068,25 @@ pub const Session = struct {
     /// frames upload into, and the playback cursor, by graph index. Drawn in
     /// the sprite branch like an animated sprite, one decoded frame at a time.
     video_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, VideoPlayback) = .empty,
+    /// A sprite node the current inference of an ml.infer style binding drives:
+    /// its texture is the model's restyled frame, refreshed each render, drawn
+    /// in the sprite branch like a video texture. The texture itself is owned by
+    /// the ml worker; this maps only which sprite shows it.
+    ml_style_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// A sprite/text node's opacity parameter name (a slice into the lens
     /// manifest arena), when it binds one, so the draw reads a live opacity.
     sprite_opacity_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
+    /// A sprite.2d node's rect parameter names (x, y, w, h; empty where
+    /// unbound), slices into the manifest arena, so a model output driving those
+    /// parameters moves and sizes the sprite each frame.
+    sprite_placement_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4][]const u8) = .empty,
     /// A sprite.2d node's live interaction transform, when it declares one, so
     /// the recognized gestures drag and scale it and a tap on it fires an event.
     sprite_interactions: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteInteraction) = .empty,
+    /// A sprite.2d node's segmentation key, when it declares one: the channel
+    /// and whether the sprite fills behind that region (greenscreen) or over it
+    /// (a restyle). The generative background and full-face restyle ride this.
+    sprite_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteMask) = .empty,
     /// A model.gltf node's live turntable control, when it declares one, so the
     /// gestures orbit, dolly and roll it each tick.
     model_controls: std.AutoHashMapUnmanaged(graph.NodeIndex, ModelControlState) = .empty,
@@ -1915,7 +1944,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .blend => s.blend_textures.contains(entry.graph_index),
             // Like blend's mask: the face is a capability input whose
             // absence degrades (no draw), never blocks the chain.
-            .mesh => s.mesh_face_textures.contains(entry.graph_index),
+            .mesh => s.mesh_face_textures.contains(entry.graph_index) or s.ml_style_textures.contains(entry.graph_index),
             // The lash strip ships no asset; its params resolve at activation
             // and it rides the tracked face, so it holds the frame through
             // with no face rather than blocking the chain.
@@ -1937,8 +1966,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // once all its frames have); until then it holds the frame
             // through, never blocking the chain.
             .sprite => s.sprite_textures.contains(entry.graph_index) or s.text3d_meshes.contains(entry.graph_index) or
-                s.video_textures.contains(entry.graph_index) or
+                s.video_textures.contains(entry.graph_index) or s.ml_style_textures.contains(entry.graph_index) or
                 (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
+            // A splat cloud is ready once its model has produced its first point
+            // set; until then it holds the frame through like any pending draw.
+            .splat => if (splatWorkerFor(s, entry.graph_index)) |sw| ml_infer.hasPublished(sw.worker) else false,
         };
         if (ready) ready_count += 1;
     }
@@ -2041,7 +2073,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (channel == 0) break :blk s.segmentation_texture orelse r.zero_mask_texture;
                     break :blk s.segmentation_class_textures[channel] orelse r.zero_mask_texture;
                 };
-                r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture, shader_mask);
+                // A generative node targeting this shader.pass drives its material
+                // graph's `generated` texture: bind that output to the reserved
+                // sampler, otherwise the plain pass samples only the frame.
+                if (s.ml_style_textures.get(entry.graph_index)) |gen_tex| {
+                    r.submitShaderPassGenerated(view_id, .{ .idx = program_idx }, input_texture, shader_mask, gen_tex);
+                } else {
+                    r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture, shader_mask);
+                }
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2613,7 +2652,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .mesh => {
-                const mesh_texture = s.mesh_face_textures.get(entry.graph_index) orelse continue;
+                // A generative node targeting this mesh drives its material: its
+                // texture is the face albedo, a text-to-material on the face mesh.
+                const mesh_texture = s.ml_style_textures.get(entry.graph_index) orelse s.mesh_face_textures.get(entry.graph_index) orelse continue;
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -2629,6 +2670,63 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
                         r.submitFaceMesh(view_id, input_texture, mesh_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), 1.0);
                     }
+                }
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .splat => {
+                const sw = splatWorkerFor(s, entry.graph_index) orelse continue;
+                if (!ml_infer.hasPublished(sw.worker)) continue;
+                if (!ml_infer.copyOutput(sw.worker, 0, sw.positions)) continue;
+                // A mesh draw reads the points as a square grid; a cell short of a
+                // full grid falls back to the point cloud so the node still draws.
+                const grid_side: usize = if (sw.mesh_draw) isqrt(sw.count) else 0;
+                const mesh_draw = sw.mesh_draw and grid_side >= 2 and grid_side * grid_side == sw.count;
+                const vertex_count: u32 = if (mesh_draw) @intCast((grid_side - 1) * (grid_side - 1) * 6) else sw.count * 6;
+                const mesh = sw.mesh orelse blk: {
+                    const m = r.createParticleMesh(vertex_count, !mesh_draw) catch continue;
+                    sw.mesh = m;
+                    break :blk m;
+                };
+                drawn += 1;
+                const blit_view = next_view_id;
+                next_view_id += 1;
+                const mesh_view = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                const rect_w = if (output != null and !is_final) width else output_width;
+                const rect_h = if (output != null and !is_final) height else output_height;
+                if (output) |target| {
+                    render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                    render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                } else {
+                    render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                    render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                }
+                r.tile = if (is_final) s.capture_tile else null;
+                const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                const base_color: [4]f32 = .{ sw.color[0], sw.color[1], sw.color[2], 1.0 };
+                if (mesh_draw) {
+                    // Connect the grid of points into a surface and draw it as a
+                    // solid 3D mesh over the passed-through frame.
+                    if (frameStage(s, vertex_count * 3)) |verts| {
+                        writeSplatMesh(sw.positions, grid_side, verts);
+                        r.updateParticleMesh(mesh, verts);
+                    }
+                    r.submitRibbons(blit_view, mesh_view, input_texture, mesh, base_color, aspect_ratio);
+                } else {
+                    // Expand the points into camera-facing billboards and draw them
+                    // as a 3D cloud over the passed-through frame.
+                    if (frameStage(s, sw.count * 6 * 8)) |verts| {
+                        writeSplatBillboards(sw.positions, sw.count, verts);
+                        render.Renderer.updateParticleMeshFaded(mesh, verts);
+                    }
+                    const particle_params: [4]f32 = .{ sw.point / @as(f32, @floatFromInt(rect_w)), sw.point / @as(f32, @floatFromInt(rect_h)), 1.0, 0.0 };
+                    const particle_fx: [4]f32 = .{ 1, 1, 0, 0 };
+                    r.submitParticles(blit_view, mesh_view, input_texture, mesh, base_color, base_color, aspect_ratio, true, particle_params, particle_fx, false, r.defaultSpriteTexture());
                 }
                 if (output) |target| {
                     input_texture = target.texture;
@@ -2763,6 +2861,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // uploading the next one into its dynamic texture.
                     advanceVideo(s, vid);
                     sprite_texture = vid.texture;
+                } else if (s.ml_style_textures.get(entry.graph_index)) |tex| {
+                    // A model that restyles the frame drives this sprite: its
+                    // texture is the model's latest output image.
+                    sprite_texture = tex;
                 } else if (s.sprite_anims.get(entry.graph_index)) |anim| {
                     // An animated sprite cycles its frames off the lens clock;
                     // wait until every frame has landed so the cycle is whole.
@@ -2773,7 +2875,41 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 } else {
                     sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
                 }
+                if (s.sprite_masks.get(entry.graph_index)) |mask| {
+                    // A masked sprite composites full-frame against a channel:
+                    // behind keeps the camera on the region and fills the sprite
+                    // off it (greenscreen); over fills the sprite on the region
+                    // and keeps the camera off it (a restyle onto the face matte).
+                    const channel = mask.channel;
+                    // With no live segmentation the sprite hides either way: behind
+                    // falls back to all-foreground (camera fills), over to the zero
+                    // mask (camera fills), so a missing matte never floods the frame.
+                    const fallback = if (mask.over) r.zero_mask_texture else r.default_mask_texture;
+                    const live = if (channel == 0) s.segmentation_texture else s.segmentation_class_textures[channel];
+                    const mask_texture = live orelse fallback;
+                    drawn += 1;
+                    const view_id = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    r.tile = if (is_final) s.capture_tile else null;
+                    if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                    // The blend program keeps its color input where the mask is on
+                    // and its background input where off, so the two roles swap by
+                    // mode: over puts the sprite on the mask, behind puts it off.
+                    if (mask.over) {
+                        r.submitBlendPass(view_id, sprite_texture, input_texture, mask_texture);
+                    } else {
+                        r.submitBlendPass(view_id, input_texture, sprite_texture, mask_texture);
+                    }
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 var rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
+                applyPlacementParams(s, entry.graph_index, rect[0..4]);
                 // An interactive sprite draws at its dragged and scaled rect,
                 // keeping its own opacity, and turned by any live rotation.
                 var sprite_rotation: f32 = 0;
@@ -3530,7 +3666,9 @@ pub fn destroySession(session: *Session) void {
     session.video_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
+    session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
+    session.sprite_masks.deinit(session.engine.gpa);
     session.model_controls.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
@@ -3624,6 +3762,13 @@ pub fn destroySession(session: *Session) void {
     session.segmentation_worker = null;
     if (session.scene_worker) |worker| segmentation.destroy(worker);
     session.scene_worker = null;
+    destroyMlWorkers(session);
+    session.ml_workers.deinit(session.engine.gpa);
+    destroyDiffusionWorkers(session);
+    session.diffusion_workers.deinit(session.engine.gpa);
+    destroySplatWorkers(session);
+    session.splat_workers.deinit(session.engine.gpa);
+    session.ml_style_textures.deinit(session.engine.gpa);
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
     releaseCurrentFrame(session);
@@ -3919,6 +4064,9 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollSpriteLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
+        pollMlMasks(s);
+        pollMlStyle(s);
+        pollDiffusion(s);
         pollSceneSegmentation(s);
         pollDepthOcclusion(s);
         pollLandmarkMattes(s);
@@ -4017,6 +4165,9 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollMlMasks(s);
+    pollMlStyle(s);
+    pollDiffusion(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
@@ -4115,6 +4266,9 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollMlMasks(s);
+    pollMlStyle(s);
+    pollDiffusion(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
     pollLandmarkMattes(s);
@@ -5813,7 +5967,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null) return .again;
+    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.diffusion_workers.items.len == 0 and s.splat_workers.items.len == 0) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -5838,6 +5992,15 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     }
     if (s.scene_worker) |worker| {
         segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    for (s.ml_workers.items) |mw| {
+        ml_infer.submitNv12(mw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    for (s.diffusion_workers.items) |dw| {
+        diffusion.submitNv12(dw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    for (s.splat_workers.items) |sw| {
+        ml_infer.submitNv12(sw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     return .ok;
 }
@@ -5904,9 +6067,51 @@ pub fn loadsPending(session: ?*Session) u32 {
 pub const segmentation_mask_side = segmentation.mask_side;
 pub const segmentation_mask_len = segmentation.mask_len;
 
-/// Test-only: pushes a synthetic mask straight into a channel's texture so a
-/// headless proof can gate a pass on a known region with no tracking model.
-/// Channel zero is the subject texture, the rest are class textures.
+/// Overrides a sprite's rect axes with any bound placement parameters, the
+/// live position a model output or ramp drives. An unbound axis keeps its
+/// static value. Shared by the draw path and the headless slot proof.
+fn applyPlacementParams(s: *Session, node_index: graph.NodeIndex, rect: *[4]f32) void {
+    const pp = s.sprite_placement_params.get(node_index) orelse return;
+    const lens = if (s.active_lens) |*l| l else return;
+    if (pp[0].len > 0) rect[0] = lens.paramValue(pp[0]) orelse rect[0];
+    if (pp[1].len > 0) rect[1] = lens.paramValue(pp[1]) orelse rect[1];
+    if (pp[2].len > 0) rect[2] = lens.paramValue(pp[2]) orelse rect[2];
+    if (pp[3].len > 0) rect[3] = lens.paramValue(pp[3]) orelse rect[3];
+}
+
+/// How many sprites currently show an ml.infer style output, so a headless
+/// proof can confirm a restyling model's image reached a sprite's texture.
+pub fn styleTextureCount(session: *Session) usize {
+    return session.ml_style_textures.count();
+}
+
+/// How many splat.cloud workers have produced their first point set, so a
+/// headless proof can wait for the cloud to become drawable.
+pub fn splatCloudReadyCount(session: *Session) usize {
+    var n: usize = 0;
+    for (session.splat_workers.items) |sw| {
+        if (ml_infer.hasPublished(sw.worker)) n += 1;
+    }
+    return n;
+}
+
+/// The first sprite/text node's rect after any bound placement parameters, so
+/// a headless proof can read where a parameter-driven sprite lands without a
+/// pixel readback. Null when the active lens draws no sprite.
+pub fn firstSpriteEffectiveRect(session: *Session) ?[4]f32 {
+    var it = session.sprite_rects.iterator();
+    if (it.next()) |e| {
+        var rect = [4]f32{ e.value_ptr[0], e.value_ptr[1], e.value_ptr[2], e.value_ptr[3] };
+        applyPlacementParams(session, e.key_ptr.*, &rect);
+        return rect;
+    }
+    return null;
+}
+
+/// Uploads a mask straight into a channel's texture: the custom-segmenter mask
+/// binding feeds an author model's output here, and a headless proof pushes a
+/// synthetic mask the same way. Channel zero is the subject texture, the rest
+/// are class textures.
 pub fn injectMaskChannel(session: *Session, channel: usize, mask: *const [segmentation.mask_len]f32) void {
     if (channel == 0) {
         session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
@@ -6957,7 +7162,9 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
     session.sprite_opacity_params.clearRetainingCapacity();
+    session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
+    session.sprite_masks.clearRetainingCapacity();
     session.model_controls.clearRetainingCapacity();
     var anim_it = session.sprite_anims.valueIterator();
     while (anim_it.next()) |anim| {
@@ -7107,6 +7314,9 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroySpriteState(session);
     destroyMeshFaceState(session);
     destroyModelState(session);
+    destroyMlWorkers(session);
+    destroyDiffusionWorkers(session);
+    destroySplatWorkers(session);
     destroyChainOrder(session);
     teardownScript(session);
     destroySounds(session);
@@ -7363,6 +7573,24 @@ pub export fn goss_session_pull_haptic(session: ?*Session, out_style: ?*u32, out
     s.haptic_read += 1;
     if (out_style) |o| o.* = @intFromEnum(ev.style);
     if (out_intensity) |o| o.* = ev.intensity;
+    return .ok;
+}
+
+/// Compiles a text prompt into a GLF lens manifest on device, writing it into
+/// out_buf and its length into out_len. A null out_buf (or too small an out_cap)
+/// reports the length only, so the caller sizes a buffer then calls again; the
+/// manifest is the same every call and needs no assets, so it is the whole lens.
+pub export fn goss_compile_prompt(engine: ?*Engine, prompt: ?[*]const u8, prompt_len: usize, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const e = engine orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (prompt == null and prompt_len != 0) return .invalid_argument;
+    const text: []const u8 = if (prompt) |p| p[0..prompt_len] else &.{};
+    const json = manifest.prompt.compile(e.gpa, text) catch return .out_of_memory;
+    defer e.gpa.free(json);
+    out_len_ptr.* = json.len;
+    if (out_buf) |buf| {
+        if (out_cap >= json.len) @memcpy(buf[0..json.len], json);
+    }
     return .ok;
 }
 
@@ -8145,7 +8373,11 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
     for (sprites) |sprite| {
         session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
         if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
+        if (sprite.x_param.len > 0 or sprite.y_param.len > 0 or sprite.w_param.len > 0 or sprite.h_param.len > 0) {
+            session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
+        }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
+        if (sprite.mask_channel) |channel| session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over }) catch {};
         // An animated GIF upgrades the node to a video texture; a node with no
         // GIF falls through to the still or image-sequence PNG path.
         if (tryStartGifSprite(session, gpa, bundle_path, sprite)) continue;
@@ -8559,6 +8791,493 @@ fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     session.particle_sprite_textures.put(gpa, graph_index, texture) catch {
         if (session.engine.renderer) |*r| r.destroyTexture(texture);
     };
+}
+
+const MlWorker = struct {
+    worker: *ml_infer.MlInfer,
+    outputs: []const manifest.MlOutput,
+    /// A mask binding routes a whole output tensor to a mask channel; null when
+    /// the node only drives parameters. mask_side is the model mask's square
+    /// side, and the two scratch planes hold its raw and resampled copies.
+    mask: ?manifest.MlMask,
+    mask_side: u32,
+    mask_src: []f32,
+    mask_dst: []f32,
+    /// A style binding routes a three-channel output image to a sprite's
+    /// texture. style_target is the sprite's node index, style_side its square
+    /// side, and the two scratch planes hold the raw floats and the packed
+    /// BGRA the dynamic texture takes. style_tex is created on first upload.
+    style_tensor: u32,
+    style_target: ?graph.NodeIndex,
+    style_side: u32,
+    style_f32: []f32,
+    style_bgra: []u8,
+    style_tex: render.TextureHandle,
+};
+
+/// Builds an inference worker for every ml.infer node from its bundled model,
+/// holding the node's output-to-parameter and output-to-mask bindings.
+/// Best-effort per node: a missing, malformed, or oversized model leaves that
+/// node inert.
+fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const io = defaultIo();
+    for (lens.manifest.nodes) |node| {
+        const ml = node.ml orelse continue;
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, ml.model }) catch continue;
+        defer gpa.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        defer gpa.free(bytes);
+        const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
+
+        // A mask binding needs the bound tensor to be a square single-channel
+        // plane; anything else leaves the node driving only its parameters.
+        var mask: ?manifest.MlMask = null;
+        var mask_side: u32 = 0;
+        var mask_src: []f32 = &.{};
+        var mask_dst: []f32 = &.{};
+        if (ml.mask) |mb| {
+            const len = ml_infer.outputLen(worker, mb.tensor);
+            const side = isqrt(len);
+            if (len > 0 and side * side == len) {
+                if (gpa.alloc(f32, len)) |src| {
+                    if (gpa.alloc(f32, segmentation.mask_len)) |dst| {
+                        mask = mb;
+                        mask_side = @intCast(side);
+                        mask_src = src;
+                        mask_dst = dst;
+                    } else |_| {
+                        gpa.free(src);
+                    }
+                } else |_| {}
+            }
+        }
+
+        // A style binding needs the bound tensor to be a square three-channel
+        // image and a sprite to draw it; otherwise the node only drives its
+        // parameters and mask.
+        var style_tensor: u32 = 0;
+        var style_target: ?graph.NodeIndex = null;
+        var style_side: u32 = 0;
+        var style_f32: []f32 = &.{};
+        var style_bgra: []u8 = &.{};
+        if (ml.style) |sb| {
+            const len = ml_infer.outputLen(worker, sb.tensor);
+            const side = isqrt(len / 3);
+            if (len > 0 and len % 3 == 0 and side * side == len / 3) {
+                if (generativeTargetNodeIndex(lens, gpa, &session.lens_graph, sb.sprite)) |target| {
+                    if (gpa.alloc(f32, len)) |f| {
+                        if (gpa.alloc(u8, side * side * 4)) |bgra| {
+                            style_tensor = sb.tensor;
+                            style_target = target;
+                            style_side = @intCast(side);
+                            style_f32 = f;
+                            style_bgra = bgra;
+                        } else |_| {
+                            gpa.free(f);
+                        }
+                    } else |_| {}
+                }
+            }
+        }
+
+        session.ml_workers.append(gpa, .{
+            .worker = worker,
+            .outputs = ml.outputs,
+            .mask = mask,
+            .mask_side = mask_side,
+            .mask_src = mask_src,
+            .mask_dst = mask_dst,
+            .style_tensor = style_tensor,
+            .style_target = style_target,
+            .style_side = style_side,
+            .style_f32 = style_f32,
+            .style_bgra = style_bgra,
+            .style_tex = .{ .idx = render.invalid_handle },
+        }) catch {
+            if (mask_src.len > 0) gpa.free(mask_src);
+            if (mask_dst.len > 0) gpa.free(mask_dst);
+            if (style_f32.len > 0) gpa.free(style_f32);
+            if (style_bgra.len > 0) gpa.free(style_bgra);
+            ml_infer.destroy(worker);
+            return;
+        };
+    }
+}
+
+/// Resolves the node a generative texture draws through, by its id. A sprite.2d
+/// draws it as a 2D image (or a masked background); a mesh.face samples it as
+/// the face material, so a generated texture lands on the face mesh.
+fn generativeTargetNodeIndex(lens: *runtime.Lens, gpa: std.mem.Allocator, g: *graph.Graph, name: []const u8) ?graph.NodeIndex {
+    const sprites = lens.spriteNodes(gpa, g) catch return null;
+    defer gpa.free(sprites);
+    for (sprites) |sprite| {
+        if (std.mem.eql(u8, sprite.image_stem, name)) return sprite.graph_index;
+    }
+    const meshes = lens.meshFaceNodes(gpa, g) catch return null;
+    defer gpa.free(meshes);
+    for (meshes) |mesh| {
+        if (std.mem.eql(u8, mesh.texture_stem, name)) return mesh.graph_index;
+    }
+    const shaders = lens.shaderPassNodes(gpa, g) catch return null;
+    defer gpa.free(shaders);
+    for (shaders) |sp| {
+        if (std.mem.eql(u8, sp.shader_stem, name)) return sp.graph_index;
+    }
+    return null;
+}
+
+/// Reads each ml.infer worker's outputs into the parameters it binds, so the
+/// model's latest inference drives the lens. NaN-guarded in the core.
+fn pollMlOutputs(session: *Session) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    for (session.ml_workers.items) |mw| {
+        // Before the first inference the bound parameter keeps its authored
+        // default rather than being forced to zero every frame.
+        if (!ml_infer.hasPublished(mw.worker)) continue;
+        for (mw.outputs) |out| {
+            const value: f32 = switch (out.reduce) {
+                .element => ml_infer.readOutput(mw.worker, out.tensor, out.index),
+                .argmax => @floatFromInt(ml_infer.argmaxOutput(mw.worker, out.tensor)),
+            };
+            lens.setParam(out.param, value);
+        }
+    }
+}
+
+/// Uploads each ml.infer mask binding's output as its channel's mask texture,
+/// resampled to the mask resolution, so an author's own segmenter drives the
+/// same compositing the built-in segmenters feed. Render-path, like the
+/// built-in mask poll: the upload needs the renderer.
+fn pollMlMasks(session: *Session) void {
+    for (session.ml_workers.items) |mw| {
+        const mask = mw.mask orelse continue;
+        if (mw.mask_src.len == 0) continue;
+        if (!ml_infer.copyOutput(mw.worker, mask.tensor, mw.mask_src)) continue;
+        resampleMask(mw.mask_src, mw.mask_side, mw.mask_dst);
+        injectMaskChannel(session, mask.channel, mw.mask_dst[0..segmentation.mask_len]);
+    }
+}
+
+/// Bilinearly resamples a square single-channel mask to the mask resolution, so
+/// any model output size feeds the fixed-size mask texture.
+fn resampleMask(src: []const f32, side: u32, dst: []f32) void {
+    const ms: usize = segmentation.mask_side;
+    const s: usize = side;
+    if (s == 0) return;
+    if (s == ms) {
+        @memcpy(dst[0..segmentation.mask_len], src[0..segmentation.mask_len]);
+        return;
+    }
+    const scale = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(ms));
+    for (0..ms) |y| {
+        const fy = (@as(f32, @floatFromInt(y)) + 0.5) * scale - 0.5;
+        const fy0 = @floor(fy);
+        const wy = fy - fy0;
+        const y0 = clampIdx(fy0, s);
+        const y1 = clampIdx(fy0 + 1, s);
+        for (0..ms) |x| {
+            const fx = (@as(f32, @floatFromInt(x)) + 0.5) * scale - 0.5;
+            const fx0 = @floor(fx);
+            const wx = fx - fx0;
+            const x0 = clampIdx(fx0, s);
+            const x1 = clampIdx(fx0 + 1, s);
+            const a = src[y0 * s + x0];
+            const b = src[y0 * s + x1];
+            const c = src[y1 * s + x0];
+            const d = src[y1 * s + x1];
+            const top = a + (b - a) * wx;
+            const bot = c + (d - c) * wx;
+            dst[y * ms + x] = top + (bot - top) * wy;
+        }
+    }
+}
+
+fn clampIdx(v: f32, n: usize) usize {
+    if (v <= 0) return 0;
+    const i: usize = @intFromFloat(v);
+    return @min(i, n - 1);
+}
+
+/// Integer floor square root, guarded against float rounding at the boundary.
+fn isqrt(n: usize) usize {
+    if (n == 0) return 0;
+    var x: usize = @intFromFloat(@sqrt(@as(f64, @floatFromInt(n))));
+    while (x * x > n) x -= 1;
+    while ((x + 1) * (x + 1) <= n) x += 1;
+    return x;
+}
+
+/// Clamps an untrusted model value to a byte, rejecting a non-finite one to
+/// zero: NaN fails the first test, so a hostile model never poisons a texel.
+fn floatToU8(v: f32) u8 {
+    if (!(v > 0)) return 0;
+    if (v >= 1) return 255;
+    return @intFromFloat(v * 255.0);
+}
+
+/// Uploads each ml.infer style binding's output image to the sprite it drives,
+/// so a model that restyles the frame shows through that sprite. Render-path,
+/// like the mask poll: the texture upload needs the renderer.
+fn pollMlStyle(session: *Session) void {
+    for (session.ml_workers.items) |*mw| {
+        const target = mw.style_target orelse continue;
+        if (mw.style_f32.len == 0) continue;
+        if (!ml_infer.copyOutput(mw.worker, mw.style_tensor, mw.style_f32)) continue;
+        const side: usize = mw.style_side;
+        const plane = side * side;
+        const nchw = ml_infer.layoutIsNchw(mw.worker);
+        for (0..plane) |i| {
+            const rv = if (nchw) mw.style_f32[0 * plane + i] else mw.style_f32[i * 3 + 0];
+            const gv = if (nchw) mw.style_f32[1 * plane + i] else mw.style_f32[i * 3 + 1];
+            const bv = if (nchw) mw.style_f32[2 * plane + i] else mw.style_f32[i * 3 + 2];
+            mw.style_bgra[i * 4 + 0] = floatToU8(bv);
+            mw.style_bgra[i * 4 + 1] = floatToU8(gv);
+            mw.style_bgra[i * 4 + 2] = floatToU8(rv);
+            mw.style_bgra[i * 4 + 3] = 255;
+        }
+        if (mw.style_tex.idx == render.invalid_handle) {
+            mw.style_tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
+        }
+        render.Renderer.updateDynamicBgraTexture(mw.style_tex, @intCast(side), @intCast(side), mw.style_bgra);
+        session.ml_style_textures.put(session.engine.gpa, target, mw.style_tex) catch {};
+    }
+}
+
+fn destroyMlWorkers(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.ml_workers.items) |mw| {
+        if (mw.mask_src.len > 0) gpa.free(mw.mask_src);
+        if (mw.mask_dst.len > 0) gpa.free(mw.mask_dst);
+        if (mw.style_f32.len > 0) gpa.free(mw.style_f32);
+        if (mw.style_bgra.len > 0) gpa.free(mw.style_bgra);
+        if (mw.style_tex.idx != render.invalid_handle) {
+            if (session.engine.renderer) |*r| r.destroyTexture(mw.style_tex);
+        }
+        ml_infer.destroy(mw.worker);
+    }
+    session.ml_workers.clearRetainingCapacity();
+    session.ml_style_textures.clearRetainingCapacity();
+}
+
+const SplatWorker = struct {
+    worker: *ml_infer.MlInfer,
+    target: graph.NodeIndex,
+    count: u32,
+    point: f32,
+    color: [3]f32,
+    // True draws the points as a connected grid surface, false as billboards.
+    mesh_draw: bool,
+    positions: []f32,
+    // The billboard mesh is created lazily on the first draw, since it needs the
+    // renderer; null marks it not yet built.
+    mesh: ?render.Renderer.ParticleMesh = null,
+};
+
+/// Builds a point-cloud worker for every splat.cloud node from its bundled
+/// model, whose output is a flat list of xyz positions. Best-effort per node: a
+/// missing model, or an output that is not a multiple of three, leaves it inert.
+fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const splats = lens.splatNodes(gpa, &session.lens_graph) catch return;
+    defer gpa.free(splats);
+    for (splats) |node| {
+        const bytes = readBundleAsset(gpa, bundle_path, node.model) orelse continue;
+        defer gpa.free(bytes);
+        const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
+        const len = ml_infer.outputLen(worker, 0);
+        if (len == 0 or len % 3 != 0) {
+            ml_infer.destroy(worker);
+            continue;
+        }
+        const count: u32 = @intCast(len / 3);
+        const positions = gpa.alloc(f32, len) catch {
+            ml_infer.destroy(worker);
+            continue;
+        };
+        session.splat_workers.append(gpa, .{
+            .worker = worker,
+            .target = node.graph_index,
+            .count = count,
+            .point = node.point,
+            .color = node.color,
+            .mesh_draw = node.mesh,
+            .positions = positions,
+        }) catch {
+            gpa.free(positions);
+            ml_infer.destroy(worker);
+        };
+    }
+}
+
+fn destroySplatWorkers(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.splat_workers.items) |sw| {
+        if (sw.mesh) |m| render.Renderer.destroyParticleMesh(m);
+        gpa.free(sw.positions);
+        ml_infer.destroy(sw.worker);
+    }
+    session.splat_workers.clearRetainingCapacity();
+}
+
+fn splatWorkerFor(session: *Session, idx: graph.NodeIndex) ?*SplatWorker {
+    for (session.splat_workers.items) |*sw| {
+        if (sw.target == idx) return sw;
+    }
+    return null;
+}
+
+/// Expands a flat xyz list into billboard vertices the faded particle program
+/// draws: six per point (two triangles), each eight floats (position, corner,
+/// life, seed, velocity). A splat is fully alive and still, so life is one and
+/// the velocity zero; the point holds its place while the camera orbits it.
+fn writeSplatBillboards(positions: []const f32, count: u32, out: []f32) void {
+    const corners = [6]f32{ 0, 1, 2, 0, 2, 3 };
+    for (0..count) |i| {
+        const px = positions[i * 3 + 0];
+        const py = positions[i * 3 + 1];
+        const pz = positions[i * 3 + 2];
+        for (corners, 0..) |corner, k| {
+            const base = (i * 6 + k) * 8;
+            out[base + 0] = px;
+            out[base + 1] = py;
+            out[base + 2] = pz;
+            out[base + 3] = corner;
+            out[base + 4] = 1.0;
+            out[base + 5] = @floatFromInt(i % 256);
+            out[base + 6] = 0;
+            out[base + 7] = 0;
+        }
+    }
+}
+
+/// Connects a square grid of xyz points into a triangle soup (two triangles per
+/// cell, three floats per vertex), so a model that emits a grid of positions
+/// draws as a continuous 3D surface rather than loose points.
+fn writeSplatMesh(positions: []const f32, side: usize, out: []f32) void {
+    if (side < 2) return;
+    var v: usize = 0;
+    var j: usize = 0;
+    while (j + 1 < side) : (j += 1) {
+        var i: usize = 0;
+        while (i + 1 < side) : (i += 1) {
+            const p00 = (j * side + i) * 3;
+            const p10 = (j * side + i + 1) * 3;
+            const p01 = ((j + 1) * side + i) * 3;
+            const p11 = ((j + 1) * side + i + 1) * 3;
+            for ([6]usize{ p00, p10, p11, p00, p11, p01 }) |p| {
+                out[v * 3 + 0] = positions[p + 0];
+                out[v * 3 + 1] = positions[p + 1];
+                out[v * 3 + 2] = positions[p + 2];
+                v += 1;
+            }
+        }
+    }
+}
+
+const DiffusionWorker = struct {
+    worker: *diffusion.Diffusion,
+    target: graph.NodeIndex,
+    side: u32,
+    nchw: bool,
+    rgb: []f32,
+    bgra: []u8,
+    tex: render.TextureHandle,
+};
+
+/// Reads a bundle asset by name, or null if it is missing or oversized. The
+/// caller frees the returned bytes.
+fn readBundleAsset(gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8) ?[]u8 {
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch return null;
+    defer gpa.free(path);
+    return std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(64 * 1024 * 1024)) catch null;
+}
+
+/// Builds a diffusion restyle worker for every diffusion node from its three
+/// bundled models, resolving the sprite it draws through. Best-effort per node:
+/// a missing model or sprite leaves that node inert.
+fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    for (lens.manifest.nodes) |node| {
+        const df = node.diffusion orelse continue;
+        // The encoder is optional: without one the loop starts from seeded noise
+        // (text to image) rather than the camera frame (img2img).
+        const enc: []u8 = if (df.encoder.len > 0) (readBundleAsset(gpa, bundle_path, df.encoder) orelse continue) else &.{};
+        defer if (enc.len > 0) gpa.free(enc);
+        const unet = readBundleAsset(gpa, bundle_path, df.unet) orelse continue;
+        defer gpa.free(unet);
+        const dec = readBundleAsset(gpa, bundle_path, df.decoder) orelse continue;
+        defer gpa.free(dec);
+        const emb: []u8 = if (df.text_embedding.len > 0) (readBundleAsset(gpa, bundle_path, df.text_embedding) orelse &.{}) else &.{};
+        defer if (emb.len > 0) gpa.free(emb);
+
+        const target = generativeTargetNodeIndex(lens, gpa, &session.lens_graph, df.sprite) orelse continue;
+
+        const worker = diffusion.create(gpa, .{ .encoder = enc, .unet = unet, .decoder = dec, .text_embedding = emb }, .{}, .{ .steps = df.steps, .strength = df.strength, .seed = df.seed, .coherence = df.coherence }, 2) catch continue;
+        const side = diffusion.outputSide(worker);
+        const len = diffusion.outputLen(worker);
+        const rgb = gpa.alloc(f32, len) catch {
+            diffusion.destroy(worker);
+            continue;
+        };
+        const bgra = gpa.alloc(u8, @as(usize, side) * side * 4) catch {
+            gpa.free(rgb);
+            diffusion.destroy(worker);
+            continue;
+        };
+        session.diffusion_workers.append(gpa, .{
+            .worker = worker,
+            .target = target,
+            .side = side,
+            .nchw = diffusion.outputIsNchw(worker),
+            .rgb = rgb,
+            .bgra = bgra,
+            .tex = .{ .idx = render.invalid_handle },
+        }) catch {
+            gpa.free(bgra);
+            gpa.free(rgb);
+            diffusion.destroy(worker);
+            return;
+        };
+    }
+}
+
+/// Uploads each diffusion worker's latest restyled frame to the sprite it
+/// draws through, so the restyle shows in the composite. Render-path, like the
+/// style poll: the texture upload needs the renderer.
+fn pollDiffusion(session: *Session) void {
+    for (session.diffusion_workers.items) |*dw| {
+        if (!diffusion.readOutput(dw.worker, dw.rgb)) continue;
+        const side: usize = dw.side;
+        const plane = side * side;
+        for (0..plane) |i| {
+            const rv = if (dw.nchw) dw.rgb[0 * plane + i] else dw.rgb[i * 3 + 0];
+            const gv = if (dw.nchw) dw.rgb[1 * plane + i] else dw.rgb[i * 3 + 1];
+            const bv = if (dw.nchw) dw.rgb[2 * plane + i] else dw.rgb[i * 3 + 2];
+            dw.bgra[i * 4 + 0] = floatToU8(bv);
+            dw.bgra[i * 4 + 1] = floatToU8(gv);
+            dw.bgra[i * 4 + 2] = floatToU8(rv);
+            dw.bgra[i * 4 + 3] = 255;
+        }
+        if (dw.tex.idx == render.invalid_handle) {
+            dw.tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
+        }
+        render.Renderer.updateDynamicBgraTexture(dw.tex, @intCast(side), @intCast(side), dw.bgra);
+        session.ml_style_textures.put(session.engine.gpa, dw.target, dw.tex) catch {};
+    }
+}
+
+fn destroyDiffusionWorkers(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.diffusion_workers.items) |dw| {
+        gpa.free(dw.bgra);
+        gpa.free(dw.rgb);
+        if (dw.tex.idx != render.invalid_handle) {
+            if (session.engine.renderer) |*r| r.destroyTexture(dw.tex);
+        }
+        diffusion.destroy(dw.worker);
+    }
+    session.diffusion_workers.clearRetainingCapacity();
 }
 
 /// Starts a background load for every spliced model.gltf node's .glb
@@ -9000,6 +9719,9 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createVideoLoaders(session, gpa, bundle_path);
     try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
+    createMlLoaders(session, gpa, bundle_path);
+    createDiffusionLoaders(session, gpa, bundle_path);
+    createSplatLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
@@ -9046,6 +9768,9 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroySpriteState(s);
     destroyMeshFaceState(s);
     destroyModelState(s);
+    destroyMlWorkers(s);
+    destroyDiffusionWorkers(s);
+    destroySplatWorkers(s);
     destroyChainOrder(s);
     teardownScript(s);
     destroySounds(s);
@@ -9874,6 +10599,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     var event_view: [max_pending_events][]const u8 = undefined;
     for (0..s.pending_event_count) |i| event_view[i] = s.pending_event_buf[i][0..s.pending_event_len[i]];
     live_signals.events = event_view[0..s.pending_event_count];
+    // Each model's latest inference lands in its bound parameters first, so a
+    // script may read or override it and the effects see this tick's result.
+    pollMlOutputs(s);
     // The script drives parameters before triggers and ramps read them, so
     // its writes flow into this tick's effects.
     runScript(s, &live_signals);

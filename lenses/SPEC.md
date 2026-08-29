@@ -634,8 +634,14 @@ all optional and defaulting to the full frame at full opacity. The image
 alpha-composites within the rect over whatever the chain has drawn so far,
 so a sprite reads as a sticker or badge pinned to the frame. An
 `"opacity_param"` names a parameter whose live value overrides the opacity
-each frame, so a param_ramp fades the sprite or a beat trigger pulses it. A
-`"frames"` count above one makes the sprite animated: it loads
+each frame, so a param_ramp fades the sprite or a beat trigger pulses it.
+`"x_param"`, `"y_param"`, `"w_param"`, and `"h_param"` do the same for the
+rect: each names a parameter whose live value overrides that axis each frame,
+so a value flowing into it moves and sizes the sprite. An unbound axis keeps
+its static value. This is how a lens anchors a sprite to something a model
+found: an `ml.infer` node writes a detected box's center or a tracked
+keypoint's position into a parameter, and the sprite bound to it follows.
+A `"frames"` count above one makes the sprite animated: it loads
 `assets/<id>_0.png` through `assets/<id>_(frames-1).png` and cycles them at
 `"fps"` off the lens clock. Shipping the image as an animated GIF at
 `assets/<id>.gif` instead plays the clip as a video texture: the engine
@@ -643,6 +649,19 @@ decodes its frames and cycles them at the clip's own frame timing, so a
 sticker animates without a param or a frame count. Until its image decodes
 (all frames, for an animated sprite) the node holds the frame through, never
 blocking the chain.
+
+A `"mask"` names a segmentation channel and keys the sprite full-frame against
+the region it marks, composited the way `blend.pass` swaps a background. A
+`"mask_mode"` picks the side: `"behind"` (the default) fills the sprite where
+the channel is off and shows the camera where it is on, a greenscreen behind the
+subject; `"over"` fills the sprite where the channel is on and shows the camera
+where it is off, a restyle of that region. It keys any sprite source the same
+way, so a bundled image, a video, or a generative texture (a diffusion or
+`ml.infer` style node targeting the sprite) becomes the replaced content:
+`"mask": "person"` restyles the room behind a selfie, and `"mask": "face_skin",
+"mask_mode": "over"` lays a generative restyle onto the face and nowhere else.
+With no live segmentation the sprite stays hidden and the camera holds through,
+either way. A sprite with no `mask` draws over the frame at its rect as usual.
 
 A sprite carries an optional `"interaction"` block so a finger can move it:
 `{"drag", "pinch", "rotate", "tap_event"}`. With `"drag"` a single finger that
@@ -686,6 +705,20 @@ frame at a time, so playback stays O(1) per frame rather than reopening the
 file. `"fps": 0` holds the first frame; `"loop": false` holds the last frame at
 the end instead of rewinding. Targets without a hardware decoder play a
 deterministic synthetic clip so the node still runs.
+
+A `"splat.cloud"` node draws 3D geometry a bundled model lifts from the camera
+frame. It carries a `"splat": {"model", "draw", "point", "r", "g", "b"}` block:
+`model` names the net under `assets/`, whose output is a flat list of xyz
+positions (its length a multiple of three, one point per triple). `"draw"` picks
+the form: `"points"` (the default) draws camera-facing billboards, a splat cloud,
+sized by `"point"` (pixels); `"mesh"` reads the output as a square grid and draws
+it as a connected 3D surface, one quad per grid cell. `r`, `g`, `b` are the color.
+The model runs on the inference rail like any author model, off the frame thread;
+the engine reads its latest points and draws them in a perspective view, so the
+submitted camera pose orbits the geometry. Until the model produces its first
+points the node holds the frame through, the standard capability degradation.
+This is the text-to-3D path: an image-to-geometry net turns the scene into a
+splat cloud or a mesh surface the lens composites like any other draw.
 
 A `"layout.composite"` node lets a lens drive the head composite instead of the
 host: it carries a `"layout": {"arrangement", "key", "chroma", "similarity",
@@ -743,6 +776,77 @@ recognized, and `onEvent(lens, name)` for each host event fired that tick
 same `lens` with its signals and params, and a handler the script omits is
 simply not called, so a lens wires only the moments it cares about.
 
+An `ml.infer` node runs a model the lens ships and turns its output into lens
+state. Like `script` and `logic.graph` it draws nothing and never joins the
+composite chain; it carries an `"ml"` block whose `"model"` names a file under
+`assets/` in the bundle. The file is a TFLite (LiteRT) or ONNX net, chosen by
+its own bytes, and it takes one square RGB image the engine fills by sampling
+the camera frame into the model's input at whichever channel order the model
+declares. Inference runs off the frame thread, so a heavy model never blocks
+the render loop; the bindings below read the newest completed result and hold
+their default until the first one lands. An author model is untrusted content
+like the rest of the bundle: its size, tensor count, and tensor sizes are
+bounded, and every value read back is finiteness-guarded, so a hostile or
+oversized model fails to load rather than reaching the frame.
+
+The `"outputs"` array binds scalars from the model into parameters. Each entry
+names a `"param"` and reads from output `"tensor"` (default 0) either the value
+at `"index"` (the default `"reduce"` of `"element"`) or, with
+`"reduce": "argmax"`, the index of the tensor's largest element - a
+classifier's predicted class. The value is written to the parameter each
+inference, clamped to the parameter's declared range like any other write.
+A detector or a pose model reaches a lens through these bindings too: it
+writes a detected box's coordinates or a keypoint's position into parameters,
+and a sprite's placement parameters (or a shader) read them to follow the
+found object.
+
+An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
+that binds a whole output tensor as a segmentation mask. The tensor is read as
+a square single-channel image, resampled to the engine's mask resolution, and
+fed to the named mask `"channel"` (the same channel names the beauty and shader
+passes key against), so a lens author's own segmenter drives the identical
+compositing the built-in segmenters do. A model whose bound tensor is not a
+square single-channel plane keeps driving its parameters and feeds no mask.
+
+An `ml.infer` node may carry a `"style"` block, `{"tensor", "sprite"}`, for a
+model that restyles the whole frame. The tensor is read as a square
+three-channel image, and each inference uploads it to the texture of the
+`sprite.2d` node named by `"sprite"`, so that sprite draws the model's output.
+A full-frame sprite makes the restyled frame the picture; a placed or
+partly-opaque sprite blends it in. The sprite ships no image of its own; its
+picture is whatever the model last produced. This is the neural style-transfer
+path: a restyle net loads like any other author model, runs off the frame
+thread under the same bounds, and draws through the sprite the composite chain
+already knows how to place, turn, and fade.
+
+A `"diffusion"` node runs an on-device latent-diffusion restyle. Like the other
+behavior nodes it draws nothing itself; it carries a `"diffusion"` block naming
+the models the bundle ships under `assets/`: a `"unet"` (the denoiser), a
+`"decoder"` (a VAE that turns a latent back into an image), and an optional
+`"encoder"` (a VAE that turns the frame into a latent). With an encoder the node
+restyles the camera frame (image to image); without one it starts from pure
+seeded noise and generates a still (text to image), sized by the decoder. When
+an encoder is present the engine samples the camera square into it each frame,
+seeds the latent with deterministic noise up to the `"strength"` (0 keeps the
+frame, 1 fully restyles); with no encoder it seeds the whole latent from noise
+and denoises the full range. It then runs `"steps"` denoise
+steps of the UNet on a fixed few-step schedule, and decodes the result. The
+UNet reads the latent, and, if it declares them, a timestep and a conditioning
+input; a `"text_embedding"` file supplies that conditioning, so a prompt encoded
+ahead of time steers the restyle. A `"seed"` fixes the noise, so the same lens
+and frame restyle the same way every run. A `"coherence"` (0..1) turns on a
+temporal filter: the engine estimates the optical flow between the last camera
+frame and this one, warps the previous restyled frame by it so it lands aligned
+with the current one, and blends the fresh decode toward that warped history by
+the coherence amount. A per-frame restyle then holds steady where content is
+still and follows it where it moves, killing the flicker an independent
+frame-by-frame restyle shows. It applies to the image-to-image path only, where
+there is a moving camera to track; the flow runs at the decoder's resolution.
+The decoded image draws through the
+`"sprite"` the block names, the same way the style binding does, so the restyle
+composites like any other sprite. The loop runs off the frame thread and never
+blocks the render; the models are bounded and sandboxed like every author model.
+
 The set of known `type` values is closed and versioned with the *engine*, not
 the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, the beauty nodes, shader
@@ -753,7 +857,10 @@ draws, LUT passes, compositing,
 the draw board, the layout composite, the 2D sprite, the 2D text, the
 `video.texture` node, `mesh.face` - the canonical face mesh warped by the tracked landmarks,
 textured by `assets/<id>.png` in canonical UV space with v measured from
-the bottom; without a tracked face the node draws nothing, the standard
+the bottom, or by a generative node's output when a diffusion or `ml.infer`
+style node targets it, so a prompt-generated image lands as the face material
+(a text-to-material on the face mesh); without a tracked face the node draws
+nothing, the standard
 capability degradation - `paint.face`, the same face-mesh texture warp
 masked to a face region and blended onto the skin by opacity and mode,
 `face.swap`, a donor face warped through the mesh and feathered into the
@@ -951,6 +1058,11 @@ and a `type` (the value type of a `constant` or `uniform`: `float`,
 The graph is a typed DAG. Sources take no inputs: `uv` (the frame
 coordinate), `time`, `constant`, `uniform` (host-set by name), and
 `texture` (a sampler bound by name, `texColor` being the frame itself).
+A `texture` named `generated` is a generative input: a diffusion or
+`ml.infer` style node targeting the `shader.pass` binds its output to that
+sampler, so a prompt-generated map feeds the material graph and the shader
+samples it like any other texture. Without a generative node driving it the
+sampler reads the frame, so the pass still runs.
 `sample` reads a texture at a coordinate. Arithmetic (`add`, `subtract`,
 `multiply`, `divide`, `power`, `min`, `max`, `mod`, `atan2`) and the vector
 and scalar functions (`dot`, `distance`, `normalize`, `length`, `saturate`,
@@ -1006,6 +1118,16 @@ the load-bearing security property: **lenses are untrusted content, and
 untrusted content only ever flows through typed, bounded, validated data -
 never through code.**
 
+A lens can be authored on device from a text prompt. `goss_compile_prompt` reads
+a short prompt and emits a GLF manifest composing the engine's asset-free
+post-effect nodes: colour-grade words (warm, cool, bright, moody, mono) pick a
+single grade, and look words add a blur, bloom, fog, edge outline, or sketch
+stylize. The nodes emit in a fixed chain order whatever the word order, so the
+same prompt always yields the same manifest, and a prompt naming no look still
+grades gently rather than emitting an empty lens. The result is ordinary GLF a
+caller inspects, saves, or hands straight to `goss_session_activate_lens`; the
+bundle needs no assets, so the manifest is the whole lens.
+
 ## 9. Conformance
 
 The reference set (`lenses/reference/`) carries at least one bundle
@@ -1022,7 +1144,29 @@ background-swap (segmentation), trigger-anim (none; a timer-driven glTF
 animation), hair-recolor (segmentation; the hair mask channel), face-paint
 (face; a `mesh.face` texture warp), and face-mask (face; a glTF model on
 `"anchor": "face"`). world-anchor (world) is proven separately on the
-deterministic replay camera track. The conformance harness runs today on the host (macOS): it renders each
+deterministic replay camera track. The byo-ml path is proven in the same
+harness: an `ml.infer` node runs a bundled TFLite segmenter and a bundled ONNX
+net, each driving a lens parameter from the frame; an author ONNX segmenter's
+output reaches the subject mask channel; an `argmax` reduce reads a
+classifier's predicted class into a parameter; a model output moves a sprite
+through its placement parameters; a restyle net's output image draws through a
+sprite; a diffusion loop over a bundled encoder, unet, and decoder restyles
+the frame and draws it through a sprite; a diffusion lens with no encoder
+generates from seeded noise and a text embedding, drawing the image through a
+sprite; a diffusion lens keyed to the person channel composites its
+generated image as the background behind the segmented subject; an img2img
+diffusion lens with temporal coherence warps its previous frame by optical flow
+and blends it into the restyle, holding the sprite steady across frames; and an
+img2img diffusion lens masked to the face_skin channel in over mode composites
+its restyle onto the face matte and holds the camera elsewhere; a diffusion
+node targeting a mesh.face node binds its generated image as the face mesh's
+material texture; a splat.cloud node lifts the camera frame to a 3D point
+set with a bundled model and draws it as a billboard cloud; a splat.cloud in mesh
+mode reads the model's points as a grid and draws them as a connected 3D surface;
+a diffusion node targeting a shader.pass binds its generated image to the material
+graph's generated sampler; and the prompt
+compiler emits a GLF manifest on device that activates as a lens and renders.
+The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output
 byte-identical across two runs and against a tracked baseline
 (`lenses/conformance-baseline.txt`), so a change that shifts a lens's

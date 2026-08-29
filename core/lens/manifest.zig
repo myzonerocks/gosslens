@@ -660,13 +660,29 @@ pub const SpriteField = struct {
     /// a param_ramp can fade the sprite or a beat trigger pulse it. Empty
     /// leaves the static opacity in force.
     opacity_param: []const u8 = "",
+    /// Parameter names whose live values override the rect each frame, so a
+    /// model output (a detected box, a tracked keypoint through an ml.infer
+    /// node) can move and size the sprite. Empty leaves the static rect.
+    x_param: []const u8 = "",
+    y_param: []const u8 = "",
+    w_param: []const u8 = "",
+    h_param: []const u8 = "",
     /// Frame count for an animated sprite: 1 (default) draws assets/<id>.png
     /// once; N>1 loads assets/<id>_0.png..assets/<id>_(N-1).png and cycles
     /// them at `fps` off the lens clock. Capped so a lens cannot ask for an
     /// unbounded number of textures.
     frames: u32 = 1,
     fps: f32 = 12.0,
+    /// A segmentation channel that keys the sprite full-frame against the region
+    /// it names. Null draws the sprite over the frame at its rect as usual.
+    mask_channel: ?u8 = null,
+    /// How a masked sprite composites: `behind` fills where the channel is off
+    /// (a greenscreen behind the subject), `over` fills where it is on (a
+    /// restyle of that region, e.g. a generative face onto the face matte).
+    mask_mode: SpriteMaskMode = .behind,
 };
+
+pub const SpriteMaskMode = enum { behind, over };
 
 pub const max_sprite_frames = 64;
 
@@ -819,6 +835,85 @@ pub const LogicGraphSpec = struct {
     output_param: []const u8,
 };
 
+/// How an output binding reduces its tensor to the scalar it writes: element
+/// takes the value at index, argmax takes the index of the tensor's largest
+/// element (a classifier's predicted class).
+pub const MlReduce = enum { element, argmax };
+
+/// One output binding of an ml.infer node: a scalar drawn from the model's
+/// output tensor drives the named parameter each inference, either the element
+/// at index or, for a classifier, the argmax over the tensor.
+pub const MlOutput = struct {
+    tensor: u32 = 0,
+    index: u32 = 0,
+    reduce: MlReduce = .element,
+    param: []const u8,
+};
+
+/// Binds a whole output tensor of an ml.infer node as a segmentation mask: the
+/// tensor is a single-channel image the engine resamples to the mask resolution
+/// and feeds to the named mask channel, so a lens author's own segmenter drives
+/// the same compositing the built-in segmenters do.
+pub const MlMask = struct {
+    tensor: u32 = 0,
+    channel: u8 = 0,
+};
+
+/// Binds a whole output tensor of an ml.infer node as a stylized RGB image:
+/// the tensor is a three-channel image the engine uploads to the named
+/// sprite.2d node's texture each frame, so a model that restyles the frame
+/// (a neural style-transfer net) draws through that sprite over the camera.
+pub const MlStyle = struct {
+    tensor: u32 = 0,
+    sprite: []const u8,
+};
+
+/// An ml.infer node's model slot: the bundle-relative model file, the input
+/// size the camera frame is resized to (zero keeps the model's own), the
+/// output-to-parameter bindings a lens reads, and optional output-to-mask and
+/// output-to-sprite bindings for an author segmenter or a restyle net.
+pub const MlField = struct {
+    model: []const u8,
+    input_width: u32 = 0,
+    input_height: u32 = 0,
+    outputs: []const MlOutput,
+    mask: ?MlMask = null,
+    style: ?MlStyle = null,
+};
+
+/// A diffusion node's restyle slot: the three bundled models the loop runs (a
+/// VAE encoder, a UNet, a VAE decoder), an optional precomputed text embedding
+/// the UNet conditions on, the sprite the restyled frame draws through, and the
+/// sampler settings (few-step count, img2img strength, and noise seed).
+pub const DiffusionField = struct {
+    encoder: []const u8,
+    unet: []const u8,
+    decoder: []const u8,
+    text_embedding: []const u8 = "",
+    sprite: []const u8,
+    steps: u32 = 4,
+    strength: f32 = 0.6,
+    seed: u64 = 0,
+    /// Temporal coherence: 0 restyles each frame independently, higher values
+    /// hold the flow-warped previous frame against flicker (img2img only).
+    coherence: f32 = 0,
+};
+
+pub const SplatDraw = enum { points, mesh };
+
+pub const SplatField = struct {
+    /// A splat.cloud node lifts the camera frame into 3D with a bundled model
+    /// whose output is a flat list of xyz positions. `draw` picks the form:
+    /// `points` draws camera-facing billboards (a cloud), `mesh` reads a square
+    /// grid and draws a surface. `point` is the billboard size, r,g,b the color.
+    model: []const u8,
+    draw: SplatDraw = .points,
+    point: f32 = 6.0,
+    r: f32 = 0.9,
+    g: f32 = 0.85,
+    b: f32 = 0.8,
+};
+
 pub const Node = struct {
     id: []const u8,
     type: []const u8,
@@ -838,6 +933,11 @@ pub const Node = struct {
     control: ?ModelControl = null,
     /// Set on a logic.graph node: its raw graph the runtime compiles.
     logic_graph: ?LogicGraphSpec = null,
+    /// Set on an ml.infer node: the bring-your-own model slot.
+    ml: ?MlField = null,
+    diffusion: ?DiffusionField = null,
+    /// Set on a splat.cloud node: the model that lifts the frame to a point cloud.
+    splat: ?SplatField = null,
     /// Set when the manifest gives the node a rigid body.
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
@@ -1559,6 +1659,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var world_anchor = false;
         var model_control: ?ModelControl = null;
         var logic_graph_spec: ?LogicGraphSpec = null;
+        var ml_field: ?MlField = null;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
         var particle_field: ?ParticleField = null;
@@ -2318,12 +2419,34 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(sv.object, "opacity_param")) |v| {
                     if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
                 }
+                if (getField(sv.object, "x_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.x_param = try arena.dupe(u8, s);
+                }
+                if (getField(sv.object, "y_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.y_param = try arena.dupe(u8, s);
+                }
+                if (getField(sv.object, "w_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.w_param = try arena.dupe(u8, s);
+                }
+                if (getField(sv.object, "h_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.h_param = try arena.dupe(u8, s);
+                }
                 if (getField(sv.object, "frames")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= max_sprite_frames) {
                         field.frames = @intCast(v.integer);
                     } else try diags.add(path.slice(), "sprite frames must be an integer 1..{d}", .{max_sprite_frames});
                 }
                 if (getField(sv.object, "fps")) |v| field.fps = @floatCast(numberOf(v) orelse field.fps);
+                if (getField(sv.object, "mask")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "sprite mask names an unknown channel '{s}'", .{name});
+                    }
+                }
+                if (getField(sv.object, "mask_mode")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.mem.eql(u8, name, "behind")) field.mask_mode = .behind else if (std.mem.eql(u8, name, "over")) field.mask_mode = .over else try diags.add(path.slice(), "sprite mask_mode is 'behind' or 'over', found '{s}'", .{name});
+                    }
+                }
                 if (getField(sv.object, "interaction")) |iv| {
                     if (iv == .object) {
                         var it: Interaction = .{};
@@ -2859,6 +2982,41 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(graph_mark);
         }
+        if (getField(object, "ml")) |mv| {
+            const ml_mark = path.push("ml");
+            if (!std.mem.eql(u8, node_type, "ml.infer")) {
+                try diags.add(path.slice(), "ml is an ml.infer field, found it on '{s}'", .{node_type});
+            } else if (mv != .object) {
+                try diags.add(path.slice(), "ml must be an object", .{});
+            } else {
+                ml_field = try parseMlField(diags, path, arena, mv.object);
+            }
+            path.pop(ml_mark);
+        }
+        var diffusion_field: ?DiffusionField = null;
+        if (getField(object, "diffusion")) |dv| {
+            const diff_mark = path.push("diffusion");
+            if (!std.mem.eql(u8, node_type, "diffusion")) {
+                try diags.add(path.slice(), "diffusion is a diffusion-node field, found it on '{s}'", .{node_type});
+            } else if (dv != .object) {
+                try diags.add(path.slice(), "diffusion must be an object", .{});
+            } else {
+                diffusion_field = try parseDiffusionField(diags, path, arena, dv.object);
+            }
+            path.pop(diff_mark);
+        }
+        var splat_field: ?SplatField = null;
+        if (getField(object, "splat")) |sv| {
+            const splat_mark = path.push("splat");
+            if (!std.mem.eql(u8, node_type, "splat.cloud")) {
+                try diags.add(path.slice(), "splat is a splat.cloud field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "splat must be an object", .{});
+            } else {
+                splat_field = try parseSplatField(diags, path, arena, sv.object);
+            }
+            path.pop(splat_mark);
+        }
 
         const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
         const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
@@ -2900,6 +3058,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .face_anchor = face_anchor,
             .control = model_control,
             .logic_graph = logic_graph_spec,
+            .ml = ml_field,
+            .diffusion = diffusion_field,
+            .splat = splat_field,
             .body_anchor = body_anchor,
             .skeleton_anchor = skeleton_anchor,
             .world_anchor = world_anchor,
@@ -2987,6 +3148,154 @@ fn parseLogicGraph(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         .nodes = try nodes.toOwnedSlice(arena),
         .output_id = try arena.dupe(u8, output_id),
         .output_param = try arena.dupe(u8, output_param),
+    };
+}
+
+fn parseDiffusionField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?DiffusionField {
+    // The encoder is optional: with one the loop restyles the camera frame
+    // (img2img), without one it generates from pure noise (text to image).
+    const encoder = if (getField(object, "encoder")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const unet = if (getField(object, "unet")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const decoder = if (getField(object, "decoder")) |v| (try expectString(diags, path, v) orelse "") else "";
+    const sprite = if (getField(object, "sprite")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (unet.len == 0 or decoder.len == 0) {
+        try diags.add(path.slice(), "diffusion needs unet and decoder model files", .{});
+        return null;
+    }
+    if (sprite.len == 0) {
+        try diags.add(path.slice(), "diffusion needs a sprite to draw the restyled frame through", .{});
+        return null;
+    }
+    var field: DiffusionField = .{
+        .encoder = try arena.dupe(u8, encoder),
+        .unet = try arena.dupe(u8, unet),
+        .decoder = try arena.dupe(u8, decoder),
+        .sprite = try arena.dupe(u8, sprite),
+    };
+    if (getField(object, "text_embedding")) |v| {
+        if (try expectString(diags, path, v)) |s| field.text_embedding = try arena.dupe(u8, s);
+    }
+    if (getField(object, "steps")) |v| {
+        if (v == .integer and v.integer >= 1 and v.integer <= 16) field.steps = @intCast(v.integer);
+    }
+    if (getField(object, "strength")) |v| {
+        field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+    }
+    if (getField(object, "seed")) |v| {
+        if (v == .integer and v.integer >= 0) field.seed = @intCast(v.integer);
+    }
+    if (getField(object, "coherence")) |v| {
+        field.coherence = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.coherence)), 0, 1);
+    }
+    return field;
+}
+
+fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?SplatField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "splat needs a model file", .{});
+        return null;
+    }
+    var field: SplatField = .{ .model = try arena.dupe(u8, model) };
+    if (getField(object, "draw")) |v| {
+        if (try expectString(diags, path, v)) |name| {
+            if (std.mem.eql(u8, name, "points")) field.draw = .points else if (std.mem.eql(u8, name, "mesh")) field.draw = .mesh else try diags.add(path.slice(), "splat draw is 'points' or 'mesh', found '{s}'", .{name});
+        }
+    }
+    if (getField(object, "point")) |v| field.point = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.point)), 1, 64);
+    if (getField(object, "r")) |v| field.r = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.r)), 0, 1);
+    if (getField(object, "g")) |v| field.g = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.g)), 0, 1);
+    if (getField(object, "b")) |v| field.b = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.b)), 0, 1);
+    return field;
+}
+
+fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?MlField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "ml needs a model file", .{});
+        return null;
+    }
+    var input_width: u32 = 0;
+    var input_height: u32 = 0;
+    if (getField(object, "input_width")) |v| {
+        if (v == .integer and v.integer >= 0) input_width = @intCast(v.integer);
+    }
+    if (getField(object, "input_height")) |v| {
+        if (v == .integer and v.integer >= 0) input_height = @intCast(v.integer);
+    }
+    var outputs: std.ArrayList(MlOutput) = .empty;
+    if (getField(object, "outputs")) |ov| {
+        if (ov == .array) {
+            for (ov.array.items) |item| {
+                if (item != .object) continue;
+                const o = item.object;
+                const param = if (getField(o, "param")) |v| (try expectString(diags, path, v) orelse "") else "";
+                if (param.len == 0) continue;
+                var out: MlOutput = .{ .param = try arena.dupe(u8, param) };
+                if (getField(o, "tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) out.tensor = @intCast(v.integer);
+                }
+                if (getField(o, "index")) |v| {
+                    if (v == .integer and v.integer >= 0) out.index = @intCast(v.integer);
+                }
+                if (getField(o, "reduce")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        out.reduce = std.meta.stringToEnum(MlReduce, name) orelse blk: {
+                            try diags.add(path.slice(), "unknown ml output reduce '{s}'", .{name});
+                            break :blk .element;
+                        };
+                    }
+                }
+                try outputs.append(arena, out);
+            }
+        }
+    }
+    var mask: ?MlMask = null;
+    if (getField(object, "mask")) |mv| {
+        const mask_mark = path.push("mask");
+        if (mv != .object) {
+            try diags.add(path.slice(), "ml mask must be an object", .{});
+        } else {
+            var m: MlMask = .{};
+            if (getField(mv.object, "tensor")) |v| {
+                if (v == .integer and v.integer >= 0) m.tensor = @intCast(v.integer);
+            }
+            const channel_name = if (getField(mv.object, "channel")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (maskChannelIndex(channel_name)) |channel| {
+                m.channel = channel;
+                mask = m;
+            } else {
+                try diags.add(path.slice(), "ml mask needs a known channel, found '{s}'", .{channel_name});
+            }
+        }
+        path.pop(mask_mark);
+    }
+    var style: ?MlStyle = null;
+    if (getField(object, "style")) |sv| {
+        const style_mark = path.push("style");
+        if (sv != .object) {
+            try diags.add(path.slice(), "ml style must be an object", .{});
+        } else {
+            const sprite_id = if (getField(sv.object, "sprite")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (sprite_id.len == 0) {
+                try diags.add(path.slice(), "ml style needs a sprite to draw through", .{});
+            } else {
+                var st: MlStyle = .{ .sprite = try arena.dupe(u8, sprite_id) };
+                if (getField(sv.object, "tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) st.tensor = @intCast(v.integer);
+                }
+                style = st;
+            }
+        }
+        path.pop(style_mark);
+    }
+    return .{
+        .model = try arena.dupe(u8, model),
+        .input_width = input_width,
+        .input_height = input_height,
+        .outputs = try outputs.toOwnedSlice(arena),
+        .mask = mask,
+        .style = style,
     };
 }
 
@@ -3759,6 +4068,22 @@ test "a sprite.2d node parses its rect and opacity" {
     try t.expectApproxEqAbs(@as(f32, 0.8), sp.opacity, 0.001);
 }
 
+test "a sprite.2d node parses its placement parameters" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "marker", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {},
+        \\    "sprite": {"x": 0.0, "y": 0.0, "w": 0.2, "h": 0.2, "x_param": "box_x", "y_param": "box_y"}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings("box_x", sp.x_param);
+    try t.expectEqualStrings("box_y", sp.y_param);
+    try t.expectEqualStrings("", sp.w_param);
+}
+
 test "a sprite.2d node parses its interaction block" {
     const source =
         \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
@@ -3791,6 +4116,133 @@ test "a model.gltf node parses its turntable control block" {
     try t.expect(control.dolly);
     try t.expect(control.roll);
     try t.expect(control.any());
+}
+
+test "an ml.infer node parses its model slot and output bindings" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "classifier", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "model.tflite", "input_width": 224, "input_height": 224,
+        \\      "outputs": [{"tensor": 0, "index": 5, "param": "cat_score"}]}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const ml = manifest.nodes[0].ml orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings("model.tflite", ml.model);
+    try t.expectEqual(@as(u32, 224), ml.input_width);
+    try t.expectEqual(@as(usize, 1), ml.outputs.len);
+    try t.expectEqual(@as(u32, 5), ml.outputs[0].index);
+    try t.expectEqualStrings("cat_score", ml.outputs[0].param);
+}
+
+test "an ml.infer output parses an argmax reduce" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "cls", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "cls.onnx",
+        \\      "outputs": [{"tensor": 0, "reduce": "argmax", "param": "label"},
+        \\                  {"tensor": 0, "index": 2, "param": "score"}]}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const ml = manifest.nodes[0].ml orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(usize, 2), ml.outputs.len);
+    try t.expectEqual(MlReduce.argmax, ml.outputs[0].reduce);
+    try t.expectEqual(MlReduce.element, ml.outputs[1].reduce);
+}
+
+test "an ml.infer node parses a mask binding to a named channel" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "seg", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "seg.onnx", "outputs": [],
+        \\      "mask": {"tensor": 0, "channel": "hair"}}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const ml = manifest.nodes[0].ml orelse return error.TestUnexpectedResult;
+    const mask = ml.mask orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(u32, 0), mask.tensor);
+    try t.expectEqual(@as(u8, 2), mask.channel);
+}
+
+test "a diffusion node parses its three models and sampler settings" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "restyle", "type": "diffusion", "params": {},
+        \\    "diffusion": {"encoder": "vae_enc.onnx", "unet": "unet.onnx", "decoder": "vae_dec.onnx",
+        \\      "sprite": "canvas", "steps": 6, "strength": 0.4, "seed": 7}},
+        \\   {"id": "canvas", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const d = manifest.nodes[0].diffusion orelse return error.TestUnexpectedResult;
+    try t.expectEqualStrings("unet.onnx", d.unet);
+    try t.expectEqualStrings("canvas", d.sprite);
+    try t.expectEqual(@as(u32, 6), d.steps);
+    try t.expectApproxEqAbs(@as(f32, 0.4), d.strength, 0.001);
+    try t.expectEqual(@as(u64, 7), d.seed);
+}
+
+test "a diffusion node missing a model is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "restyle", "type": "diffusion", "params": {},
+        \\    "diffusion": {"encoder": "vae_enc.onnx", "decoder": "vae_dec.onnx", "sprite": "canvas"}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "diffusion needs unet and decoder") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "an ml.infer node parses a style binding to a sprite" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "restyle", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "style.onnx", "outputs": [],
+        \\      "style": {"tensor": 0, "sprite": "canvas"}}},
+        \\   {"id": "canvas", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const ml = manifest.nodes[0].ml orelse return error.TestUnexpectedResult;
+    const style = ml.style orelse return error.TestUnexpectedResult;
+    try t.expectEqual(@as(u32, 0), style.tensor);
+    try t.expectEqualStrings("canvas", style.sprite);
+}
+
+test "an ml.infer mask with an unknown channel is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "seg", "type": "ml.infer", "params": {},
+        \\    "ml": {"model": "seg.onnx", "outputs": [],
+        \\      "mask": {"tensor": 0, "channel": "not_a_channel"}}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "ml mask needs a known channel") != null) found = true;
+    }
+    try t.expect(found);
 }
 
 test "a sprite.2d node with no sprite block defaults to full frame" {
@@ -3983,4 +4435,199 @@ test "scene classes append at the frozen mask-channel tail" {
     try t.expectEqual(ground_channel, maskChannelIndex("ground").?);
     try t.expectEqual(building_channel, maskChannelIndex("building").?);
     try t.expectEqual(@as(usize, 25), mask_channels.len);
+}
+
+/// The on-device prompt-to-lens compiler: it turns a short text prompt into a
+/// GLF manifest composing the engine's asset-free post-effect nodes, so a lens
+/// is authored from words with no upload and no round trip. The output is plain
+/// GLF a caller can inspect, save, or hand straight to activate.
+pub const prompt = struct {
+    /// A colour-grade look. At most one grades the frame, so competing words
+    /// resolve to the first the prompt names.
+    const Grade = enum { none, warm, cool, bright, moody, mono };
+
+    /// The recognized looks, filled by scanning the prompt's words. Each effect
+    /// is a single asset-free node, so the emitted bundle needs no assets.
+    const Recipe = struct {
+        grade: Grade = .none,
+        bloom: bool = false,
+        blur: bool = false,
+        fog: bool = false,
+        edge: bool = false,
+        stylize: bool = false,
+
+        fn empty(self: Recipe) bool {
+            return self.grade == .none and !self.bloom and !self.blur and !self.fog and !self.edge and !self.stylize;
+        }
+    };
+
+    fn isWordChar(ch: u8) bool {
+        return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9');
+    }
+
+    fn eqIgnoreCase(word: []const u8, lower: []const u8) bool {
+        if (word.len != lower.len) return false;
+        for (word, lower) |w, l| {
+            const wl = if (w >= 'A' and w <= 'Z') w + 32 else w;
+            if (wl != l) return false;
+        }
+        return true;
+    }
+
+    /// Folds one prompt word into the recipe. The grade slot keeps the first
+    /// look a word claims; the post effects each latch on independently.
+    fn applyWord(recipe: *Recipe, word: []const u8) void {
+        const warm = [_][]const u8{ "warm", "vintage", "sepia", "sunset", "golden", "cozy" };
+        const cool = [_][]const u8{ "cool", "cold", "icy", "winter", "blue" };
+        const bright = [_][]const u8{ "bright", "vivid", "pop", "vibrant", "punchy" };
+        const moody = [_][]const u8{ "moody", "dark", "dramatic", "cinematic", "noir" };
+        const mono = [_][]const u8{ "mono", "bw", "grayscale", "greyscale", "monochrome" };
+        const bloom = [_][]const u8{ "glow", "bloom", "dreamy", "soft", "ethereal" };
+        const blur = [_][]const u8{ "blur", "hazy", "haze", "smooth" };
+        const fog = [_][]const u8{ "fog", "foggy", "mist", "misty" };
+        const edge = [_][]const u8{ "cartoon", "toon", "comic", "ink", "outline" };
+        const stylize = [_][]const u8{ "sketch", "hatch", "pencil", "crosshatch", "drawn" };
+
+        if (recipe.grade == .none) {
+            for (warm) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .warm;
+                return;
+            };
+            for (cool) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .cool;
+                return;
+            };
+            for (bright) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .bright;
+                return;
+            };
+            for (moody) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .moody;
+                return;
+            };
+            for (mono) |w| if (eqIgnoreCase(word, w)) {
+                recipe.grade = .mono;
+                return;
+            };
+        }
+        for (bloom) |w| {
+            if (eqIgnoreCase(word, w)) recipe.bloom = true;
+        }
+        for (blur) |w| {
+            if (eqIgnoreCase(word, w)) recipe.blur = true;
+        }
+        for (fog) |w| {
+            if (eqIgnoreCase(word, w)) recipe.fog = true;
+        }
+        for (edge) |w| {
+            if (eqIgnoreCase(word, w)) recipe.edge = true;
+        }
+        for (stylize) |w| {
+            if (eqIgnoreCase(word, w)) recipe.stylize = true;
+        }
+    }
+
+    fn scan(text: []const u8) Recipe {
+        var recipe: Recipe = .{};
+        var i: usize = 0;
+        while (i < text.len) {
+            while (i < text.len and !isWordChar(text[i])) i += 1;
+            const start = i;
+            while (i < text.len and isWordChar(text[i])) i += 1;
+            if (i > start) applyWord(&recipe, text[start..i]);
+        }
+        return recipe;
+    }
+
+    fn gradeBlock(grade: Grade) []const u8 {
+        return switch (grade) {
+            .warm => "\"grade\": {\"exposure\": 0.1, \"contrast\": 1.1, \"saturation\": 1.2, \"temperature\": 0.06}",
+            .cool => "\"grade\": {\"exposure\": 0.0, \"contrast\": 1.1, \"saturation\": 1.1, \"temperature\": -0.06}",
+            .bright => "\"grade\": {\"exposure\": 0.2, \"contrast\": 1.15, \"saturation\": 1.3, \"temperature\": 0.0}",
+            .moody => "\"grade\": {\"exposure\": -0.15, \"contrast\": 1.4, \"saturation\": 0.9, \"temperature\": -0.02}",
+            .mono => "\"grade\": {\"exposure\": 0.0, \"contrast\": 1.2, \"saturation\": 0.0, \"temperature\": 0.0}",
+            .none => "\"grade\": {\"exposure\": 0.05, \"contrast\": 1.05, \"saturation\": 1.1, \"temperature\": 0.0}",
+        };
+    }
+
+    fn emitNode(w: *std.Io.Writer, first: *bool, id: []const u8, node_type: []const u8, block: ?[]const u8) !void {
+        if (!first.*) try w.writeAll(",\n  ");
+        first.* = false;
+        try w.print("{{\"id\": \"{s}\", \"type\": \"{s}\", \"inputs\": {{\"frame\": \"camera\"}}, \"params\": {{}}", .{ id, node_type });
+        if (block) |b| try w.print(", {s}", .{b});
+        try w.writeAll("}");
+    }
+
+    /// Compiles `text` into a GLF manifest string. The nodes emit in a fixed
+    /// effect order regardless of word order, so the same prompt always yields
+    /// the same bundle. A prompt that names no look still grades gently, so the
+    /// compiler never emits an empty lens. The caller owns the returned bytes.
+    pub fn compile(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+        var recipe = scan(text);
+        if (recipe.empty()) recipe.grade = .none; // the gentle default look
+
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        errdefer out.deinit();
+        const w = &out.writer;
+        try w.writeAll(
+            \\{"glf": "1.0", "id": "goss.prompt.compiled", "version": "1.0.0", "display_name": "Prompt Lens", "engine_compat": ">=0.5", "capabilities": [], "parameters": [],
+            \\ "nodes": [
+        );
+        var first = true;
+        // Grade always emits (the default look when the prompt named none), then
+        // the post effects follow in a stable chain order.
+        try emitNode(w, &first, "grade", "grade.pass", gradeBlock(recipe.grade));
+        if (recipe.blur) try emitNode(w, &first, "blur", "blur.pass", null);
+        if (recipe.bloom) try emitNode(w, &first, "bloom", "bloom.pass", "\"bloom\": {\"threshold\": 0.6, \"intensity\": 0.8}");
+        if (recipe.fog) try emitNode(w, &first, "fog", "fog.pass", "\"fog\": {\"color\": [0.8, 0.85, 0.9], \"density\": 1.2}");
+        if (recipe.edge) try emitNode(w, &first, "edge", "edge.pass", "\"edge\": {\"mode\": \"canny\", \"low_threshold\": 0.1, \"high_threshold\": 0.5, \"blur_radius\": 4.0}");
+        if (recipe.stylize) try emitNode(w, &first, "stylize", "stylize.pass", "\"stylize\": {\"mode\": \"crosshatch\", \"strength\": 1.0}");
+        try w.writeAll("], \"triggers\": []}");
+        return out.toOwnedSlice();
+    }
+};
+
+test "prompt compiles to the looks it names" {
+    const gpa = std.testing.allocator;
+    const json = try prompt.compile(gpa, "warm dreamy cartoon");
+    defer gpa.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"grade.pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"temperature\": 0.06") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"bloom.pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"edge.pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"blur.pass\"") == null);
+}
+
+test "prompt word order does not change the bundle" {
+    const gpa = std.testing.allocator;
+    const a = try prompt.compile(gpa, "cool blur glow");
+    defer gpa.free(a);
+    const b = try prompt.compile(gpa, "glow cool blur");
+    defer gpa.free(b);
+    try std.testing.expectEqualStrings(a, b);
+}
+
+test "prompt first grade word wins" {
+    const gpa = std.testing.allocator;
+    const json = try prompt.compile(gpa, "warm cool");
+    defer gpa.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"temperature\": 0.06") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"temperature\": -0.06") == null);
+}
+
+test "prompt unrecognized still grades gently" {
+    const gpa = std.testing.allocator;
+    const json = try prompt.compile(gpa, "zzz qqq");
+    defer gpa.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"grade.pass\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"bloom.pass\"") == null);
+}
+
+test "prompt output parses as a valid lens" {
+    const gpa = std.testing.allocator;
+    const json = try prompt.compile(gpa, "cinematic glow foggy sketch");
+    defer gpa.free(json);
+    var parsed = try parseOk(json);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.nodes.len >= 2);
 }

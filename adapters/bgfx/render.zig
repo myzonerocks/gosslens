@@ -234,6 +234,7 @@ pub const Renderer = struct {
     tex_sprite: c.bgfx_uniform_handle_t,
     tex_background: c.bgfx_uniform_handle_t,
     tex_mask: c.bgfx_uniform_handle_t,
+    tex_generated: c.bgfx_uniform_handle_t,
     tex_mean: c.bgfx_uniform_handle_t,
     tex_lookup_gray: c.bgfx_uniform_handle_t,
     tex_lookup_origin: c.bgfx_uniform_handle_t,
@@ -599,6 +600,7 @@ pub const Renderer = struct {
             .tex_sprite = c.bgfx_create_uniform("s_texSprite", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_background = c.bgfx_create_uniform("s_texBackground", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_mask = c.bgfx_create_uniform("s_texMask", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_generated = c.bgfx_create_uniform("s_generated", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_mean = c.bgfx_create_uniform("s_texMean", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_lookup_gray = c.bgfx_create_uniform("s_texLookupGray", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_lookup_origin = c.bgfx_create_uniform("s_texLookupOrigin", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
@@ -1197,6 +1199,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_sprite);
         c.bgfx_destroy_uniform(r.tex_background);
         c.bgfx_destroy_uniform(r.tex_mask);
+        c.bgfx_destroy_uniform(r.tex_generated);
         c.bgfx_destroy_uniform(r.tex_mean);
         c.bgfx_destroy_uniform(r.tex_lookup_gray);
         c.bgfx_destroy_uniform(r.tex_lookup_origin);
@@ -1677,6 +1680,18 @@ pub const Renderer = struct {
     pub fn submitShaderPass(r: *Renderer, view_id: c.bgfx_view_id_t, program: c.bgfx_program_handle_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Like submitShaderPass but also binds a generative texture to the reserved
+    /// s_generated sampler (stage 1), so a material graph whose `generated`
+    /// texture node samples it draws a prompt-generated map into the material.
+    pub fn submitShaderPassGenerated(r: *Renderer, view_id: c.bgfx_view_id_t, program: c.bgfx_program_handle_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, generated_texture: c.bgfx_texture_handle_t) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_generated, generated_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, program, 0, c.BGFX_DISCARD_ALL);

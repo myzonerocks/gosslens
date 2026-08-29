@@ -150,6 +150,7 @@ file must move together.
 | `goss_engine_init_renderer` | `initRenderer(surface, width, height)` | all SDKs |
 | `goss_engine_resize` | `resize(width, height)` | all SDKs |
 | `goss_engine_render_frame` | `renderFrame(session)` | all SDKs |
+| `goss_compile_prompt` | `compilePrompt(prompt)`, compiling a text prompt into a GLF lens manifest on device with a probe call for the length then a fill call; the result is inspectable GLF passed straight to `activateLens`, needing no assets | all SDKs |
 
 ### CaptureOutput
 

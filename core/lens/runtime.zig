@@ -37,7 +37,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -77,13 +77,18 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "sprite.2d")) return .sprite_2d;
     if (std.mem.eql(u8, type_str, "text.2d")) return .text_2d;
     if (std.mem.eql(u8, type_str, "video.texture")) return .video_texture;
+    if (std.mem.eql(u8, type_str, "splat.cloud")) return .splat_cloud;
     return null;
 }
 
-/// A behavior node drives parameters each tick and draws nothing, so it never
-/// joins the composite chain: the script and the logic graph.
+/// A behavior node drives parameters or a sprite's texture each tick and draws
+/// nothing itself, so it never joins the composite chain: the script, the logic
+/// graph, the ml.infer model, and the diffusion restyle.
 fn isBehaviorNode(type_str: []const u8) bool {
-    return std.mem.eql(u8, type_str, "script") or std.mem.eql(u8, type_str, "logic.graph");
+    return std.mem.eql(u8, type_str, "script") or
+        std.mem.eql(u8, type_str, "logic.graph") or
+        std.mem.eql(u8, type_str, "ml.infer") or
+        std.mem.eql(u8, type_str, "diffusion");
 }
 
 const ParamSlot = struct { name: []const u8, effect: EffectSlot };
@@ -106,7 +111,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
     };
 }
 
@@ -213,6 +218,9 @@ const LensNode = struct {
     /// .video_texture only: the clip source, rect, opacity, and playback rate
     /// the node decodes and draws at.
     video: ?manifest.VideoField = null,
+    /// .splat_cloud only: the model that lifts the frame to a point cloud and
+    /// the billboard size and color it draws the splats with.
+    splat: ?manifest.SplatField = null,
     /// .model_gltf only: microseconds since play_animation last fired
     /// for this node, null if it never has. Advances every tick() the
     /// same way a ramp does - once a trigger starts it, not before.
@@ -322,11 +330,35 @@ pub const SpriteNode = struct {
     /// A parameter name whose live value overrides opacity each frame, or
     /// empty for the static opacity.
     opacity_param: []const u8,
+    /// Parameter names whose live values override the rect each frame, or empty
+    /// for the static rect. A model output driving these moves the sprite.
+    x_param: []const u8,
+    y_param: []const u8,
+    w_param: []const u8,
+    h_param: []const u8,
     /// Frame count and rate for an animated sprite; frames == 1 is static.
     frames: u32,
     fps: f32,
     /// The direct-manipulation gestures this sprite responds to.
     interaction: manifest.Interaction,
+    /// A segmentation channel that keys the sprite full-frame; null draws the
+    /// sprite over the frame at its rect. mask_over selects the composite:
+    /// false fills behind the region (greenscreen), true fills over it (restyle).
+    mask_channel: ?u8,
+    mask_over: bool,
+};
+
+/// One splat.cloud node ready for the caller to load and draw - which graph node
+/// it is, the model (assets/<model>) that lifts the frame to a point cloud, and
+/// the billboard size and rgb color the splats draw with.
+pub const SplatNode = struct {
+    graph_index: graph.NodeIndex,
+    model: []const u8,
+    point: f32,
+    color: [3]f32,
+    /// True draws the model's output as a connected grid mesh; false draws it as
+    /// a billboard point cloud.
+    mesh: bool,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -516,7 +548,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap };
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
 
 /// One matte.hair source node ready for the caller to draw - which graph node
 /// it is, and its guided-filter parameters packed for the refine pass (radius,
@@ -1110,7 +1142,23 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every splat.cloud node this lens spliced, in execution order, each
+    /// carrying the model that lifts the frame to a point cloud and the
+    /// billboard size and color it draws with.
+    pub fn splatNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]SplatNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(SplatNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .splat_cloud) continue;
+            const sf = node.splat orelse continue;
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1186,6 +1234,7 @@ pub const Lens = struct {
                 .face_swap => .face_swap,
                 .draw_board => .draw_board,
                 .sprite_2d, .text_2d, .video_texture => .sprite,
+                .splat_cloud => .splat,
                 else => continue,
             };
             try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
@@ -1416,6 +1465,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .sprite = if (node_type == .sprite_2d) node.sprite else null,
             .text = if (node_type == .text_2d) node.text else null,
             .video = if (node_type == .video_texture) node.video else null,
+            .splat = if (node_type == .splat_cloud) node.splat else null,
             .grade = if (node_type == .grade_pass) node.grade else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .dof = if (node_type == .dof_pass) node.dof else null,
@@ -2441,4 +2491,22 @@ test "a logic graph drives a parameter from the signals each tick" {
     try t.expectApproxEqAbs(@as(f32, 0.6), lens.paramValue("intensity").?, 1e-5);
     _ = tick(&lens, animation.fixed_step_us, .{ .pointer_x = 0.9 });
     try t.expectApproxEqAbs(@as(f32, 1.0), lens.paramValue("intensity").?, 1e-5);
+}
+
+test "an ml.infer node activates as a behavior node, outside the composite chain" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const src =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "score", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "m", "type": "ml.infer", "params": {}, "ml": {"model": "model.tflite", "outputs": [{"param": "score"}]}}],
+        \\ "triggers": []}
+    ;
+    const lens_manifest = try parseTestManifest(t.allocator, src);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+    // The ml.infer node draws nothing, so no node joins the composite chain.
+    try t.expectEqual(@as(usize, 0), lens.nodes.len);
 }

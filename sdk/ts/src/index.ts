@@ -481,6 +481,27 @@ export class GossEngine {
     return this.mod.ccall("goss_engine_render_frame", "number", ["number", "number"], [this.handle, session?.handle ?? 0]);
   }
 
+  /// Compiles a text prompt into a GLF lens manifest on device. The result is
+  /// ordinary GLF the caller can inspect or pass to activateLens, and needs no
+  /// assets. A length probe sizes the buffer, then a fill call writes it.
+  compilePrompt(prompt: string): string {
+    const bytes = new TextEncoder().encode(prompt);
+    const promptPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length || 1]) as number;
+    this.mod.HEAPU8.set(bytes, promptPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const view = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    this.mod.ccall("goss_compile_prompt", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, promptPtr, bytes.length, 0, 0, lenPtr]);
+    const needed = view();
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+    this.mod.ccall("goss_compile_prompt", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, promptPtr, bytes.length, outPtr, needed, lenPtr]);
+    const written = view();
+    const json = new TextDecoder().decode(this.mod.HEAPU8.slice(outPtr, outPtr + written));
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [promptPtr, bytes.length || 1]);
+    return json;
+  }
+
   /// Releases the persistent wrap the engine keeps per external live
   /// texture handle - the pair of the native SDKs' renderToLiveTexture,
   /// for a host retiring a publish surface before the engine goes away.

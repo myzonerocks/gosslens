@@ -139,7 +139,11 @@ other dependency and stay behind their adapters; engine-owned ones live in
 
 - Hand, body-pose, segmentation, and gesture models run on the tracking
   module's inference rail, the same one the face pipeline uses. Creator
-  models load through that rail's model-loading contract.
+  models load through that rail's model-loading contract. The rail schedules
+  its own delegate: it tries the platform accelerator first, CoreML on Apple
+  and NNAPI on Android, and falls back to the XNNPACK CPU delegate wherever a
+  device has no accelerator, so the same model loads everywhere and runs on
+  the fastest path the target offers.
 - Face-mesh effects (beauty, makeup, masks, face paint) build on the
   canonical face topology over the landmarks the engine tracks and render
   through the lens runtime's beauty and mesh nodes.
