@@ -2903,15 +2903,17 @@ fn proveMlInferMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool 
     return true;
 }
 
-fn writeSplatLens(dir: []const u8, model: []const u8) !void {
+fn writeSplatLens(dir: []const u8, model: []const u8, mesh: bool) !void {
     const page = std.heap.page_allocator;
-    const manifest_json =
-        \\{"glf":"1.0","id":"goss.reference.ml-splat","version":"1.0.0","display_name":"BYO Splat","engine_compat":">=0.5","capabilities":[],
+    const draw = if (mesh) "mesh" else "points";
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.ml-splat","version":"1.0.0","display_name":"BYO Splat","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
-        \\ "nodes":[{"id":"cloud","type":"splat.cloud","inputs":{"frame":"camera"},"params":{},
-        \\   "splat":{"model":"splat.onnx","point":8.0,"r":0.9,"g":0.8,"b":0.3}}],
-        \\ "triggers":[]}
-    ;
+        \\ "nodes":[{{"id":"cloud","type":"splat.cloud","inputs":{{"frame":"camera"}},"params":{{}},
+        \\   "splat":{{"model":"splat.onnx","draw":"{s}","point":8.0,"r":0.9,"g":0.8,"b":0.3}}}}],
+        \\ "triggers":[]}}
+    , .{draw});
+    defer page.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
@@ -2961,7 +2963,7 @@ fn proveMlInferSplat(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splat/assets");
-    try writeSplatLens("zig-out/ml-splat", model);
+    try writeSplatLens("zig-out/ml-splat", model, false);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2975,6 +2977,35 @@ fn proveMlInferSplat(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a splat.cloud node lifts the camera frame to a 3D point set with a bundled model and draws it as a billboard cloud\n", .{});
+    return true;
+}
+
+/// Proves the text-to-3D mesh draw: a splat.cloud in mesh mode reads the model's
+/// output as a square grid of points and draws it as a connected 3D surface, the
+/// mesh sibling of the billboard cloud. The synthetic model emits a full grid.
+fn proveMlInferSplatMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splatmesh/assets");
+    try writeSplatLens("zig-out/ml-splatmesh", model, true);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runSplatOnce(engine, "zig-out/ml-splatmesh", person);
+    const drew_b = try runSplatOnce(engine, "zig-out/ml-splatmesh", person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the splat mesh never produced its surface\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a splat.cloud in mesh mode reads the model's points as a grid and draws them as a connected 3D surface\n", .{});
     return true;
 }
 
@@ -13349,6 +13380,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer material graph");
     if (!try proveMlInferSplat(gpa, engine)) return 1;
     watchHold("ml infer splat");
+    if (!try proveMlInferSplatMesh(gpa, engine)) return 1;
+    watchHold("ml infer splat mesh");
     if (!try proveCompilePrompt(gpa, engine)) return 1;
     watchHold("compile prompt");
     if (!try proveScript(gpa, engine)) return 1;

@@ -2680,8 +2680,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const sw = splatWorkerFor(s, entry.graph_index) orelse continue;
                 if (!ml_infer.hasPublished(sw.worker)) continue;
                 if (!ml_infer.copyOutput(sw.worker, 0, sw.positions)) continue;
+                // A mesh draw reads the points as a square grid; a cell short of a
+                // full grid falls back to the point cloud so the node still draws.
+                const grid_side: usize = if (sw.mesh_draw) isqrt(sw.count) else 0;
+                const mesh_draw = sw.mesh_draw and grid_side >= 2 and grid_side * grid_side == sw.count;
+                const vertex_count: u32 = if (mesh_draw) @intCast((grid_side - 1) * (grid_side - 1) * 6) else sw.count * 6;
                 const mesh = sw.mesh orelse blk: {
-                    const m = r.createParticleMesh(sw.count * 6, true) catch continue;
+                    const m = r.createParticleMesh(vertex_count, !mesh_draw) catch continue;
                     sw.mesh = m;
                     break :blk m;
                 };
@@ -2701,18 +2706,28 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
                     render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
                 }
-                // Expand the model's points into camera-facing billboards and draw
-                // them as a 3D cloud over the passed-through frame.
-                if (frameStage(s, sw.count * 6 * 8)) |verts| {
-                    writeSplatBillboards(sw.positions, sw.count, verts);
-                    render.Renderer.updateParticleMeshFaded(mesh, verts);
-                }
                 r.tile = if (is_final) s.capture_tile else null;
                 const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
                 const base_color: [4]f32 = .{ sw.color[0], sw.color[1], sw.color[2], 1.0 };
-                const particle_params: [4]f32 = .{ sw.point / @as(f32, @floatFromInt(rect_w)), sw.point / @as(f32, @floatFromInt(rect_h)), 1.0, 0.0 };
-                const particle_fx: [4]f32 = .{ 1, 1, 0, 0 };
-                r.submitParticles(blit_view, mesh_view, input_texture, mesh, base_color, base_color, aspect_ratio, true, particle_params, particle_fx, false, r.defaultSpriteTexture());
+                if (mesh_draw) {
+                    // Connect the grid of points into a surface and draw it as a
+                    // solid 3D mesh over the passed-through frame.
+                    if (frameStage(s, vertex_count * 3)) |verts| {
+                        writeSplatMesh(sw.positions, grid_side, verts);
+                        r.updateParticleMesh(mesh, verts);
+                    }
+                    r.submitRibbons(blit_view, mesh_view, input_texture, mesh, base_color, aspect_ratio);
+                } else {
+                    // Expand the points into camera-facing billboards and draw them
+                    // as a 3D cloud over the passed-through frame.
+                    if (frameStage(s, sw.count * 6 * 8)) |verts| {
+                        writeSplatBillboards(sw.positions, sw.count, verts);
+                        render.Renderer.updateParticleMeshFaded(mesh, verts);
+                    }
+                    const particle_params: [4]f32 = .{ sw.point / @as(f32, @floatFromInt(rect_w)), sw.point / @as(f32, @floatFromInt(rect_h)), 1.0, 0.0 };
+                    const particle_fx: [4]f32 = .{ 1, 1, 0, 0 };
+                    r.submitParticles(blit_view, mesh_view, input_texture, mesh, base_color, base_color, aspect_ratio, true, particle_params, particle_fx, false, r.defaultSpriteTexture());
+                }
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -9051,6 +9066,8 @@ const SplatWorker = struct {
     count: u32,
     point: f32,
     color: [3]f32,
+    // True draws the points as a connected grid surface, false as billboards.
+    mesh_draw: bool,
     positions: []f32,
     // The billboard mesh is created lazily on the first draw, since it needs the
     // renderer; null marks it not yet built.
@@ -9084,6 +9101,7 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .count = count,
             .point = node.point,
             .color = node.color,
+            .mesh_draw = node.mesh,
             .positions = positions,
         }) catch {
             gpa.free(positions);
@@ -9129,6 +9147,30 @@ fn writeSplatBillboards(positions: []const f32, count: u32, out: []f32) void {
             out[base + 5] = @floatFromInt(i % 256);
             out[base + 6] = 0;
             out[base + 7] = 0;
+        }
+    }
+}
+
+/// Connects a square grid of xyz points into a triangle soup (two triangles per
+/// cell, three floats per vertex), so a model that emits a grid of positions
+/// draws as a continuous 3D surface rather than loose points.
+fn writeSplatMesh(positions: []const f32, side: usize, out: []f32) void {
+    if (side < 2) return;
+    var v: usize = 0;
+    var j: usize = 0;
+    while (j + 1 < side) : (j += 1) {
+        var i: usize = 0;
+        while (i + 1 < side) : (i += 1) {
+            const p00 = (j * side + i) * 3;
+            const p10 = (j * side + i + 1) * 3;
+            const p01 = ((j + 1) * side + i) * 3;
+            const p11 = ((j + 1) * side + i + 1) * 3;
+            for ([6]usize{ p00, p10, p11, p00, p11, p01 }) |p| {
+                out[v * 3 + 0] = positions[p + 0];
+                out[v * 3 + 1] = positions[p + 1];
+                out[v * 3 + 2] = positions[p + 2];
+                v += 1;
+            }
         }
     }
 }

@@ -899,12 +899,15 @@ pub const DiffusionField = struct {
     coherence: f32 = 0,
 };
 
+pub const SplatDraw = enum { points, mesh };
+
 pub const SplatField = struct {
-    /// A splat.cloud node lifts the camera frame into a 3D point cloud with a
-    /// bundled model whose output is a flat list of xyz positions, drawn as
-    /// camera-facing billboards. The model runs on the inference rail like any
-    /// author model; `point` is the billboard size in pixels and r,g,b its color.
+    /// A splat.cloud node lifts the camera frame into 3D with a bundled model
+    /// whose output is a flat list of xyz positions. `draw` picks the form:
+    /// `points` draws camera-facing billboards (a cloud), `mesh` reads a square
+    /// grid and draws a surface. `point` is the billboard size, r,g,b the color.
     model: []const u8,
+    draw: SplatDraw = .points,
     point: f32 = 6.0,
     r: f32 = 0.9,
     g: f32 = 0.85,
@@ -3194,6 +3197,11 @@ fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         return null;
     }
     var field: SplatField = .{ .model = try arena.dupe(u8, model) };
+    if (getField(object, "draw")) |v| {
+        if (try expectString(diags, path, v)) |name| {
+            if (std.mem.eql(u8, name, "points")) field.draw = .points else if (std.mem.eql(u8, name, "mesh")) field.draw = .mesh else try diags.add(path.slice(), "splat draw is 'points' or 'mesh', found '{s}'", .{name});
+        }
+    }
     if (getField(object, "point")) |v| field.point = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.point)), 1, 64);
     if (getField(object, "r")) |v| field.r = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.r)), 0, 1);
     if (getField(object, "g")) |v| field.g = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.g)), 0, 1);
