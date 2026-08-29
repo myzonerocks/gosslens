@@ -910,7 +910,7 @@ pub const SplatField = struct {
     /// A splat.cloud node lifts a frame into 3D with a bundled model whose output
     /// is a flat xyz list. `source` picks the input (live camera or a submitted
     /// selfie); `draw` the form (`points` billboards or a `mesh` grid surface);
-    /// `point` the billboard size and r,g,b the color.
+    /// `point` the size, r,g,b the color, `colored` a per-point color from rgb.
     model: []const u8,
     source: SplatSource = .camera,
     draw: SplatDraw = .points,
@@ -918,6 +918,7 @@ pub const SplatField = struct {
     r: f32 = 0.9,
     g: f32 = 0.85,
     b: f32 = 0.8,
+    colored: bool = false,
 };
 
 pub const Node = struct {
@@ -3242,6 +3243,9 @@ fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
     if (getField(object, "r")) |v| field.r = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.r)), 0, 1);
     if (getField(object, "g")) |v| field.g = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.g)), 0, 1);
     if (getField(object, "b")) |v| field.b = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.b)), 0, 1);
+    if (getField(object, "colored")) |v| {
+        if (v == .bool) field.colored = v.bool;
+    }
     return field;
 }
 

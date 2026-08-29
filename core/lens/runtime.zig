@@ -370,6 +370,9 @@ pub const SplatNode = struct {
     /// True runs the model once on a submitted selfie (an avatar) rather than the
     /// live camera each tick.
     selfie: bool,
+    /// True when the model emits rgb after xyz per point, so each splat carries
+    /// its own color instead of the node color.
+    colored: bool,
 };
 
 /// One text.2d node ready for the caller to rasterize and draw - which
@@ -1169,7 +1172,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .splat_cloud) continue;
             const sf = node.splat orelse continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .selfie = sf.source == .selfie });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .selfie = sf.source == .selfie, .colored = sf.colored });
         }
         return out.toOwnedSlice(gpa);
     }

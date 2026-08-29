@@ -2903,7 +2903,7 @@ fn proveMlInferMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool 
     return true;
 }
 
-fn writeSplatLens(dir: []const u8, model: []const u8, mesh: bool, selfie: bool) !void {
+fn writeSplatLens(dir: []const u8, model: []const u8, mesh: bool, selfie: bool, colored: bool) !void {
     const page = std.heap.page_allocator;
     const draw = if (mesh) "mesh" else "points";
     const source = if (selfie) "selfie" else "camera";
@@ -2911,9 +2911,9 @@ fn writeSplatLens(dir: []const u8, model: []const u8, mesh: bool, selfie: bool) 
         \\{{"glf":"1.0","id":"goss.reference.ml-splat","version":"1.0.0","display_name":"BYO Splat","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
         \\ "nodes":[{{"id":"cloud","type":"splat.cloud","inputs":{{"frame":"camera"}},"params":{{}},
-        \\   "splat":{{"model":"splat.onnx","source":"{s}","draw":"{s}","point":8.0,"r":0.9,"g":0.8,"b":0.3}}}}],
+        \\   "splat":{{"model":"splat.onnx","source":"{s}","draw":"{s}","point":8.0,"r":0.9,"g":0.8,"b":0.3,"colored":{}}}}}],
         \\ "triggers":[]}}
-    , .{ source, draw });
+    , .{ source, draw, colored });
     defer page.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
@@ -2964,7 +2964,7 @@ fn proveMlInferSplat(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splat/assets");
-    try writeSplatLens("zig-out/ml-splat", model, false, false);
+    try writeSplatLens("zig-out/ml-splat", model, false, false, false);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -2993,7 +2993,7 @@ fn proveMlInferSplatMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splatmesh/assets");
-    try writeSplatLens("zig-out/ml-splatmesh", model, true, false);
+    try writeSplatLens("zig-out/ml-splatmesh", model, true, false, false);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -3007,6 +3007,45 @@ fn proveMlInferSplatMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a splat.cloud in mesh mode reads the model's points as a grid and draws them as a connected 3D surface\n", .{});
+    return true;
+}
+
+/// Proves per-splat color end to end: a colored splat.cloud runs a model that
+/// emits rgb after xyz per point (six channels), so the loader reads it at
+/// stride six and each splat carries its own color into the billboard cloud it
+/// draws. The color the writer packs per point is asserted by a unit test.
+fn proveMlInferSplatColored(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    // 6 outputs from 3 inputs: rows 0-2 carry rgb to xyz, rows 3-5 carry rgb to
+    // the point color, so each splat's color is its own source pixel.
+    const w6 = [_]f32{
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1,
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1,
+    };
+    const colored_model = onnxConvModel(a, "x", 3, 6, side, &w6, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-splatcolor/assets");
+    try writeSplatLens("zig-out/ml-splatcolor", colored_model, false, false, true);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runSplatOnce(engine, "zig-out/ml-splatcolor", person);
+    const drew_b = try runSplatOnce(engine, "zig-out/ml-splatcolor", person);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the colored splat never produced its cloud\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a colored splat.cloud reads a six-channel model at stride six and draws each point carrying its own color\n", .{});
     return true;
 }
 
@@ -3075,7 +3114,7 @@ fn proveMlInferSelfieAvatar(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const model = onnxConvModel(a, "x", 3, 3, side, &w, &.{});
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-selfie/assets");
-    try writeSplatLens("zig-out/ml-selfie", model, false, true);
+    try writeSplatLens("zig-out/ml-selfie", model, false, true, false);
 
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
@@ -13616,6 +13655,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer splat");
     if (!try proveMlInferSplatMesh(gpa, engine)) return 1;
     watchHold("ml infer splat mesh");
+    if (!try proveMlInferSplatColored(gpa, engine)) return 1;
+    watchHold("ml infer splat colored");
     if (!try proveMlInferSelfieAvatar(gpa, engine)) return 1;
     watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;

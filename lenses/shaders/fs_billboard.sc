@@ -1,4 +1,4 @@
-$input v_billboard
+$input v_billboard, v_color
 
 #include <bgfx_shader.sh>
 
@@ -25,6 +25,8 @@ void main()
 		uv = (uv + cell) / dim;
 	}
 	vec4 sprite = texture2D(s_texSprite, uv);
-	vec3 rgb = mix(u_particleCool.rgb, u_modelColor.rgb, life) * sprite.rgb;
-	gl_FragColor = vec4(rgb, u_modelColor.a * life * falloff * sprite.a);
+	// v_color is the per-vertex tint, white (identity) for particles and the
+	// per-point color for a colored splat cloud.
+	vec3 rgb = mix(u_particleCool.rgb, u_modelColor.rgb, life) * sprite.rgb * v_color.rgb;
+	gl_FragColor = vec4(rgb, u_modelColor.a * life * falloff * sprite.a * v_color.a);
 }

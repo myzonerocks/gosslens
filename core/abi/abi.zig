@@ -2747,15 +2747,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // Connect the grid of points into a surface and draw it as a
                     // solid 3D mesh over the passed-through frame.
                     if (frameStage(s, vertex_count * 3)) |verts| {
-                        writeSplatMesh(sw.positions, grid_side, verts);
+                        writeSplatMesh(sw.positions, grid_side, sw.colored, verts);
                         r.updateParticleMesh(mesh, verts);
                     }
                     r.submitRibbons(blit_view, mesh_view, input_texture, mesh, base_color, aspect_ratio);
                 } else {
                     // Expand the points into camera-facing billboards and draw them
                     // as a 3D cloud over the passed-through frame.
-                    if (frameStage(s, sw.count * 6 * 8)) |verts| {
-                        writeSplatBillboards(sw.positions, sw.count, verts);
+                    if (frameStage(s, sw.count * 6 * 12)) |verts| {
+                        writeSplatBillboards(sw.positions, sw.count, sw.colored, verts);
                         render.Renderer.updateParticleMeshFaded(mesh, verts);
                     }
                     const particle_params: [4]f32 = .{ sw.point / @as(f32, @floatFromInt(rect_w)), sw.point / @as(f32, @floatFromInt(rect_h)), 1.0, 0.0 };
@@ -3163,11 +3163,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             const sheet_dim: f32 = @ceil(@sqrt(frames));
                             particle_fx = .{ frames, sheet_dim, sys.field.stretch, 0 };
                             if (has_trail) {
-                                if (frameStage(s, sys.trailVertexCount() * 8)) |verts| {
+                                if (frameStage(s, sys.trailVertexCount() * 12)) |verts| {
                                     sys.writeTrailBillboards(verts);
                                     render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
                                 }
-                            } else if (frameStage(s, count * 6 * 8)) |verts| {
+                            } else if (frameStage(s, count * 6 * 12)) |verts| {
                                 sys.writeBillboards(verts);
                                 render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
                             }
@@ -9192,6 +9192,9 @@ const SplatWorker = struct {
     mesh_draw: bool,
     // True runs once on a submitted selfie (an avatar), not the live camera.
     selfie: bool,
+    // True when the model emits rgb after xyz per point (stride six), so each
+    // splat draws in its own color rather than the node color.
+    colored: bool,
     positions: []f32,
     // The billboard mesh is created lazily on the first draw, since it needs the
     // renderer; null marks it not yet built.
@@ -9210,11 +9213,14 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         defer gpa.free(bytes);
         const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
         const len = ml_infer.outputLen(worker, 0);
-        if (len == 0 or len % 3 != 0) {
+        // A colored cloud's model emits xyz then rgb per point, so its output is
+        // a multiple of six; a plain one emits xyz only, a multiple of three.
+        const stride: usize = if (node.colored) 6 else 3;
+        if (len == 0 or len % stride != 0) {
             ml_infer.destroy(worker);
             continue;
         }
-        const count: u32 = @intCast(len / 3);
+        const count: u32 = @intCast(len / stride);
         const positions = gpa.alloc(f32, len) catch {
             ml_infer.destroy(worker);
             continue;
@@ -9227,11 +9233,16 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .color = node.color,
             .mesh_draw = node.mesh,
             .selfie = node.selfie,
+            .colored = node.colored,
             .positions = positions,
         }) catch {
             gpa.free(positions);
             ml_infer.destroy(worker);
+            continue;
         };
+        // Reserve the staging the billboard cloud writes each frame, six vertices
+        // of twelve floats per point, so the draw never falls back to a stale mesh.
+        reserveFrameStage(session, @as(usize, count) * 6 * 12);
     }
 }
 
@@ -9256,14 +9267,20 @@ fn splatWorkerFor(session: *Session, idx: graph.NodeIndex) ?*SplatWorker {
 /// draws: six per point (two triangles), each eight floats (position, corner,
 /// life, seed, velocity). A splat is fully alive and still, so life is one and
 /// the velocity zero; the point holds its place while the camera orbits it.
-fn writeSplatBillboards(positions: []const f32, count: u32, out: []f32) void {
+fn writeSplatBillboards(positions: []const f32, count: u32, colored: bool, out: []f32) void {
     const corners = [6]f32{ 0, 1, 2, 0, 2, 3 };
+    // A colored cloud's model emits xyz then rgb per point (stride six); a plain
+    // one emits xyz only (stride three) and each splat draws in the node color.
+    const stride: usize = if (colored) 6 else 3;
     for (0..count) |i| {
-        const px = positions[i * 3 + 0];
-        const py = positions[i * 3 + 1];
-        const pz = positions[i * 3 + 2];
+        const px = positions[i * stride + 0];
+        const py = positions[i * stride + 1];
+        const pz = positions[i * stride + 2];
+        const cr: f32 = if (colored) positions[i * stride + 3] else 1.0;
+        const cg: f32 = if (colored) positions[i * stride + 4] else 1.0;
+        const cb: f32 = if (colored) positions[i * stride + 5] else 1.0;
         for (corners, 0..) |corner, k| {
-            const base = (i * 6 + k) * 8;
+            const base = (i * 6 + k) * 12;
             out[base + 0] = px;
             out[base + 1] = py;
             out[base + 2] = pz;
@@ -9272,6 +9289,10 @@ fn writeSplatBillboards(positions: []const f32, count: u32, out: []f32) void {
             out[base + 5] = @floatFromInt(i % 256);
             out[base + 6] = 0;
             out[base + 7] = 0;
+            out[base + 8] = cr;
+            out[base + 9] = cg;
+            out[base + 10] = cb;
+            out[base + 11] = 1.0;
         }
     }
 }
@@ -9279,17 +9300,20 @@ fn writeSplatBillboards(positions: []const f32, count: u32, out: []f32) void {
 /// Connects a square grid of xyz points into a triangle soup (two triangles per
 /// cell, three floats per vertex), so a model that emits a grid of positions
 /// draws as a continuous 3D surface rather than loose points.
-fn writeSplatMesh(positions: []const f32, side: usize, out: []f32) void {
+fn writeSplatMesh(positions: []const f32, side: usize, colored: bool, out: []f32) void {
     if (side < 2) return;
+    // Colored points carry rgb after xyz, so step by six; the surface itself
+    // stays position only and reads just the xyz of each grid point.
+    const stride: usize = if (colored) 6 else 3;
     var v: usize = 0;
     var j: usize = 0;
     while (j + 1 < side) : (j += 1) {
         var i: usize = 0;
         while (i + 1 < side) : (i += 1) {
-            const p00 = (j * side + i) * 3;
-            const p10 = (j * side + i + 1) * 3;
-            const p01 = ((j + 1) * side + i) * 3;
-            const p11 = ((j + 1) * side + i + 1) * 3;
+            const p00 = (j * side + i) * stride;
+            const p10 = (j * side + i + 1) * stride;
+            const p01 = ((j + 1) * side + i) * stride;
+            const p11 = ((j + 1) * side + i + 1) * stride;
             for ([6]usize{ p00, p10, p11, p00, p11, p01 }) |p| {
                 out[v * 3 + 0] = positions[p + 0];
                 out[v * 3 + 1] = positions[p + 1];
@@ -9518,7 +9542,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             session.particle_meshes.put(gpa, model.graph_index, mesh) catch {
                                 render.Renderer.destroyParticleMesh(mesh);
                             };
-                            reserveFrameStage(session, if (faded) @as(usize, vertex_count) * 8 else @as(usize, vertex_count) * 3);
+                            reserveFrameStage(session, if (faded) @as(usize, vertex_count) * 12 else @as(usize, vertex_count) * 3);
                             if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
                         } else |_| {
                             var s2 = sys;
@@ -10254,6 +10278,34 @@ test "buildMorphBlendshapeTable maps ARKit names to blendshape indices" {
     try t.expectEqual(@as(i8, -1), table[1]);
     try t.expectEqual(@as(i8, @intCast(face.blendshapeIndex("eyeBlinkLeft").?)), table[2]);
     try t.expectEqual(@as(i8, -1), table[3]);
+}
+
+test "writeSplatBillboards carries per-point color when colored, white otherwise" {
+    // Colored: two points, xyz then rgb interleaved (stride six).
+    const colored_pts = [_]f32{
+        0.1, 0.2, 0.3, 0.9, 0.8, 0.7,
+        0.4, 0.5, 0.6, 0.15, 0.25, 0.35,
+    };
+    var out: [2 * 6 * 12]f32 = undefined;
+    writeSplatBillboards(&colored_pts, 2, true, &out);
+    // Every one of the first point's six vertices carries its own rgb, alpha one.
+    for (0..6) |k| {
+        const base = k * 12;
+        try t.expectEqual(@as(f32, 0.1), out[base + 0]);
+        try t.expectEqual(@as(f32, 0.9), out[base + 8]);
+        try t.expectEqual(@as(f32, 0.8), out[base + 9]);
+        try t.expectEqual(@as(f32, 0.7), out[base + 10]);
+        try t.expectEqual(@as(f32, 1.0), out[base + 11]);
+    }
+    // The second point reads its own color, at stride six.
+    try t.expectEqual(@as(f32, 0.4), out[6 * 12 + 0]);
+    try t.expectEqual(@as(f32, 0.15), out[6 * 12 + 8]);
+    // Plain: xyz-only points (stride three); the color slot is white.
+    const plain_pts = [_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 };
+    var out2: [2 * 6 * 12]f32 = undefined;
+    writeSplatBillboards(&plain_pts, 2, false, &out2);
+    try t.expectEqual(@as(f32, 0.4), out2[6 * 12 + 0]);
+    for (0..4) |c| try t.expectEqual(@as(f32, 1.0), out2[8 + c]);
 }
 
 /// Lowercases into buf and drops a "mixamorig:" style prefix (anything

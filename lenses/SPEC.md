@@ -737,9 +737,12 @@ the end instead of rewinding. Targets without a hardware decoder play a
 deterministic synthetic clip so the node still runs.
 
 A `"splat.cloud"` node draws 3D geometry a bundled model lifts from a frame.
-It carries a `"splat": {"model", "source", "draw", "point", "r", "g", "b"}`
-block: `model` names the net under `assets/`, whose output is a flat list of xyz
-positions (its length a multiple of three, one point per triple). `"source"`
+It carries a `"splat": {"model", "source", "draw", "point", "r", "g", "b",
+"colored"}` block: `model` names the net under `assets/`, whose output is a flat
+list of xyz positions (its length a multiple of three, one point per triple).
+With `"colored"` the model emits rgb after xyz per point (its length a multiple
+of six) and each splat draws in its own color instead of the node `r`, `g`, `b`,
+so a photoreal selfie avatar carries the photo's color per point. `"source"`
 picks the input: `"camera"` (the default) lifts the live frame each tick;
 `"selfie"` runs the model once over a still submitted through
 `goss_session_submit_avatar_source` and then holds the result, so a photoreal
@@ -1204,7 +1207,8 @@ one submitted still through the avatar op and draws it off the per-frame camera;
 a retarget avatar is reenacted by an injected source performance, an open source
 jaw deforming the mesh where a closed one holds it at rest; a tracked avatar
 renders in a toon art style and stays live, tracking an injected jaw while
-differing from the un-stylized avatar;
+differing from the un-stylized avatar; a colored splat.cloud reads a
+six-channel model at stride six and draws each point in its own color;
 and the prompt
 compiler emits a GLF manifest on device that activates as a lens and renders.
 The conformance harness runs today on the host (macOS): it renders each

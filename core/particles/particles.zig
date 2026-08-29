@@ -473,7 +473,7 @@ pub const System = struct {
         return @as(usize, self.field.count) * self.trailLen() * 6;
     }
 
-    /// Writes the trail as fading billboards (trailVertexCount() * 8 floats):
+    /// Writes the trail as fading billboards (trailVertexCount() * 12 floats):
     /// each particle's recent positions, oldest faintest, so the ribbon tapers
     /// off behind it. Same vertex shape as writeBillboards, so the one fading
     /// billboard program draws it with no new shader.
@@ -491,7 +491,7 @@ pub const System = struct {
                 const age = @as(f32, @floatFromInt(slot + 1)) / @as(f32, @floatFromInt(n));
                 const frac = life_frac * age;
                 for (corners, 0..) |corner, k| {
-                    const base = ((i * n + slot) * 6 + k) * 8;
+                    const base = ((i * n + slot) * 6 + k) * 12;
                     out[base + 0] = self.history[hb + 0];
                     out[base + 1] = self.history[hb + 1];
                     out[base + 2] = self.history[hb + 2];
@@ -500,6 +500,10 @@ pub const System = struct {
                     out[base + 5] = p.seed;
                     out[base + 6] = p.vel[0];
                     out[base + 7] = p.vel[1];
+                    out[base + 8] = 1.0;
+                    out[base + 9] = 1.0;
+                    out[base + 10] = 1.0;
+                    out[base + 11] = 1.0;
                 }
             }
         }
@@ -580,9 +584,9 @@ pub const System = struct {
     }
 
     /// Writes six vertices per particle (a camera-facing quad) into out (count
-    /// * 6 * 8 floats): the centre, a corner index, remaining-life fraction,
-    /// spin seed, and world velocity xy - which the billboard shader expands
-    /// into a rotated, sized, faded, stretched, flip-booked sprite.
+    /// * 6 * 12 floats): the centre, a corner index, remaining-life fraction,
+    /// spin seed, world velocity xy, and a white per-vertex color - which the
+    /// billboard shader expands into a rotated, sized, faded sprite.
     pub fn writeBillboards(self: *const System, out: []f32) void {
         const corners = [6]f32{ 0, 1, 2, 0, 2, 3 };
         writeParticleBillboards(self.particles, out, 0, corners);
@@ -593,7 +597,7 @@ pub const System = struct {
         for (list, 0..) |p, i| {
             const frac = std.math.clamp(p.life / p.max_life, 0.0, 1.0);
             for (corners, 0..) |corner, k| {
-                const base = ((offset + i) * 6 + k) * 8;
+                const base = ((offset + i) * 6 + k) * 12;
                 out[base + 0] = p.pos[0];
                 out[base + 1] = p.pos[1];
                 out[base + 2] = p.pos[2];
@@ -602,6 +606,12 @@ pub const System = struct {
                 out[base + 5] = p.seed;
                 out[base + 6] = p.vel[0];
                 out[base + 7] = p.vel[1];
+                // White per-vertex color: a particle's tint comes from the
+                // fragment uniforms, so its color slot is the identity.
+                out[base + 8] = 1.0;
+                out[base + 9] = 1.0;
+                out[base + 10] = 1.0;
+                out[base + 11] = 1.0;
             }
         }
     }
@@ -824,10 +834,10 @@ test "a trail records recent positions and fades from head to tail" {
     try std.testing.expect(distinct);
 
     // Billboards write, oldest slot fainter than newest for the same particle.
-    const out = try std.testing.allocator.alloc(f32, s.trailVertexCount() * 8);
+    const out = try std.testing.allocator.alloc(f32, s.trailVertexCount() * 12);
     defer std.testing.allocator.free(out);
     s.writeTrailBillboards(out);
-    const oldest_frac = out[((0 * n + 0) * 6 + 0) * 8 + 4];
-    const newest_frac = out[((0 * n + (n - 1)) * 6 + 0) * 8 + 4];
+    const oldest_frac = out[((0 * n + 0) * 6 + 0) * 12 + 4];
+    const newest_frac = out[((0 * n + (n - 1)) * 6 + 0) * 12 + 4];
     try std.testing.expect(newest_frac > oldest_frac);
 }
