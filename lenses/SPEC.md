@@ -186,6 +186,14 @@ so ramping a weight opens a blendshape (a smile, a blink). Each name must be
 a declared parameter, a target past the list contributes nothing, and with
 no `morph_weights` the mesh draws unmorphed.
 
+A face-anchored `model.gltf` node may add `"retarget": true` to turn the mesh
+into an avatar of the user's face: each morph target whose glTF name matches an
+ARKit blendshape (`jawOpen`, `eyeBlinkLeft`, and the rest) is driven each frame
+by that live blendshape, and the head pose already rides the tracked face. A
+target with no matching name still reads its `morph_weights` parameter, so a rig
+can mix retargeted expression with authored morphs. With no tracked face the
+mesh holds its rest shape. `retarget` is a `model.gltf` field only.
+
 A `model.gltf` node may add `"control": {"orbit", "dolly", "roll"}`, a
 turntable the recognized gestures steer: `orbit` spins the model with a drag
 (yaw from the horizontal, pitch from the vertical), `dolly` scales it with a

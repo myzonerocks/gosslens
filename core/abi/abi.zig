@@ -1109,6 +1109,10 @@ pub const Session = struct {
     /// pollModelLoaders keeps around (not a bgfx resource, so it lives
     /// here rather than inside render.Renderer).
     model_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, LoadedModel) = .empty,
+    /// model.gltf nodes that retarget the tracked face: their mesh auto-binds
+    /// each morph target to the live blendshapes. Filled at activation from the
+    /// manifest's retarget fields, read when the mesh finishes loading.
+    model_retargets: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
 };
 
 /// A model.gltf node's loaded state: real gpu buffers plus the plain
@@ -1158,7 +1162,26 @@ const LoadedModel = struct {
     /// empty for a mesh with no morph targets.
     morph_rest: []const [3]f32 = &.{},
     morph_scratch: [][3]f32 = &.{},
+    /// One entry per morph target: the face blendshape index it maps to by
+    /// name, or -1 when the target has no matching ARKit name. Built once at
+    /// load so an avatar drives each morph from the live blendshape array.
+    morph_to_blendshape: []const i8 = &.{},
+    /// When set, the morph pass fills each mapped target from the tracked
+    /// blendshapes instead of a bound parameter (an avatar's face retarget).
+    auto_bind_blendshapes: bool = false,
 };
+
+/// Maps each morph target name to the face blendshape index it drives (or -1
+/// when no ARKit name matches), so an avatar retarget reads the live blendshape
+/// array by target rather than a hand-wired parameter per target.
+fn buildMorphBlendshapeTable(gpa: std.mem.Allocator, names: []const []const u8) []const i8 {
+    if (names.len == 0) return &.{};
+    const table = gpa.alloc(i8, names.len) catch return &.{};
+    for (names, 0..) |name, i| {
+        table[i] = if (face.blendshapeIndex(name)) |idx| @intCast(idx) else -1;
+    }
+    return table;
+}
 
 /// Deforms rest positions by a weighted sum of morph target deltas into
 /// `out`: out[v] = rest[v] + sum_t weight[t] * target[t][v]. Weights come
@@ -3334,10 +3357,18 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // path draws it; an unbound mesh keeps its rest shape.
                 if (loaded.morph_targets.len > 0 and loaded.morph_scratch.len > 0) {
                     if (active_lens) |lens| {
-                        if (lens.bindsMorphWeights(entry.graph_index)) {
+                        // An avatar retarget fills each named target from the live
+                        // blendshapes; every other target, and a plain morph mesh,
+                        // reads its bound parameter as before.
+                        const face_ready = s.face_count > 0 and s.face_results[0].presence >= 0.5;
+                        const auto = loaded.auto_bind_blendshapes and face_ready;
+                        if (auto or lens.bindsMorphWeights(entry.graph_index)) {
                             var weights: [max_morph_targets]f32 = undefined;
                             const n = @min(loaded.morph_targets.len, max_morph_targets);
-                            for (0..n) |ti| weights[ti] = lens.morphWeight(entry.graph_index, ti);
+                            for (0..n) |ti| {
+                                const mapped = auto and ti < loaded.morph_to_blendshape.len and loaded.morph_to_blendshape[ti] >= 0;
+                                weights[ti] = if (mapped) s.face_results[0].blendshapes[@intCast(loaded.morph_to_blendshape[ti])] else lens.morphWeight(entry.graph_index, ti);
+                            }
                             morphPositions(loaded.morph_scratch, loaded.morph_rest, loaded.morph_targets[0..n], weights[0..n]);
                             r.updateModelMesh(loaded.mesh, loaded.morph_scratch);
                         }
@@ -3741,6 +3772,7 @@ pub fn destroySession(session: *Session) void {
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
+    session.model_retargets.deinit(session.engine.gpa);
     if (session.depth_data.len != 0) session.engine.gpa.free(session.depth_data);
     if (session.depth_scratch.len != 0) session.engine.gpa.free(session.depth_scratch);
     if (session.frame_stage.len != 0) session.engine.gpa.free(session.frame_stage);
@@ -7278,9 +7310,11 @@ fn destroyModelState(session: *Session) void {
         gltf.freeMorphTargets(session.engine.gpa, loaded.morph_targets);
         if (loaded.morph_rest.len > 0) session.engine.gpa.free(loaded.morph_rest);
         if (loaded.morph_scratch.len > 0) session.engine.gpa.free(loaded.morph_scratch);
+        if (loaded.morph_to_blendshape.len > 0) session.engine.gpa.free(loaded.morph_to_blendshape);
         if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
     session.model_meshes.clearRetainingCapacity();
+    session.model_retargets.clearRetainingCapacity();
 }
 
 /// Replaces any currently active lens with the one manifest_json
@@ -9291,6 +9325,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         if (model.face_anchor) {
             session.model_face_anchors.put(gpa, model.graph_index, {}) catch {};
         }
+        if (model.retarget) {
+            session.model_retargets.put(gpa, model.graph_index, {}) catch {};
+        }
         if (model.body_anchor) {
             session.model_body_anchors.put(gpa, model.graph_index, {}) catch {};
         }
@@ -9659,6 +9696,11 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 gpa.free(decoded.positions);
             }
             gpa.free(decoded.indices);
+            // Distil the morph target names into a blendshape index per target
+            // (or -1), then drop the names; the table is all the retarget needs.
+            const morph_to_blendshape = buildMorphBlendshapeTable(gpa, decoded.morph_names);
+            for (decoded.morph_names) |n| gpa.free(n);
+            gpa.free(decoded.morph_names);
             session.model_meshes.put(gpa, entry.key_ptr.*, .{
                 .mesh = mesh,
                 .base_color = decoded.base_color,
@@ -9667,6 +9709,8 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 .morph_targets = decoded.morph_targets,
                 .morph_rest = morph_rest,
                 .morph_scratch = morph_scratch,
+                .morph_to_blendshape = morph_to_blendshape,
+                .auto_bind_blendshapes = session.model_retargets.contains(entry.key_ptr.*),
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
                 if (rig) |rg| {
@@ -9675,6 +9719,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 }
                 gltf.freeAnimations(gpa, decoded.animations);
                 gltf.freeMorphTargets(gpa, decoded.morph_targets);
+                if (morph_to_blendshape.len > 0) gpa.free(morph_to_blendshape);
                 if (morph_rest.len > 0) gpa.free(morph_rest);
                 if (morph_scratch.len > 0) gpa.free(morph_scratch);
             };
@@ -10104,6 +10149,16 @@ test "morphPositions adds weighted target deltas to the rest pose" {
     morphPositions(&out, &rest, &targets, &.{ 0.0, 0.0 });
     try t.expectApproxEqAbs(@as(f32, 1.0), out[1][0], 0.001);
     try t.expectApproxEqAbs(@as(f32, 0.0), out[1][1], 0.001);
+}
+
+test "buildMorphBlendshapeTable maps ARKit names to blendshape indices" {
+    const names = [_][]const u8{ "jawOpen", "not_a_blendshape", "eyeBlinkLeft", "" };
+    const table = buildMorphBlendshapeTable(t.allocator, &names);
+    defer t.allocator.free(table);
+    try t.expectEqual(@as(i8, @intCast(face.blendshapeIndex("jawOpen").?)), table[0]);
+    try t.expectEqual(@as(i8, -1), table[1]);
+    try t.expectEqual(@as(i8, @intCast(face.blendshapeIndex("eyeBlinkLeft").?)), table[2]);
+    try t.expectEqual(@as(i8, -1), table[3]);
 }
 
 /// Lowercases into buf and drops a "mixamorig:" style prefix (anything

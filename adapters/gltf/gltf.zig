@@ -302,6 +302,15 @@ pub const Mesh = struct {
     pub fn primitive(m: Mesh, index: usize) Primitive {
         return .{ .raw = @ptrCast(&m.raw.primitives[index]) };
     }
+
+    /// The morph target's author name (glTF mesh.extras.targetNames), or null
+    /// when the asset ships none for this index. ARKit rigs name them
+    /// jawOpen, eyeBlinkLeft, and so on, which the avatar retarget matches.
+    pub fn morphTargetName(m: Mesh, index: usize) ?[]const u8 {
+        if (index >= m.raw.target_names_count) return null;
+        const name = m.raw.target_names[index] orelse return null;
+        return std.mem.span(@as([*:0]const u8, @ptrCast(name)));
+    }
 };
 
 pub const Node = struct {
@@ -570,6 +579,10 @@ pub const DecodedModel = struct {
     /// A weighted sum of these added to the base positions is the morphed
     /// mesh; the weights come from the lens.
     morph_targets: []const []const [3]f32 = &.{},
+    /// One author name per morph target, in the same order, or empty for an
+    /// unnamed target. Lets an avatar match a target to a face blendshape by
+    /// name; empty overall when the asset ships no target names.
+    morph_names: []const []const u8 = &.{},
 };
 
 /// Parses a .glb/.gltf's bytes into a plain-data model: the first
@@ -643,11 +656,22 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         for (morph_targets.items) |m| gpa.free(m);
         morph_targets.deinit(gpa);
     }
+    // The author names are duped here because cgltf owns them and frees them
+    // when the asset is torn down; the decoded model outlives the asset.
+    var morph_names: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (morph_names.items) |n| gpa.free(n);
+        morph_names.deinit(gpa);
+    }
+    const the_mesh = asset.mesh(0);
     for (0..prim.morphTargetCount()) |mi| {
         const deltas = try gpa.alloc([3]f32, vertex_count);
         errdefer gpa.free(deltas);
         if (try prim.readMorphTargetPositions(mi, deltas) != vertex_count) return error.MalformedAsset;
         try morph_targets.append(gpa, deltas);
+        const name = if (the_mesh.morphTargetName(mi)) |src| try gpa.dupe(u8, src) else try gpa.dupe(u8, "");
+        errdefer gpa.free(name);
+        try morph_names.append(gpa, name);
     }
 
     const owned_animations = try animations.toOwnedSlice(gpa);
@@ -656,7 +680,12 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         gpa.free(owned_animations);
     }
     const owned_morph_targets = try morph_targets.toOwnedSlice(gpa);
-    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animations = owned_animations, .skin = decoded_skin, .morph_targets = owned_morph_targets };
+    errdefer {
+        for (owned_morph_targets) |m| gpa.free(m);
+        gpa.free(owned_morph_targets);
+    }
+    const owned_morph_names = try morph_names.toOwnedSlice(gpa);
+    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animations = owned_animations, .skin = decoded_skin, .morph_targets = owned_morph_targets, .morph_names = owned_morph_names };
 }
 
 /// Reads a glTF skin into owned arrays. A vertex joint index past the
@@ -785,6 +814,8 @@ pub fn freeDecodedModel(gpa: std.mem.Allocator, model: DecodedModel) void {
     freeAnimations(gpa, model.animations);
     if (model.skin) |*sk| freeSkin(gpa, sk);
     freeMorphTargets(gpa, model.morph_targets);
+    for (model.morph_names) |n| gpa.free(n);
+    gpa.free(model.morph_names);
 }
 
 const t = std.testing;
@@ -1196,7 +1227,7 @@ fn buildMorphGlb(gpa: std.mem.Allocator) ![]u8 {
         \\{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
         \\{{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}},
         \\{{"bufferView":2,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[0.5,0.5,0]}}],
-        \\"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"targets":[{{"POSITION":2}}]}}]}}],
+        \\"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"targets":[{{"POSITION":2}}]}}],"extras":{{"targetNames":["jawOpen"]}}}}],
         \\"nodes":[{{"mesh":0,"name":"tri"}}],
         \\"scenes":[{{"nodes":[0]}}],"scene":0}}
     , .{bin.items.len});
@@ -1241,6 +1272,9 @@ test "decodeModel surfaces morph target position deltas" {
     try t.expectEqual([3]f32{ 0, 0, 0 }, model.morph_targets[0][0]);
     try t.expectApproxEqAbs(@as(f32, 0.5), model.morph_targets[0][1][0], 0.001);
     try t.expectApproxEqAbs(@as(f32, 0.5), model.morph_targets[0][2][1], 0.001);
+    // The author name rides through so an avatar retarget can match it.
+    try t.expectEqual(@as(usize, 1), model.morph_names.len);
+    try t.expectEqualStrings("jawOpen", model.morph_names[0]);
 }
 
 test "a mesh with no morph targets surfaces an empty list" {
