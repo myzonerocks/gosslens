@@ -2073,7 +2073,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (channel == 0) break :blk s.segmentation_texture orelse r.zero_mask_texture;
                     break :blk s.segmentation_class_textures[channel] orelse r.zero_mask_texture;
                 };
-                r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture, shader_mask);
+                // A generative node targeting this shader.pass drives its material
+                // graph's `generated` texture: bind that output to the reserved
+                // sampler, otherwise the plain pass samples only the frame.
+                if (s.ml_style_textures.get(entry.graph_index)) |gen_tex| {
+                    r.submitShaderPassGenerated(view_id, .{ .idx = program_idx }, input_texture, shader_mask, gen_tex);
+                } else {
+                    r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture, shader_mask);
+                }
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -8896,6 +8903,11 @@ fn generativeTargetNodeIndex(lens: *runtime.Lens, gpa: std.mem.Allocator, g: *gr
     defer gpa.free(meshes);
     for (meshes) |mesh| {
         if (std.mem.eql(u8, mesh.texture_stem, name)) return mesh.graph_index;
+    }
+    const shaders = lens.shaderPassNodes(gpa, g) catch return null;
+    defer gpa.free(shaders);
+    for (shaders) |sp| {
+        if (std.mem.eql(u8, sp.shader_stem, name)) return sp.graph_index;
     }
     return null;
 }

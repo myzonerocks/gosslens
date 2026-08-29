@@ -1056,6 +1056,11 @@ and a `type` (the value type of a `constant` or `uniform`: `float`,
 The graph is a typed DAG. Sources take no inputs: `uv` (the frame
 coordinate), `time`, `constant`, `uniform` (host-set by name), and
 `texture` (a sampler bound by name, `texColor` being the frame itself).
+A `texture` named `generated` is a generative input: a diffusion or
+`ml.infer` style node targeting the `shader.pass` binds its output to that
+sampler, so a prompt-generated map feeds the material graph and the shader
+samples it like any other texture. Without a generative node driving it the
+sampler reads the frame, so the pass still runs.
 `sample` reads a texture at a coordinate. Arithmetic (`add`, `subtract`,
 `multiply`, `divide`, `power`, `min`, `max`, `mod`, `atan2`) and the vector
 and scalar functions (`dot`, `distance`, `normalize`, `length`, `saturate`,
@@ -1154,7 +1159,9 @@ img2img diffusion lens masked to the face_skin channel in over mode composites
 its restyle onto the face matte and holds the camera elsewhere; a diffusion
 node targeting a mesh.face node binds its generated image as the face mesh's
 material texture; a splat.cloud node lifts the camera frame to a 3D point
-set with a bundled model and draws it as a billboard cloud; and the prompt
+set with a bundled model and draws it as a billboard cloud; a diffusion node
+targeting a shader.pass binds its generated image to the material graph's
+generated sampler; and the prompt
 compiler emits a GLF manifest on device that activates as a lens and renders.
 The conformance harness runs today on the host (macOS): it renders each
 covered lens through the production ABI and checks the output

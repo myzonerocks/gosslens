@@ -2534,6 +2534,7 @@ const DiffusionLensSpec = struct {
     sprite_mask_over: bool = false,
     coherence: f32 = 0,
     target_mesh: bool = false,
+    target_material: bool = false,
 };
 
 fn writeDiffusionLens(spec: DiffusionLensSpec) !void {
@@ -2545,13 +2546,17 @@ fn writeDiffusionLens(spec: DiffusionLensSpec) !void {
     defer page.free(mask_field);
     const coherence_field = if (spec.coherence > 0) try std.fmt.allocPrint(page, ",\"coherence\":{d}", .{spec.coherence}) else try page.dupe(u8, "");
     defer page.free(coherence_field);
-    // The target node the diffusion draws through: a full-frame sprite, or a
-    // face mesh that samples the generated texture as its material.
+    // The target node the diffusion draws through: a full-frame sprite, a face
+    // mesh that samples the generated texture as its material, or a shader.pass
+    // whose material graph samples the reserved `generated` texture.
+    const literal_target = spec.target_mesh or spec.target_material;
     const target_node = if (spec.target_mesh)
         "{\"id\":\"canvas\",\"type\":\"mesh.face\",\"inputs\":{\"frame\":\"camera\"},\"params\":{}}"
+    else if (spec.target_material)
+        "{\"id\":\"canvas\",\"type\":\"shader.pass\",\"inputs\":{\"frame\":\"camera\"},\"params\":{},\"material\":{\"output\":3,\"nodes\":[{\"kind\":\"uv\"},{\"kind\":\"texture\",\"name\":\"generated\"},{\"kind\":\"sample\",\"inputs\":[1,0]},{\"kind\":\"output\",\"inputs\":[2]}]}}"
     else
         try std.fmt.allocPrint(page, "{{\"id\":\"canvas\",\"type\":\"sprite.2d\",\"inputs\":{{\"frame\":\"camera\"}},\"params\":{{}}, \"sprite\":{{\"x\":0.0,\"y\":0.0,\"w\":1.0,\"h\":1.0{s}}}}}", .{mask_field});
-    defer if (!spec.target_mesh) page.free(target_node);
+    defer if (!literal_target) page.free(target_node);
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
@@ -2860,6 +2865,41 @@ fn proveMlInferMaterial(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a diffusion node targeting a mesh.face node binds its generated image as the face mesh's material texture\n", .{});
+    return true;
+}
+
+/// Proves text-to-texture into the shader material graph: a diffusion node
+/// targets a shader.pass whose material graph samples the reserved `generated`
+/// texture, so the generated map is bound to that sampler and the material
+/// draws it. The generated texture reaches the shader.pass target.
+fn proveMlInferMaterialGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 8;
+    const enc_w = [_]f32{ 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 };
+    const unet_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const dec_w = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    const extra = [_][]const u8{ onnxValueInfo(a, "timestep", &.{1}), onnxValueInfo(a, "cond", &.{ 1, 4 }) };
+    const enc = onnxConvModel(a, "x", 3, 4, side, &enc_w, &.{});
+    const unet = onnxConvModel(a, "latent", 4, 4, side, &unet_w, &extra);
+    const dec = onnxConvModel(a, "latent", 4, 3, side, &dec_w, &.{});
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-materialgraph/assets");
+    try writeDiffusionLens(.{ .dir = "zig-out/ml-materialgraph", .enc = enc, .unet = unet, .dec = dec, .target_material = true });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const drew_a = try runDiffusionOnce(engine, "zig-out/ml-materialgraph", person, null);
+    const drew_b = try runDiffusionOnce(engine, "zig-out/ml-materialgraph", person, null);
+    if (!drew_a or !drew_b) {
+        std.debug.print("conformance: FAIL the generated texture never reached the material graph\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diffusion node targeting a shader.pass binds its generated image to the material graph's generated sampler\n", .{});
     return true;
 }
 
@@ -13305,6 +13345,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer face restyle");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
+    if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
+    watchHold("ml infer material graph");
     if (!try proveMlInferSplat(gpa, engine)) return 1;
     watchHold("ml infer splat");
     if (!try proveCompilePrompt(gpa, engine)) return 1;

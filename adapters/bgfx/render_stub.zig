@@ -316,6 +316,15 @@ pub const Renderer = struct {
         _ = mask_texture;
     }
 
+    pub fn submitShaderPassGenerated(r: *Renderer, view_id: u16, program: ProgramHandle, input_texture: TextureHandle, mask_texture: TextureHandle, generated_texture: TextureHandle) void {
+        _ = r;
+        _ = view_id;
+        _ = program;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = generated_texture;
+    }
+
     pub fn submitBrush(r: *Renderer, view_id: u16, verts: [*]const f32, vertex_count: u32, additive: bool) void {
         _ = r;
         _ = view_id;
