@@ -113,6 +113,21 @@ export fn Java_com_gosslens_Gosslens_nativeRenderFrame(env: *JniEnv, cls: jobjec
     return @intFromEnum(abi.goss_engine_render_frame(engineFromHandle(engine), sessionFromHandle(session)));
 }
 
+/// Compiles a prompt into a GLF manifest: pass a null out buffer (or zero
+/// capacity) to write the length into len_buffer and probe, then again with a
+/// buffer that fits. len_buffer is eight bytes holding the size_t out length.
+export fn Java_com_gosslens_Gosslens_nativeCompilePrompt(env: *JniEnv, cls: jobject, engine: i64, prompt_buffer: jobject, prompt_len: i32, out_buffer: jobject, out_capacity: i64, len_buffer: jobject) i32 {
+    _ = cls;
+    const prompt = getDirectBufferAddress(env, prompt_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_len: *align(1) u64 = @ptrCast(len_bytes);
+    const out: ?[*]u8 = getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_compile_prompt(engineFromHandle(engine), @ptrCast(prompt), @intCast(@max(prompt_len, 0)), out, @intCast(@max(out_capacity, 0)), &written);
+    out_len.* = written;
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSessionCreate(env: *JniEnv, cls: jobject, engine: i64, frame_budget_us: i32) i64 {
     _ = env;
     _ = cls;

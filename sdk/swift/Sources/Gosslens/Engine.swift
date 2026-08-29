@@ -65,4 +65,17 @@ public final class GossEngine: @unchecked Sendable {
     public func renderFrame(session: GossSession?) throws {
         try checked(goss_engine_render_frame(handle, session?.handle))
     }
+
+    /// Compiles a text prompt into a GLF lens manifest on device. The result is
+    /// ordinary GLF the caller can inspect or pass to activateLens, and needs no
+    /// assets. A length probe sizes the buffer, then a fill call writes it.
+    public func compilePrompt(_ prompt: String) throws -> String {
+        let bytes = Array(prompt.utf8)
+        var needed: Int = 0
+        try checked(goss_compile_prompt(handle, bytes, bytes.count, nil, 0, &needed))
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        try checked(goss_compile_prompt(handle, bytes, bytes.count, &out, out.count, &written))
+        return String(decoding: out[0..<written], as: UTF8.self)
+    }
 }

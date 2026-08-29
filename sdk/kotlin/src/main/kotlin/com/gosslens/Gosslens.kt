@@ -28,6 +28,7 @@ object Gosslens {
     internal external fun nativeSubmitWorld(session: Long, stateBuffer: ByteBuffer, planesBuffer: ByteBuffer, planeCount: Int, anchorsBuffer: ByteBuffer, anchorCount: Int, lightBuffer: ByteBuffer): Int
     internal external fun nativeSubmitAudio(session: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Int
     internal external fun nativeRenderFrame(engine: Long, session: Long): Int
+    internal external fun nativeCompilePrompt(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
     internal external fun nativeSessionDestroy(session: Long)
     internal external fun nativeSubmitFrameCopy(
@@ -387,6 +388,26 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
 
     fun renderFrame(session: GossSession?): Boolean =
         Gosslens.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
+
+    /** Compiles a text prompt into a GLF lens manifest on device. The result
+     * is ordinary GLF the caller can inspect or pass to activateLens, and needs
+     * no assets. A length probe sizes the buffer, then a fill call writes it. */
+    fun compilePrompt(prompt: String): String {
+        val bytes = prompt.toByteArray(Charsets.UTF_8)
+        val promptBuffer = ByteBuffer.allocateDirect(maxOf(bytes.size, 1))
+        promptBuffer.put(bytes)
+        promptBuffer.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        Gosslens.nativeCompilePrompt(handle, promptBuffer, bytes.size, probe, 0L, len)
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        Gosslens.nativeCompilePrompt(handle, promptBuffer, bytes.size, out, needed.toLong(), len)
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return String(result, Charsets.UTF_8)
+    }
 
     /** Starts recording the session's rendered frames, effects baked
      * in, into an MP4 at [path]. One recording per engine; every
