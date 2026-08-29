@@ -392,6 +392,7 @@ pub fn build(b: *std.Build) void {
     const onnx_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("adapters/tracking/onnx.zig"), .target = target, .optimize = optimize }) });
     const diffusion_schedule_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/diffusion_schedule.zig"), .target = target, .optimize = optimize }) });
     const optical_flow_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/optical_flow.zig"), .target = target, .optimize = optimize }) });
+    const ml_delegate_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = target, .optimize = optimize }) });
     const logic_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("core/lens/logic.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "trigger", .module = lens_trigger_module }} }) });
     const face_geometry_tests = b.addTest(.{ .root_module = face_geometry_core_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
@@ -438,6 +439,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(onnx_tests).step);
     test_step.dependOn(&b.addRunArtifact(diffusion_schedule_tests).step);
     test_step.dependOn(&b.addRunArtifact(optical_flow_tests).step);
+    test_step.dependOn(&b.addRunArtifact(ml_delegate_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
@@ -680,6 +682,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         runtime_module.link_libc = true;
+        runtime_module.addImport("ml_delegate", b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = target, .optimize = optimize }));
         runtime_module.addIncludePath(b.path(".vendor/litert"));
         // MediaPipe's segmentation models need a custom TFLite op the
         // stock interpreter can't resolve on its own (adapters/tracking/
@@ -914,6 +917,7 @@ pub fn build(b: *std.Build) void {
             .optimize = wasi_optimize,
         });
         runtime_wasi.link_libc = true;
+        runtime_wasi.addImport("ml_delegate", b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = wasi_target, .optimize = wasi_optimize }));
         runtime_wasi.addIncludePath(b.path(".vendor/litert"));
         // The segmentation core the web module drives directly: runtime,
         // sampler, and the custom upsample op the segmenters need.
@@ -1274,6 +1278,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             });
             runtime_conformance.link_libc = true;
+            runtime_conformance.addImport("ml_delegate", b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = target, .optimize = optimize }));
             runtime_conformance.addIncludePath(b.path(".vendor/litert"));
             const transpose_conv_bias_conformance = b.createModule(.{
                 .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
@@ -1665,6 +1670,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
             .optimize = optimize,
         });
         runtime_android.link_libc = true;
+        runtime_android.addImport("ml_delegate", b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = android_target, .optimize = optimize }));
         runtime_android.addIncludePath(b.path(".vendor/litert"));
         addNdkPaths(b, runtime_android, sysroot, abi_triple);
         runtime_android.addCMacro("_Nonnull", "");
@@ -3852,6 +3858,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             .optimize = optimize,
         });
         runtime_ios.link_libc = true;
+        runtime_ios.addImport("ml_delegate", b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = ios_target, .optimize = optimize }));
         runtime_ios.addIncludePath(b.path(".vendor/litert"));
         addAppleSdkPaths(b, runtime_ios);
         const tracking_ios = b.createModule(.{

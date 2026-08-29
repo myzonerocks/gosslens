@@ -4,11 +4,17 @@
 //! the engine: the runtime maps them in place rather than copying.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const ml_delegate = @import("ml_delegate");
+
+pub const Backend = ml_delegate.Backend;
 
 pub const c = @cImport({
     @cInclude("tflite/c/c_api.h");
     @cInclude("tflite/core/c/c_api_opaque.h");
     @cInclude("tflite/delegates/xnnpack/xnnpack_delegate.h");
+    @cInclude("tflite/delegates/coreml/coreml_delegate.h");
+    @cInclude("tflite/delegates/nnapi/nnapi_delegate_c_api.h");
 });
 
 pub const Error = error{
@@ -43,11 +49,50 @@ fn reportRuntimeError(user_data: ?*anyopaque, format: [*c]const u8, args: VaList
     std.debug.print("tflite: {s}\n", .{buf[0..len]});
 }
 
+/// Creates the delegate for one backend, or null if this target cannot (the
+/// accelerator paths compile only where their runtime exists, so a host build
+/// never references the Apple or Android delegate symbols).
+fn createBackendDelegate(backend: Backend, threads: i32) ?*c.TfLiteDelegate {
+    switch (backend) {
+        .xnnpack => {
+            var options = c.TfLiteXNNPackDelegateOptionsDefault();
+            options.num_threads = threads;
+            return c.TfLiteXNNPackDelegateCreate(&options);
+        },
+        .coreml => {
+            if (comptime builtin.target.os.tag == .ios or builtin.target.os.tag == .tvos) {
+                var options: c.TfLiteCoreMlDelegateOptions = std.mem.zeroes(c.TfLiteCoreMlDelegateOptions);
+                options.enabled_devices = c.TfLiteCoreMlDelegateDevicesWithNeuralEngine;
+                return c.TfLiteCoreMlDelegateCreate(&options);
+            }
+            return null;
+        },
+        .nnapi => {
+            if (comptime builtin.target.abi.isAndroid()) {
+                var options = c.TfLiteNnapiDelegateOptionsDefault();
+                return c.TfLiteNnapiDelegateCreate(&options);
+            }
+            return null;
+        },
+    }
+}
+
+fn deleteBackendDelegate(backend: Backend, delegate: *c.TfLiteDelegate) void {
+    switch (backend) {
+        .xnnpack => c.TfLiteXNNPackDelegateDelete(delegate),
+        .coreml => if (comptime builtin.target.os.tag == .ios or builtin.target.os.tag == .tvos) c.TfLiteCoreMlDelegateDelete(delegate),
+        .nnapi => if (comptime builtin.target.abi.isAndroid()) c.TfLiteNnapiDelegateDelete(delegate),
+    }
+}
+
 pub const Engine = struct {
     model: *c.TfLiteModel,
     options: *c.TfLiteInterpreterOptions,
     delegate: *c.TfLiteDelegate,
     interpreter: *c.TfLiteInterpreter,
+    /// The delegate the scheduler settled on: the platform accelerator when it
+    /// built, else the XNNPACK CPU fallback. deinit deletes by this.
+    backend: Backend,
     /// Owned custom-op registrations, if any: TfLiteOperator's own docs
     /// require it outlive every interpreter built from the options it
     /// was added to, so the engine that owns the interpreter is exactly
@@ -73,45 +118,60 @@ pub const Engine = struct {
             return error.ModelRejected;
         errdefer c.TfLiteModelDelete(model);
 
-        const options = c.TfLiteInterpreterOptionsCreate() orelse
-            return error.InterpreterUnavailable;
-        errdefer c.TfLiteInterpreterOptionsDelete(options);
+        // Try the platform accelerator first, then the XNNPACK CPU fallback, so
+        // a device runs on its NPU where it can and every target still loads.
+        var order_buf: [ml_delegate.max_backends]Backend = undefined;
+        const order = ml_delegate.delegateOrderFor(.auto, builtin.target.os.tag, comptime builtin.target.abi.isAndroid(), &order_buf);
+        for (order) |backend| {
+            if (tryBuild(model, backend, threads, custom_ops)) |built| return built;
+        }
+        return error.InterpreterUnavailable;
+    }
+
+    /// Builds an interpreter for one backend, cleaning up and returning null if
+    /// any step fails so the caller can try the next backend. The model outlives
+    /// every attempt; only the per-attempt options, delegate, and interpreter
+    /// are torn down on failure.
+    fn tryBuild(model: *c.TfLiteModel, backend: Backend, threads: i32, custom_ops: []const *const fn (*c.TfLiteInterpreterOptions) *c.TfLiteOperator) ?Engine {
+        const options = c.TfLiteInterpreterOptionsCreate() orelse return null;
+        var built = false;
+        defer if (!built) c.TfLiteInterpreterOptionsDelete(options);
         c.TfLiteInterpreterOptionsSetErrorReporter(options, reportRuntimeError, null);
         c.TfLiteInterpreterOptionsSetNumThreads(options, threads);
 
         var registered: [max_custom_ops]?*c.TfLiteOperator = @splat(null);
-        errdefer for (registered) |maybe_op| {
+        defer if (!built) for (registered) |maybe_op| {
             if (maybe_op) |op| c.TfLiteOperatorDelete(op);
         };
         for (custom_ops, 0..) |register, i| registered[i] = register(options);
 
-        var delegate_options = c.TfLiteXNNPackDelegateOptionsDefault();
-        delegate_options.num_threads = threads;
-        const delegate = c.TfLiteXNNPackDelegateCreate(&delegate_options) orelse
-            return error.InterpreterUnavailable;
-        errdefer c.TfLiteXNNPackDelegateDelete(delegate);
+        const delegate = createBackendDelegate(backend, threads) orelse return null;
+        defer if (!built) deleteBackendDelegate(backend, delegate);
         c.TfLiteInterpreterOptionsAddDelegate(options, delegate);
 
-        const interpreter = c.TfLiteInterpreterCreate(model, options) orelse
-            return error.InterpreterUnavailable;
-        errdefer c.TfLiteInterpreterDelete(interpreter);
+        const interpreter = c.TfLiteInterpreterCreate(model, options) orelse return null;
+        defer if (!built) c.TfLiteInterpreterDelete(interpreter);
+        if (c.TfLiteInterpreterAllocateTensors(interpreter) != c.kTfLiteOk) return null;
 
-        if (c.TfLiteInterpreterAllocateTensors(interpreter) != c.kTfLiteOk) {
-            return error.AllocationFailed;
-        }
-
-        return .{ .model = model, .options = options, .delegate = delegate, .interpreter = interpreter, .custom_ops = registered };
+        built = true;
+        return .{ .model = model, .options = options, .delegate = delegate, .interpreter = interpreter, .backend = backend, .custom_ops = registered };
     }
 
     pub fn deinit(engine: *Engine) void {
         c.TfLiteInterpreterDelete(engine.interpreter);
         c.TfLiteInterpreterOptionsDelete(engine.options);
-        c.TfLiteXNNPackDelegateDelete(engine.delegate);
+        deleteBackendDelegate(engine.backend, engine.delegate);
         c.TfLiteModelDelete(engine.model);
         for (engine.custom_ops) |maybe_op| {
             if (maybe_op) |op| c.TfLiteOperatorDelete(op);
         }
         engine.* = undefined;
+    }
+
+    /// The delegate this engine runs on, so a caller can confirm the scheduler
+    /// took the accelerator or the CPU fallback.
+    pub fn activeBackend(engine: *const Engine) Backend {
+        return engine.backend;
     }
 
     pub fn inputCount(engine: *const Engine) usize {
