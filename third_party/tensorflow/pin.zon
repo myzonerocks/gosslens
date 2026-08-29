@@ -8,4 +8,10 @@
     .license_file = "LICENSE",
     .license_sha256 = "71c6915d04265772a0339bed47276942c678b45cc01534210ebe6984fd1aec65",
     .archive_url = "https://github.com/tensorflow/tensorflow/archive/refs/tags/v2.21.0.tar.gz",
+    // Upstream's own lint and bazel-CI configs, reached only through
+    // symlinks a windows host cannot create. No gosslens target reads them.
+    .exclude = .{
+        "*/.pylintrc",
+        "*/tensorflow/tools/tf_sig_build_dockerfiles/devel.usertools/nvidia.bazelrc",
+    },
 }

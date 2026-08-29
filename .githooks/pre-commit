@@ -6,6 +6,7 @@
 set -e
 root="$(git rev-parse --show-toplevel)"
 zig="$root/.local/zig/current/zig"
+[ -x "$zig" ] || zig="$zig.exe"
 [ -x "$zig" ] || zig=zig
 cd "$root"
 "$zig" build gate -- --staged

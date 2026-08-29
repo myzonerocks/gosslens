@@ -8,9 +8,13 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 ver="$(tr -d ' \t\r\n' < "$root/.zigversion")"
 [ -n "$ver" ] || { echo "toolchain-sync: .zigversion is empty" >&2; exit 1; }
 
+# Windows hosts run this under the shell git ships; the archive is a zip
+# there, the binary carries .exe, and "current" is a junction rather than a
+# symlink, which needs no privilege.
 case "$(uname -s)" in
-  Darwin) os=macos ;;
-  Linux) os=linux ;;
+  Darwin) os=macos; ext=tar.xz; exe= ;;
+  Linux) os=linux; ext=tar.xz; exe= ;;
+  MINGW*|MSYS*|CYGWIN*) os=windows; ext=zip; exe=.exe ;;
   *) echo "toolchain-sync: unsupported host $(uname -s)" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
@@ -22,42 +26,77 @@ esac
 dest="$root/.local/zig/$ver"
 current="$root/.local/zig/current"
 
+# Points "current" at the version just installed: a junction on windows,
+# where a symlink needs a privilege a plain checkout does not have.
+link_current() {
+  if [ "$os" = windows ]; then
+    # -d is false for a junction left dangling by a moved checkout, which
+    # is still there and still in mklink's way; -L catches that one.
+    if [ -d "$current" ] || [ -L "$current" ]; then
+      cmd //c rmdir "$(cygpath -w "$current")" >/dev/null 2>&1 || {
+        echo "toolchain-sync: $current is not a junction; remove it and retry" >&2
+        exit 1
+      }
+    fi
+    cmd //c mklink //J "$(cygpath -w "$current")" "$(cygpath -w "$dest")" >/dev/null
+  else
+    ln -sfn "$dest" "$current"
+  fi
+}
+
 git -C "$root" config core.hooksPath .githooks
 
-if [ -x "$dest/zig" ] && [ "$("$dest/zig" version)" = "$ver" ]; then
-  ln -sfn "$dest" "$current"
+if [ -x "$dest/zig$exe" ] && [ "$("$dest/zig$exe" version)" = "$ver" ]; then
+  link_current
   echo "toolchain-sync: zig $ver already installed at $dest"
   exit 0
 fi
 
 name="zig-$arch-$os-$ver"
-url="https://ziglang.org/download/$ver/$name.tar.xz"
+url="https://ziglang.org/download/$ver/$name.$ext"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 echo "toolchain-sync: fetching $url"
-curl -fsSL "$url" -o "$tmp/$name.tar.xz"
+curl -fsSL "$url" -o "$tmp/$name.$ext"
 
-expected="$(curl -fsSL https://ziglang.org/download/index.json | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-print(d['$ver']['$arch-$os']['shasum'])
-")"
+# The digest comes out of the release index with awk rather than a json
+# parser: awk is on every host this supports, and a windows python3 is
+# often the store stub, which resolves on PATH and then refuses to run.
+expected="$(curl -fsSL https://ziglang.org/download/index.json | awk -v ver="\"$ver\":" -v key="\"$arch-$os\":" '
+  $1 == ver { inver = 1; next }
+  inver && /^  "/ { inver = 0 }
+  inver && $1 == key { inkey = 1; next }
+  inkey && $1 == "\"shasum\":" && !got { gsub(/[",]/, "", $2); digest = $2; got = 1 }
+  inkey && /^    }/ { inkey = 0 }
+  END { print digest }
+')"
+[ -n "$expected" ] || {
+  echo "toolchain-sync: no $arch-$os digest for zig $ver in the release index" >&2
+  exit 1
+}
 if command -v sha256sum >/dev/null 2>&1; then
-  actual="$(sha256sum "$tmp/$name.tar.xz" | cut -d' ' -f1)"
+  actual="$(sha256sum "$tmp/$name.$ext" | cut -d' ' -f1)"
 else
-  actual="$(shasum -a 256 "$tmp/$name.tar.xz" | cut -d' ' -f1)"
+  actual="$(shasum -a 256 "$tmp/$name.$ext" | cut -d' ' -f1)"
 fi
 [ "$actual" = "$expected" ] || {
-  echo "toolchain-sync: digest mismatch for $name.tar.xz" >&2
+  echo "toolchain-sync: digest mismatch for $name.$ext" >&2
   echo "  expected $expected" >&2
   echo "  actual   $actual" >&2
   exit 1
 }
 
+rm -rf "$dest"
 mkdir -p "$dest"
-tar -xJf "$tmp/$name.tar.xz" -C "$dest" --strip-components=1
-ln -sfn "$dest" "$current"
+if [ "$ext" = zip ]; then
+  # unzip has no --strip-components; the archive holds one top directory.
+  unzip -q "$tmp/$name.zip" -d "$tmp/x"
+  (cd "$tmp/x/$name" && tar -cf - .) | (cd "$dest" && tar -xf -)
+else
+  tar -xJf "$tmp/$name.tar.xz" -C "$dest" --strip-components=1
+fi
+link_current
 
 echo "toolchain-sync: installed zig $ver to $dest"
 echo "toolchain-sync: add to PATH: $current"

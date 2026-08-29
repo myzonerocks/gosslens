@@ -34,6 +34,11 @@ const Pin = struct {
     /// Excluded from the default (no --only) sync - large, single-use
     /// vendors name this so every CI job's setup doesn't pay for them.
     opt_in: bool = false,
+    /// Archive members left unextracted, matched against the member path
+    /// before --strip-components. For upstream payloads no gosslens target
+    /// compiles: prebuilt binaries this project's license policy bans
+    /// anyway, whose apple framework symlinks a windows host cannot create.
+    exclude: []const []const u8 = &.{},
 };
 
 const builtin = @import("builtin");
@@ -52,6 +57,18 @@ fn hostArchiveOverrideFor(pin: Pin, os_tag: std.Target.Os.Tag, cpu_arch: std.Tar
 
 fn hostArchiveOverride(pin: Pin) ?ArchiveRef {
     return hostArchiveOverrideFor(pin, builtin.os.tag, builtin.cpu.arch);
+}
+
+/// The extraction command for one pin. -f auto-detects gzip vs xz, and any
+/// excluded members are dropped before --strip-components applies.
+fn tarArgv(arena: Allocator, pin: Pin, archive_path: []const u8, dest: []const u8) ![]const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.append(arena, "tar");
+    for (pin.exclude) |pattern| {
+        try argv.append(arena, try std.fmt.allocPrint(arena, "--exclude={s}", .{pattern}));
+    }
+    try argv.appendSlice(arena, &.{ "-xf", archive_path, "-C", dest, "--strip-components=1" });
+    return argv.items;
 }
 
 // Licenses that may enter this codebase. Anything else fails closed,
@@ -244,8 +261,7 @@ const Sync = struct {
         const dest = try std.fmt.allocPrint(s.arena, ".vendor/{s}", .{pin.name});
         Io.Dir.cwd().deleteTree(s.io, dest) catch {};
         try Io.Dir.cwd().createDirPath(s.io, dest);
-        // -f auto-detects gzip vs xz.
-        try s.run(&.{ "tar", "-xf", archive_path, "-C", dest, "--strip-components=1" });
+        try s.run(try tarArgv(s.arena, pin, archive_path, dest));
 
         const license_path = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dest, pin.license_file });
         if (!s.fileDigestMatches(license_path, pin.license_sha256)) {
@@ -296,7 +312,8 @@ const Sync = struct {
 };
 
 pub fn main(init: std.process.Init) !u8 {
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+    const arena = init.arena.allocator();
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, arena);
     _ = args.next();
     var check_only = false;
     var only: ?[]const u8 = null;
@@ -314,7 +331,7 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
 
-    var s: Sync = .{ .arena = init.arena.allocator(), .io = init.io, .check_only = check_only };
+    var s: Sync = .{ .arena = arena, .io = init.io, .check_only = check_only };
 
     var names: std.ArrayList([]const u8) = .empty;
     var dir = Io.Dir.cwd().openDir(s.io, "third_party", .{ .iterate = true }) catch {
@@ -473,4 +490,33 @@ test "opt_in and host_optional default to false" {
     };
     try t.expect(!pin.opt_in);
     try t.expect(!pin.host_optional);
+    try t.expectEqual(@as(usize, 0), pin.exclude.len);
+}
+
+test "tarArgv drops excluded members and is otherwise the plain extraction" {
+    var arena_state = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const bare = Pin{
+        .name = "x",
+        .repo = "",
+        .version = "",
+        .commit = "",
+        .archive_sha256 = "",
+        .license = "MIT",
+        .license_file = "",
+        .license_sha256 = "",
+    };
+    try t.expectEqualDeep(
+        @as([]const []const u8, &.{ "tar", "-xf", "a.tar.gz", "-C", "d", "--strip-components=1" }),
+        try tarArgv(arena, bare, "a.tar.gz", "d"),
+    );
+
+    var excluding = bare;
+    excluding.exclude = &.{ "*/libs/*", "*/.pylintrc" };
+    try t.expectEqualDeep(
+        @as([]const []const u8, &.{ "tar", "--exclude=*/libs/*", "--exclude=*/.pylintrc", "-xf", "a.tar.gz", "-C", "d", "--strip-components=1" }),
+        try tarArgv(arena, excluding, "a.tar.gz", "d"),
+    );
 }

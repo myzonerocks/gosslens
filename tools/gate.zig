@@ -885,7 +885,7 @@ pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     var g: Gate = .{ .arena = arena, .io = init.io };
 
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, arena);
     _ = args.next(); // program path
     const mode = args.next() orelse {
         std.debug.print("gate: usage: gate --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-body <file>\n", .{});

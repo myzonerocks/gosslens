@@ -25,6 +25,28 @@ After an intended ABI change run `zig build abi-update`: it regenerates
 surface, so the version is never bumped by hand. The pre-commit hook runs it
 for you when a commit touches the surface; `zig build abi` verifies both match.
 
+### On Windows
+
+Run the commands above from the bash git installs, not from cmd or PowerShell.
+`tools/toolchain-sync` is a shell script, the hooks are shell scripts, and both
+resolve the pinned compiler as `zig.exe`. The toolchain lands in the same
+`.local/zig/current`, as a directory junction rather than a symlink, so no
+elevation or developer mode is needed.
+
+The portable bar runs here: `zig build test`, `gate -- --tree`, `abi`,
+`vendor-sync -- --check`, `fetch-models -- --check`, `shaderc`, and
+`lens-validate-reference`. The on-screen `harness` and `conformance` runners
+are macOS-only, so `zig build ci` is not the local bar on a Windows host; a
+change still has to clear it on macOS or Linux before it merges. Building the
+Android library needs the pinned NDK (`ndk_version` in `build.zig`) named in
+`ANDROID_NDK_ROOT` or installed under `%LOCALAPPDATA%\Android\Sdk\ndk`. Android
+Studio's SDK Manager installs the newest NDK, which is not the pin and may be a
+beta; tick "Show Package Details" and take the pinned version.
+
+`shaderc` compiles glslang and tint, and one clang per core on a 12-thread
+machine wants more memory than an 8 GB host has; it dies with `LLVM ERROR: out
+of memory`. Pass `-j4` there on a machine that small.
+
 ## Watch it draw
 
     zig build harness              # run a lens through the real graph, drawn on screen
