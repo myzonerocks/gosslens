@@ -10340,7 +10340,7 @@ fn captureRetouchShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12C
     return shot;
 }
 
-/// The six Wave 5 retouch effects: each lands on the right anatomy and does the
+/// The six retouch effects: each lands on the right anatomy and does the
 /// right thing. First the region mattes are placed against tracked landmarks,
 /// then each look renders keyed to the face (or the skin segmenter) and vanishes
 /// without it, softening, brightening, or mattING its region, bit-stable.
