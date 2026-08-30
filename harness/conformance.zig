@@ -4626,6 +4626,103 @@ fn proveRollLock(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A synthetic face on a circle with the iris loops placed at two eyes and an
+/// eyeLook gaze set, so a gaze_correct warp has irises to redirect. The gaze is
+/// out-left, a clear horizontal look off the lens.
+fn gazeFace() abi.FaceResult {
+    var synthetic = std.mem.zeroes(abi.FaceResult);
+    synthetic.presence = 1.0;
+    const lm_count = synthetic.landmarks.len / 3;
+    synthetic.landmark_count_out = @intCast(lm_count);
+    const cxp: f32 = @as(f32, @floatFromInt(width)) / 2.0;
+    const cyp: f32 = @as(f32, @floatFromInt(height)) / 2.0;
+    for (0..lm_count) |lm| {
+        const ang = @as(f32, @floatFromInt(lm)) / @as(f32, @floatFromInt(lm_count)) * std.math.tau;
+        synthetic.landmarks[lm * 3 + 0] = cxp + 110.0 * @cos(ang);
+        synthetic.landmarks[lm * 3 + 1] = cyp + 110.0 * @sin(ang);
+        synthetic.landmarks[lm * 3 + 2] = 0;
+    }
+    // The iris loops sit at the two eyes so their centroids land where the
+    // redirect should push.
+    for ([_]u16{ 474, 475, 476, 477 }) |idx| {
+        synthetic.landmarks[idx * 3 + 0] = cxp - 45.0;
+        synthetic.landmarks[idx * 3 + 1] = cyp - 25.0;
+    }
+    for ([_]u16{ 469, 470, 471, 472 }) |idx| {
+        synthetic.landmarks[idx * 3 + 0] = cxp + 45.0;
+        synthetic.landmarks[idx * 3 + 1] = cyp - 25.0;
+    }
+    // blendshape_names[14] is eyeLookInRight and [15] eyeLookOutLeft, both a
+    // look to the subject's left, pinned by a face module test.
+    synthetic.blendshapes[15] = 1.0;
+    synthetic.blendshapes[14] = 1.0;
+    return synthetic;
+}
+
+/// Proves gaze correction: a synthetic face looking off the lens, its irises at
+/// two eyes. The gaze_correct warp reads the gaze from the blendshapes and pushes
+/// each pupil back toward the lens, so the eye region shifts versus a strength-0
+/// control while the no-face frame and a far corner stay byte-identical.
+fn proveGazeCorrect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const cap_w: usize = 400;
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..height) |row| for (0..width) |col| {
+        const i = (row * @as(usize, width) + col) * 4;
+        frame_rgba[i + 0] = @intCast(col * 255 / (@as(usize, width) - 1));
+        frame_rgba[i + 1] = @intCast(row * 255 / (@as(usize, height) - 1));
+        frame_rgba[i + 2] = 128;
+        frame_rgba[i + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const face = gazeFace();
+    const faces_one = [_]abi.FaceResult{face};
+    const no_faces = [_]abi.FaceResult{};
+
+    const gaze_json =
+        \\{"glf":"1.0","id":"goss.reference.gaze","version":"1.0.0","display_name":"Gaze","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"gaze_correct","strength":0.15,"radius":0.12}}],"triggers":[]}
+    ;
+    const control_json =
+        \\{"glf":"1.0","id":"goss.reference.gaze-control","version":"1.0.0","display_name":"Gaze Control","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"gaze_correct","strength":0.0,"radius":0.12}}],"triggers":[]}
+    ;
+
+    const redirected = try captureSubmittedFaceShot(gpa, engine, planes, gaze_json, &faces_one);
+    defer gpa.free(redirected);
+    const redirected2 = try captureSubmittedFaceShot(gpa, engine, planes, gaze_json, &faces_one);
+    defer gpa.free(redirected2);
+    const control = try captureSubmittedFaceShot(gpa, engine, planes, control_json, &faces_one);
+    defer gpa.free(control);
+    const no_face = try captureSubmittedFaceShot(gpa, engine, planes, gaze_json, &no_faces);
+    defer gpa.free(no_face);
+    const plain = try captureSubmittedFaceShot(gpa, engine, planes, null, &no_faces);
+    defer gpa.free(plain);
+
+    if (!std.mem.eql(u8, redirected, redirected2)) {
+        std.debug.print("conformance: FAIL gaze_correct is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, no_face, plain)) {
+        std.debug.print("conformance: FAIL gaze_correct altered the frame with no face - not keyed to the eyes\n", .{});
+        return false;
+    }
+    var gcx: f32 = 0;
+    var gcy: f32 = 0;
+    const changed = changedRegion(redirected, control, cap_w, 300, &gcx, &gcy);
+    if (!(changed > 200)) {
+        std.debug.print("conformance: FAIL gaze_correct did not redirect the eye region ({d} px changed)\n", .{changed});
+        return false;
+    }
+    if (!cornerBlockEqual(redirected, control, cap_w, 40)) {
+        std.debug.print("conformance: FAIL gaze_correct changed a far corner outside the eyes\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a gaze_correct warp reads the gaze from the blendshapes and redirects the pupils at the iris centroids: the eye region shifts ({d} px) versus a strength-0 control while a far corner and the no-face frame stay byte-identical\n", .{changed});
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -16052,6 +16149,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("rolling pass");
     if (!try proveRollLock(gpa, engine)) return 1;
     watchHold("roll_lock warp");
+    if (!try proveGazeCorrect(gpa, engine)) return 1;
+    watchHold("gaze_correct warp");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

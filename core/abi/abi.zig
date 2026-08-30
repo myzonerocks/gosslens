@@ -2009,6 +2009,67 @@ fn rollAngle(s: *Session) f32 {
     return headEuler(m).roll;
 }
 
+/// The horizontal and vertical gaze the eyeLook blendshapes carry, positive x
+/// to the subject's outer-left and positive y up, matching trigger.zig's gaze
+/// signals. Zero when the eyes look straight at the lens.
+fn gazeVector(bs: *const [face.blendshape_count]f32) [2]f32 {
+    const in_l = comptime face.blendshapeIndex("eyeLookInLeft").?;
+    const in_r = comptime face.blendshapeIndex("eyeLookInRight").?;
+    const out_l = comptime face.blendshapeIndex("eyeLookOutLeft").?;
+    const out_r = comptime face.blendshapeIndex("eyeLookOutRight").?;
+    const up_l = comptime face.blendshapeIndex("eyeLookUpLeft").?;
+    const up_r = comptime face.blendshapeIndex("eyeLookUpRight").?;
+    const dn_l = comptime face.blendshapeIndex("eyeLookDownLeft").?;
+    const dn_r = comptime face.blendshapeIndex("eyeLookDownRight").?;
+    const x = 0.5 * ((bs[out_l] + bs[in_r]) - (bs[in_l] + bs[out_r]));
+    const y = 0.5 * ((bs[up_l] + bs[up_r]) - (bs[dn_l] + bs[dn_r]));
+    return .{ x, y };
+}
+
+/// The centroid of one iris loop mapped from sensor pixels into the frame's
+/// normalized draw space, the way the preview blit lays the frame out.
+fn irisCentroidDraw(landmarks: *const [face.landmark_count * 3]f32, loop: []const u16, width: u16, height: u16, rotation: u32, mirror: bool) [2]f32 {
+    var sx: f32 = 0;
+    var sy: f32 = 0;
+    for (loop) |idx| {
+        sx += landmarks[@as(usize, idx) * 3];
+        sy += landmarks[@as(usize, idx) * 3 + 1];
+    }
+    const n: f32 = @floatFromInt(loop.len);
+    const u = (sx / n) / @as(f32, @floatFromInt(width));
+    const v = (sy / n) / @as(f32, @floatFromInt(height));
+    return face106.transformPoint(u, v, rotation, mirror);
+}
+
+/// The two liquify push points a gaze_correct warp redirects the eyes with: one
+/// at each iris centroid, pushing the pupil opposite the measured gaze so it
+/// reads back toward the lens. The strength scales the push in the shader, so the
+/// push carries only the direction here. Null with no face.
+fn gazeEyePoints(s: *Session, width: u16, height: u16, rotation: u32, mirror: bool) ?[2][4]f32 {
+    var result: face.Result = undefined;
+    var flat: ?*const [face.landmark_count * 3]f32 = null;
+    var bshapes: ?*const [face.blendshape_count]f32 = null;
+    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+        flat = &s.face_results[0].landmarks;
+        bshapes = &s.face_results[0].blendshapes;
+    } else if (s.face_tracking) |worker| {
+        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+            flat = &result.landmarks;
+            bshapes = &result.blendshapes;
+        }
+    }
+    const src = flat orelse return null;
+    const bs = bshapes orelse return null;
+    const gaze = gazeVector(bs);
+    const push = [2]f32{ -gaze[0], gaze[1] };
+    const left = irisCentroidDraw(src, &face.left_iris_loop, width, height, rotation, mirror);
+    const right = irisCentroidDraw(src, &face.right_iris_loop, width, height, rotation, mirror);
+    return .{
+        .{ left[0], left[1], push[0], push[1] },
+        .{ right[0], right[1], push[0], push[1] },
+    };
+}
+
 /// Grows the per-frame vertex staging to hold `floats`, called once per
 /// dynamic mesh at lens activation. Never runs on the frame path.
 fn reserveFrameStage(s: *Session, floats: usize) void {
@@ -2105,8 +2166,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // bank, so it holds the frame through when no face is present.
             .warp => blk: {
                 const wp = s.warp_params.get(entry.graph_index) orelse break :blk false;
-                // roll_lock (mode 7) levels scenery and needs no face; face_scale
-                // (mode 6) rides the tracked face and holds through without one.
+                // gaze_correct (mode 8) rides the eyes and needs a face; roll_lock
+                // (mode 7) levels scenery and needs none; face_scale (mode 6) rides
+                // the tracked face and holds through without one.
+                if (wp[0] > 7.5) break :blk reshapeFaceReady(s);
                 if (wp[0] > 6.5) break :blk true;
                 break :blk if (wp[0] > 5.5) reshapeFaceReady(s) else true;
             },
@@ -2666,6 +2729,18 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     points[i] = .{ wp[10 + i * 4 + 0], wp[10 + i * 4 + 1], wp[10 + i * 4 + 2], wp[10 + i * 4 + 3] };
                     fall[i] = .{ wp[10 + manifest.warp_point_max * 4 + i], 0.0, 0.0, 0.0 };
                 }
+                // gaze_correct derives its two eye push points from the live iris
+                // centroids and the gaze the blendshapes carry, so the summed
+                // liquify redirect nudges each pupil back toward the lens.
+                var pt_count = wp[9];
+                if (wp[0] > 7.5) {
+                    const eyes = gazeEyePoints(s, width, height, rotation, mirror) orelse continue;
+                    points[0] = eyes[0];
+                    points[1] = eyes[1];
+                    fall[0] = .{ @max(wp[3], 0.01), 0, 0, 0 };
+                    fall[1] = .{ @max(wp[3], 0.01), 0, 0, 0 };
+                    pt_count = 2;
+                }
                 // A masked warp confines the displacement to its class: the
                 // named channel binds on unit 1 (an absent class serves the zero
                 // mask, so it moves nothing), while no mask binds the all-set
@@ -2674,7 +2749,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
                 else
                     r.default_mask_texture;
-                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], center[0], center[1], region_radius }, .{ amount, wp[5], aspect, 0.0 }, .{ wp[9], wp[7], wp[8], 0.0 }, &points, &fall);
+                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], center[0], center[1], region_radius }, .{ amount, wp[5], aspect, 0.0 }, .{ pt_count, wp[7], wp[8], 0.0 }, &points, &fall);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;

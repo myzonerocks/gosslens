@@ -679,9 +679,10 @@ refracts the frame through a sphere and lets the surround through),
 outside the sphere), `bulge` (magnify toward the center), `pinch` (pull the
 image inward), `swirl` (twist about the center), `liquify` (freeform
 multi-point push/pull), `face_scale` (scale the whole tracked face about its
-own center), or `roll_lock` (counter-rotate the frame to level the horizon).
-`center_x` and `center_y` place the distortion, `radius`
-sizes it, and `strength` scales how hard it pushes, with zero an identity.
+own center), `roll_lock` (counter-rotate the frame to level the horizon), or
+`gaze_correct` (redirect the eyes back toward the lens). `center_x` and
+`center_y` place the distortion, `radius` sizes it, and `strength` scales how
+hard it pushes, with zero an identity.
 
 `face_scale` is a landmark-anchored transform: it ignores the static center and
 radius and takes both from the tracked face each frame, then scales the face
@@ -698,6 +699,12 @@ tracked head's roll), and rotates the whole frame about its center by that angle
 so a tilted horizon comes level. `strength` scales the correction and zero is an
 identity; with no orientation and no tracked face it reads no roll and holds the
 frame through.
+
+`gaze_correct` redirects the eyes toward the lens: it reads the gaze from the
+tracked face's eyeLook blendshapes and pushes each pupil, at its iris centroid,
+opposite the measured gaze, the same summed liquify displacement confined to a
+per-eye `radius`. `strength` scales the redirection and zero is an identity. It
+needs a tracked face; with none it holds the frame through.
 `refractive_index` is the glass index the two sphere modes bend the view ray by;
 the displacement modes ignore it. `aspect_auto` keeps the region circular on
 screen by correcting for the frame's aspect.
@@ -1430,6 +1437,8 @@ a rolling.pass with a submitted camera rotation shifts each scanline by its
 readout offset, a straight edge slanting under motion and holding without it;
 a roll_lock warp levels the horizon from the orientation stream, a tilted bar
 coming level under a submitted device roll and holding without one;
+a gaze_correct warp reads the eyeLook blendshapes and redirects the pupils, the
+eye region shifting under a measured gaze while a far corner holds;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

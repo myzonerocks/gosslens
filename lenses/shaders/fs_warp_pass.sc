@@ -73,6 +73,16 @@ void main()
 	// unmasked warp; below 1 it eases the displacement toward none.
 	float gate = texture2D(s_texDepth, uv).r;
 
+	if (mode > 7.5) {
+		// gaze_correct: two eye push points redirect the pupils, the same summed
+		// liquify displacement, so an off-camera gaze is nudged back to the lens.
+		vec2 disp = liquifyDisp(uv, aspect);
+		vec2 srcuv = uv - disp;
+		if (gate < 1.0) srcuv = mix(uv, srcuv, gate);
+		gl_FragColor = texture2D(s_texColor, srcuv);
+		return;
+	}
+
 	if (mode > 6.5) {
 		// roll_lock: counter-rotate the frame about the center to level the
 		// horizon. u_warpParams.x carries the signed angle the engine derived
