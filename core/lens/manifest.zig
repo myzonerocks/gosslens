@@ -1420,6 +1420,22 @@ pub const Volume = struct {
     half: [3]f32 = .{ 0, 0, 0 },
 };
 
+/// A lens-level trigger rectangle in the normalized frame (0..1 from the top
+/// left), tested against a tracked hand's index fingertip each tick to feed
+/// the hand.in_region signal - a "point at this screen zone" trigger. No world
+/// tracking or metric depth, so it fires from the 2D landmarks alone.
+pub const Region2d = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+
+    pub fn contains(self: Region2d, px: f32, py: f32) bool {
+        return px >= self.x and px <= self.x + self.w and
+            py >= self.y and py <= self.y + self.h;
+    }
+};
+
 /// A directional light a lens declares to shade its model.gltf nodes:
 /// `direction` (world travel), `intensity` (diffuse scale) and `ambient` (a
 /// lift for faces turned away). `sky` and `ground` tint the ambient by the
@@ -1454,6 +1470,7 @@ pub const Manifest = struct {
     nodes: []const Node,
     triggers: []const Trigger,
     volume: ?Volume = null,
+    region2d: ?Region2d = null,
     /// Opt-in high-dynamic-range compositing: the color chain's intermediate
     /// targets carry half-float precision (16F where the backend renders it,
     /// 8-bit otherwise) and grade passes keep values above 1.0 through the
@@ -4499,6 +4516,25 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
         path.pop(mark);
     }
 
+    if (getField(root, "region2d")) |rv| {
+        const mark = path.push("region2d");
+        if (rv != .object) {
+            try diags.add(path.slice(), "region2d must be an object", .{});
+        } else {
+            var reg: Region2d = .{};
+            reg.x = std.math.clamp(@as(f32, @floatCast(numberOf(getField(rv.object, "x") orelse .null) orelse 0)), 0.0, 1.0);
+            reg.y = std.math.clamp(@as(f32, @floatCast(numberOf(getField(rv.object, "y") orelse .null) orelse 0)), 0.0, 1.0);
+            reg.w = std.math.clamp(@as(f32, @floatCast(numberOf(getField(rv.object, "w") orelse .null) orelse 0)), 0.0, 1.0);
+            reg.h = std.math.clamp(@as(f32, @floatCast(numberOf(getField(rv.object, "h") orelse .null) orelse 0)), 0.0, 1.0);
+            if (reg.w <= 0 or reg.h <= 0) {
+                try diags.add(path.slice(), "region2d needs a positive w and h", .{});
+            } else {
+                manifest.region2d = reg;
+            }
+        }
+        path.pop(mark);
+    }
+
     try crossReference(diags, &path, arena, &manifest);
 
     if (diags.list.items.len > diags_before) {
@@ -5621,4 +5657,40 @@ test "prompt output parses as a valid lens" {
     var parsed = try parseOk(json);
     defer parsed.deinit();
     try std.testing.expect(parsed.nodes.len >= 2);
+}
+
+test "a 2D trigger region contains its interior and excludes the outside" {
+    const reg: Region2d = .{ .x = 0.6, .y = 0.0, .w = 0.4, .h = 0.4 };
+    // A fingertip in the top-right quadrant is inside; the edges count.
+    try t.expect(reg.contains(0.8, 0.2));
+    try t.expect(reg.contains(0.6, 0.0));
+    try t.expect(reg.contains(1.0, 0.4));
+    // Just outside on either axis is out, and the far corner is well clear.
+    try t.expect(!reg.contains(0.59, 0.2));
+    try t.expect(!reg.contains(0.8, 0.41));
+    try t.expect(!reg.contains(0.1, 0.9));
+}
+
+test "a lens declaring a region2d parses it and rejects a zero-size one" {
+    const with_region =
+        \\{"glf": "1.0", "id": "r", "version": "1.0.0", "display_name": "Region",
+        \\ "engine_compat": ">=0.5", "capabilities": [], "parameters": [],
+        \\ "region2d": {"x": 0.6, "y": 0.1, "w": 0.3, "h": 0.3},
+        \\ "nodes": [], "triggers": []}
+    ;
+    var parsed = try parseOk(with_region);
+    defer parsed.deinit();
+    try t.expect(parsed.region2d != null);
+    try t.expectEqual(@as(f32, 0.6), parsed.region2d.?.x);
+    try t.expectEqual(@as(f32, 0.3), parsed.region2d.?.w);
+
+    const zero_region =
+        \\{"glf": "1.0", "id": "r", "version": "1.0.0", "display_name": "Region",
+        \\ "engine_compat": ">=0.5", "capabilities": [], "parameters": [],
+        \\ "region2d": {"x": 0.6, "y": 0.1, "w": 0.0, "h": 0.3},
+        \\ "nodes": [], "triggers": []}
+    ;
+    var result = try parseFails(zero_region);
+    defer result.deinit();
+    try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "positive w and h") != null);
 }

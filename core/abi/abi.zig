@@ -13715,9 +13715,17 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (s.hand_tracking) |worker| {
         var hands: hand.Result = undefined;
         if (tracking.hand_worker.readResult(worker, &hands)) {
+            const region = s.active_lens.?.manifest.region2d;
             for (hands.hands[0..@min(hands.hand_count, hand.max_hands)]) |*h| {
                 if (h.gesture != 0 and live_signals.hand_gesture == 0) live_signals.hand_gesture = h.gesture;
                 if (hand.isPinching(&h.landmarks)) live_signals.hand_pinch = true;
+                // The index fingertip against the lens's 2D trigger rectangle,
+                // both in the normalized frame, so a lens fires while the hand
+                // points into a screen zone. Any tracked hand inside sets it.
+                if (region) |reg| {
+                    const tip = hand.jointPoint(&h.landmarks, .index_tip);
+                    if (reg.contains(tip[0], tip[1])) live_signals.hand_in_region = true;
+                }
             }
         }
     }

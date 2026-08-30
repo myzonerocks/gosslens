@@ -41,6 +41,7 @@ pub const SignalKind = enum {
     body_wave,
     body_dance,
     device_in_volume,
+    hand_in_region,
     touch_double_tap,
     touch_long_press,
     touch_swipe,
@@ -54,7 +55,7 @@ pub const SignalKind = enum {
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
         .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
     };
 }
@@ -142,6 +143,10 @@ pub const Signals = struct {
     /// on-device each tick from the submitted world pose and the manifest's
     /// volume region. False with no world tracking or no volume declared.
     device_in_volume: bool = false,
+    /// Whether a tracked hand's index fingertip is inside the lens's 2D trigger
+    /// rectangle, computed on-device each tick from the hand landmarks and the
+    /// manifest's region2d. False with no hand tracking or no region declared.
+    hand_in_region: bool = false,
     /// The camera's current zoom factor, engine-fed at tick from the session's
     /// camera controls, so a lens fires an effect on zoom (`camera.zoom > 2`).
     /// One means no zoom, the resting value before any control is set.
@@ -244,6 +249,7 @@ fn readBool(s: Signal, signals: Signals) bool {
         },
         .geo_in_region => signals.geo_in_region,
         .device_in_volume => signals.device_in_volume,
+        .hand_in_region => signals.hand_in_region,
         .camera_focus => signals.camera_focus,
         .camera_exposure => signals.camera_exposure,
         .looking_at_camera => {
@@ -677,6 +683,9 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "device") and std.mem.eql(u8, tail, "in_volume")) {
             return .{ .kind = .device_in_volume };
         }
+        if (std.mem.eql(u8, head, "hand") and std.mem.eql(u8, tail, "in_region")) {
+            return .{ .kind = .hand_in_region };
+        }
         if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "level")) {
             return .{ .kind = .audio_level };
         }
@@ -1074,6 +1083,13 @@ test "geo.in_region reads the on-device membership boolean" {
     defer expr.deinit();
     try t.expect(!evaluate(expr.root, .{}));
     try t.expect(evaluate(expr.root, .{ .geo_in_region = true }));
+}
+
+test "hand.in_region reads the on-device fingertip-membership boolean" {
+    var expr = try compileOk("hand.in_region");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .hand_in_region = true }));
 }
 
 test "camera.zoom compiles as a numeric signal and compares live" {

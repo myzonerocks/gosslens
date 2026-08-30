@@ -1299,7 +1299,9 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   completes), `body.dance` (true while rhythmic whole-body motion lasts),
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `device.in_volume` (true while the
-  tracked device is inside the lens's `volume` region, see below), `tap`,
+  tracked device is inside the lens's `volume` region, see below),
+  `hand.in_region` (true while a tracked hand's index fingertip is inside the
+  lens's `region2d` rectangle, see below), `tap`,
   `touch.doubleTap` / `touch.longPress` (true for one tick when the screen
   gesture completes), `touch.swipe('left')` (true for one tick on a swipe in
   the named direction: left, right, up, down), `touch.drag` (true while one
@@ -1323,6 +1325,15 @@ manifest: `{"center": [x, y, z], "radius": r}` for a sphere or `{"center":
 engine tests the submitted device pose against it on-device each tick and only
 the inside/outside boolean reaches the lens; the pose itself never crosses the
 ABI. With no world tracking or no volume declared, the signal reads false.
+
+A `hand.in_region` signal reads a top-level `"region2d"` rectangle on the
+manifest: `{"x": x, "y": y, "w": w, "h": h}`, all in the normalized frame (0
+to 1 from the top left). The engine tests a tracked hand's index fingertip
+against it on-device each tick and only the inside/outside boolean reaches the
+lens; the landmarks never cross the ABI. Any tracked hand inside sets it. With
+no hand tracking or no region declared, the signal reads false. Unlike the
+world `volume`, this is a flat screen zone, so it needs no world tracking or
+metric depth, only the 2D landmarks.
 
 ### 6.2 Actions
 
