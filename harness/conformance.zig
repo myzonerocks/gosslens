@@ -7448,6 +7448,18 @@ fn captureLitModel(gpa: std.mem.Allocator, engine: *abi.Engine, variant: []const
         \\ "parameters":[],
         \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
         \\ "triggers":[]}
+    else if (std.mem.eql(u8, variant, "hemi"))
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "light":{"direction":[0.0,0.0,-1.0],"color":[1.0,1.0,1.0],"intensity":0.0,"ambient":1.0,"sky":[1.0,1.0,1.0],"ground":[0.0,0.0,0.0]},
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
+    else if (std.mem.eql(u8, variant, "uniform"))
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "light":{"direction":[0.0,0.0,-1.0],"color":[1.0,1.0,1.0],"intensity":0.0,"ambient":0.5,"sky":[1.0,1.0,1.0],"ground":[1.0,1.0,1.0]},
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
     else
         \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
@@ -7628,6 +7640,112 @@ fn proveModelMaterial(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
 
     std.debug.print("conformance: PROOF a model.gltf emissive material lifts the lit surface: the emissive triangle averages {d} over {d} covered pixels where the non-emissive one averages {d}, deterministically\n", .{ emissive_avg, covered, plain_avg });
+    return true;
+}
+
+/// Sums the green of a shot's covered model pixels split into the model's own
+/// top and bottom halves (the midpoint of the covered pixels' y-range, not the
+/// screen), so a hemisphere ambient's grade shows wherever the model sits.
+/// Covered means the reference shot's green clears the black background.
+fn splitTopBottom(shot: []const u8, reference: []const u8, w: u32, h: u32, top_sum: *u64, top_n: *u64, bot_sum: *u64, bot_n: *u64) void {
+    var min_y: u32 = h;
+    var max_y: u32 = 0;
+    var yy: u32 = 0;
+    while (yy < h) : (yy += 1) {
+        var xx: u32 = 0;
+        while (xx < w) : (xx += 1) {
+            if (reference[(yy * w + xx) * 4 + 1] > 16) {
+                if (yy < min_y) min_y = yy;
+                if (yy > max_y) max_y = yy;
+            }
+        }
+    }
+    const mid_y = (min_y + max_y) / 2;
+    top_sum.* = 0;
+    top_n.* = 0;
+    bot_sum.* = 0;
+    bot_n.* = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            const i = (y * w + x) * 4;
+            if (reference[i + 1] <= 16) continue;
+            if (y < mid_y) {
+                top_sum.* += shot[i + 1];
+                top_n.* += 1;
+            } else {
+                bot_sum.* += shot[i + 1];
+                bot_n.* += 1;
+            }
+        }
+    }
+}
+
+/// Proves the hemisphere ambient (a simple image-based-lighting term): a sphere
+/// lit only by a sky-white, ground-black hemisphere ambient is bright across
+/// its top and dark across its bottom, while the same sphere under a uniform
+/// ambient is even top-to-bottom. Deterministic.
+fn proveHemisphereIBL(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const ball_glb = std.Io.Dir.cwd().readFileAlloc(harness_io, "lenses/reference/box-block/assets/ball.glb", gpa, .limited(4 << 20)) catch {
+        std.debug.print("conformance: FAIL could not read the reference sphere glb\n", .{});
+        return false;
+    };
+    defer gpa.free(ball_glb);
+
+    const black = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    for (0..black.len / 4) |i| black[i * 4 + 3] = 255;
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = black }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const hemi = try captureLitModel(gpa, engine, "hemi", planes, ball_glb);
+    defer gpa.free(hemi);
+    const uniform = try captureLitModel(gpa, engine, "uniform", planes, ball_glb);
+    defer gpa.free(uniform);
+    const hemi_again = try captureLitModel(gpa, engine, "hemi", planes, ball_glb);
+    defer gpa.free(hemi_again);
+
+    if (!std.mem.eql(u8, hemi, hemi_again)) {
+        std.debug.print("conformance: FAIL hemisphere ambient is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    var ht: u64 = 0;
+    var htn: u64 = 0;
+    var hb: u64 = 0;
+    var hbn: u64 = 0;
+    splitTopBottom(hemi, uniform, width, height, &ht, &htn, &hb, &hbn);
+    var ut: u64 = 0;
+    var utn: u64 = 0;
+    var ub: u64 = 0;
+    var ubn: u64 = 0;
+    splitTopBottom(uniform, uniform, width, height, &ut, &utn, &ub, &ubn);
+    if (htn < 40 or hbn < 40 or utn < 40 or ubn < 40) {
+        std.debug.print("conformance: FAIL too few covered pixels in a half to judge the hemisphere (top {d}, bottom {d})\n", .{ htn, hbn });
+        return false;
+    }
+    const hemi_top = ht / htn;
+    const hemi_bot = hb / hbn;
+    const uni_top = ut / utn;
+    const uni_bot = ub / ubn;
+    // The hemisphere ambient must shade the model's two halves distinctly (a
+    // vertical gradient along the normal's up-component), while the uniform
+    // ambient shades them the same.
+    const hemi_delta = @abs(@as(i64, @intCast(hemi_top)) - @as(i64, @intCast(hemi_bot)));
+    const uni_delta = @abs(@as(i64, @intCast(uni_top)) - @as(i64, @intCast(uni_bot)));
+    if (hemi_delta < 40) {
+        std.debug.print("conformance: FAIL hemisphere ambient did not grade the two halves (top {d}, bottom {d})\n", .{ hemi_top, hemi_bot });
+        return false;
+    }
+    if (uni_delta > 16) {
+        std.debug.print("conformance: FAIL uniform ambient is not even top-to-bottom (top {d}, bottom {d})\n", .{ uni_top, uni_bot });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a hemisphere ambient grades a model by its normal's up-component: the sphere's two halves read {d} vs {d} under a sky-white ground-black hemisphere where a uniform ambient reads {d} vs {d}, deterministically\n", .{ hemi_top, hemi_bot, uni_top, uni_bot });
     return true;
 }
 
@@ -18259,6 +18377,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("directional-light");
     if (!try proveModelMaterial(gpa, engine)) return 1;
     watchHold("model-material");
+    if (!try proveHemisphereIBL(gpa, engine)) return 1;
+    watchHold("hemisphere-ibl");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;

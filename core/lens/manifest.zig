@@ -1412,11 +1412,16 @@ pub const Volume = struct {
 /// A single directional light a lens declares to shade its model.gltf nodes.
 /// `direction` is the world direction the light travels; `intensity` scales
 /// the diffuse term and `ambient` lifts surfaces facing away off pure black.
+/// `sky` and `ground` tint that ambient by the surface normal's up-component,
+/// a hemisphere image-based-lighting approximation; both default to white, so
+/// the ambient stays a flat lift unless a lens sets them.
 pub const Light = struct {
     direction: [3]f32 = .{ 0, 0, -1 },
     color: [3]f32 = .{ 1, 1, 1 },
     intensity: f32 = 1,
     ambient: f32 = 0.1,
+    sky: [3]f32 = .{ 1, 1, 1 },
+    ground: [3]f32 = .{ 1, 1, 1 },
 };
 
 pub const Manifest = struct {
@@ -4387,6 +4392,12 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
             }
             if (getField(lv.object, "intensity")) |v| light.intensity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse light.intensity)), 0.0, 64.0);
             if (getField(lv.object, "ambient")) |v| light.ambient = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse light.ambient)), 0.0, 1.0);
+            if (getField(lv.object, "sky")) |v| {
+                if (!readVec3(v, &light.sky)) try diags.add(path.slice(), "light sky must be three numbers", .{});
+            }
+            if (getField(lv.object, "ground")) |v| {
+                if (!readVec3(v, &light.ground)) try diags.add(path.slice(), "light ground must be three numbers", .{});
+            }
             manifest.light = light;
         }
         path.pop(mark);

@@ -1394,10 +1394,16 @@ fn morphPositions(out: [][3]f32, rest: []const [3]f32, targets: []const []const 
 /// blended by their bound weights (clip_weights). With none bound the
 /// first clip carries full weight, so a single-clip model is unchanged;
 /// a model with no clips draws on its rest transform.
-/// Packs a lens's directional light into the two vec4s the lit model shader
-/// reads: the world direction and intensity, then the color and ambient term.
-fn lightParams(light: manifest.Light) [8]f32 {
-    return .{ light.direction[0], light.direction[1], light.direction[2], light.intensity, light.color[0], light.color[1], light.color[2], light.ambient };
+/// Packs a lens's directional light into the four vec4s the lit model shader
+/// reads: the world direction and intensity, the color and ambient term, then
+/// the hemisphere sky and ground ambient tints.
+fn lightParams(light: manifest.Light) [16]f32 {
+    return .{
+        light.direction[0], light.direction[1], light.direction[2], light.intensity,
+        light.color[0],     light.color[1],     light.color[2],     light.ambient,
+        light.sky[0],       light.sky[1],       light.sky[2],       0,
+        light.ground[0],    light.ground[1],    light.ground[2],    0,
+    };
 }
 
 /// Packs a model's PBR material into the two vec4s the lit shader reads: the

@@ -750,7 +750,7 @@ pub const Renderer = struct {
             .lash_shape_uniform = c.bgfx_create_uniform("u_lashShape", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
-            .light_uniform = c.bgfx_create_uniform("u_light", c.BGFX_UNIFORM_TYPE_VEC4, 2),
+            .light_uniform = c.bgfx_create_uniform("u_light", c.BGFX_UNIFORM_TYPE_VEC4, 4),
             .material_uniform = c.bgfx_create_uniform("u_material", c.BGFX_UNIFORM_TYPE_VEC4, 2),
             .particle_cool_uniform = c.bgfx_create_uniform("u_particleCool", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .particle_size_uniform = c.bgfx_create_uniform("u_particleSize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -3317,14 +3317,14 @@ pub const Renderer = struct {
     /// mesh through the directional-light program. `light` is two vec4s: the
     /// world light direction and intensity, then its color and the ambient term;
     /// `material` is two vec4s: the emissive color and metallic, then roughness.
-    pub fn submitLitModel(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [8]f32, material: [8]f32, aspect_ratio: f32) void {
+    pub fn submitLitModel(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [16]f32, material: [8]f32, aspect_ratio: f32) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
         r.drawLitModelMesh(mesh_view, mesh, model_matrix, base_color, light, material, aspect_ratio);
     }
 
     /// The mesh half of submitLitModel, without the frame blit, mirroring
     /// drawModelMesh for the multi-node fan-out.
-    pub fn drawLitModelMesh(r: *Renderer, mesh_view: c.bgfx_view_id_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [8]f32, material: [8]f32, aspect_ratio: f32) void {
+    pub fn drawLitModelMesh(r: *Renderer, mesh_view: c.bgfx_view_id_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [16]f32, material: [8]f32, aspect_ratio: f32) void {
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
         const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
         const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
@@ -3334,7 +3334,7 @@ pub const Renderer = struct {
         c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
         var light_params = light;
-        c.bgfx_set_uniform(r.light_uniform, &light_params, 2);
+        c.bgfx_set_uniform(r.light_uniform, &light_params, 4);
         var material_params = material;
         c.bgfx_set_uniform(r.material_uniform, &material_params, 2);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);

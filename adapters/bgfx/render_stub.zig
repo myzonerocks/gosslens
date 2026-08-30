@@ -791,7 +791,7 @@ pub const Renderer = struct {
         _ = aspect_ratio;
     }
 
-    pub fn submitLitModel(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [8]f32, material: [8]f32, aspect_ratio: f32) void {
+    pub fn submitLitModel(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [16]f32, material: [8]f32, aspect_ratio: f32) void {
         _ = r;
         _ = blit_view;
         _ = mesh_view;

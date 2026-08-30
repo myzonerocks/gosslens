@@ -174,9 +174,12 @@ nothing. `anchor` is rejected on every other node type, and `"face"`,
 
 A lens may declare a top-level `"light"` to shade its `model.gltf` nodes with a
 single directional light: `{"direction": [x, y, z], "color": [r, g, b],
-"intensity": n, "ambient": a}`. `direction` is the world direction the light
-travels, `intensity` scales the diffuse term, and `ambient` lifts the faces
-turned away from the light off pure black. With a light set, a static model
+"intensity": n, "ambient": a, "sky": [r,g,b], "ground": [r,g,b]}`. `direction`
+is the world direction the light travels, `intensity` scales the diffuse term,
+and `ambient` lifts the faces turned away from the light off pure black. `sky`
+and `ground` tint that ambient by the surface normal's up-component (a
+hemisphere image-based-lighting approximation: `ambient * mix(ground, sky, up)`);
+both default to white, so the ambient stays a flat lift unless a lens sets them. With a light set, a static model
 draws through the lit program (its per-vertex normals shade a Lambert diffuse
 against the light); with none it stays flat unlit exactly as before, so lighting
 is opt-in. Morph and skinned meshes deform per frame and stay flat for now.
