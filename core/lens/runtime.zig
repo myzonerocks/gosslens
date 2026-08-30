@@ -416,6 +416,10 @@ pub const SplatNode = struct {
     /// True draws the model's output as a connected grid mesh; false draws it as
     /// a billboard point cloud.
     mesh: bool,
+    /// True draws the model's output as anisotropic sorted gaussian splats: each
+    /// splat carries a 3D covariance and opacity, projected to an oriented screen
+    /// ellipse and composited back-to-front. Takes precedence over mesh.
+    gaussian: bool,
     /// True runs the model once on a submitted selfie (an avatar) rather than the
     /// live camera each tick.
     selfie: bool,
@@ -1538,7 +1542,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .splat_cloud) continue;
             const sf = node.splat orelse continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .selfie = sf.source == .selfie, .colored = sf.colored });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .gaussian = sf.draw == .gaussian, .selfie = sf.source == .selfie, .colored = sf.colored });
         }
         return out.toOwnedSlice(gpa);
     }

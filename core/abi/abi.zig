@@ -3312,7 +3312,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
                 const base_color: [4]f32 = .{ sw.color[0], sw.color[1], sw.color[2], 1.0 };
-                if (mesh_draw) {
+                if (sw.gaussian) {
+                    // Project each splat's covariance into an oriented screen
+                    // ellipse, sort the cloud back-to-front, and over-blend it.
+                    if (frameStage(s, sw.count * 6 * 12)) |verts| {
+                        writeSplatGaussians(sw, verts);
+                        render.Renderer.updateParticleMeshFaded(mesh, verts);
+                    }
+                    r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio);
+                } else if (mesh_draw) {
                     // Connect the grid of points into a surface and draw it as a
                     // solid 3D mesh over the passed-through frame.
                     if (frameStage(s, vertex_count * 3)) |verts| {
@@ -11314,7 +11322,14 @@ const SplatWorker = struct {
     // True when the model emits rgb after xyz per point (stride six), so each
     // splat draws in its own color rather than the node color.
     colored: bool,
+    // True draws anisotropic sorted gaussians: the model emits xyz, scale, a
+    // rotation quaternion, opacity, and rgb per splat (stride fourteen), each
+    // projected to an oriented screen ellipse and composited back-to-front.
+    gaussian: bool,
     positions: []f32,
+    // Per-frame back-to-front draw order for the gaussian path, allocated once
+    // at load and re-sorted each frame; empty for the point and mesh paths.
+    order: []u32,
     // The billboard mesh is created lazily on the first draw, since it needs the
     // renderer; null marks it not yet built.
     mesh: ?render.Renderer.ParticleMesh = null,
@@ -11336,9 +11351,10 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         defer gpa.free(bytes);
         const worker = ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch continue;
         const len = ml_infer.outputLen(worker, 0);
-        // A colored cloud's model emits xyz then rgb per point, so its output is
-        // a multiple of six; a plain one emits xyz only, a multiple of three.
-        const stride: usize = if (node.colored) 6 else 3;
+        // A gaussian cloud's model emits xyz, scale, quaternion, opacity, and rgb
+        // per splat (stride fourteen); a colored point cloud emits xyz then rgb
+        // (stride six); a plain one emits xyz only (stride three).
+        const stride: usize = if (node.gaussian) 14 else if (node.colored) 6 else 3;
         if (len == 0 or len % stride != 0) {
             ml_infer.destroy(worker);
             continue;
@@ -11348,6 +11364,13 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             ml_infer.destroy(worker);
             continue;
         };
+        // The gaussian path re-sorts a per-splat index list each frame; the point
+        // and mesh paths draw in emit order and keep it empty.
+        const order: []u32 = if (node.gaussian) (gpa.alloc(u32, count) catch {
+            gpa.free(positions);
+            ml_infer.destroy(worker);
+            continue;
+        }) else &.{};
         session.splat_workers.append(gpa, .{
             .worker = worker,
             .target = node.graph_index,
@@ -11357,9 +11380,12 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .mesh_draw = node.mesh,
             .selfie = node.selfie,
             .colored = node.colored,
+            .gaussian = node.gaussian,
             .positions = positions,
+            .order = order,
         }) catch {
             gpa.free(positions);
+            if (order.len > 0) gpa.free(order);
             ml_infer.destroy(worker);
             continue;
         };
@@ -11375,6 +11401,7 @@ fn destroySplatWorkers(session: *Session) void {
     for (session.splat_workers.items) |sw| {
         if (sw.mesh) |m| render.Renderer.destroyParticleMesh(m);
         gpa.free(sw.positions);
+        if (sw.order.len > 0) gpa.free(sw.order);
         ml_infer.destroy(sw.worker);
     }
     session.splat_workers.clearRetainingCapacity();
@@ -11444,6 +11471,129 @@ fn writeSplatMesh(positions: []const f32, side: usize, colored: bool, out: []f32
                 out[v * 3 + 2] = positions[p + 2];
                 v += 1;
             }
+        }
+    }
+}
+
+/// A model value with any non-finite one (NaN, inf) replaced by a fallback, so a
+/// hostile or broken model can never poison a splat's geometry or color.
+fn finiteOr(v: f32, fallback: f32) f32 {
+    return if (std.math.isFinite(v)) v else fallback;
+}
+
+/// Expands each gaussian splat into a camera-facing quad shaped by its projected
+/// 3D covariance (the model emits xyz, scale, quaternion, opacity, rgb per splat).
+/// R S Sᵀ Rᵀ is eigen-decomposed into an oriented screen ellipse the six vertices
+/// carry, and the cloud is sorted back-to-front for the premultiplied over-blend.
+fn writeSplatGaussians(sw: *SplatWorker, out: []f32) void {
+    const count = sw.count;
+    const pos = sw.positions;
+    // The three-sigma extent the quad spans, so the gaussian tail is negligible
+    // at the corners and the fragment discard trims the rest.
+    const k: f32 = 3.0;
+    for (0..count) |i| sw.order[i] = @intCast(i);
+    const Ctx = struct {
+        p: []const f32,
+        // The camera looks toward -z from z = 2, so a smaller z is farther and is
+        // drawn first; the index tie-break makes the order total and deterministic.
+        fn less(c: @This(), a: u32, b: u32) bool {
+            const za = c.p[@as(usize, a) * 14 + 2];
+            const zb = c.p[@as(usize, b) * 14 + 2];
+            if (za != zb) return za < zb;
+            return a < b;
+        }
+    };
+    std.sort.pdq(u32, sw.order[0..count], Ctx{ .p = pos }, Ctx.less);
+
+    const corners = [6][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ -1, -1 }, .{ 1, 1 }, .{ -1, 1 } };
+    for (sw.order[0..count], 0..) |splat, draw_i| {
+        const b = @as(usize, splat) * 14;
+        const px = finiteOr(pos[b + 0], 0);
+        const py = finiteOr(pos[b + 1], 0);
+        const pz = finiteOr(pos[b + 2], 0);
+        const sx = std.math.clamp(finiteOr(pos[b + 3], 0), 0, 4);
+        const sy = std.math.clamp(finiteOr(pos[b + 4], 0), 0, 4);
+        const sz = std.math.clamp(finiteOr(pos[b + 5], 0), 0, 4);
+        var qx = finiteOr(pos[b + 6], 0);
+        var qy = finiteOr(pos[b + 7], 0);
+        var qz = finiteOr(pos[b + 8], 0);
+        var qw = finiteOr(pos[b + 9], 1);
+        const qn = @sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+        if (qn > 1e-8) {
+            qx /= qn;
+            qy /= qn;
+            qz /= qn;
+            qw /= qn;
+        } else {
+            qx = 0;
+            qy = 0;
+            qz = 0;
+            qw = 1;
+        }
+        // Rows 0 and 1 of the rotation matrix (the splat's world x and y axes),
+        // the only rows the camera-facing 2x2 covariance block needs.
+        const r00 = 1 - 2 * (qy * qy + qz * qz);
+        const r01 = 2 * (qx * qy - qz * qw);
+        const r02 = 2 * (qx * qz + qy * qw);
+        const r10 = 2 * (qx * qy + qz * qw);
+        const r11 = 1 - 2 * (qx * qx + qz * qz);
+        const r12 = 2 * (qy * qz - qx * qw);
+        const vx = sx * sx;
+        const vy = sy * sy;
+        const vz = sz * sz;
+        const ca = r00 * r00 * vx + r01 * r01 * vy + r02 * r02 * vz;
+        const cov_b = r00 * r10 * vx + r01 * r11 * vy + r02 * r12 * vz;
+        const cc = r10 * r10 * vx + r11 * r11 * vy + r12 * r12 * vz;
+        // Eigen-decompose the symmetric 2x2 covariance into oriented axes.
+        const mid = 0.5 * (ca + cc);
+        const halfd = 0.5 * (ca - cc);
+        const disc = @sqrt(halfd * halfd + cov_b * cov_b);
+        const l1 = @max(mid + disc, 0);
+        const l2 = @max(mid - disc, 0);
+        var e1x: f32 = 1;
+        var e1y: f32 = 0;
+        if (@abs(cov_b) > 1e-8) {
+            e1x = l1 - cc;
+            e1y = cov_b;
+            const en = @sqrt(e1x * e1x + e1y * e1y);
+            if (en > 1e-8) {
+                e1x /= en;
+                e1y /= en;
+            } else {
+                e1x = 1;
+                e1y = 0;
+            }
+        } else if (cc > ca) {
+            e1x = 0;
+            e1y = 1;
+        }
+        const a1 = k * @sqrt(l1);
+        const a2 = k * @sqrt(l2);
+        // Axis 1 along the major eigenvector, axis 2 perpendicular.
+        const ax1x = e1x * a1;
+        const ax1y = e1y * a1;
+        const ax2x = -e1y * a2;
+        const ax2y = e1x * a2;
+        const op = std.math.clamp(finiteOr(pos[b + 10], 1), 0, 1);
+        const cr = std.math.clamp(finiteOr(pos[b + 11], 1), 0, 1);
+        const cg = std.math.clamp(finiteOr(pos[b + 12], 1), 0, 1);
+        const cbl = std.math.clamp(finiteOr(pos[b + 13], 1), 0, 1);
+        for (corners, 0..) |corner, ci| {
+            const u = corner[0];
+            const v = corner[1];
+            const o = (draw_i * 6 + ci) * 12;
+            out[o + 0] = px;
+            out[o + 1] = py;
+            out[o + 2] = pz;
+            out[o + 3] = u * ax1x + v * ax2x;
+            out[o + 4] = u * ax1y + v * ax2y;
+            out[o + 5] = 0;
+            out[o + 6] = u * k;
+            out[o + 7] = v * k;
+            out[o + 8] = cr;
+            out[o + 9] = cg;
+            out[o + 10] = cbl;
+            out[o + 11] = op;
         }
     }
 }

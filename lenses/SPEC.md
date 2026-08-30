@@ -905,8 +905,13 @@ picks the input: `"camera"` (the default) lifts the live frame each tick;
 avatar is generated from one photo and stays put off the live camera. `"draw"`
 picks the form: `"points"` (the default) draws camera-facing billboards, a splat
 cloud, sized by `"point"` (pixels); `"mesh"` reads the output as a square grid and
-draws it as a connected 3D surface, one quad per grid cell. `r`, `g`, `b` are the
-color. The model runs on the inference rail like any author model, off the frame
+draws it as a connected 3D surface, one quad per grid cell; `"gaussian"` reads the
+output at stride fourteen (xyz, a three-axis scale, a rotation quaternion, an
+opacity, and rgb per splat) and draws real anisotropic gaussian splats: each
+splat's covariance is projected to an oriented screen ellipse, the cloud is sorted
+back-to-front, and the ellipses composite with a premultiplied over-blend weighted
+by opacity, so a splat avatar or scene reads as a soft continuous volume rather
+than loose points. `r`, `g`, `b` are the color. The model runs on the inference rail like any author model, off the frame
 thread; the engine reads its latest points and draws them in a perspective view,
 so the submitted camera pose orbits the geometry. Until the model produces its
 first points the node holds the frame through, the standard capability

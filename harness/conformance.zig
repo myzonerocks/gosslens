@@ -5637,6 +5637,54 @@ fn onnxConvModel(a: std.mem.Allocator, in_name: []const u8, cin: i64, cout: i64,
     return model.buf.items;
 }
 
+/// A synthetic ONNX model whose single 1x1 conv has zero weights and a bias equal
+/// to `values`, so its output is exactly `values` for any frame. It hands a
+/// splat.cloud a known gaussian set (xyz, scale, quaternion, opacity, rgb per
+/// splat) so the render can be asserted precisely against fixed splats.
+fn onnxConstModel(a: std.mem.Allocator, values: []const f32) []const u8 {
+    const cout: i64 = @intCast(values.len);
+    const cin: i64 = 3;
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, cout);
+    w.varintField(1, cin);
+    w.varintField(1, 1);
+    w.varintField(1, 1);
+    w.varintField(2, 1);
+    var wraw: std.ArrayList(u8) = .empty;
+    var wi: usize = 0;
+    while (wi < values.len * 3) : (wi += 1) wraw.appendSlice(a, &[4]u8{ 0, 0, 0, 0 }) catch unreachable;
+    w.bytesField(9, wraw.items);
+    w.bytesField(8, "W");
+    var bp: OnnxPb = .{ .a = a };
+    bp.varintField(1, cout);
+    bp.varintField(2, 1);
+    var braw: std.ArrayList(u8) = .empty;
+    for (values) |v| {
+        var b4: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b4, @bitCast(v), .little);
+        braw.appendSlice(a, &b4) catch unreachable;
+    }
+    bp.bytesField(9, braw.items);
+    bp.bytesField(8, "B");
+    const conv = onnxNode(a, "Conv", &.{ "x", "W", "B" }, &.{"y"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(5, bp.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, cin, 1, 1 }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ cout, cin, 1, 1 }));
+    g.bytesField(11, onnxValueInfo(a, "B", &.{cout}));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, cout, 1, 1 }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
 /// The knobs a diffusion reference lens varies. A null encoder starts from pure
 /// noise (text to image); a text_embedding ships a cond asset; a sprite_mask
 /// keys the output; coherence turns on the temporal filter; target_mesh draws
@@ -6428,6 +6476,167 @@ fn runSelfieSplatRgbaOnce(engine: *abi.Engine, dir: []const u8, rgba: []const u8
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
+    return true;
+}
+
+fn writeSplatGaussianLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.splat-gaussian","version":"1.0.0","display_name":"Gaussian Splat","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"cloud","type":"splat.cloud","inputs":{"frame":"camera"},"params":{},
+        \\   "splat":{"model":"splat.onnx","source":"camera","draw":"gaussian","point":8.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/splat.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates a gaussian splat lens, waits for the cloud to publish, and captures
+/// the composite over a black frame so the splats read as their own coverage.
+fn runSplatGaussianShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, out_w: *u32, out_h: *u32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.SplatActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    var polls: usize = 0;
+    while (abi.splatCloudReadyCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return error.SplatNeverReady;
+    }
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    // The capture lands at the renderer's own dimensions, not the fed frame's,
+    // so a generous buffer holds it and the caller reads the real w*h back.
+    const shot = try gpa.alloc(u8, @as(usize, 1024) * 1024 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+const SplatExtents = struct { horiz: usize, vert: usize };
+
+/// The on-screen width and height of a splat centred on the frame: the run of
+/// lit pixels along the centre row and the centre column, so an oriented ellipse
+/// reads as wider-than-tall or taller-than-wide.
+fn splatExtents(shot: []const u8, w: u32, h: u32) SplatExtents {
+    const cx: usize = w / 2;
+    const cy: usize = h / 2;
+    var minx: i64 = -1;
+    var maxx: i64 = -1;
+    for (0..w) |x| {
+        const o = (cy * w + x) * 4;
+        if (@as(u32, shot[o]) + shot[o + 1] + shot[o + 2] > 60) {
+            if (minx < 0) minx = @intCast(x);
+            maxx = @intCast(x);
+        }
+    }
+    var miny: i64 = -1;
+    var maxy: i64 = -1;
+    for (0..h) |y| {
+        const o = (y * w + cx) * 4;
+        if (@as(u32, shot[o]) + shot[o + 1] + shot[o + 2] > 60) {
+            if (miny < 0) miny = @intCast(y);
+            maxy = @intCast(y);
+        }
+    }
+    const he: usize = if (maxx >= 0) @intCast(maxx - minx + 1) else 0;
+    const ve: usize = if (maxy >= 0) @intCast(maxy - miny + 1) else 0;
+    return .{ .horiz = he, .vert = ve };
+}
+
+fn centerRgb(shot: []const u8, w: u32, h: u32) [3]u8 {
+    const o = (@as(usize, h / 2) * w + w / 2) * 4;
+    return .{ shot[o], shot[o + 1], shot[o + 2] };
+}
+
+/// Proves the anisotropic sorted gaussian splat render: fixed const-model splats
+/// draw as oriented ellipses (a covariance elongated along x reads wider than
+/// tall, along y taller than wide) and composite in depth order (a near opaque
+/// splat draws over a far one, swapping when the depths swap), bit-stable.
+fn proveSplatGaussian(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // One white splat, covariance elongated along x, then along y.
+    const model_h = onnxConstModel(a, &.{ 0, 0, 0, 0.15, 0.045, 0.045, 0, 0, 0, 1, 1.0, 1, 1, 1 });
+    const model_v = onnxConstModel(a, &.{ 0, 0, 0, 0.045, 0.15, 0.045, 0, 0, 0, 1, 1.0, 1, 1, 1 });
+    // Two overlapping splats: a far blue and a near red, then the colors swapped
+    // between the depths so the front-most one is the other color.
+    const model_rb = onnxConstModel(a, &.{ 0, 0, -0.5, 0.12, 0.12, 0.12, 0, 0, 0, 1, 1.0, 0, 0, 1, 0, 0, 0.5, 0.12, 0.12, 0.12, 0, 0, 0, 1, 1.0, 1, 0, 0 });
+    const model_br = onnxConstModel(a, &.{ 0, 0, -0.5, 0.12, 0.12, 0.12, 0, 0, 0, 1, 1.0, 1, 0, 0, 0, 0, 0.5, 0.12, 0.12, 0.12, 0, 0, 0, 1, 1.0, 0, 0, 1 });
+
+    inline for (.{ "zig-out/splat-h", "zig-out/splat-v", "zig-out/splat-rb", "zig-out/splat-br" }) |d| {
+        try std.Io.Dir.cwd().createDirPath(harness_io, d ++ "/assets");
+    }
+    try writeSplatGaussianLens("zig-out/splat-h", model_h);
+    try writeSplatGaussianLens("zig-out/splat-v", model_v);
+    try writeSplatGaussianLens("zig-out/splat-rb", model_rb);
+    try writeSplatGaussianLens("zig-out/splat-br", model_br);
+
+    const dim: u32 = 320;
+    const black_rgba = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
+    defer gpa.free(black_rgba);
+    @memset(black_rgba, 0);
+    const black = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = black_rgba }, .width = dim, .height = dim });
+    defer black.deinit(gpa);
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot_h = try runSplatGaussianShot(gpa, engine, "zig-out/splat-h", black, &w, &h);
+    defer gpa.free(shot_h);
+    const shot_h2 = try runSplatGaussianShot(gpa, engine, "zig-out/splat-h", black, &w, &h);
+    defer gpa.free(shot_h2);
+    const shot_v = try runSplatGaussianShot(gpa, engine, "zig-out/splat-v", black, &w, &h);
+    defer gpa.free(shot_v);
+    const shot_rb = try runSplatGaussianShot(gpa, engine, "zig-out/splat-rb", black, &w, &h);
+    defer gpa.free(shot_rb);
+    const shot_br = try runSplatGaussianShot(gpa, engine, "zig-out/splat-br", black, &w, &h);
+    defer gpa.free(shot_br);
+
+    const n = @as(usize, w) * h * 4;
+    if (!std.mem.eql(u8, shot_h[0..n], shot_h2[0..n])) {
+        std.debug.print("conformance: FAIL gaussian splat render is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const eh = splatExtents(shot_h, w, h);
+    const ev = splatExtents(shot_v, w, h);
+    if (eh.horiz == 0 or ev.vert == 0) {
+        std.debug.print("conformance: FAIL gaussian splat drew nothing (h {d}x{d}, v {d}x{d})\n", .{ eh.horiz, eh.vert, ev.horiz, ev.vert });
+        return false;
+    }
+    if (!(eh.horiz > eh.vert + 8)) {
+        std.debug.print("conformance: FAIL the x-elongated splat did not read wider than tall ({d} vs {d})\n", .{ eh.horiz, eh.vert });
+        return false;
+    }
+    if (!(ev.vert > ev.horiz + 8)) {
+        std.debug.print("conformance: FAIL the y-elongated splat did not read taller than wide ({d} vs {d})\n", .{ ev.vert, ev.horiz });
+        return false;
+    }
+    const crb = centerRgb(shot_rb, w, h);
+    const cbr = centerRgb(shot_br, w, h);
+    if (!(@as(i32, crb[0]) > @as(i32, crb[2]) + 20)) {
+        std.debug.print("conformance: FAIL the near red splat did not draw over the far blue one (r {d}, b {d})\n", .{ crb[0], crb[2] });
+        return false;
+    }
+    if (!(@as(i32, cbr[2]) > @as(i32, cbr[0]) + 20)) {
+        std.debug.print("conformance: FAIL swapping the depths did not swap which splat is on top (r {d}, b {d})\n", .{ cbr[0], cbr[2] });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a gaussian splat.cloud draws anisotropic sorted splats: the x-elongated covariance reads {d}x{d} and the y-elongated {d}x{d}, and a near red splat composites over a far blue one (r {d} > b {d}), swapping with the depth, bit-stable\n", .{ eh.horiz, eh.vert, ev.horiz, ev.vert, crb[0], crb[2] });
     return true;
 }
 
@@ -17057,6 +17266,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer splat mesh");
     if (!try proveMlInferSplatColored(gpa, engine)) return 1;
     watchHold("ml infer splat colored");
+    if (!try proveSplatGaussian(gpa, engine)) return 1;
+    watchHold("splat gaussian");
     if (!try proveMlInferSelfieAvatar(gpa, engine)) return 1;
     watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;

@@ -1017,6 +1017,15 @@ pub const Renderer = struct {
         _ = aspect_ratio;
     }
 
+    pub fn submitSplats(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = aspect_ratio;
+    }
+
     pub const HairMesh = struct {
         position_buffer: TextureHandle = .{},
         index_buffer: TextureHandle = .{},

@@ -1141,7 +1141,7 @@ pub const DiffusionField = struct {
     coherence: f32 = 0,
 };
 
-pub const SplatDraw = enum { points, mesh };
+pub const SplatDraw = enum { points, mesh, gaussian };
 
 /// Where a splat.cloud's model reads its input. `camera` lifts the live frame
 /// each tick; `selfie` runs once on a still submitted through the ABI, so a
@@ -1149,10 +1149,10 @@ pub const SplatDraw = enum { points, mesh };
 pub const SplatSource = enum { camera, selfie };
 
 pub const SplatField = struct {
-    /// A splat.cloud node lifts a frame into 3D with a bundled model whose output
-    /// is a flat xyz list. `source` picks the input (live camera or a submitted
-    /// selfie); `draw` the form (`points` billboards or a `mesh` grid surface);
-    /// `point` the size, r,g,b the color, `colored` a per-point color from rgb.
+    /// A splat.cloud node lifts a frame into 3D with a bundled model. `source`
+    /// picks the input (live camera or a submitted selfie); `draw` the form
+    /// (`points` billboards, `mesh` grid surface, or `gaussian` anisotropic sorted
+    /// splats, whose output adds scale, rotation, opacity, rgb); `point`, r,g,b color.
     model: []const u8,
     source: SplatSource = .camera,
     draw: SplatDraw = .points,
@@ -3812,7 +3812,7 @@ fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
     }
     if (getField(object, "draw")) |v| {
         if (try expectString(diags, path, v)) |name| {
-            if (std.mem.eql(u8, name, "points")) field.draw = .points else if (std.mem.eql(u8, name, "mesh")) field.draw = .mesh else try diags.add(path.slice(), "splat draw is 'points' or 'mesh', found '{s}'", .{name});
+            if (std.mem.eql(u8, name, "points")) field.draw = .points else if (std.mem.eql(u8, name, "mesh")) field.draw = .mesh else if (std.mem.eql(u8, name, "gaussian")) field.draw = .gaussian else try diags.add(path.slice(), "splat draw is 'points', 'mesh', or 'gaussian', found '{s}'", .{name});
         }
     }
     if (getField(object, "point")) |v| field.point = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.point)), 1, 64);
