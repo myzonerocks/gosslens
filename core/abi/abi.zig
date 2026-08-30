@@ -2182,6 +2182,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     r.tile = null;
     var ready_count: usize = 0;
     for (s.chain_order) |entry| {
+        // A node a hide or swap_subgraph action hid does not draw and is not
+        // counted, so the frame passes through it like any inactive pass.
+        if (s.active_lens) |*lens| {
+            if (lens.isNodeHidden(entry.graph_index)) continue;
+        }
         const ready = switch (entry.kind) {
             .shader => s.shader_programs.contains(entry.graph_index),
             .lut => s.lut_textures.contains(entry.graph_index),
@@ -2401,6 +2406,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     var drawn: usize = 0;
     var next_slot: usize = 1;
     for (s.chain_order) |entry| {
+        // Skip a node a hide/swap_subgraph action hid, matching the ready-count
+        // pass above so drawn stays in step with ready_count for is_final.
+        if (s.active_lens) |*lens| {
+            if (lens.isNodeHidden(entry.graph_index)) continue;
+        }
         switch (entry.kind) {
             .shader => {
                 const program_idx = s.shader_programs.get(entry.graph_index) orelse continue;

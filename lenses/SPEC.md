@@ -1271,13 +1271,13 @@ persists across ticks, so a no-code lens keeps a score or a step index with no
 script; `set_counter` writes `to`), and `haptic` (buzz the device: `target`
 names the style, one of light, medium, heavy, soft, rigid, success, warning,
 failure, and `to` is a 0..1 intensity hint the host drains through
-`goss_session_pull_haptic`). Reserved, accepted by the validator but not yet executed by the
-runtime: `show` / `hide` (a node by id) and `swap_subgraph` (splice a
-different set of this lens's own nodes in place of a named group -
-edit-time, deferred to the next frame boundary so it never tears a
-frame). A 1.0 runtime treats the reserved actions as no-ops; a lens
-must not depend on them until a spec revision moves them out of this
-paragraph.
+`goss_session_pull_haptic`). `show` / `hide` toggle a draw node's visibility by
+its id: a hidden node's pass is skipped in the composite chain so the frame
+passes through it, and `show` restores it. `swap_subgraph` switches between
+mutually exclusive variants named by their draw-node ids: it shows its target and
+hides whichever node the previous swap on this lens made active, so a trigger
+flips the lens between alternate draws. The change takes effect the tick the
+action fires.
 
 ### 6.3 Parameter animation
 

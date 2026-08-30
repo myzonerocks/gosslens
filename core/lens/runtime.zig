@@ -143,6 +143,9 @@ const effect_slot_count = 6;
 const LensNode = struct {
     graph_index: graph.NodeIndex,
     node_type: NodeType,
+    /// The lens-format node id, a slice into the retained manifest arena, so a
+    /// show/hide/swap_subgraph action can resolve its target to this draw node.
+    node_id: []const u8 = "",
     bindings: [effect_slot_count]?ParamSource = @splat(null),
     /// Set only for .shader_pass, .lut_pass, .blend_pass, and
     /// .model_gltf nodes: the node's own id, which also names the asset
@@ -792,6 +795,12 @@ pub const Lens = struct {
     param_values: []f32,
     ramps: []?animation.Ramp,
     nodes: []LensNode,
+    /// Per-node draw visibility, parallel to nodes: a hide action sets a node's
+    /// slot true so the composite chain skips its draw (the frame passes through),
+    /// show clears it, and swap_subgraph shows its target while hiding the node the
+    /// previous swap made active. swap_active tracks that last-shown node.
+    node_hidden: []bool,
+    swap_active: ?graph.NodeIndex = null,
     /// Every distinct timer('name') this lens's triggers reference,
     /// each name individually owned (not a slice into a compiled
     /// trigger's own arena, so freeing timer_names never depends on
@@ -842,6 +851,7 @@ pub const Lens = struct {
         self.gpa.free(self.param_values);
         self.gpa.free(self.ramps);
         self.gpa.free(self.nodes);
+        self.gpa.free(self.node_hidden);
         for (self.timer_names) |name| self.gpa.free(name);
         self.gpa.free(self.timer_names);
         self.gpa.free(self.timer_elapsed_us);
@@ -1764,6 +1774,34 @@ pub const Lens = struct {
         return null;
     }
 
+    /// Whether a draw node is currently hidden by a hide or swap_subgraph action,
+    /// read by the composite chain to skip its draw.
+    pub fn isNodeHidden(self: *const Lens, graph_index: graph.NodeIndex) bool {
+        for (self.nodes, self.node_hidden) |node, hidden| {
+            if (node.graph_index == graph_index) return hidden;
+        }
+        return false;
+    }
+
+    fn setHiddenByName(self: *Lens, name: []const u8, hidden: bool) void {
+        for (self.nodes, self.node_hidden) |node, *slot| {
+            if (std.mem.eql(u8, node.node_id, name)) slot.* = hidden;
+        }
+    }
+
+    fn setHiddenByIndex(self: *Lens, graph_index: graph.NodeIndex, hidden: bool) void {
+        for (self.nodes, self.node_hidden) |node, *slot| {
+            if (node.graph_index == graph_index) slot.* = hidden;
+        }
+    }
+
+    fn nodeIndexByName(self: *const Lens, name: []const u8) ?graph.NodeIndex {
+        for (self.nodes) |node| {
+            if (std.mem.eql(u8, node.node_id, name)) return node.graph_index;
+        }
+        return null;
+    }
+
     fn collectNodeEffects(self: *const Lens, gpa: std.mem.Allocator, out: *std.ArrayList(AppliedEffect), node: LensNode) !void {
         for (node.bindings, 0..) |binding, i| {
             const source = binding orelse continue;
@@ -1827,6 +1865,9 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         if (!isBehaviorNode(node.type)) composite_count += 1;
     }
     const nodes = try gpa.alloc(LensNode, composite_count);
+    const node_hidden = try gpa.alloc(bool, composite_count);
+    @memset(node_hidden, false);
+    errdefer gpa.free(node_hidden);
     errdefer gpa.free(nodes);
     var spliced_count: usize = 0;
     errdefer for (nodes[0..spliced_count]) |n| g.removeNode(n.graph_index);
@@ -1852,6 +1893,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         nodes[spliced_count] = .{
             .graph_index = graph_index,
             .node_type = node_type,
+            .node_id = node.id,
             .asset_stem = switch (node_type) {
                 .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .paint_face, .face_swap, .sprite_2d => node.id,
                 else => null,
@@ -2017,6 +2059,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .param_values = param_values,
         .ramps = ramps,
         .nodes = nodes,
+        .node_hidden = node_hidden,
         .timer_names = try timer_names.toOwnedSlice(gpa),
         .timer_elapsed_us = timer_elapsed_us,
         .tick_timer_values = tick_timer_values,
@@ -2181,9 +2224,9 @@ fn clampToParam(p: manifest.Parameter, value: f32) f32 {
 /// frame's trigger pass needs this frame's own elapsed time); ramps and
 /// model playback advance after, so an action that starts one this
 /// frame gets its first real advance now rather than sitting at its
-/// starting value until the next tick. show/hide/swap_subgraph are
-/// still not wired to anything (real remaining work, tracked
-/// separately from this lens's own scope).
+/// starting value until the next tick. show/hide toggle a draw node's
+/// visibility by id and swap_subgraph switches between mutually exclusive
+/// variants, all read by the composite chain to skip a hidden node's draw.
 pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const AppliedEffect {
     lens.elapsed_us +|= real_dt_us;
     for (lens.timer_elapsed_us) |*elapsed| elapsed.* += real_dt_us;
@@ -2302,7 +2345,16 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
                 lens.tick_haptic_count += 1;
             }
         },
-        .show, .hide, .swap_subgraph => {},
+        .show => lens.setHiddenByName(action.target, false),
+        .hide => lens.setHiddenByName(action.target, true),
+        .swap_subgraph => {
+            // Exclusive show: reveal the target and hide whichever node the last
+            // swap made active, so the action switches between mutually exclusive
+            // subgraph variants named by their draw-node ids.
+            if (lens.swap_active) |prev| lens.setHiddenByIndex(prev, true);
+            lens.setHiddenByName(action.target, false);
+            lens.swap_active = lens.nodeIndexByName(action.target);
+        },
     }
 }
 

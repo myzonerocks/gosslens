@@ -7200,6 +7200,104 @@ fn proveEventTrigger(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Renders the session over a fixed frame and captures the composite, so a proof
+/// can see a draw node's visibility change take effect.
+fn renderTriggerShot(gpa: std.mem.Allocator, engine: *abi.Engine, session: *abi.Session, planes: Nv12Copy, out_w: *u32, out_h: *u32) ![]u8 {
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const shot = try gpa.alloc(u8, @as(usize, 1024) * 1024 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves the show/hide/swap_subgraph trigger actions, which parsed and validated
+/// but were no-ops. A hide action skips a draw node's pass (the frame passes
+/// through), show restores it, and swap_subgraph switches between two mutually
+/// exclusive grade variants; each rendered result is asserted and bit-stable.
+fn proveShowHideSwap(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const dim: u32 = 320;
+    const red = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
+    defer gpa.free(red);
+    var i: usize = 0;
+    while (i < red.len) : (i += 4) {
+        red[i] = 220;
+        red[i + 1] = 20;
+        red[i + 2] = 20;
+        red[i + 3] = 255;
+    }
+    const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = red }, .width = dim, .height = dim });
+    defer planes.deinit(gpa);
+
+    const sh_manifest =
+        \\{"glf":"1.0","id":"goss.reference.showhide","version":"1.0.0","display_name":"ShowHide","engine_compat":">=0.5","capabilities":[],"parameters":[],
+        \\ "nodes":[{"id":"g","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"invert":1.0}}],
+        \\ "triggers":[{"when":"event('hide')","action":{"kind":"hide","target":"g"}},{"when":"event('show')","action":{"kind":"show","target":"g"}}]}
+    ;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens(session, sh_manifest.ptr, sh_manifest.len) != .ok) return error.ShowHideActivation;
+    var sig = std.mem.zeroes(abi.LensSignals);
+    var w: u32 = 0;
+    var h: u32 = 0;
+
+    const shown = try renderTriggerShot(gpa, engine, session, planes, &w, &h);
+    defer gpa.free(shown);
+    _ = abi.goss_session_fire_event(session, "hide", "hide".len);
+    _ = abi.goss_session_tick_lens(session, 16000, &sig);
+    const hidden = try renderTriggerShot(gpa, engine, session, planes, &w, &h);
+    defer gpa.free(hidden);
+    _ = abi.goss_session_fire_event(session, "show", "show".len);
+    _ = abi.goss_session_tick_lens(session, 16000, &sig);
+    const shown2 = try renderTriggerShot(gpa, engine, session, planes, &w, &h);
+    defer gpa.free(shown2);
+
+    const n = @as(usize, w) * h * 4;
+    // The graded (inverted) frame differs from the raw frame the hidden node lets
+    // through, and showing it again restores the exact graded frame, bit-stable.
+    if (countDiff(shown[0..n], hidden[0..n]) == 0) {
+        std.debug.print("conformance: FAIL hide did not skip the grade pass (frame unchanged)\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shown[0..n], shown2[0..n])) {
+        std.debug.print("conformance: FAIL show did not restore the grade pass identically\n", .{});
+        return false;
+    }
+
+    const sw_manifest =
+        \\{"glf":"1.0","id":"goss.reference.swapsg","version":"1.0.0","display_name":"Swap","engine_compat":">=0.5","capabilities":[],"parameters":[],
+        \\ "nodes":[{"id":"a","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"invert":1.0}},{"id":"b","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"grayscale":1.0}}],
+        \\ "triggers":[{"when":"event('swapa')","action":{"kind":"swap_subgraph","target":"a"}},{"when":"event('swapb')","action":{"kind":"swap_subgraph","target":"b"}}]}
+    ;
+    const sess2 = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(sess2);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens(sess2, sw_manifest.ptr, sw_manifest.len) != .ok) return error.SwapActivation;
+    _ = abi.goss_session_fire_event(sess2, "swapb", "swapb".len);
+    _ = abi.goss_session_tick_lens(sess2, 16000, &sig);
+    const only_b = try renderTriggerShot(gpa, engine, sess2, planes, &w, &h);
+    defer gpa.free(only_b);
+    _ = abi.goss_session_fire_event(sess2, "swapa", "swapa".len);
+    _ = abi.goss_session_tick_lens(sess2, 16000, &sig);
+    const only_a = try renderTriggerShot(gpa, engine, sess2, planes, &w, &h);
+    defer gpa.free(only_a);
+
+    // Swapping to a (invert) then to b (grayscale) shows mutually exclusive
+    // variants, so the two rendered frames differ.
+    if (countDiff(only_a[0..n], only_b[0..n]) == 0) {
+        std.debug.print("conformance: FAIL swap_subgraph did not switch between the variants\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF show/hide/swap_subgraph drive draw-node visibility: hide skips a pass (frame diff {d}), show restores it bit-identically, and swap_subgraph switches exclusive variants (diff {d})\n", .{ countDiff(shown[0..n], hidden[0..n]), countDiff(only_a[0..n], only_b[0..n]) });
+    return true;
+}
+
 /// Proves a trigger volume through the public ABI: a lens with a device.in_volume
 /// trigger and a manifest volume leaves its parameter at default while the
 /// submitted world pose sits outside the region and fires the action once the
@@ -17588,6 +17686,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("camera controls");
     if (!try proveEventTrigger(gpa, engine)) return 1;
     watchHold("event trigger");
+    if (!try proveShowHideSwap(gpa, engine)) return 1;
+    watchHold("show hide swap");
     if (!try proveVolumeTrigger(gpa, engine)) return 1;
     watchHold("volume trigger");
     if (!try proveLayoutComposite(gpa, engine)) return 1;
