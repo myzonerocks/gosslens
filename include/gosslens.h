@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 68u
+#define GOSS_ABI_MINOR 69u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -373,6 +373,13 @@ typedef struct goss_capture_guidance {
  * estimate, once per platform frame. Drives the world.tracking_state
  * trigger signal and world-anchored lens content. */
 goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light);
+
+/* Raycasts a normalized screen point (0..1, origin top-left) against the
+ * tracked ground plane and writes the world hit position into out_position
+ * (three floats). Returns goss_again until world tracking is in its tracked
+ * state and the ray meets the plane, so a tap-to-place lens polls it and
+ * places an anchor at the hit. */
+goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position);
 
 typedef struct goss_capture_config {
   uint32_t width;       /* 0 = the submitted frame's own resolution */

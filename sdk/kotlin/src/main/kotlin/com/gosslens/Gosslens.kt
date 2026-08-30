@@ -122,6 +122,7 @@ object Gosslens {
     internal external fun nativeDeactivateLens(session: Long)
     internal external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
     internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativeHitTest(session: Long, screenX: Float, screenY: Float, outBuffer: ByteBuffer): Int
     internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
@@ -1276,6 +1277,16 @@ class GossSession private constructor(
         val nameBuf = ByteBuffer.allocateDirect(nameBytes.size).apply { put(nameBytes); rewind() }
         val outBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
         return if (Gosslens.nativeParameterValue(handle, nameBuf, nameBytes.size, outBuf) == 0) outBuf.getFloat(0) else null
+    }
+
+    /** Raycasts a normalized screen point (0..1, origin top-left) against the
+     * tracked ground plane, returning the world hit position as [x, y, z], or
+     * null until world tracking is live and the ray meets the plane. A
+     * tap-to-place lens polls this and drops an anchor at the hit. */
+    fun hitTest(screenX: Float, screenY: Float): FloatArray? {
+        val outBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
+        return if (Gosslens.nativeHitTest(handle, screenX, screenY, outBuf) == 0)
+            floatArrayOf(outBuf.getFloat(0), outBuf.getFloat(4), outBuf.getFloat(8)) else null
     }
 
     /** Pulls the next block of mixed lens audio into a direct [out] buffer

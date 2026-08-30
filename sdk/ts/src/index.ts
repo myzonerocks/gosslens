@@ -958,6 +958,19 @@ export class GossSession {
     return value;
   }
 
+  /// Raycasts a normalized screen point (0..1, origin top-left) against the
+  /// tracked ground plane, returning the world hit position [x, y, z], or null
+  /// until world tracking is live and the ray meets the plane. A tap-to-place
+  /// lens polls this and drops an anchor at the hit.
+  hitTest(x: number, y: number): [number, number, number] | null {
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]);
+    const status = this.mod.ccall("goss_session_hit_test", "number", ["number", "number", "number", "number"], [this.handle, x, y, outPtr]);
+    const w = outPtr >> 2;
+    const hit: [number, number, number] | null = status === 0 ? [this.mod.HEAPF32[w]!, this.mod.HEAPF32[w + 1]!, this.mod.HEAPF32[w + 2]!] : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 12]);
+    return hit;
+  }
+
   /// Feeds interleaved f32 PCM into the session's own level and beat
   /// analysis, which drives the audio.level and audio.beat lens triggers.
   /// samples holds frameCount * channels floats; timestampUs is carried for a

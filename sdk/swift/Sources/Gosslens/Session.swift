@@ -155,6 +155,20 @@ public final class GossSession: @unchecked Sendable {
         try checked(goss_session_set_pose_upper_body(handle, enabled ? 1 : 0))
     }
 
+    /// Raycasts a normalized screen point (0..1, origin top-left) against the
+    /// tracked ground plane, returning the world hit position. Nil until world
+    /// tracking is live and the ray meets the plane, so a tap-to-place lens
+    /// polls it and drops an anchor at the hit.
+    public func hitTest(screenX: Float, screenY: Float) -> SIMD3<Float>? {
+        var out = SIMD3<Float>(0, 0, 0)
+        let ok = withUnsafeMutablePointer(to: &out) { p in
+            p.withMemoryRebound(to: Float.self, capacity: 3) { fp in
+                goss_session_hit_test(handle, screenX, screenY, fp) == GOSS_OK
+            }
+        }
+        return ok ? out : nil
+    }
+
     /// Stands the segmentation worker up from a raw selfie or hair segmenter
     /// .tflite model (not bundled the way a face_landmarker.task is). The
     /// bytes are copied; the caller may release them on return. Throws

@@ -841,6 +841,13 @@ export fn Java_com_gosslens_Gosslens_nativeParameterValue(env: *JniEnv, cls: job
     return @intFromEnum(abi.goss_session_parameter_value(sessionFromHandle(session), name, @intCast(name_len), out));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeHitTest(env: *JniEnv, cls: jobject, session: i64, screen_x: f32, screen_y: f32, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: *[3]f32 = @ptrCast(@alignCast(out_bytes));
+    return @intFromEnum(abi.goss_session_hit_test(sessionFromHandle(session), screen_x, screen_y, out));
+}
+
 export fn Java_com_gosslens_Gosslens_nativePullAudio(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, frames: i32) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

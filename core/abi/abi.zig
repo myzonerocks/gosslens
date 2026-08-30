@@ -125,6 +125,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_recording_stop(goss_engine *engine)",
     "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
     "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
+    "goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position)",
     "goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_session *session, uint64_t native_handle, uint32_t width, uint32_t height)",
@@ -1410,6 +1411,30 @@ fn lightParams(light: manifest.Light) [16]f32 {
 /// emissive color and metallic factor, then the roughness.
 fn materialParams(loaded: LoadedModel) [8]f32 {
     return .{ loaded.emissive[0], loaded.emissive[1], loaded.emissive[2], loaded.metallic, loaded.roughness, 0, 0, 0 };
+}
+
+/// Maps a 0..1 screen point to the world point where its camera ray meets the
+/// ground plane y=0, given the tracked projection and camera pose - the hit
+/// test a tap-to-place lens raycasts with. Null when the projection is
+/// singular, the ray runs parallel to the plane, or the hit is behind the eye.
+fn unprojectToPlane(projection: math.Mat4, world_from_camera: math.Mat4, sx: f32, sy: f32) ?[3]f32 {
+    const inv_proj = math.Mat4.inverse(projection) orelse return null;
+    const ndc_x = sx * 2.0 - 1.0;
+    const ndc_y = 1.0 - sy * 2.0;
+    // Two clip-space points down the ray (near z=0, far z=1 in zero-to-one depth).
+    const near_c = inv_proj.mulVec(.{ ndc_x, ndc_y, 0.0, 1.0 });
+    const far_c = inv_proj.mulVec(.{ ndc_x, ndc_y, 1.0, 1.0 });
+    if (near_c[3] == 0 or far_c[3] == 0) return null;
+    const near_cam = math.vec.vec3From4(near_c) / @as(math.Vec3, @splat(near_c[3]));
+    const far_cam = math.vec.vec3From4(far_c) / @as(math.Vec3, @splat(far_c[3]));
+    const near_w = world_from_camera.mulPoint(near_cam);
+    const far_w = world_from_camera.mulPoint(far_cam);
+    const dir = far_w - near_w;
+    if (@abs(dir[1]) < 1e-6) return null;
+    const dist = -near_w[1] / dir[1];
+    if (dist < 0) return null;
+    const hit = near_w + @as(math.Vec3, @splat(dist)) * dir;
+    return .{ hit[0], hit[1], hit[2] };
 }
 
 /// The world position a navigation path reaches at elapsed_seconds: the path is
@@ -5359,6 +5384,21 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
     s.world.dropped_anchors +|= @intCast(anchor_count -| max_world_anchors);
     if (light) |l| s.world.light = l.*;
     s.world_engine_fed = true;
+    return .ok;
+}
+
+/// Raycasts a normalized screen point (0..1, origin top-left) against the
+/// tracked ground plane and writes the world hit position into out_position.
+/// `.again` until world tracking is in its tracked state and the ray meets the
+/// plane, so a tap-to-place lens can poll it and place an anchor at the hit.
+pub export fn goss_session_hit_test(session: ?*Session, screen_x: f32, screen_y: f32, out_position: ?*[3]f32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_position orelse return .invalid_argument;
+    if (!s.world_engine_fed or s.world.state.tracking_state != 2) return .again;
+    const projection: math.Mat4 = .{ .cols = @bitCast(s.world.state.projection) };
+    const world_from_camera: math.Mat4 = .{ .cols = @bitCast(s.world.state.world_from_camera) };
+    const hit = unprojectToPlane(projection, world_from_camera, screen_x, screen_y) orelse return .again;
+    out.* = hit;
     return .ok;
 }
 
@@ -13068,6 +13108,26 @@ test "pathPosition walks its waypoints over time and loops" {
     const held = pathPosition(.{ .points = &one, .duration = 1, .loop = true }, 7.3);
     try t.expectApproxEqAbs(@as(f32, 3), held[0], 0.001);
     try t.expectApproxEqAbs(@as(f32, 5), held[2], 0.001);
+}
+
+test "unprojectToPlane raycasts a screen point onto the ground plane" {
+    // A camera one unit up looking straight down at the ground.
+    const eye: math.Vec3 = .{ 0, 1, 0 };
+    const view = math.Mat4.lookAt(eye, .{ 0, 0, 0 }, .{ 0, 0, -1 });
+    const world_from_camera = view.inverseRigid();
+    const proj = math.Mat4.perspective(math.scalar.radians(60.0), 1.0, 0.05, 100.0, .zero_to_one);
+
+    // The center ray lands directly under the camera, at the origin.
+    const center = unprojectToPlane(proj, world_from_camera, 0.5, 0.5) orelse return error.NoHit;
+    try t.expectApproxEqAbs(@as(f32, 0), center[0], 0.01);
+    try t.expectApproxEqAbs(@as(f32, 0), center[1], 0.01);
+    try t.expectApproxEqAbs(@as(f32, 0), center[2], 0.01);
+
+    // An off-center ray lands away from the point under the camera but still on
+    // the ground plane (y stays zero).
+    const off = unprojectToPlane(proj, world_from_camera, 0.85, 0.5) orelse return error.NoHit;
+    try t.expect(@abs(off[0]) > 0.05 or @abs(off[2]) > 0.05);
+    try t.expectApproxEqAbs(@as(f32, 0), off[1], 0.01);
 }
 
 test "buildMorphBlendshapeTable maps ARKit names to blendshape indices" {
