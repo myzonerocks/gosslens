@@ -1980,6 +1980,87 @@ const OnnxPb = struct {
     }
 };
 
+/// A synthetic audio model: Add(x, x) over a [1, N] window, doubling every
+/// sample, so the output's first element is twice the newest window sample.
+fn buildOnnxAudioProbe(a: std.mem.Allocator, n: i64) []const u8 {
+    const add = onnxNode(a, "Add", &.{ "x", "x" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, add);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, n }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, n }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes an audio.infer lens: a bounded window model driving the `level`
+/// parameter from the microphone, plus the model asset.
+fn writeAudioLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.audio-infer","version":"1.0.0","display_name":"BYO Audio","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"level","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[{"tensor":0,"index":0,"param":"level"}]}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates the audio lens, submits blocks of constant-amplitude audio while
+/// ticking, and reports the `level` parameter once the worker has run over the
+/// ring window (the default sentinel flips to a real value).
+fn runAudioLevel(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, amp: f32) !f32 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, amp);
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var value: f32 = -999.0;
+    var polls: usize = 0;
+    while (value == -999.0) {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + polls * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "level", "level".len, &value);
+        polls += 1;
+        if (polls > 100000) return error.AudioInferTimedOut;
+    }
+    return value;
+}
+
+/// Proves the audio.infer core: a bounded window model runs over the microphone
+/// ring and drives a lens parameter. A doubling net reads about twice the
+/// amplitude of a constant tone and near zero on silence, so it sees real audio.
+fn proveAudioInfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxAudioProbe(arena.allocator(), 256);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-infer/assets");
+    try writeAudioLens("zig-out/audio-infer", model);
+
+    const loud = try runAudioLevel(gpa, engine, "zig-out/audio-infer", 0.3);
+    const quiet = try runAudioLevel(gpa, engine, "zig-out/audio-infer", 0.0);
+    if (!(loud > 0.4 and loud < 0.8)) {
+        std.debug.print("conformance: FAIL audio.infer did not read about twice a 0.3 tone (level {d})\n", .{loud});
+        return false;
+    }
+    if (!(quiet > -0.05 and quiet < 0.05)) {
+        std.debug.print("conformance: FAIL audio.infer did not read near zero on silence (level {d})\n", .{quiet});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.infer node runs a bounded model over the microphone window and drives a parameter: a doubling net reads about twice a 0.3 tone ({d:.3}) and near zero on silence ({d:.3})\n", .{ loud, quiet });
+    return true;
+}
+
 /// Emits an ONNX net that sums the three input channels (a 1x1 conv with unit
 /// weights) then averages the plane, so its one output is the frame's mean
 /// brightness. NCHW input [1,3,8,8] exercises the core's channel transpose.
@@ -14978,6 +15059,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("color managed capture");
     if (!try proveMlInfer(gpa, engine)) return 1;
     watchHold("ml infer");
+    if (!try proveAudioInfer(gpa, engine)) return 1;
+    watchHold("audio infer");
     if (!try proveMlInferOnnx(gpa, engine)) return 1;
     watchHold("ml infer onnx");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;

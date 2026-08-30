@@ -644,6 +644,19 @@ pub const Session = struct {
     /// each holding its output-to-parameter bindings; built from the bundle at
     /// activation, fed the camera frame, read into params each tick.
     ml_workers: std.ArrayListUnmanaged(MlWorker) = .empty,
+    /// The audio inference workers an active lens's audio.infer nodes drive, each
+    /// holding its output-to-parameter bindings; built at activation, fed a
+    /// window of the microphone ring, read into params each tick.
+    audio_workers: std.ArrayListUnmanaged(AudioWorker) = .empty,
+    /// A ring of the latest mono microphone samples, written each submit_audio,
+    /// so an audio.infer worker reads a window without retaining the whole stream.
+    audio_ring: [audio_ring_len]f32 = @splat(0),
+    audio_ring_pos: usize = 0,
+    audio_ring_filled: bool = false,
+    /// Scratch the tick copies a worker's window into, in chronological order,
+    /// before handing it to the inference core. Allocated when the first audio
+    /// worker loads, sized to the ring.
+    audio_window: []f32 = &.{},
     /// The diffusion restyle workers an active lens's diffusion nodes drive,
     /// each drawing its decoded frame through a sprite; built from the bundle at
     /// activation, fed the camera frame, uploaded to their sprite each render.
@@ -4067,6 +4080,9 @@ pub fn destroySession(session: *Session) void {
     session.scene_worker = null;
     destroyMlWorkers(session);
     session.ml_workers.deinit(session.engine.gpa);
+    destroyAudioWorkers(session);
+    session.audio_workers.deinit(session.engine.gpa);
+    if (session.audio_window.len > 0) session.engine.gpa.free(session.audio_window);
     destroyDiffusionWorkers(session);
     session.diffusion_workers.deinit(session.engine.gpa);
     destroySplatWorkers(session);
@@ -4876,6 +4892,21 @@ pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f
     const slice = data[0 .. @as(usize, frame_count) * channels];
     s.audio.feed(slice, channels);
     s.audio_engine_fed = true;
+
+    // Downmix each frame to mono and write it into the microphone ring, so an
+    // audio.infer worker reads a window of the latest samples off the frame path.
+    var fi: usize = 0;
+    while (fi < frame_count) : (fi += 1) {
+        var mono: f32 = 0;
+        for (0..channels) |ch| mono += slice[fi * channels + ch];
+        mono /= @floatFromInt(channels);
+        s.audio_ring[s.audio_ring_pos] = mono;
+        s.audio_ring_pos += 1;
+        if (s.audio_ring_pos >= audio_ring_len) {
+            s.audio_ring_pos = 0;
+            s.audio_ring_filled = true;
+        }
+    }
 
     const e = s.engine;
     if (e.recording != null and e.recording_session == s) {
@@ -6272,7 +6303,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.diffusion_workers.items.len == 0 and s.splat_workers.items.len == 0) return .again;
+    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.audio_workers.items.len == 0 and s.diffusion_workers.items.len == 0 and s.splat_workers.items.len == 0) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -7897,6 +7928,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyMeshFaceState(session);
     destroyModelState(session);
     destroyMlWorkers(session);
+    destroyAudioWorkers(session);
     destroyDiffusionWorkers(session);
     destroySplatWorkers(session);
     destroyChainOrder(session);
@@ -9487,6 +9519,17 @@ fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     };
 }
 
+/// One second of mono audio at 48 kHz, the largest window an audio.infer model
+/// may read from the ring.
+const audio_ring_len: usize = 48000;
+
+/// One audio.infer worker ready to run: its synchronous inference core and the
+/// output-to-parameter bindings it drives each tick.
+const AudioWorker = struct {
+    worker: *ml_infer.AudioInfer,
+    outputs: []const manifest.MlOutput,
+};
+
 const MlWorker = struct {
     worker: *ml_infer.MlInfer,
     outputs: []const manifest.MlOutput,
@@ -9660,6 +9703,80 @@ fn pollMlOutputs(session: *Session) void {
             lens.setParam(out.param, value);
         }
     }
+}
+
+/// Builds an audio inference worker for every audio.infer node from its bundled
+/// model, holding the node's output-to-parameter bindings. Best-effort per node,
+/// and counted against the shared heavy-worker budget so the mic rail cannot
+/// oversubscribe the device either.
+fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const io = defaultIo();
+    for (lens.manifest.nodes) |node| {
+        const audio = node.audio orelse continue;
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: audio.infer node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, audio.model }) catch continue;
+        defer gpa.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        defer gpa.free(bytes);
+        const worker = ml_infer.audioCreate(gpa, bytes, .{}, 2) catch continue;
+        session.audio_workers.append(gpa, .{ .worker = worker, .outputs = audio.outputs }) catch {
+            ml_infer.audioDestroy(worker);
+            continue;
+        };
+        session.ml_workers_loaded += 1;
+        // The tick reads windows into one scratch, sized once to the ring.
+        if (session.audio_window.len == 0) {
+            session.audio_window = gpa.alloc(f32, audio_ring_len) catch &.{};
+        }
+    }
+}
+
+/// Copies the newest `out.len` samples of the microphone ring into `out` in
+/// chronological order (oldest first), zero-padding the front when the ring has
+/// not filled that far yet.
+fn readAudioWindow(session: *const Session, out: []f32) void {
+    const n = out.len;
+    const available = if (session.audio_ring_filled) audio_ring_len else session.audio_ring_pos;
+    for (0..n) |k| {
+        const from_end = n - k; // 1 is the newest sample, n the oldest of the window
+        if (from_end > available) {
+            out[k] = 0;
+            continue;
+        }
+        const idx = (session.audio_ring_pos + audio_ring_len - from_end) % audio_ring_len;
+        out[k] = session.audio_ring[idx];
+    }
+}
+
+/// Runs each audio.infer worker over the latest microphone window and reads its
+/// outputs into the parameters it binds, so the model drives the lens from the
+/// mic the way pollMlOutputs drives it from the camera.
+fn pollAudioInfer(session: *Session) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    for (session.audio_workers.items) |aw| {
+        const window_len = ml_infer.audioInputLen(aw.worker);
+        if (window_len == 0 or window_len > session.audio_window.len) continue;
+        const window = session.audio_window[0..window_len];
+        readAudioWindow(session, window);
+        if (!ml_infer.audioCompute(aw.worker, window)) continue;
+        for (aw.outputs) |out| {
+            const value: f32 = switch (out.reduce) {
+                .element => ml_infer.audioReadOutput(aw.worker, out.tensor, out.index),
+                .argmax => @floatFromInt(ml_infer.audioArgmax(aw.worker, out.tensor)),
+            };
+            lens.setParam(out.param, value);
+        }
+    }
+}
+
+/// Destroys every audio.infer worker and clears the list, at lens deactivation.
+fn destroyAudioWorkers(session: *Session) void {
+    for (session.audio_workers.items) |aw| ml_infer.audioDestroy(aw.worker);
+    session.audio_workers.clearRetainingCapacity();
 }
 
 /// Uploads each ml.infer mask binding's output as its channel's mask texture,
@@ -10493,6 +10610,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     // device and overheat; the count resets before this lens's loaders run.
     session.ml_workers_loaded = 0;
     createMlLoaders(session, gpa, bundle_path);
+    createAudioLoaders(session, gpa, bundle_path);
     createDiffusionLoaders(session, gpa, bundle_path);
     createSplatLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
@@ -10551,6 +10669,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyMeshFaceState(s);
     destroyModelState(s);
     destroyMlWorkers(s);
+    destroyAudioWorkers(s);
     destroyDiffusionWorkers(s);
     destroySplatWorkers(s);
     destroyChainOrder(s);
@@ -11517,6 +11636,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     // Each model's latest inference lands in its bound parameters first, so a
     // script may read or override it and the effects see this tick's result.
     pollMlOutputs(s);
+    pollAudioInfer(s);
     // The script drives parameters before triggers and ramps read them, so
     // its writes flow into this tick's effects.
     runScript(s, &live_signals);

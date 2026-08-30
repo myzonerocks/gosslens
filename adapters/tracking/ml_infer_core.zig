@@ -326,3 +326,139 @@ pub const Core = struct {
     }
 };
 
+/// A synchronous audio inference core: loads a bounded author model whose single
+/// input is a 1-D window of PCM samples, writes a window in, invokes, and reads
+/// scalar outputs, driving a lens parameter from the microphone. Sandboxed like
+/// the frame core; run directly at tick since an audio window is small.
+pub const AudioCore = struct {
+    gpa: std.mem.Allocator,
+    model_bytes: []u8,
+    engine: ml_engine.Engine,
+    input_len: usize,
+    input_scratch: []f32,
+    output_count: u32,
+    outputs: [max_outputs][]f32,
+    published: bool = false,
+
+    /// The largest window a bounded audio model may take, so a hostile shape
+    /// never allocates an unbounded buffer.
+    const max_input_len: usize = 1 << 20;
+
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*AudioCore {
+        const self = gpa.create(AudioCore) catch return error.OutOfMemory;
+        errdefer gpa.destroy(self);
+        if (model_bytes.len > bounds.max_model_bytes) return error.ModelRejected;
+        const owned = gpa.dupe(u8, model_bytes) catch return error.OutOfMemory;
+        errdefer gpa.free(owned);
+        var engine = ml_engine.Engine.init(gpa, owned, threads) catch return error.InvalidModel;
+        errdefer engine.deinit();
+        const in_count = engine.inputCount();
+        const out_count = engine.outputCount();
+        if (in_count != 1) return error.InvalidModel;
+        if (out_count == 0 or out_count > max_outputs) return error.InvalidModel;
+        var dims_buf: [8]i32 = undefined;
+        const in_dims = engine.inputDims(0, &dims_buf) catch return error.InvalidModel;
+        var in_len: usize = 1;
+        for (in_dims) |d| {
+            if (d <= 0) return error.InvalidModel;
+            in_len *= @intCast(d);
+        }
+        if (in_len == 0 or in_len > max_input_len) return error.InvalidModel;
+        const scratch = gpa.alloc(f32, in_len) catch return error.OutOfMemory;
+        errdefer gpa.free(scratch);
+        @memset(scratch, 0);
+        // A warm-up over silence discovers every output length and validates the
+        // ops resolve, so a broken model is rejected at load, not at the mic.
+        engine.writeInput(0, std.mem.sliceAsBytes(scratch)) catch return error.InvalidModel;
+        engine.invoke() catch return error.InvalidModel;
+        var output_lens: [max_outputs]usize = @splat(0);
+        var largest: u64 = @as(u64, in_len) * @sizeOf(f32);
+        for (0..out_count) |i| {
+            const floats = engine.outputFloats(i) catch return error.InvalidModel;
+            output_lens[i] = floats.len;
+            largest = @max(largest, floats.len * @sizeOf(f32));
+        }
+        if (!bounds.admits(owned.len, in_count + out_count, largest)) return error.ModelRejected;
+        var outputs: [max_outputs][]f32 = @splat(&.{});
+        var built: usize = 0;
+        errdefer for (outputs[0..built]) |buf| gpa.free(buf);
+        for (0..out_count) |i| {
+            outputs[i] = gpa.alloc(f32, output_lens[i]) catch return error.OutOfMemory;
+            @memset(outputs[i], 0);
+            built += 1;
+        }
+        self.* = .{
+            .gpa = gpa,
+            .model_bytes = owned,
+            .engine = engine,
+            .input_len = in_len,
+            .input_scratch = scratch,
+            .output_count = @intCast(out_count),
+            .outputs = outputs,
+        };
+        return self;
+    }
+
+    pub fn deinit(self: *AudioCore) void {
+        const gpa = self.gpa;
+        for (self.outputs[0..self.output_count]) |buf| gpa.free(buf);
+        self.engine.deinit();
+        gpa.free(self.input_scratch);
+        gpa.free(self.model_bytes);
+        gpa.destroy(self);
+    }
+
+    /// Writes a window of PCM into the model input (padded or truncated to its
+    /// length), invokes, and copies the outputs into owned buffers. False on a
+    /// backend error, leaving the last published outputs intact.
+    pub fn compute(self: *AudioCore, window: []const f32) bool {
+        const n = @min(window.len, self.input_len);
+        @memcpy(self.input_scratch[0..n], window[0..n]);
+        if (n < self.input_len) @memset(self.input_scratch[n..], 0);
+        self.engine.writeInput(0, std.mem.sliceAsBytes(self.input_scratch)) catch return false;
+        self.engine.invoke() catch return false;
+        for (0..self.output_count) |i| {
+            const floats = self.engine.outputFloats(i) catch return false;
+            const m = @min(floats.len, self.outputs[i].len);
+            @memcpy(self.outputs[i][0..m], floats[0..m]);
+        }
+        self.published = true;
+        return true;
+    }
+
+    pub fn readOutput(self: *const AudioCore, tensor: u32, index: u32) f32 {
+        if (tensor >= self.output_count) return 0;
+        const buf = self.outputs[tensor];
+        if (index >= buf.len) return 0;
+        const v = buf[index];
+        return if (v == v) v else 0;
+    }
+
+    pub fn argmaxOutput(self: *const AudioCore, tensor: u32) u32 {
+        if (tensor >= self.output_count) return 0;
+        const buf = self.outputs[tensor];
+        var best: u32 = 0;
+        var best_v: f32 = -std.math.inf(f32);
+        for (buf, 0..) |v, i| {
+            if (v == v and v > best_v) {
+                best_v = v;
+                best = @intCast(i);
+            }
+        }
+        return best;
+    }
+
+    pub fn outputLen(self: *const AudioCore, tensor: u32) usize {
+        if (tensor >= self.output_count) return 0;
+        return self.outputs[tensor].len;
+    }
+
+    pub fn hasPublished(self: *const AudioCore) bool {
+        return self.published;
+    }
+
+    pub fn inputLen(self: *const AudioCore) usize {
+        return self.input_len;
+    }
+};
+

@@ -929,6 +929,15 @@ writes a detected box's coordinates or a keypoint's position into parameters,
 and a sprite's placement parameters (or a shader) read them to follow the
 found object.
 
+An `"audio.infer"` node is the microphone sibling of `ml.infer`: it runs a
+bundled model whose one input is a window of the latest microphone samples
+(mono, drawn from a ring the engine fills as audio arrives) and binds the model's
+scalar outputs into parameters through the same `"outputs"` array. It carries an
+`"audio"` block, `{"model", "outputs"}`, draws nothing, and drives the lens from
+sound the way `ml.infer` drives it from the camera - an audio-reactive parameter,
+a viseme for a talking avatar, a caption. It is bounded and sandboxed like every
+author model, and it counts against the same per-session heavy-worker budget.
+
 An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
 that binds a whole output tensor as a segmentation mask. The tensor is read as
 a square single-channel image, resampled to the engine's mask resolution, and
@@ -1297,8 +1306,10 @@ animation), hair-recolor (segmentation; the hair mask channel), face-paint
 `"anchor": "face"`). world-anchor (world) is proven separately on the
 deterministic replay camera track. The byo-ml path is proven in the same
 harness: an `ml.infer` node runs a bundled TFLite segmenter and a bundled ONNX
-net, each driving a lens parameter from the frame; an author ONNX segmenter's
-output reaches the subject mask channel; an `argmax` reduce reads a
+net, each driving a lens parameter from the frame; an audio.infer node runs a
+bounded model over the microphone window and drives a parameter, a doubling net
+reading about twice a constant tone and near zero on silence; an author ONNX
+segmenter's output reaches the subject mask channel; an `argmax` reduce reads a
 classifier's predicted class into a parameter; a model output moves a sprite
 through its placement parameters; a restyle net's output image draws through a
 sprite; a super-resolution net whose output is a larger square than its input

@@ -967,6 +967,14 @@ pub const MlField = struct {
     temporal: bool = false,
 };
 
+/// An audio.infer node: a bounded author model whose one input is a window of
+/// microphone PCM, and the scalar output bindings it drives into parameters,
+/// the way an ml.infer node drives parameters from the camera frame.
+pub const AudioField = struct {
+    model: []const u8,
+    outputs: []const MlOutput,
+};
+
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
 /// VAE encoder, a UNet, a VAE decoder), an optional precomputed text embedding
 /// the UNet conditions on, the sprite the restyled frame draws through, and the
@@ -1035,6 +1043,8 @@ pub const Node = struct {
     logic_graph: ?LogicGraphSpec = null,
     /// Set on an ml.infer node: the bring-your-own model slot.
     ml: ?MlField = null,
+    /// Set on an audio.infer node: the microphone model slot.
+    audio: ?AudioField = null,
     diffusion: ?DiffusionField = null,
     /// Set on a splat.cloud node: the model that lifts the frame to a point cloud.
     splat: ?SplatField = null,
@@ -1778,6 +1788,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var model_control: ?ModelControl = null;
         var logic_graph_spec: ?LogicGraphSpec = null;
         var ml_field: ?MlField = null;
+        var audio_field: ?AudioField = null;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
         var particle_field: ?ParticleField = null;
@@ -3268,6 +3279,17 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(ml_mark);
         }
+        if (getField(object, "audio")) |av| {
+            const audio_mark = path.push("audio");
+            if (!std.mem.eql(u8, node_type, "audio.infer")) {
+                try diags.add(path.slice(), "audio is an audio.infer field, found it on '{s}'", .{node_type});
+            } else if (av != .object) {
+                try diags.add(path.slice(), "audio must be an object", .{});
+            } else {
+                audio_field = try parseAudioField(diags, path, arena, av.object);
+            }
+            path.pop(audio_mark);
+        }
         var diffusion_field: ?DiffusionField = null;
         if (getField(object, "diffusion")) |dv| {
             const diff_mark = path.push("diffusion");
@@ -3336,6 +3358,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .control = model_control,
             .logic_graph = logic_graph_spec,
             .ml = ml_field,
+            .audio = audio_field,
             .diffusion = diffusion_field,
             .splat = splat_field,
             .body_anchor = body_anchor,
@@ -3503,20 +3526,10 @@ fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
     return field;
 }
 
-fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?MlField {
-    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
-    if (model.len == 0) {
-        try diags.add(path.slice(), "ml needs a model file", .{});
-        return null;
-    }
-    var input_width: u32 = 0;
-    var input_height: u32 = 0;
-    if (getField(object, "input_width")) |v| {
-        if (v == .integer and v.integer >= 0) input_width = @intCast(v.integer);
-    }
-    if (getField(object, "input_height")) |v| {
-        if (v == .integer and v.integer >= 0) input_height = @intCast(v.integer);
-    }
+/// Parses an ml or audio node's `outputs` array: each entry binds a scalar - an
+/// element at an index, or the argmax over the tensor - of a model output to a
+/// named parameter.
+fn parseMlOutputs(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}![]const MlOutput {
     var outputs: std.ArrayList(MlOutput) = .empty;
     if (getField(object, "outputs")) |ov| {
         if (ov == .array) {
@@ -3544,6 +3557,38 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
             }
         }
     }
+    return outputs.toOwnedSlice(arena);
+}
+
+/// Parses an audio.infer node's `audio` block: a bounded PCM-window model and the
+/// scalar output bindings it drives into parameters.
+fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?AudioField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "audio needs a model file", .{});
+        return null;
+    }
+    return .{
+        .model = try arena.dupe(u8, model),
+        .outputs = try parseMlOutputs(diags, path, arena, object),
+    };
+}
+
+fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?MlField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "ml needs a model file", .{});
+        return null;
+    }
+    var input_width: u32 = 0;
+    var input_height: u32 = 0;
+    if (getField(object, "input_width")) |v| {
+        if (v == .integer and v.integer >= 0) input_width = @intCast(v.integer);
+    }
+    if (getField(object, "input_height")) |v| {
+        if (v == .integer and v.integer >= 0) input_height = @intCast(v.integer);
+    }
+    const outputs_slice = try parseMlOutputs(diags, path, arena, object);
     var mask: ?MlMask = null;
     if (getField(object, "mask")) |mv| {
         const mask_mark = path.push("mask");
@@ -3607,7 +3652,7 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         .model = try arena.dupe(u8, model),
         .input_width = input_width,
         .input_height = input_height,
-        .outputs = try outputs.toOwnedSlice(arena),
+        .outputs = outputs_slice,
         .mask = mask,
         .style = style,
         .aux_reference = try arena.dupe(u8, aux_reference),

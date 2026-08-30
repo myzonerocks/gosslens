@@ -14,6 +14,48 @@ pub const max_outputs = 8;
 
 pub const MlInfer = struct {};
 
+pub const AudioInfer = struct {};
+
+pub fn audioCreate(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*AudioInfer {
+    _ = gpa;
+    _ = model_bytes;
+    _ = bounds;
+    _ = threads;
+    return error.Unsupported;
+}
+pub fn audioDestroy(ai: *AudioInfer) void {
+    _ = ai;
+}
+pub fn audioCompute(ai: *AudioInfer, window: []const f32) bool {
+    _ = ai;
+    _ = window;
+    return false;
+}
+pub fn audioReadOutput(ai: *const AudioInfer, tensor: u32, index: u32) f32 {
+    _ = ai;
+    _ = tensor;
+    _ = index;
+    return 0;
+}
+pub fn audioArgmax(ai: *const AudioInfer, tensor: u32) u32 {
+    _ = ai;
+    _ = tensor;
+    return 0;
+}
+pub fn audioOutputLen(ai: *const AudioInfer, tensor: u32) usize {
+    _ = ai;
+    _ = tensor;
+    return 0;
+}
+pub fn audioHasPublished(ai: *const AudioInfer) bool {
+    _ = ai;
+    return false;
+}
+pub fn audioInputLen(ai: *const AudioInfer) usize {
+    _ = ai;
+    return 0;
+}
+
 pub fn create(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*MlInfer {
     _ = gpa;
     _ = model_bytes;

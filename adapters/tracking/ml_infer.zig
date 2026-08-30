@@ -14,6 +14,35 @@ pub const CreateError = core_mod.CreateError;
 pub const Core = core_mod.Core;
 pub const max_outputs = core_mod.max_outputs;
 
+/// The audio inference worker, run synchronously (an audio window is small), so
+/// the wrapper is a thin pass-through to the core rather than a threaded mailbox.
+pub const AudioInfer = core_mod.AudioCore;
+
+pub fn audioCreate(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*AudioInfer {
+    return core_mod.AudioCore.init(gpa, model_bytes, bounds, threads);
+}
+pub fn audioDestroy(ai: *AudioInfer) void {
+    ai.deinit();
+}
+pub fn audioCompute(ai: *AudioInfer, window: []const f32) bool {
+    return ai.compute(window);
+}
+pub fn audioReadOutput(ai: *const AudioInfer, tensor: u32, index: u32) f32 {
+    return ai.readOutput(tensor, index);
+}
+pub fn audioArgmax(ai: *const AudioInfer, tensor: u32) u32 {
+    return ai.argmaxOutput(tensor);
+}
+pub fn audioOutputLen(ai: *const AudioInfer, tensor: u32) usize {
+    return ai.outputLen(tensor);
+}
+pub fn audioHasPublished(ai: *const AudioInfer) bool {
+    return ai.hasPublished();
+}
+pub fn audioInputLen(ai: *const AudioInfer) usize {
+    return ai.inputLen();
+}
+
 const PendingFrame = struct {
     width: u32 = 0,
     height: u32 = 0,
