@@ -709,6 +709,117 @@ fn proveMultiFaceFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves per-face index binding: a model bound to `face_index: 1` draws only
+/// on the second submitted face. Through the face-solo lens, the left face
+/// (index 0) alone draws nothing while adding the right face (index 1) lights
+/// the right half alone, so the binding selects its face over fanning out.
+fn provePerFaceBinding(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL per-face tracking enable\n", .{});
+        return false;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/face-solo", ".lens-packages/face-solo".len) != .ok) {
+        std.debug.print("conformance: FAIL per-face lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+    var base: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &base) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+
+    const shift = @as(f32, @floatFromInt(planes.width)) * 0.2;
+    const landmark_count = base.landmarks.len / 3;
+    var left = base;
+    var right = base;
+    var lm: usize = 0;
+    while (lm < landmark_count) : (lm += 1) {
+        left.landmarks[lm * 3] -= shift;
+        right.landmarks[lm * 3] += shift;
+    }
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_one = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_one);
+    const shot_two = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_two);
+    const shot_two_again = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_two_again);
+
+    // Only the left face (index 0) is present: the model bound to index 1 has
+    // no face to sit on, so it draws nothing.
+    const one = [_]abi.FaceResult{left};
+    // Both faces: the model lights face index 1 (the right one) only.
+    const two = [_]abi.FaceResult{ left, right };
+    var w1: u32 = 0;
+    var h1: u32 = 0;
+    var w2: u32 = 0;
+    var h2: u32 = 0;
+    var w3: u32 = 0;
+    var h3: u32 = 0;
+    try renderSubmittedFaces(engine, session, &desc, planes, &one, shot_one, &w1, &h1);
+    try renderSubmittedFaces(engine, session, &desc, planes, &two, shot_two, &w2, &h2);
+    try renderSubmittedFaces(engine, session, &desc, planes, &two, shot_two_again, &w3, &h3);
+    if (w1 != w2 or h1 != h2 or w1 == 0 or h1 == 0) {
+        std.debug.print("conformance: FAIL per-face capture size {d}x{d} vs {d}x{d}\n", .{ w1, h1, w2, h2 });
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_two[0 .. w2 * h2 * 4], shot_two_again[0 .. w3 * h3 * 4])) {
+        std.debug.print("conformance: FAIL per-face binding is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    // The second face lit the right half; the left half is byte-identical to the
+    // one-face frame, so index 1 bound to its own face and left the other alone.
+    var left_changed: usize = 0;
+    var right_changed: usize = 0;
+    var y: u32 = 0;
+    while (y < h1) : (y += 1) {
+        var x: u32 = 0;
+        while (x < w1) : (x += 1) {
+            const idx = (y * w1 + x) * 4;
+            const differs = !std.mem.eql(u8, shot_one[idx .. idx + 4], shot_two[idx .. idx + 4]);
+            if (differs) {
+                if (x < w1 / 2) left_changed += 1 else right_changed += 1;
+            }
+        }
+    }
+    if (right_changed == 0 or left_changed != 0) {
+        std.debug.print("conformance: FAIL per-face binding did not isolate face 1 (left changed {d}, right changed {d})\n", .{ left_changed, right_changed });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a model bound to face_index 1 draws only on the second face - the right half lights ({d} px) while the left stays byte-identical, bit-stable\n", .{right_changed});
+    return true;
+}
+
 fn proveMultiBodyFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -18163,6 +18274,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("world anchor");
     if (!try proveMultiFaceFanOut(gpa, engine)) return 1;
     watchHold("multi face fan out");
+    if (!try provePerFaceBinding(gpa, engine)) return 1;
+    watchHold("per face binding");
     if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;

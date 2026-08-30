@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.face-solo",
+  "version": "1.0.0",
+  "display_name": "Face Solo",
+  "engine_compat": ">=0.11",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "face_mask", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "face", "face_index": 1}
+  ],
+  "triggers": []
+}

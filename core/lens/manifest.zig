@@ -8,6 +8,11 @@
 const std = @import("std");
 const material = @import("material");
 
+/// The highest tracked-face count a face_index binding may name, mirroring the
+/// tracker's own face cap; kept as a local constant so the lens-format parser
+/// stays independent of the tracking layer.
+const max_faces_bound = 4;
+
 pub const max_manifest_bytes = 256 * 1024;
 pub const max_json_depth = 32;
 pub const max_parameters = 256;
@@ -1187,6 +1192,10 @@ pub const Node = struct {
     mask_channel: ?u8 = null,
     /// True when a model.gltf node anchors to the tracked face.
     face_anchor: bool = false,
+    /// Which tracked face a face-anchored model.gltf binds to: -1 (the default)
+    /// draws on every submitted face, a non-negative index draws only on that
+    /// one, so a lens can decorate two faces with different models.
+    face_index: i32 = -1,
     /// True when a face-anchored model.gltf retargets the tracked expression:
     /// each morph target named for an ARKit blendshape is driven by that live
     /// blendshape, turning the mesh into an avatar of the user's face.
@@ -3555,6 +3564,17 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(anchor_mark);
         }
+        var face_index: i32 = -1;
+        if (getField(object, "face_index")) |fiv| {
+            if (!face_anchor) {
+                try diags.add(path.slice(), "face_index needs a face anchor", .{});
+            } else if (numberOf(fiv)) |n| {
+                const idx = @as(i32, @intFromFloat(@round(n)));
+                if (idx < 0 or idx >= max_faces_bound) {
+                    try diags.add(path.slice(), "face_index must be 0..{d}", .{max_faces_bound - 1});
+                } else face_index = idx;
+            } else try diags.add(path.slice(), "face_index must be a number", .{});
+        }
         var retarget = false;
         if (getField(object, "retarget")) |rv| {
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -3775,6 +3795,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .params = try params.toOwnedSlice(arena),
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
+            .face_index = face_index,
             .retarget = retarget,
             .talk = talk,
             .control = model_control,
@@ -5693,4 +5714,38 @@ test "a lens declaring a region2d parses it and rejects a zero-size one" {
     var result = try parseFails(zero_region);
     defer result.deinit();
     try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "positive w and h") != null);
+}
+
+test "a face-anchored model binds to a face index and rejects a bad one" {
+    const bound =
+        \\{"glf": "1.0", "id": "f", "version": "1.0.0", "display_name": "Face",
+        \\ "engine_compat": ">=0.5", "capabilities": ["face"], "parameters": [],
+        \\ "nodes": [{"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"},
+        \\   "params": {}, "anchor": "face", "face_index": 1}], "triggers": []}
+    ;
+    var parsed = try parseOk(bound);
+    defer parsed.deinit();
+    try t.expectEqual(@as(i32, 1), parsed.nodes[0].face_index);
+
+    // Absent face_index defaults to -1 (every face).
+    const unbound =
+        \\{"glf": "1.0", "id": "f", "version": "1.0.0", "display_name": "Face",
+        \\ "engine_compat": ">=0.5", "capabilities": ["face"], "parameters": [],
+        \\ "nodes": [{"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"},
+        \\   "params": {}, "anchor": "face"}], "triggers": []}
+    ;
+    var parsed2 = try parseOk(unbound);
+    defer parsed2.deinit();
+    try t.expectEqual(@as(i32, -1), parsed2.nodes[0].face_index);
+
+    // An index past the tracker cap fails closed.
+    const past =
+        \\{"glf": "1.0", "id": "f", "version": "1.0.0", "display_name": "Face",
+        \\ "engine_compat": ">=0.5", "capabilities": ["face"], "parameters": [],
+        \\ "nodes": [{"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"},
+        \\   "params": {}, "anchor": "face", "face_index": 9}], "triggers": []}
+    ;
+    var result = try parseFails(past);
+    defer result.deinit();
+    try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "face_index must be") != null);
 }

@@ -159,6 +159,11 @@ const LensNode = struct {
     mask_channel: ?u8 = null,
     /// .model_gltf only: the node anchors to the tracked face.
     face_anchor: bool = false,
+    /// .model_gltf face anchor only: which tracked face to bind to, an index
+    /// into the submitted faces. -1 (the default) draws on every face; a
+    /// non-negative index draws only on that one, so a lens decorates two
+    /// faces differently.
+    face_index: i32 = -1,
     /// .model_gltf only: a face-anchored model retargets the tracked expression
     /// onto its morph targets (an avatar of the user's face).
     retarget: bool = false,
@@ -324,6 +329,7 @@ pub const ModelNode = struct {
     /// chain naming its anchor) resolve at draw setup.
     node_id: []const u8,
     face_anchor: bool = false,
+    face_index: i32 = -1,
     retarget: bool = false,
     talk: bool = false,
     body_anchor: bool = false,
@@ -1475,7 +1481,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .model_gltf) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .retarget = node.retarget, .talk = node.talk, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles, .control = node.control });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .face_index = node.face_index, .retarget = node.retarget, .talk = node.talk, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles, .control = node.control });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1930,6 +1936,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
             .face_anchor = node_type == .model_gltf and node.face_anchor,
+            .face_index = node.face_index,
             .retarget = node_type == .model_gltf and node.retarget,
             .talk = node_type == .model_gltf and node.talk,
             .body_anchor = node_type == .model_gltf and node.body_anchor,

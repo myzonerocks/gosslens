@@ -1273,7 +1273,9 @@ pub const Session = struct {
     /// the draw cycles them at off the lens clock.
     sprite_anims: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteAnim) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
-    model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    /// Face-anchored model nodes, each mapped to the face index it binds to
+    /// (-1 draws on every submitted face, a non-negative index only that one).
+    model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, i32) = .empty,
     model_body_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     model_skeleton_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     /// model.gltf nodes anchored to the tracked world, by graph index.
@@ -4197,7 +4199,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     continue;
                 }
                 var anchored_without_target = false;
-                if (s.model_face_anchors.contains(entry.graph_index)) {
+                if (s.model_face_anchors.get(entry.graph_index)) |bound_face_index| {
                     // The head transform lands in source-frame pixels, stretched
                     // by the preview blit to fill a rect whose z=0 plane spans
                     // 4*tan(22.5) world units vertically.
@@ -4217,7 +4219,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         // blit the frame once through the first, draw the rest
                         // of the meshes over it.
                         var drawn_face = false;
-                        for (s.face_results[0..s.face_count]) |*fr| {
+                        for (s.face_results[0..s.face_count], 0..) |*fr, fi| {
+                            // A node bound to one face index skips the others; the
+                            // default -1 draws on every submitted face.
+                            if (bound_face_index >= 0 and bound_face_index != @as(i32, @intCast(fi))) continue;
                             const head = face_geometry.estimateHeadPose(&fr.landmarks) orelse continue;
                             const m = pixel_to_world.mul(head).mul(base_model_matrix);
                             if (!drawn_face) {
@@ -12142,7 +12147,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     defer gpa.free(models);
     for (models) |model| {
         if (model.face_anchor) {
-            session.model_face_anchors.put(gpa, model.graph_index, {}) catch {};
+            session.model_face_anchors.put(gpa, model.graph_index, model.face_index) catch {};
         }
         if (model.retarget) {
             session.model_retargets.put(gpa, model.graph_index, {}) catch {};

@@ -151,8 +151,12 @@ A `model.gltf` node may add `"anchor": "face"`, pinning the model to the
 tracked head: the runtime fits the canonical face's metric geometry to
 the live landmarks and poses the model with that transform, so model
 space is the canonical face's centimeter space (origin between the eyes,
-x toward the subject's left, y up, z out of the face). Without a tracked
-face the node draws nothing, the standard capability degradation.
+x toward the subject's left, y up, z out of the face). The runtime draws
+one instance per submitted face, so a face-anchored model fans out across
+every tracked head. A node may add `"face_index": n` to bind to just one of
+them (`0` is the first submitted face), so a lens decorates two faces with
+different models; the default, drawing on every face, is `-1`. Without a
+tracked face the node draws nothing, the standard capability degradation.
 `"anchor": "body"` pins the model to every tracked body: the runtime places
 one instance at each submitted body's torso, scaled by torso length and
 rolled by its tilt, so a body-anchored model fans out across a crowd (or
