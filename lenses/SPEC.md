@@ -922,6 +922,11 @@ The text block also styles the glyphs: `"gradient"` (an rgb the glyphs fade
 toward at their base, the top staying the main color), `"shadow"` (a soft
 drop shadow), `"stroke"` (an rgb outline), and `"depth"` (a value above zero
 extrudes the glyphs into a rotated 3D block mesh rather than flat sprite text).
+A `"wrap"` (a column count above zero) word-wraps long `content` onto several
+lines to that many monospace columns before rasterizing, breaking at spaces
+where a word fits and hard-breaking a word longer than a line, so a caption
+flows to the rect's proportions instead of stretching thin; the author's own
+newlines are kept, and no `wrap` leaves the content as written.
 
 A `"video.texture"` node plays an MP4 clip over the frame like a sprite. It
 ships its clip as `assets/<source>.mp4` and carries a `"video": {"source",

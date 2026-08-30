@@ -849,6 +849,10 @@ pub const TextField = struct {
     /// Extrude the glyphs into a rotated 3D block mesh of this depth (in the
     /// normalized text space); 0 keeps the flat 2D sprite text.
     depth: f32 = 0,
+    /// Word-wrap the content to at most this many monospace columns per line
+    /// so a long string flows onto several lines instead of stretching thin;
+    /// 0 leaves the content as authored.
+    wrap: u32 = 0,
 };
 
 pub const VideoField = struct {
@@ -3107,6 +3111,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     if (v == .bool) field.shadow = v.bool;
                 }
                 if (getField(tv.object, "depth")) |v| field.depth = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.depth)));
+                if (getField(tv.object, "wrap")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer <= 512) field.wrap = @intCast(v.integer);
+                }
                 text_field = field;
             }
             path.pop(tmark);

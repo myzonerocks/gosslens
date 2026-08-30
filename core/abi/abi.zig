@@ -10263,11 +10263,15 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
             } else |_| {}
             continue;
         }
+        // A wrapped text node flows its string onto several lines to the column
+        // budget before rasterizing; an unwrapped one rasterizes as authored.
+        const content = if (txt.wrap > 0) (font.wrap(gpa, txt.content, txt.wrap) catch txt.content) else txt.content;
+        defer if (txt.wrap > 0 and content.ptr != txt.content.ptr) gpa.free(content);
         const rich = txt.gradient != null or txt.shadow or txt.stroke != null;
         const raster = if (rich)
-            font.rasterizeRich(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }, txt.gradient, txt.shadow, txt.stroke) catch continue
+            font.rasterizeRich(gpa, content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }, txt.gradient, txt.shadow, txt.stroke) catch continue
         else
-            font.rasterize(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
+            font.rasterize(gpa, content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
         defer gpa.free(raster.rgba);
         const texture = render.Renderer.createStaticTexture(@intCast(raster.width), @intCast(raster.height), raster.rgba);
         session.sprite_textures.put(gpa, txt.graph_index, texture) catch {

@@ -103,6 +103,53 @@ pub fn measure(text: []const u8, scale: u32) struct { w: u32, h: u32 } {
     return .{ .w = max_len * glyph_px * s, .h = lines * glyph_px * s };
 }
 
+/// Greedy word-wraps `text` to at most `max_cols` monospace columns per line,
+/// breaking at spaces where a word fits and hard-breaking a word longer than a
+/// full line, while preserving the caller's own newlines. `max_cols` 0 returns
+/// the text unchanged. The caller owns and frees the returned bytes.
+pub fn wrap(gpa: std.mem.Allocator, text: []const u8, max_cols: u32) ![]u8 {
+    if (max_cols == 0) return gpa.dupe(u8, text);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var col: u32 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const ch = text[i];
+        if (ch == '\n') {
+            try out.append(gpa, '\n');
+            col = 0;
+            i += 1;
+        } else if (ch == ' ') {
+            // A run of spaces collapses at a line start; otherwise decide by the
+            // next word: keep it on this line if the space plus the word fits,
+            // else wrap here and drop the space.
+            var j = i + 1;
+            while (j < text.len and text[j] != ' ' and text[j] != '\n') j += 1;
+            const word_len: u32 = @intCast(j - (i + 1));
+            if (col == 0) {
+                i += 1;
+            } else if (col + 1 + word_len > max_cols) {
+                try out.append(gpa, '\n');
+                col = 0;
+                i += 1;
+            } else {
+                try out.append(gpa, ' ');
+                col += 1;
+                i += 1;
+            }
+        } else {
+            if (col >= max_cols) {
+                try out.append(gpa, '\n');
+                col = 0;
+            }
+            try out.append(gpa, ch);
+            col += 1;
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 /// Rasterizes `text` into a freshly allocated RGBA buffer: each glyph
 /// pixel set to `color`, every other pixel fully transparent. The caller
 /// owns and frees the returned bytes.
@@ -321,6 +368,33 @@ test "measure sizes a monospace line" {
     const m = measure("ABC", 2);
     try t.expectEqual(@as(u32, 3 * 8 * 2), m.w);
     try t.expectEqual(@as(u32, 8 * 2), m.h);
+}
+
+test "wrap breaks at word boundaries and hard-breaks long words" {
+    // Each word fits but three of them exceed eight columns, so it wraps twice.
+    const a = try wrap(t.allocator, "hello world foo", 8);
+    defer t.allocator.free(a);
+    try t.expectEqualStrings("hello\nworld\nfoo", a);
+
+    // A pair that fits exactly on one line stays on it.
+    const b = try wrap(t.allocator, "hello world", 11);
+    defer t.allocator.free(b);
+    try t.expectEqualStrings("hello world", b);
+
+    // A single word longer than a line hard-breaks into full-width chunks.
+    const c = try wrap(t.allocator, "abcdefghij", 4);
+    defer t.allocator.free(c);
+    try t.expectEqualStrings("abcd\nefgh\nij", c);
+
+    // An author's own newline is preserved, and each side wraps within it.
+    const d = try wrap(t.allocator, "one two\nthree four", 7);
+    defer t.allocator.free(d);
+    try t.expectEqualStrings("one two\nthree\nfour", d);
+
+    // No column budget returns the text untouched.
+    const e = try wrap(t.allocator, "unchanged text here", 0);
+    defer t.allocator.free(e);
+    try t.expectEqualStrings("unchanged text here", e);
 }
 
 test "measure and rasterize handle multiple lines" {
