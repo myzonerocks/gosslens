@@ -282,6 +282,9 @@ const Gate = struct {
         if (findBannedToken(message)) |tok| {
             try g.flag("provenance: {s} contains banned token '{s}'", .{ context, tok });
         }
+        if (findPhaseNomenclature(message)) |hit| {
+            try g.flag("internal-plan: {s} names an internal delivery phase ('{s}'); describe the change, not the roadmap", .{ context, hit });
+        }
     }
 
     // Scans added lines in a unified diff for comment-hygiene violations.
@@ -1021,6 +1024,31 @@ fn looksBinary(content: []const u8) bool {
 fn findBannedToken(text: []const u8) ?[]const u8 {
     for (banned_tokens) |tok| {
         if (std.ascii.indexOfIgnoreCase(text, tok) != null) return tok;
+    }
+    return null;
+}
+
+// Internal delivery-phase numbering belongs to the planning docs, not a
+// public commit or PR body. These words directly followed by a number are
+// the tell; a bare word ("waveform", a hand wave, a WAVE chunk) is fine.
+const phase_words = [_][]const u8{ "wave", "milestone", "sprint" };
+
+// Returns the offending "<word> <number>" span if the message references an
+// internal phase by number, so it never rides along into public history.
+fn findPhaseNomenclature(text: []const u8) ?[]const u8 {
+    for (phase_words) |word| {
+        var start: usize = 0;
+        while (start < text.len) {
+            const rel = std.ascii.indexOfIgnoreCase(text[start..], word) orelse break;
+            const idx = start + rel;
+            start = idx + 1;
+            if (idx > 0 and isIdentChar(text[idx - 1])) continue;
+            var end = idx + word.len;
+            if (end < text.len and (text[end] | 0x20) == 's') end += 1;
+            var j = end;
+            while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+            if (j < text.len and std.ascii.isDigit(text[j])) return text[idx .. j + 1];
+        }
     }
     return null;
 }
