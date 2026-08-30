@@ -791,7 +791,7 @@ pub const Renderer = struct {
         _ = aspect_ratio;
     }
 
-    pub fn submitLitModel(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [8]f32, aspect_ratio: f32) void {
+    pub fn submitLitModel(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [8]f32, material: [8]f32, aspect_ratio: f32) void {
         _ = r;
         _ = blit_view;
         _ = mesh_view;
@@ -800,16 +800,18 @@ pub const Renderer = struct {
         _ = model_matrix;
         _ = base_color;
         _ = light;
+        _ = material;
         _ = aspect_ratio;
     }
 
-    pub fn drawLitModelMesh(r: *Renderer, mesh_view: u8, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [8]f32, aspect_ratio: f32) void {
+    pub fn drawLitModelMesh(r: *Renderer, mesh_view: u8, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [8]f32, material: [8]f32, aspect_ratio: f32) void {
         _ = r;
         _ = mesh_view;
         _ = mesh;
         _ = model_matrix;
         _ = base_color;
         _ = light;
+        _ = material;
         _ = aspect_ratio;
     }
 

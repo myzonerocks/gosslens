@@ -181,6 +181,13 @@ draws through the lit program (its per-vertex normals shade a Lambert diffuse
 against the light); with none it stays flat unlit exactly as before, so lighting
 is opt-in. Morph and skinned meshes deform per frame and stay flat for now.
 
+The lit program reads the glTF material's PBR factors: the metallic factor
+scales a Blinn-Phong specular highlight whose tightness follows the roughness
+factor and whose tint runs from white (dielectric) toward the base color
+(metal), and the emissive factor adds self-illumination on top, so a material
+glows independent of the light. A material-less mesh takes the glTF defaults
+(dielectric, fully rough, no emission), shading as a plain matte surface.
+
 A `model.gltf` node may add `"clip_weights"`: an array of parameter names,
 one per animation clip in the order the glTF declares them. Each frame the
 runtime samples every clip at the node's playback time and blends their

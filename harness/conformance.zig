@@ -7555,6 +7555,82 @@ fn proveDirectionalLight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Builds a self-contained glTF (a single camera-facing triangle, its buffer a
+/// base64 data URI) with the given base color and emissive factor, so a proof
+/// can control a model's PBR material exactly. Caller owns the returned bytes.
+fn writeTriangleGltf(gpa: std.mem.Allocator, base: [3]f32, emissive: [3]f32) ![]u8 {
+    var buf: [42]u8 = undefined;
+    const pos = [_]f32{ -0.6, -0.6, 0, 0.6, -0.6, 0, 0.0, 0.6, 0 };
+    @memcpy(buf[0..36], std.mem.sliceAsBytes(&pos));
+    const idx = [_]u16{ 0, 1, 2 };
+    @memcpy(buf[36..42], std.mem.sliceAsBytes(&idx));
+    var b64: [64]u8 = undefined;
+    const enc = std.base64.standard.Encoder.encode(&b64, &buf);
+    return std.fmt.allocPrint(gpa,
+        "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0}}]," ++
+        "\"meshes\":[{{\"primitives\":[{{\"attributes\":{{\"POSITION\":0}},\"indices\":1,\"material\":0}}]}}]," ++
+        "\"materials\":[{{\"pbrMetallicRoughness\":{{\"baseColorFactor\":[{d},{d},{d},1.0],\"metallicFactor\":0.0,\"roughnessFactor\":1.0}},\"emissiveFactor\":[{d},{d},{d}]}}]," ++
+        "\"accessors\":[{{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"min\":[-0.6,-0.6,0],\"max\":[0.6,0.6,0]}},{{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}}]," ++
+        "\"bufferViews\":[{{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36}},{{\"buffer\":0,\"byteOffset\":36,\"byteLength\":6}}]," ++
+        "\"buffers\":[{{\"byteLength\":42,\"uri\":\"data:application/octet-stream;base64,{s}\"}}]}}", .{ base[0], base[1], base[2], emissive[0], emissive[1], emissive[2], enc });
+}
+
+/// Proves the lit shader consumes the glTF material's emissive channel: a
+/// camera-facing triangle with an emissive material renders brighter over its
+/// covered pixels than the same triangle with no emissive, since emissive adds
+/// self-illumination on top of the lit diffuse. Deterministic.
+fn proveModelMaterial(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const emissive_glb = try writeTriangleGltf(gpa, .{ 0.5, 0.5, 0.5 }, .{ 0.4, 0.4, 0.4 });
+    defer gpa.free(emissive_glb);
+    const plain_glb = try writeTriangleGltf(gpa, .{ 0.5, 0.5, 0.5 }, .{ 0.0, 0.0, 0.0 });
+    defer gpa.free(plain_glb);
+
+    const black = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    for (0..black.len / 4) |i| black[i * 4 + 3] = 255;
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = black }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const emissive_shot = try captureLitModel(gpa, engine, "front", planes, emissive_glb);
+    defer gpa.free(emissive_shot);
+    const plain_shot = try captureLitModel(gpa, engine, "front", planes, plain_glb);
+    defer gpa.free(plain_shot);
+    const emissive_again = try captureLitModel(gpa, engine, "front", planes, emissive_glb);
+    defer gpa.free(emissive_again);
+
+    if (!std.mem.eql(u8, emissive_shot, emissive_again)) {
+        std.debug.print("conformance: FAIL emissive material is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    var emissive_sum: u64 = 0;
+    var plain_sum: u64 = 0;
+    var covered: u64 = 0;
+    var p: usize = 0;
+    while (p + 4 <= plain_shot.len) : (p += 4) {
+        if (plain_shot[p + 1] > 16) {
+            covered += 1;
+            plain_sum += plain_shot[p + 1];
+            emissive_sum += emissive_shot[p + 1];
+        }
+    }
+    if (covered < 200) {
+        std.debug.print("conformance: FAIL the triangle covered too few pixels ({d}) to judge emissive\n", .{covered});
+        return false;
+    }
+    const emissive_avg = emissive_sum / covered;
+    const plain_avg = plain_sum / covered;
+    if (@as(i64, @intCast(emissive_avg)) - @as(i64, @intCast(plain_avg)) < 40) {
+        std.debug.print("conformance: FAIL emissive did not lift the surface (emissive avg {d}, plain avg {d})\n", .{ emissive_avg, plain_avg });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a model.gltf emissive material lifts the lit surface: the emissive triangle averages {d} over {d} covered pixels where the non-emissive one averages {d}, deterministically\n", .{ emissive_avg, covered, plain_avg });
+    return true;
+}
+
 /// Proves lens audio: a play_sound trigger starts a voice that the mixer
 /// pulls out as PCM, silent before the trigger, non-silent after, and
 /// bit-identical across two runs of the same sequence.
@@ -18181,6 +18257,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("hdr-composite");
     if (!try proveDirectionalLight(gpa, engine)) return 1;
     watchHold("directional-light");
+    if (!try proveModelMaterial(gpa, engine)) return 1;
+    watchHold("model-material");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;

@@ -1355,6 +1355,12 @@ const LoadedModel = struct {
     /// When set, the mesh carries per-vertex normals and draws through the lit
     /// program against the lens's directional light; else it draws flat unlit.
     lit: bool = false,
+    /// The glTF material's PBR factors, fed to the lit shader: metallic scales
+    /// the specular highlight, roughness sets its tightness, and emissive adds
+    /// self-illumination. Unused by the flat (unlit) path.
+    metallic: f32 = 0,
+    roughness: f32 = 1,
+    emissive: [3]f32 = .{ 0, 0, 0 },
 };
 
 /// Maps each morph target name to the face blendshape index it drives (or -1
@@ -1392,6 +1398,12 @@ fn morphPositions(out: [][3]f32, rest: []const [3]f32, targets: []const []const 
 /// reads: the world direction and intensity, then the color and ambient term.
 fn lightParams(light: manifest.Light) [8]f32 {
     return .{ light.direction[0], light.direction[1], light.direction[2], light.intensity, light.color[0], light.color[1], light.color[2], light.ambient };
+}
+
+/// Packs a model's PBR material into the two vec4s the lit shader reads: the
+/// emissive color and metallic factor, then the roughness.
+fn materialParams(loaded: LoadedModel) [8]f32 {
+    return .{ loaded.emissive[0], loaded.emissive[1], loaded.emissive[2], loaded.metallic, loaded.roughness, 0, 0, 0 };
 }
 
 fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
@@ -4295,7 +4307,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
                 } else if (loaded.lit) {
                     const light = if (active_lens) |l| l.manifest.light orelse manifest.Light{} else manifest.Light{};
-                    r.submitLitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, lightParams(light), aspect_ratio);
+                    r.submitLitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, lightParams(light), materialParams(loaded), aspect_ratio);
                 } else {
                     r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, aspect_ratio);
                 }
@@ -12485,6 +12497,9 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 .auto_bind_blendshapes = session.model_retargets.contains(entry.key_ptr.*),
                 .audio_talk = session.model_talks.contains(entry.key_ptr.*),
                 .lit = is_lit,
+                .metallic = decoded.metallic,
+                .roughness = decoded.roughness,
+                .emissive = decoded.emissive,
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
                 if (rig) |rg| {
