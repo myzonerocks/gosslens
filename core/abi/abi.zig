@@ -696,6 +696,14 @@ pub const Session = struct {
     audio_echo_ms: f32 = 0,
     audio_echo_ring: []f32 = &.{},
     audio_echo_pos: usize = 0,
+    /// An active audio.enhance node's de-reverb: the gain and delay of the
+    /// feedforward comb that inverts the room's dominant reflection, and a
+    /// per-channel ring of past input samples the comb subtracts the delayed copy
+    /// from. Sized to channels times the delay at mix time, freed at teardown.
+    audio_dereverb_strength: f32 = 0,
+    audio_dereverb_ms: f32 = 0,
+    audio_dereverb_ring: []f32 = &.{},
+    audio_dereverb_pos: usize = 0,
     /// An active voice.transform node's pitch-shift ratio (1 when none), and the
     /// per-channel delay line the output mix pitch-shifts the microphone through,
     /// a two-tap crossfade sweep carried across chunks. Resolved at activation.
@@ -4505,6 +4513,7 @@ pub fn destroySession(session: *Session) void {
     session.audio_workers.deinit(session.engine.gpa);
     if (session.audio_window.len > 0) session.engine.gpa.free(session.audio_window);
     if (session.audio_echo_ring.len > 0) session.engine.gpa.free(session.audio_echo_ring);
+    if (session.audio_dereverb_ring.len > 0) session.engine.gpa.free(session.audio_dereverb_ring);
     destroyDiffusionWorkers(session);
     session.diffusion_workers.deinit(session.engine.gpa);
     destroySplatWorkers(session);
@@ -9072,9 +9081,10 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
         // neither the raw mic passes straight through.
         const mic_chunk: ?[]const f32 = blk: {
             const raw = if (mic_slice) |m| m[base .. base + span] else break :blk null;
-            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1 and s.audio_echo_strength <= 0) break :blk raw;
+            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1 and s.audio_echo_strength <= 0 and s.audio_dereverb_strength <= 0) break :blk raw;
             @memcpy(enhanced_buf[0..span], raw);
             if (s.audio_enhance_strength > 0) enhanceMic(s, enhanced_buf[0..span], n, channels);
+            if (s.audio_dereverb_strength > 0) dereverbMic(s, enhanced_buf[0..span], n, channels, sample_rate);
             if (s.audio_echo_strength > 0) echoCancelMic(s, enhanced_buf[0..span], n, channels, sample_rate);
             if (s.voice_pitch != 1) voiceTransformMic(s, enhanced_buf[0..span], n, channels);
             break :blk enhanced_buf[0..span];
@@ -10706,6 +10716,10 @@ fn resolveAudioEnhance(session: *Session) void {
     session.audio_echo_ms = 0;
     session.audio_echo_pos = 0;
     if (session.audio_echo_ring.len > 0) @memset(session.audio_echo_ring, 0);
+    session.audio_dereverb_strength = 0;
+    session.audio_dereverb_ms = 0;
+    session.audio_dereverb_pos = 0;
+    if (session.audio_dereverb_ring.len > 0) @memset(session.audio_dereverb_ring, 0);
     session.voice_pitch = 1;
     session.voice_delay = @splat(@splat(0));
     session.voice_wpos = 0;
@@ -10717,6 +10731,10 @@ fn resolveAudioEnhance(session: *Session) void {
             if (ae.echo > 0) {
                 session.audio_echo_strength = ae.echo;
                 session.audio_echo_ms = ae.echo_ms;
+            }
+            if (ae.dereverb > 0) {
+                session.audio_dereverb_strength = ae.dereverb;
+                session.audio_dereverb_ms = ae.dereverb_ms;
             }
         }
         if (node.voice_transform) |vt| session.voice_pitch = vt.pitch;
@@ -10779,6 +10797,43 @@ fn echoCancelMic(session: *Session, mic: []f32, frame_count: u32, channels: u32,
         pos = (pos + 1) % delay;
     }
     session.audio_echo_pos = pos;
+}
+
+/// De-reverberates one interleaved output chunk: a feedforward comb subtracts the
+/// input delayed by dereverb_ms and scaled by the dereverb gain, the inverse of a
+/// room's feedback-comb reflection, so the reverberant tail thins. The per-channel
+/// ring holds past input samples and is sized to the delay, carried across chunks.
+fn dereverbMic(session: *Session, mic: []f32, frame_count: u32, channels: u32, sample_rate: u32) void {
+    const gain = session.audio_dereverb_strength;
+    if (gain <= 0 or session.audio_dereverb_ms <= 0) return;
+    const delay: usize = @intFromFloat(session.audio_dereverb_ms / 1000.0 * @as(f32, @floatFromInt(sample_rate)));
+    if (delay == 0) return;
+    const need = delay * channels;
+    if (session.audio_dereverb_ring.len != need) {
+        const gpa = session.engine.gpa;
+        if (session.audio_dereverb_ring.len > 0) gpa.free(session.audio_dereverb_ring);
+        session.audio_dereverb_ring = gpa.alloc(f32, need) catch {
+            session.audio_dereverb_ring = &.{};
+            return;
+        };
+        @memset(session.audio_dereverb_ring, 0);
+        session.audio_dereverb_pos = 0;
+    }
+    var pos = session.audio_dereverb_pos % delay;
+    for (0..frame_count) |f| {
+        for (0..channels) |c| {
+            const idx = f * channels + c;
+            const slot = pos * channels + c;
+            // The ring slot holds the input from `delay` frames ago; the feedforward
+            // comb subtracts that scaled copy, then stores the current input.
+            const delayed = session.audio_dereverb_ring[slot];
+            const x = mic[idx];
+            session.audio_dereverb_ring[slot] = x;
+            mic[idx] = x - gain * delayed;
+        }
+        pos = (pos + 1) % delay;
+    }
+    session.audio_dereverb_pos = pos;
 }
 
 /// Pitch-shifts one interleaved output chunk's microphone in place while keeping

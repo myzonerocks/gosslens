@@ -1077,10 +1077,13 @@ block. `strength` (0..1, default 1) runs a deterministic noise reduction over th
 microphone before it is summed with the lens voices, a one-pole low-pass that
 pulls the high-frequency hiss down and a soft gate that eases the near-silent
 noise floor toward zero, blended in by `strength` so zero leaves the mic
-untouched. `echo` (0..1, default 0) then runs echo cancellation: an inverse comb
+untouched. `dereverb` (0..1, default 0) runs de-reverberation: a feedforward comb subtracts
+`dereverb` of the signal delayed by `dereverb_ms` (5..60, default 30), the inverse
+of a room's dominant feedback-comb reflection, so the reverberant tail thins.
+`echo` (0..1, default 0) then runs echo cancellation: an inverse comb
 subtracts `echo` of the enhanced signal delayed by `echo_ms` milliseconds (5..60,
 default 40), so a room echo or acoustic feedback repeating at that delay is
-removed. Zero echo leaves it off. It needs no model.
+removed. Zero on any stage leaves it off. It needs no model.
 
 A `"voice.transform"` node changes the outgoing voice. It draws nothing and
 carries a `"voice": {"pitch"}` block (0.5..2, default 1): the output mix pitch

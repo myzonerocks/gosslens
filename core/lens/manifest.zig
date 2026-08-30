@@ -1119,6 +1119,11 @@ pub const AudioEnhanceField = struct {
     /// that delay is removed from the outgoing track. Zero leaves it untouched.
     echo: f32 = 0,
     echo_ms: f32 = 40,
+    /// De-reverberation: a feedforward comb subtracts `dereverb` (0..1) of the mic
+    /// delayed by `dereverb_ms`, inverting the dominant reflection comb of a room
+    /// so the reverberant tail thins. Zero leaves it off.
+    dereverb: f32 = 0,
+    dereverb_ms: f32 = 30,
 };
 
 /// A voice.transform node's real-time voice change: `pitch` (0.5..2) the ratio
@@ -3585,6 +3590,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     if (getField(ev.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
                     if (getField(ev.object, "echo")) |v| field.echo = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.echo)), 0, 1);
                     if (getField(ev.object, "echo_ms")) |v| field.echo_ms = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.echo_ms)), 5, 60);
+                    if (getField(ev.object, "dereverb")) |v| field.dereverb = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.dereverb)), 0, 1);
+                    if (getField(ev.object, "dereverb_ms")) |v| field.dereverb_ms = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.dereverb_ms)), 5, 60);
                 }
             }
             audio_enhance_field = field;

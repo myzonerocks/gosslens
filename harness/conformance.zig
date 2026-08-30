@@ -5392,17 +5392,17 @@ fn proveTemporalHdr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 }
 
 fn writeAudioEnhanceLens(dir: []const u8, strength: f32) !void {
-    return writeAudioEnhanceLensFull(dir, strength, 0, 40);
+    return writeAudioEnhanceLensFull(dir, strength, 0, 40, 0, 30);
 }
 
-fn writeAudioEnhanceLensFull(dir: []const u8, strength: f32, echo: f32, echo_ms: f32) !void {
+fn writeAudioEnhanceLensFull(dir: []const u8, strength: f32, echo: f32, echo_ms: f32, dereverb: f32, dereverb_ms: f32) !void {
     const page = std.heap.page_allocator;
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.audio-enhance","version":"1.0.0","display_name":"Audio Enhance","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
-        \\ "nodes":[{{"id":"clean","type":"audio.enhance","params":{{}},"enhance":{{"strength":{d:.3},"echo":{d:.3},"echo_ms":{d:.3}}}}}],
+        \\ "nodes":[{{"id":"clean","type":"audio.enhance","params":{{}},"enhance":{{"strength":{d:.3},"echo":{d:.3},"echo_ms":{d:.3},"dereverb":{d:.3},"dereverb_ms":{d:.3}}}}}],
         \\ "triggers":[]}}
-    , .{ strength, echo, echo_ms });
+    , .{ strength, echo, echo_ms, dereverb, dereverb_ms });
     defer page.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
@@ -5513,9 +5513,9 @@ fn proveEchoCancel(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
 
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-echo-0");
-    try writeAudioEnhanceLensFull("zig-out/audio-echo-0", 0.0, 0.0, delay_ms);
+    try writeAudioEnhanceLensFull("zig-out/audio-echo-0", 0.0, 0.0, delay_ms, 0.0, 30);
     try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-echo-1");
-    try writeAudioEnhanceLensFull("zig-out/audio-echo-1", 0.0, echo_gain, delay_ms);
+    try writeAudioEnhanceLensFull("zig-out/audio-echo-1", 0.0, echo_gain, delay_ms, 0.0, 30);
 
     const raw = try captureMixOutput(gpa, engine, "zig-out/audio-echo-0", mic, sample_rate);
     defer gpa.free(raw);
@@ -5537,6 +5537,58 @@ fn proveEchoCancel(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF an audio.enhance echo binding cancels a room echo: the echo's autocorrelation peak at its {d} ms lag collapses ({d} -> {d}) while a control leaves it standing\n", .{ delay_ms, ac_raw, ac_cancel });
+    return true;
+}
+
+/// Proves microphone de-reverberation: a deterministic broadband source run through
+/// a feedback-comb reverb (a decaying reflection at a fixed delay). An audio.enhance
+/// dereverb binding runs the inverse feedforward comb, so the reverb's strong
+/// autocorrelation peak at that delay collapses while a control leaves it standing.
+fn proveDereverb(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sample_rate: u32 = 48000;
+    const n: usize = 9600;
+    const delay_ms: f32 = 25.0;
+    const delay: usize = @intFromFloat(delay_ms / 1000.0 * @as(f32, @floatFromInt(sample_rate)));
+    const decay: f32 = 0.7;
+
+    const src = try gpa.alloc(f32, n);
+    defer gpa.free(src);
+    var seed: u32 = 987654321;
+    for (0..n) |i| {
+        seed = seed *% 1664525 +% 1013904223;
+        src[i] = (@as(f32, @floatFromInt(seed >> 16)) / 32768.0 - 1.0) * 0.3;
+    }
+    // A feedback-comb reverb: each sample re-injects a decayed copy from `delay`
+    // samples back, so the tail rings on. The dereverb comb is its exact inverse.
+    const mic = try gpa.alloc(f32, n);
+    defer gpa.free(mic);
+    for (0..n) |i| {
+        mic[i] = src[i] + (if (i >= delay) decay * mic[i - delay] else 0);
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-rev-0");
+    try writeAudioEnhanceLensFull("zig-out/audio-rev-0", 0.0, 0.0, 40, 0.0, delay_ms);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-rev-1");
+    try writeAudioEnhanceLensFull("zig-out/audio-rev-1", 0.0, 0.0, 40, decay, delay_ms);
+
+    const raw = try captureMixOutput(gpa, engine, "zig-out/audio-rev-0", mic, sample_rate);
+    defer gpa.free(raw);
+    const cleaned = try captureMixOutput(gpa, engine, "zig-out/audio-rev-1", mic, sample_rate);
+    defer gpa.free(cleaned);
+
+    const ac_raw = autocorrAtLag(raw, delay);
+    const ac_clean = autocorrAtLag(cleaned, delay);
+    if (!(ac_raw > 0)) {
+        std.debug.print("conformance: FAIL the reverb test signal had no autocorrelation peak at the reflection lag\n", .{});
+        return false;
+    }
+    const acr = @as(f64, @floatFromInt(ac_raw));
+    const acc = @as(f64, @floatFromInt(ac_clean));
+    if (!(acc * 2.0 < acr)) {
+        std.debug.print("conformance: FAIL de-reverb did not thin the reverberant tail (autocorr {d} -> {d})\n", .{ ac_raw, ac_clean });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.enhance dereverb binding thins a room reverb: the reflection's autocorrelation peak at its {d} ms lag collapses ({d} -> {d}) while a control leaves it standing\n", .{ delay_ms, ac_raw, ac_clean });
     return true;
 }
 
@@ -17620,6 +17672,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("audio enhance");
     if (!try proveEchoCancel(gpa, engine)) return 1;
     watchHold("echo cancel");
+    if (!try proveDereverb(gpa, engine)) return 1;
+    watchHold("dereverb");
     if (!try proveVoiceTransform(gpa, engine)) return 1;
     watchHold("voice transform");
     if (!try proveCaptionSegment(gpa, engine)) return 1;
