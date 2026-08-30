@@ -4388,6 +4388,20 @@ fn proveInpaint(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeWarpModeLens(dir: []const u8, mode: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.warp-mode","version":"1.0.0","display_name":"Warp","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"w","type":"warp.pass","inputs":{{"frame":"camera"}},"params":{{}},"warp":{{"mode":"{s}","strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ mode, strength });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
 fn writeRollingLens(dir: []const u8, strength: f32, readout: f32) !void {
     const page = std.heap.page_allocator;
     const manifest_json = try std.fmt.allocPrint(page,
@@ -4496,6 +4510,119 @@ fn proveRolling(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a rolling.pass counter-shifts each scanline by its readout offset under a submitted camera rotation: a straight edge slants {d:.0}px top-to-bottom with motion ({d:.0} -> {d:.0}) and holds vertical without it\n", .{ moved_slant, moved_top, moved_bot });
+    return true;
+}
+
+/// Captures a roll_lock warp shot. When a gravity vector is passed it is fed
+/// through the orientation stream so the level correction has a tilt to counter;
+/// with none the pass reads no roll and holds the frame through.
+fn captureRollShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, gravity: ?[3]f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    if (gravity) |g| _ = abi.goss_session_submit_orientation(session, g[0], g[1], g[2], 1000);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Least-squares slope (rows per column) of the bright bar's centre row across
+/// the capture columns, the bar's tilt; small is level.
+fn barSlope(shot: []const u8) f64 {
+    var n: f64 = 0;
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    var sxx: f64 = 0;
+    var sxy: f64 = 0;
+    var col: usize = 40;
+    while (col < 360) : (col += 4) {
+        var best_row: usize = 0;
+        var best: u16 = 0;
+        for (0..300) |row| {
+            const lum = shot[(row * 400 + col) * 4];
+            if (lum > best) {
+                best = lum;
+                best_row = row;
+            }
+        }
+        if (best < 128) continue;
+        const x: f64 = @floatFromInt(col);
+        const y: f64 = @floatFromInt(best_row);
+        n += 1;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+    const denom = n * sxx - sx * sx;
+    return if (denom != 0) (n * sxy - sx * sy) / denom else 0;
+}
+
+/// Proves horizon-lock: a bright bar slanted 20 degrees, and a device gravity
+/// tilted the same. The engine derives the roll from the orientation stream and
+/// the roll_lock warp counter-rotates the frame, leveling the bar; with no
+/// orientation the pass reads no roll and holds the frame byte-identical.
+fn proveRollLock(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const slope0: f64 = 0.36397; // tan(20 degrees)
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    const cxp: f64 = @floatFromInt(width / 2);
+    const cyp: f64 = @floatFromInt(height / 2);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const bar_center = cyp + slope0 * (@as(f64, @floatFromInt(col)) - cxp);
+        const on = @abs(@as(f64, @floatFromInt(row)) - bar_center) < 9.0;
+        const v: u8 = if (on) 240 else 20;
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/rolllock");
+    try writeWarpModeLens("zig-out/rolllock", "roll_lock", 1.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/rolllock-0");
+    try writeWarpModeLens("zig-out/rolllock-0", "roll_lock", 0.0);
+
+    // A 20-degree device roll: gravity tips out of straight-down by the same angle.
+    const tilt = [3]f32{ 0.34202, -0.93969, 0 };
+    const control = try captureRollShot(gpa, engine, "zig-out/rolllock-0", planes, tilt);
+    defer gpa.free(control);
+    const leveled = try captureRollShot(gpa, engine, "zig-out/rolllock", planes, tilt);
+    defer gpa.free(leveled);
+    const no_imu = try captureRollShot(gpa, engine, "zig-out/rolllock", planes, null);
+    defer gpa.free(no_imu);
+
+    // With no orientation the pass reads no roll and holds the frame through.
+    if (!std.mem.eql(u8, no_imu, control)) {
+        std.debug.print("conformance: FAIL roll_lock altered the frame with no orientation submitted\n", .{});
+        return false;
+    }
+    const control_slope = @abs(barSlope(control));
+    const leveled_slope = @abs(barSlope(leveled));
+    if (!(control_slope > 0.2)) {
+        std.debug.print("conformance: FAIL the roll_lock test bar was not measurably tilted ({d:.3})\n", .{control_slope});
+        return false;
+    }
+    if (!(leveled_slope < control_slope * 0.4)) {
+        std.debug.print("conformance: FAIL roll_lock did not level the tilted bar (control slope {d:.3}, leveled {d:.3})\n", .{ control_slope, leveled_slope });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a roll_lock warp counter-rotates the frame by the roll the orientation stream carries: a 20-degree tilted bar levels from slope {d:.3} to {d:.3} while it holds byte-identical with no orientation\n", .{ control_slope, leveled_slope });
     return true;
 }
 
@@ -15923,6 +16050,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("inpaint pass");
     if (!try proveRolling(gpa, engine)) return 1;
     watchHold("rolling pass");
+    if (!try proveRollLock(gpa, engine)) return 1;
+    watchHold("roll_lock warp");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

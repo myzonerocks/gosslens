@@ -678,8 +678,9 @@ refracts the frame through a sphere and lets the surround through),
 `sphere_refraction` (the same refraction but the classic crystal ball, black
 outside the sphere), `bulge` (magnify toward the center), `pinch` (pull the
 image inward), `swirl` (twist about the center), `liquify` (freeform
-multi-point push/pull), or `face_scale` (scale the whole tracked face about its
-own center). `center_x` and `center_y` place the distortion, `radius`
+multi-point push/pull), `face_scale` (scale the whole tracked face about its
+own center), or `roll_lock` (counter-rotate the frame to level the horizon).
+`center_x` and `center_y` place the distortion, `radius`
 sizes it, and `strength` scales how hard it pushes, with zero an identity.
 
 `face_scale` is a landmark-anchored transform: it ignores the static center and
@@ -690,6 +691,13 @@ inset), easing to identity by the region's rim so the surround is untouched. It
 needs a tracked face like `reshape.bank`; with no face it holds the frame
 through. The `face-inset`, `face-stretch`, and `face-cutout` reference lenses
 show the three landmark-anchored face transforms.
+
+`roll_lock` levels the horizon: it reads the device roll from the orientation
+stream (submitted through `goss_session_submit_orientation`, falling back to the
+tracked head's roll), and rotates the whole frame about its center by that angle
+so a tilted horizon comes level. `strength` scales the correction and zero is an
+identity; with no orientation and no tracked face it reads no roll and holds the
+frame through.
 `refractive_index` is the glass index the two sphere modes bend the view ray by;
 the displacement modes ignore it. `aspect_auto` keeps the region circular on
 screen by correcting for the frame's aspect.
@@ -1420,6 +1428,8 @@ an inpaint.pass fills a masked object from its surrounding boundary, the removed
 region's red falling and blue rising toward the field while the field holds;
 a rolling.pass with a submitted camera rotation shifts each scanline by its
 readout offset, a straight edge slanting under motion and holding without it;
+a roll_lock warp levels the horizon from the orientation stream, a tilted bar
+coming level under a submitted device roll and holding without one;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

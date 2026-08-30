@@ -1990,6 +1990,25 @@ fn faceScaleCenter(s: *Session, width: u16, height: u16, rotation: u32, mirror: 
     return .{ .cx = cx, .cy = cy, .radius = @max(maxd * 1.2, 0.02) };
 }
 
+/// The device roll a roll_lock warp levels: the submitted gravity's tilt in the
+/// image plane when the orientation stream is fed, else the tracked head's roll,
+/// else zero so the pass is identity. Positive tips the frame toward the right.
+fn rollAngle(s: *Session) f32 {
+    if (s.orientation_set) return std.math.atan2(s.orientation_prev[0], -s.orientation_prev[1]);
+    var result: face.Result = undefined;
+    var flat: ?*const [face.landmark_count * 3]f32 = null;
+    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+        flat = &s.face_results[0].landmarks;
+    } else if (s.face_tracking) |worker| {
+        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+            flat = &result.landmarks;
+        }
+    }
+    const src = flat orelse return 0;
+    const m = face_geometry.estimateHeadPose(src) orelse return 0;
+    return headEuler(m).roll;
+}
+
 /// Grows the per-frame vertex staging to hold `floats`, called once per
 /// dynamic mesh at lens activation. Never runs on the frame path.
 fn reserveFrameStage(s: *Session, floats: usize) void {
@@ -2086,6 +2105,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // bank, so it holds the frame through when no face is present.
             .warp => blk: {
                 const wp = s.warp_params.get(entry.graph_index) orelse break :blk false;
+                // roll_lock (mode 7) levels scenery and needs no face; face_scale
+                // (mode 6) rides the tracked face and holds through without one.
+                if (wp[0] > 6.5) break :blk true;
                 break :blk if (wp[0] > 5.5) reshapeFaceReady(s) else true;
             },
             // A reshape bank needs a tracked face to sculpt around, like dof
@@ -2618,7 +2640,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // stays on the face. No face was gated out in the readiness pass.
                 var center = [2]f32{ wp[1], wp[2] };
                 var region_radius = wp[3];
-                if (wp[0] > 5.5) {
+                // roll_lock (mode 7) rotates the whole frame about the center by
+                // the derived roll, so its amount is the signed angle, not wp[4].
+                var amount = wp[4];
+                if (wp[0] > 6.5) {
+                    center = .{ 0.5, 0.5 };
+                    amount = rollAngle(s) * wp[4];
+                } else if (wp[0] > 5.5) {
                     const fc = faceScaleCenter(s, width, height, rotation, mirror, aspect) orelse continue;
                     center = .{ fc.cx, fc.cy };
                     region_radius = fc.radius;
@@ -2646,7 +2674,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
                 else
                     r.default_mask_texture;
-                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], center[0], center[1], region_radius }, .{ wp[4], wp[5], aspect, 0.0 }, .{ wp[9], wp[7], wp[8], 0.0 }, &points, &fall);
+                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], center[0], center[1], region_radius }, .{ amount, wp[5], aspect, 0.0 }, .{ wp[9], wp[7], wp[8], 0.0 }, &points, &fall);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
