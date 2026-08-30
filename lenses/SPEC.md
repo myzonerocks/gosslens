@@ -1466,6 +1466,8 @@ a temporal.fuse net averages a ring of the last N frames through its sprite, a
 dark and a bright frame reading their mean, distinct from either;
 a temporal.fuse interpolate net blends two frames by the authored phase, a low
 phase reading toward the first frame and a high phase toward the second;
+a temporal.fuse hdr net merges an exposure bracket submitted through the
+frame-bracket op to its mean, holding off until the whole bracket lands;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

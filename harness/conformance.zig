@@ -4904,6 +4904,24 @@ fn writeTemporalLens(dir: []const u8, model: []const u8, frames: u32, mode: []co
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
 }
 
+fn writeTemporalHdrLens(dir: []const u8, model: []const u8, frames: u32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.temporal-hdr","version":"1.0.0","display_name":"Temporal HDR","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"fuse","type":"temporal.fuse","params":{{}},"temporal":{{"model":"m.onnx","frames":{d},"mode":"hdr","source":"bracket","sprite":"canvas"}}}},
+        \\  {{"id":"canvas","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},"sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}}}],
+        \\ "triggers":[]}}
+    , .{frames});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/m.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
 fn solidNv12(gpa: std.mem.Allocator, gray: u8) !Nv12Copy {
     const rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
     defer gpa.free(rgba);
@@ -5048,6 +5066,92 @@ fn proveTemporalInterpolate(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a temporal.fuse interpolate net blends two frames by the authored phase: phase 0.25 reads {d} and phase 0.75 reads {d}, tracking from the first frame toward the second\n", .{ lo_g, hi_g });
+    return true;
+}
+
+/// Activates a bracket-source temporal.fuse lens and submits a run of exposures
+/// through the frame-bracket op, one at a time so the ring keeps them in order,
+/// asserting the fusion does not publish until the full bracket has landed, then
+/// captures the fused image. Null on timeout or an early publish.
+fn captureTemporalBracketShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, grays: []const u8) !?[]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (width + 1) / 2;
+    for (grays, 0..) |gray, i| {
+        const planes = try solidNv12(gpa, gray);
+        defer planes.deinit(gpa);
+        const desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        // One bracket submit per exposure; the op stamps its own sequence so the
+        // ring keeps each. Wait for it to ring before the next exposure.
+        if (abi.goss_session_submit_frame_bracket(session, &desc, planes.y.ptr, width, planes.uv.ptr, half_w * 2) != .ok) return error.BracketSubmitFailed;
+        const want: u32 = @intCast(i + 1);
+        var spins: usize = 0;
+        while (abi.temporalRingFilled(session) < want) {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            std.Thread.yield() catch {};
+            c.glfwPollEvents();
+            spins += 1;
+            if (spins > 20000) return null;
+        }
+        // The ring is not full until the last exposure, so nothing has published.
+        if (i + 1 < grays.len and abi.styleTextureCount(session) != 0) {
+            std.debug.print("conformance: FAIL temporal hdr published before the full bracket landed\n", .{});
+            return null;
+        }
+    }
+    const last = try solidNv12(gpa, grays[grays.len - 1]);
+    defer last.deinit(gpa);
+    const last_desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 2000 };
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_submit_frame_copy(session, &last_desc, last.y.ptr, width, last.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        std.Thread.yield() catch {};
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 20000) return null;
+    }
+    var shot: []u8 = &.{};
+    for (0..8) |i| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 6) {
+            shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(shot);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return shot;
+}
+
+/// Proves HDR exposure fusion: a three-exposure bracket submitted through the
+/// frame-bracket op fuses to its mean, distinct from any single exposure, and the
+/// fusion holds off until the whole bracket has landed. The exposures are fed as
+/// a bracket source, not the live camera.
+fn proveTemporalHdr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 16;
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-hdr/assets");
+    try writeTemporalHdrLens("zig-out/temporal-hdr", onnxMeanModel(a, 3, side), 3);
+    const shot = (try captureTemporalBracketShot(gpa, engine, "zig-out/temporal-hdr", &.{ 20, 100, 240 })) orelse {
+        std.debug.print("conformance: FAIL temporal hdr never fused the bracket\n", .{});
+        return false;
+    };
+    defer gpa.free(shot);
+    const fused = centerGray(shot);
+    // The mean of 20, 100 and 240 is 120, distinct from every single exposure.
+    if (!(fused > 105 and fused < 135)) {
+        std.debug.print("conformance: FAIL temporal hdr did not fuse the bracket to its mean (center {d})\n", .{fused});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a temporal.fuse hdr node merges an exposure bracket submitted through the frame-bracket op: three exposures fuse to their mean {d}, distinct from any single, and hold off until the whole bracket lands\n", .{fused});
     return true;
 }
 
@@ -16485,6 +16589,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("temporal.fuse");
     if (!try proveTemporalInterpolate(gpa, engine)) return 1;
     watchHold("temporal interpolate");
+    if (!try proveTemporalHdr(gpa, engine)) return 1;
+    watchHold("temporal hdr");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

@@ -1552,6 +1552,35 @@ export class GossSession {
     this.mod.ccall("goss_session_submit_segmentation_image", "number", ["number", "number", "number", "number"], [this.handle, ptr, width, height]);
   }
 
+  /// Submits one RGBA exposure of an HDR bracket (width by height RGBA8, row
+  /// major), converted to NV12 and fed to bracket-source temporal.fuse nodes; the
+  /// fusion publishes once the ring holds a full bracket.
+  submitFrameBracketRgba(rgba: Uint8Array, width: number, height: number): void {
+    const ptr = this.scratch(rgba.length);
+    this.mod.HEAPU8.set(rgba, ptr);
+    this.mod.ccall("goss_session_submit_frame_bracket_rgba", "number", ["number", "number", "number", "number"], [this.handle, ptr, width, height]);
+  }
+
+  /// Submits one NV12 exposure of an HDR bracket, fed to bracket-source
+  /// temporal.fuse nodes. y and uv are the plane bytes as submitFrameCopy takes.
+  submitFrameBracket(y: Uint8Array, yStride: number, uv: Uint8Array, uvStride: number, width: number, height: number, colorStandard = 1, colorRange = 0): void {
+    const yPtr = this.mod.ccall("goss_alloc", "number", ["number"], [y.length]) as number;
+    this.mod.HEAPU8.set(y, yPtr);
+    const uvPtr = this.mod.ccall("goss_alloc", "number", ["number"], [uv.length]) as number;
+    this.mod.HEAPU8.set(uv, uvPtr);
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, colorStandard, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, colorRange, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 24, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
+    this.mod.ccall("goss_session_submit_frame_bracket", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, this.frameDescPtr, yPtr, yStride, uvPtr, uvStride]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [yPtr, y.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [uvPtr, uv.length]);
+  }
+
   /// Samples a reference photo's makeup color per face part, so a tint.pass
   /// with a reference source paints the live face in that color. rgba is width
   /// by height RGBA8; landmarks is the reference face's 478 x, y, z points. An

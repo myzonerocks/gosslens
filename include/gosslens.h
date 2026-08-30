@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 62u
+#define GOSS_ABI_MINOR 64u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -587,6 +587,14 @@ goss_status goss_session_submit_camera_intrinsics(goss_session *session, float f
  * velocity derived from consecutive samples to correct rolling-shutter skew; the
  * host submits one per frame from the IMU. A near-zero vector clears the stream. */
 goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us);
+
+/* Submits one exposure of an HDR bracket, fed only to bracket-source
+ * temporal.fuse nodes (the live camera feeds the rest); the fusion publishes
+ * once the ring holds a full bracket. The NV12 form takes the same planes as
+ * submit_frame_copy, the RGBA form width*height*4 bytes row-major. Returns
+ * goss_status_again when no bracket-source temporal.fuse node is active. */
+goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride);
+goss_status goss_session_submit_frame_bracket_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height);
 
 /* Segments a host-provided still RGBA image (width*height*4 bytes, row-major):
  * converts it to NV12 and feeds the running segmenter, so the next render

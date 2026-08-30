@@ -365,6 +365,28 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitFrameCopy(
     return @intFromEnum(abi.goss_session_submit_frame_copy(sessionFromHandle(session), &desc, y, @intCast(@max(y_stride, 0)), uv, @intCast(@max(uv_stride, 0))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitFrameBracket(env: *JniEnv, cls: jobject, session: i64, y_buffer: jobject, y_stride: i32, uv_buffer: jobject, uv_stride: i32, width: i32, height: i32, color_standard: i32, color_range: i32, timestamp_us: i64) i32 {
+    _ = cls;
+    const y = getDirectBufferAddress(env, y_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const uv = getDirectBufferAddress(env, uv_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var desc: abi.FrameDesc = .{
+        .width = @intCast(@max(width, 0)),
+        .height = @intCast(@max(height, 0)),
+        .pixel_format = 0,
+        .color_standard = @intCast(@max(color_standard, 0)),
+        .color_range = @intCast(@max(color_range, 0)),
+        .flags = 0,
+        .timestamp_us = timestamp_us,
+    };
+    return @intFromEnum(abi.goss_session_submit_frame_bracket(sessionFromHandle(session), &desc, y, @intCast(@max(y_stride, 0)), uv, @intCast(@max(uv_stride, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSubmitFrameBracketRgba(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, width: i32, height: i32) i32 {
+    _ = cls;
+    const rgba = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_submit_frame_bracket_rgba(sessionFromHandle(session), rgba, @intCast(@max(width, 0)), @intCast(@max(height, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSubmitHardwareBuffer(
     env: *JniEnv,
     cls: jobject,

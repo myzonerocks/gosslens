@@ -44,6 +44,19 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+    internal external fun nativeSubmitFrameBracket(
+        session: Long,
+        yBuffer: ByteBuffer,
+        yStride: Int,
+        uvBuffer: ByteBuffer,
+        uvStride: Int,
+        width: Int,
+        height: Int,
+        colorStandard: Int,
+        colorRange: Int,
+        timestampUs: Long,
+    ): Int
+    internal external fun nativeSubmitFrameBracketRgba(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeReportFrame(session: Long, frameTimeUs: Int, thermal: Int): Int
     internal external fun nativeEnableFaceTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
     internal external fun nativeDisableFaceTracking(session: Long)
@@ -1115,6 +1128,31 @@ class GossSession private constructor(
         buf.put(rgba)
         buf.rewind()
         return Gosslens.nativeSubmitSegmentationImage(handle, buf, width, height) == 0
+    }
+
+    /** Submits one exposure of an HDR bracket, fed only to bracket-source
+     * temporal.fuse nodes; the fusion publishes once the ring holds a full
+     * bracket. y and uv are direct NV12 plane buffers, as submitFrameCopy takes. */
+    fun submitFrameBracket(
+        y: ByteBuffer,
+        yStride: Int,
+        uv: ByteBuffer,
+        uvStride: Int,
+        width: Int,
+        height: Int,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
+    ): Boolean = Gosslens.nativeSubmitFrameBracket(
+        handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, 0L,
+    ) == 0
+
+    /** Submits one RGBA exposure of an HDR bracket (width by height RGBA8, row
+     * major), converted to NV12 and fed to bracket-source temporal.fuse nodes. */
+    fun submitFrameBracketRgba(rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = stage(rgba.size)
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSubmitFrameBracketRgba(handle, buf, width, height) == 0
     }
 
     /** Samples a reference photo's makeup color per face part, so a tint.pass

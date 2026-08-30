@@ -212,6 +212,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
     "goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)",
     "goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)",
+    "goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
+    "goss_status goss_session_submit_frame_bracket_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_set_makeup_reference(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height, const float *landmarks, uint32_t landmark_count)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
@@ -1157,6 +1159,9 @@ pub const Session = struct {
     auto_frame_cy: f32 = 0.5,
     auto_frame_scale: f32 = 1,
     auto_frame_valid: bool = false,
+    /// A monotonic sequence stamped on each submitted exposure so a bracket-source
+    /// temporal.fuse ring keeps every distinct exposure rather than deduping them.
+    bracket_seq: i64 = 0,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -6993,6 +6998,69 @@ pub export fn goss_session_submit_orientation(session: ?*Session, gravity_x: f32
     s.orientation_prev = g;
     s.orientation_prev_ts = timestamp_us;
     s.orientation_have_prev = true;
+    return .ok;
+}
+
+/// Feeds one NV12 exposure into every bracket-source temporal.fuse ring, each
+/// distinct exposure a distinct timestamp so the ring keeps them all. The fusion
+/// publishes once the ring holds a full bracket.
+fn feedBracket(s: *Session, conversion: math.color.Conversion, width: u32, height: u32, y_plane: [*]const u8, y_stride: u32, uv_plane: [*]const u8, uv_stride: u32) void {
+    s.bracket_seq += 1;
+    for (s.temporal_workers.items) |tw| {
+        if (!tw.is_bracket) continue;
+        ml_infer.temporalSubmitNv12(tw.worker, width, height, s.bracket_seq, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+}
+
+/// Submits one NV12 exposure of an HDR bracket, fed only to bracket-source
+/// temporal.fuse nodes (the live camera feeds the rest). Again when no bracket
+/// node is active.
+pub export fn goss_session_submit_frame_bracket(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const y_plane = y orelse return .invalid_argument;
+    const uv_plane = uv orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
+    if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
+    var has_bracket = false;
+    for (s.temporal_workers.items) |tw| {
+        if (tw.is_bracket) has_bracket = true;
+    }
+    if (!has_bracket) return .again;
+    const standard: math.color.Standard = switch (d.color_standard) {
+        1 => .bt709,
+        2 => .bt2020,
+        else => .bt601,
+    };
+    const range: math.color.Range = if (d.color_range == 1) .full else .video;
+    feedBracket(s, math.color.yuvToRgb(standard, range), d.width, d.height, y_plane, y_stride, uv_plane, uv_stride);
+    return .ok;
+}
+
+/// Submits one RGBA exposure of an HDR bracket (width*height*4 bytes, row-major),
+/// converted to NV12 and fed to bracket-source temporal.fuse nodes. Again when no
+/// bracket node is active.
+pub export fn goss_session_submit_frame_bracket_rgba(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const pixels = rgba orelse return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    var has_bracket = false;
+    for (s.temporal_workers.items) |tw| {
+        if (tw.is_bracket) has_bracket = true;
+    }
+    if (!has_bracket) return .again;
+    const gpa = s.engine.gpa;
+    const w: usize = width;
+    const h: usize = height;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    const y_out = gpa.alloc(u8, w * h) catch return .out_of_memory;
+    defer gpa.free(y_out);
+    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return .out_of_memory;
+    defer gpa.free(uv_out);
+    image.argbToNv12(pixels[0 .. w * h * 4], @intCast(w), @intCast(h), .bt601, .video, y_out, uv_out) catch return .unsupported;
+    feedBracket(s, math.color.yuvToRgb(.bt601, .video), width, height, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
     return .ok;
 }
 
