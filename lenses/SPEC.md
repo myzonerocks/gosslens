@@ -892,6 +892,16 @@ like the rest of the bundle: its size, tensor count, and tensor sizes are
 bounded, and every value read back is finiteness-guarded, so a hostile or
 oversized model fails to load rather than reaching the frame.
 
+The heavy inference workers a lens loads - `ml.infer` nets, diffusion restyles,
+and `splat.cloud` clouds - share one per-session budget, so a lens stacking many
+nets loads only up to the budget and leaves the rest inert rather than
+oversubscribing the device and overheating it. When an enhance chain does stack
+these deterministic post-effects, the engine draws them in a fixed order that
+keeps each one working on the input it expects: geometry first (undistort, then
+stabilize), then resolution (super-resolution), then cleanup (denoise, dehaze,
+low-light), then tone (grade, auto white balance), then relight and harmonize,
+and beauty last.
+
 The `"outputs"` array binds scalars from the model into parameters. Each entry
 names a `"param"` and reads from output `"tensor"` (default 0) either the value
 at `"index"` (the default `"reduce"` of `"element"`) or, with
@@ -1294,6 +1304,8 @@ a grade.pass naming a channel grades inside its mask in full and attenuates
 outside it, where the unmasked grade changes that outside too;
 an awb.pass estimates a gray-world balance from the frame thumb and neutralizes a
 color cast, pulling the channel spread to under half where strength 0 is untouched;
+a per-session inference budget caps the heavy workers, four ml.infer nets all
+loading under a budget of eight but only two under a budget of two;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

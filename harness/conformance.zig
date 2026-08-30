@@ -3383,6 +3383,67 @@ fn proveAwb(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a lens with `count` bare ml.infer nodes, all sharing one bundled model,
+/// to exercise the per-session heavy-worker budget.
+fn writeMlBudgetLens(dir: []const u8, model: []const u8, count: usize) !void {
+    const page = std.heap.page_allocator;
+    var nodes: std.ArrayList(u8) = .empty;
+    defer nodes.deinit(page);
+    for (0..count) |i| {
+        if (i > 0) try nodes.append(page, ',');
+        const one = try std.fmt.allocPrint(page, "{{\"id\":\"m{d}\",\"type\":\"ml.infer\",\"params\":{{}},\"ml\":{{\"model\":\"model.tflite\",\"outputs\":[]}}}}", .{i});
+        defer page.free(one);
+        try nodes.appendSlice(page, one);
+    }
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.ml-budget","version":"1.0.0","display_name":"Budget","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{s}],
+        \\ "triggers":[]}}
+    , .{nodes.items});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.tflite", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates the budget lens on a fresh session under the given worker budget and
+/// reports how many heavy workers it loaded.
+fn workersUnderBudget(engine: *abi.Engine, dir: []const u8, budget: u32) !u32 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    abi.setMlWorkerBudget(session, budget);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    return abi.mlWorkerCount(session);
+}
+
+/// Proves the per-session inference budget: a lens with more heavy nets than the
+/// budget loads only up to it, leaving the rest inert so a stacked enhance chain
+/// cannot oversubscribe the device. A generous budget loads them all.
+fn proveInferenceBudget(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const model = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(32 << 20));
+    defer gpa.free(model);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-budget/assets");
+    try writeMlBudgetLens("zig-out/ml-budget", model, 4);
+
+    const all = try workersUnderBudget(engine, "zig-out/ml-budget", 8);
+    const capped = try workersUnderBudget(engine, "zig-out/ml-budget", 2);
+    if (all != 4) {
+        std.debug.print("conformance: FAIL a generous budget did not load all four nets (loaded {d})\n", .{all});
+        return false;
+    }
+    if (capped != 2) {
+        std.debug.print("conformance: FAIL the budget did not cap the workers at 2 (loaded {d})\n", .{capped});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a per-session inference budget caps the heavy workers: four ml.infer nets all load under a budget of eight but only two load under a budget of two, the rest left inert\n", .{});
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -14783,6 +14844,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("undistort pass");
     if (!try proveAwb(gpa, engine)) return 1;
     watchHold("awb pass");
+    if (!try proveInferenceBudget(gpa, engine)) return 1;
+    watchHold("inference budget");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

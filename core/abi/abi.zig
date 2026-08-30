@@ -1068,6 +1068,12 @@ pub const Session = struct {
     /// scene-adaptive correction from the whole frame's statistics.
     frame_thumb: [thumb_side * thumb_side * 3]f32 = @splat(0),
     thumb_valid: bool = false,
+    /// How many heavy inference workers (ml.infer, diffusion, splat clouds) this
+    /// session admits at once, and how many the active lens has loaded. A lens
+    /// past the budget leaves its extra nets inert rather than oversubscribing
+    /// the device, honoring the no-overheat mandate for a stacked enhance chain.
+    ml_worker_budget: u32 = default_ml_worker_budget,
+    ml_workers_loaded: u32 = 0,
     /// The camera intrinsics an undistort.pass corrects for: the two radial
     /// coefficients, the principal point in pixels of the submitted frame
     /// (normalized against the working size at draw), the pixel aspect (fx/fy),
@@ -6448,6 +6454,20 @@ pub fn activeGpuParticleSims(session: ?*Session) u32 {
     return @intCast(s.gpu_particle_sims.count());
 }
 
+/// Sets how many heavy inference workers the session admits at once; the harness
+/// drives the enhance-stack budget down to prove a lens past it stays bounded.
+pub fn setMlWorkerBudget(session: ?*Session, budget: u32) void {
+    const s = session orelse return;
+    s.ml_worker_budget = budget;
+}
+
+/// How many heavy inference workers the active lens loaded, so the harness can
+/// prove the budget capped a stacked enhance chain.
+pub fn mlWorkerCount(session: ?*Session) u32 {
+    const s = session orelse return 0;
+    return s.ml_workers_loaded;
+}
+
 /// Reads the index-th submitted face. invalid_argument once index reaches
 /// face_count, so a caller loops zero to face_count to visit every face.
 pub export fn goss_session_face_result_at(session: ?*Session, index: u32, out_result: ?*face.Result) Status {
@@ -6592,6 +6612,10 @@ pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?
 /// The side of the square RGB thumbnail an auto-enhance pass reads: small enough
 /// that the per-frame reduction is a fixed handful of thousands of samples.
 const thumb_side = 32;
+
+/// How many heavy inference workers a session admits at once by default, the cap
+/// that keeps a lens stacking many nets from overheating the device.
+const default_ml_worker_budget: u32 = 8;
 
 /// Downsamples an NV12 frame into the session's RGB thumb, sampling the Y and UV
 /// planes at a thumb_side grid and converting each with the frame's color map.
@@ -9332,6 +9356,10 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
     const io = defaultIo();
     for (lens.manifest.nodes) |node| {
         const ml = node.ml orelse continue;
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: ml.infer node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, ml.model }) catch continue;
         defer gpa.free(path);
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
@@ -9428,6 +9456,7 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             ml_infer.destroy(worker);
             return;
         };
+        session.ml_workers_loaded += 1;
     }
 }
 
@@ -9613,6 +9642,10 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     const splats = lens.splatNodes(gpa, &session.lens_graph) catch return;
     defer gpa.free(splats);
     for (splats) |node| {
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: splat.cloud node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
         const bytes = readBundleAsset(gpa, bundle_path, node.model) orelse continue;
         defer gpa.free(bytes);
         const worker = ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch continue;
@@ -9644,6 +9677,7 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             ml_infer.destroy(worker);
             continue;
         };
+        session.ml_workers_loaded += 1;
         // Reserve the staging the billboard cloud writes each frame, six vertices
         // of twelve floats per point, so the draw never falls back to a stale mesh.
         reserveFrameStage(session, @as(usize, count) * 6 * 12);
@@ -9753,6 +9787,10 @@ fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
     const lens = if (session.active_lens) |*l| l else return;
     for (lens.manifest.nodes) |node| {
         const df = node.diffusion orelse continue;
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: diffusion node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
         // The encoder is optional: without one the loop starts from seeded noise
         // (text to image) rather than the camera frame (img2img).
         const enc: []u8 = if (df.encoder.len > 0) (readBundleAsset(gpa, bundle_path, df.encoder) orelse continue) else &.{};
@@ -9792,6 +9830,7 @@ fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
             diffusion.destroy(worker);
             return;
         };
+        session.ml_workers_loaded += 1;
     }
 }
 
@@ -10287,6 +10326,10 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createVideoLoaders(session, gpa, bundle_path);
     try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
+    // The heavy inference workers (ml.infer, diffusion, splat clouds) share one
+    // per-session budget so a lens stacking many nets cannot oversubscribe the
+    // device and overheat; the count resets before this lens's loaders run.
+    session.ml_workers_loaded = 0;
     createMlLoaders(session, gpa, bundle_path);
     createDiffusionLoaders(session, gpa, bundle_path);
     createSplatLoaders(session, gpa, bundle_path);
