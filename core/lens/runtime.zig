@@ -37,7 +37,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, dehaze_pass, relight_pass, glare_pass, vignette_pass, lowlight_pass, undistort_pass, awb_pass, stabilize_pass, zoom_pass, dereflect_pass, harmonize_pass, inpaint_pass, rolling_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -53,6 +53,19 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "blend.pass")) return .blend_pass;
     if (std.mem.eql(u8, type_str, "blur.pass")) return .blur_pass;
     if (std.mem.eql(u8, type_str, "grade.pass")) return .grade_pass;
+    if (std.mem.eql(u8, type_str, "dehaze.pass")) return .dehaze_pass;
+    if (std.mem.eql(u8, type_str, "relight.pass")) return .relight_pass;
+    if (std.mem.eql(u8, type_str, "glare.pass")) return .glare_pass;
+    if (std.mem.eql(u8, type_str, "vignette.pass")) return .vignette_pass;
+    if (std.mem.eql(u8, type_str, "lowlight.pass")) return .lowlight_pass;
+    if (std.mem.eql(u8, type_str, "undistort.pass")) return .undistort_pass;
+    if (std.mem.eql(u8, type_str, "awb.pass")) return .awb_pass;
+    if (std.mem.eql(u8, type_str, "stabilize.pass")) return .stabilize_pass;
+    if (std.mem.eql(u8, type_str, "zoom.pass")) return .zoom_pass;
+    if (std.mem.eql(u8, type_str, "dereflect.pass")) return .dereflect_pass;
+    if (std.mem.eql(u8, type_str, "harmonize.pass")) return .harmonize_pass;
+    if (std.mem.eql(u8, type_str, "inpaint.pass")) return .inpaint_pass;
+    if (std.mem.eql(u8, type_str, "rolling.pass")) return .rolling_pass;
     if (std.mem.eql(u8, type_str, "bloom.pass")) return .bloom_pass;
     if (std.mem.eql(u8, type_str, "dof.pass")) return .dof_pass;
     if (std.mem.eql(u8, type_str, "fog.pass")) return .fog_pass;
@@ -83,11 +96,15 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
 
 /// A behavior node drives parameters or a sprite's texture each tick and draws
 /// nothing itself, so it never joins the composite chain: the script, the logic
-/// graph, the ml.infer model, and the diffusion restyle.
+/// graph, the ml.infer model, the audio.infer model, and the diffusion restyle.
 fn isBehaviorNode(type_str: []const u8) bool {
     return std.mem.eql(u8, type_str, "script") or
         std.mem.eql(u8, type_str, "logic.graph") or
         std.mem.eql(u8, type_str, "ml.infer") or
+        std.mem.eql(u8, type_str, "temporal.fuse") or
+        std.mem.eql(u8, type_str, "audio.infer") or
+        std.mem.eql(u8, type_str, "audio.enhance") or
+        std.mem.eql(u8, type_str, "voice.transform") or
         std.mem.eql(u8, type_str, "diffusion");
 }
 
@@ -111,7 +128,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .dehaze_pass, .relight_pass, .glare_pass, .vignette_pass, .lowlight_pass, .undistort_pass, .awb_pass, .stabilize_pass, .zoom_pass, .dereflect_pass, .harmonize_pass, .inpaint_pass, .rolling_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
     };
 }
 
@@ -164,6 +181,32 @@ const LensNode = struct {
     morph_weights: []const []const u8 = &.{},
     /// .grade_pass only: the node's parametric color grade.
     grade: ?manifest.GradeField = null,
+    /// .dehaze_pass only: the node's dark-channel dehaze strength.
+    dehaze: ?manifest.DehazeField = null,
+    /// .relight_pass only: the node's directional key light.
+    relight: ?manifest.RelightField = null,
+    /// .glare_pass only: the node's specular-highlight rolloff.
+    glare: ?manifest.GlareField = null,
+    /// .vignette_pass only: the node's radial luma-gain.
+    vignette: ?manifest.VignetteField = null,
+    /// .lowlight_pass only: the node's shadow lift and denoise.
+    lowlight: ?manifest.LowLightField = null,
+    /// .undistort_pass only: the node's correction strength.
+    undistort: ?manifest.UndistortField = null,
+    /// .awb_pass only: the node's auto-enhance blend strength.
+    awb: ?manifest.AwbField = null,
+    /// .stabilize_pass only: the node's stabilization blend strength.
+    stabilize: ?manifest.StabilizeField = null,
+    /// .zoom_pass only: the node's digital region magnify.
+    zoom: ?manifest.ZoomField = null,
+    /// .dereflect_pass only: the node's specular attenuation strength.
+    dereflect: ?manifest.DereflectField = null,
+    /// .harmonize_pass only: the node's fg/bg color transfer.
+    harmonize: ?manifest.HarmonizeField = null,
+    /// .inpaint_pass only: the node's removal mask and search radius.
+    inpaint: ?manifest.InpaintField = null,
+    /// .rolling_pass only: the node's correction strength and readout time.
+    rolling: ?manifest.RollingShutterField = null,
     /// .bloom_pass only: the node's glow threshold and intensity.
     bloom: ?manifest.BloomField = null,
     /// .dof_pass only: the node's focus plane and blur strength.
@@ -354,6 +397,9 @@ pub const SpriteNode = struct {
     /// false fills behind the region (greenscreen), true fills over it (restyle).
     mask_channel: ?u8,
     mask_over: bool,
+    /// Over-mode restyle strength (0..1) and its optional live parameter name.
+    mask_strength: f32,
+    mask_strength_param: []const u8,
 };
 
 /// One splat.cloud node ready for the caller to load and draw - which graph node
@@ -415,6 +461,108 @@ pub const VideoNode = struct {
 pub const GradePassNode = struct {
     graph_index: graph.NodeIndex,
     grade: [12]f32,
+    /// An optional mask channel scoping the grade to a region; null grades all.
+    mask_channel: ?u8 = null,
+};
+
+/// One dehaze.pass node ready for the caller to draw - which graph node it is
+/// and its dark-channel dehaze strength.
+pub const DehazePassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+};
+
+/// One relight.pass node ready for the caller to draw - its strength and the
+/// light direction as a unit vector for u_relight.
+pub const RelightPassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [3]f32,
+};
+
+/// One glare.pass node ready for the caller to draw - its rolloff strength and
+/// the luma threshold above which a highlight is pulled down.
+pub const GlarePassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+    threshold: f32,
+};
+
+/// One vignette.pass node ready for the caller to draw - its radial gain
+/// strength and the radius inside which the frame is untouched.
+pub const VignettePassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+    radius: f32,
+};
+
+/// One lowlight.pass node ready for the caller to draw - its shadow-lift
+/// strength and the denoise amount.
+pub const LowLightPassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+    denoise: f32,
+};
+
+/// One undistort.pass node ready for the caller to draw - its correction
+/// strength; the radial coefficients and centre ride the submitted intrinsics.
+pub const UndistortPassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+};
+
+/// One awb.pass node ready for the caller to draw - its auto-enhance blend
+/// strength; the gains and levels are estimated per frame from the thumb.
+pub const AwbPassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+};
+
+/// One stabilize.pass node ready for the caller to draw - its blend strength;
+/// the shift and crop are estimated per frame by the engine's stabilizer.
+pub const StabilizePassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+};
+
+/// One zoom.pass node ready for the caller to draw - its magnify factor and the
+/// centre it zooms around.
+pub const ZoomPassNode = struct {
+    graph_index: graph.NodeIndex,
+    factor: f32,
+    cx: f32,
+    cy: f32,
+};
+
+/// One dereflect.pass node ready for the caller to draw - its specular
+/// attenuation strength.
+pub const DereflectPassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+};
+
+/// One harmonize.pass node ready for the caller to draw - its blend strength and
+/// transfer direction; the region statistics are measured per frame.
+pub const HarmonizePassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+    direction: u8,
+};
+
+/// One inpaint.pass node ready for the caller to draw - which mask channel marks
+/// the region to remove, and the search radius that fills it from its boundary.
+pub const InpaintPassNode = struct {
+    graph_index: graph.NodeIndex,
+    mask_channel: u8,
+    radius: f32,
+};
+
+/// One rolling.pass node ready for the caller to draw - its correction strength
+/// and the sensor readout time the per-row skew scales by; the camera motion is
+/// read from the orientation stream at draw.
+pub const RollingPassNode = struct {
+    graph_index: graph.NodeIndex,
+    strength: f32,
+    readout: f32,
 };
 
 /// One bloom.pass node ready for the caller to draw - which graph node it
@@ -562,7 +710,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
+pub const PassKind = enum { shader, lut, blend, blur, grade, dehaze, relight, glare, vignette, lowlight, undistort, awb, stabilize, zoom, dereflect, harmonize, inpaint, rolling, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
 
 /// One matte.hair source node ready for the caller to draw - which graph node
 /// it is, and its guided-filter parameters packed for the refine pass (radius,
@@ -758,7 +906,197 @@ pub const Lens = struct {
                 gr.exposure, gr.contrast, gr.saturation, gr.temperature,
                 gr.brightness, hue_rad,   gr.tint,       gr.grayscale,
                 gr.invert,    gr.posterize, 0,           0,
-            } });
+            }, .mask_channel = gr.mask_channel });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    pub fn dehazePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]DehazePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(DehazePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .dehaze_pass) continue;
+            const dh = node.dehaze orelse manifest.DehazeField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = dh.strength });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    pub fn relightPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]RelightPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(RelightPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .relight_pass) continue;
+            const rl = node.relight orelse manifest.RelightField{};
+            const rad = rl.angle * (std.math.pi / 180.0);
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = .{ rl.strength, std.math.cos(rad), std.math.sin(rad) } });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    pub fn glarePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]GlarePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(GlarePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .glare_pass) continue;
+            const gl = node.glare orelse manifest.GlareField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = gl.strength, .threshold = gl.threshold });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every vignette.pass node this lens spliced, in execution order, each
+    /// carrying its radial gain params - mirrors glarePassNodes.
+    pub fn vignettePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]VignettePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(VignettePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .vignette_pass) continue;
+            const vg = node.vignette orelse manifest.VignetteField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = vg.strength, .radius = vg.radius });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every lowlight.pass node this lens spliced, in execution order, each
+    /// carrying its lift and denoise params - mirrors vignettePassNodes.
+    pub fn lowlightPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]LowLightPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(LowLightPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .lowlight_pass) continue;
+            const ll = node.lowlight orelse manifest.LowLightField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = ll.strength, .denoise = ll.denoise });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every undistort.pass node this lens spliced, in execution order, each
+    /// carrying its correction strength - mirrors lowlightPassNodes.
+    pub fn undistortPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]UndistortPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(UndistortPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .undistort_pass) continue;
+            const un = node.undistort orelse manifest.UndistortField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = un.strength });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every awb.pass node this lens spliced, in execution order, each carrying
+    /// its auto-enhance strength - mirrors undistortPassNodes.
+    pub fn awbPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]AwbPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(AwbPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .awb_pass) continue;
+            const aw = node.awb orelse manifest.AwbField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = aw.strength });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every stabilize.pass node this lens spliced, in execution order, each
+    /// carrying its blend strength - mirrors awbPassNodes.
+    pub fn stabilizePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]StabilizePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(StabilizePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .stabilize_pass) continue;
+            const st = node.stabilize orelse manifest.StabilizeField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = st.strength });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every zoom.pass node this lens spliced, in execution order, each carrying
+    /// its magnify factor and centre - mirrors stabilizePassNodes.
+    pub fn zoomPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]ZoomPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(ZoomPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .zoom_pass) continue;
+            const zm = node.zoom orelse manifest.ZoomField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .factor = zm.factor, .cx = zm.cx, .cy = zm.cy });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every dereflect.pass node this lens spliced, in execution order, each
+    /// carrying its attenuation strength - mirrors zoomPassNodes.
+    pub fn dereflectPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]DereflectPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(DereflectPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .dereflect_pass) continue;
+            const dr = node.dereflect orelse manifest.DereflectField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = dr.strength });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every harmonize.pass node this lens spliced, in execution order, each
+    /// carrying its strength and direction - mirrors dereflectPassNodes.
+    pub fn harmonizePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]HarmonizePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(HarmonizePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .harmonize_pass) continue;
+            const hm = node.harmonize orelse manifest.HarmonizeField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = hm.strength, .direction = hm.direction });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every inpaint.pass node this lens spliced, in execution order, each
+    /// carrying its removal channel and radius - mirrors harmonizePassNodes.
+    pub fn inpaintPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]InpaintPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(InpaintPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .inpaint_pass) continue;
+            const ip = node.inpaint orelse manifest.InpaintField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .mask_channel = ip.mask_channel, .radius = ip.radius });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every rolling.pass node this lens spliced, in execution order, each
+    /// carrying its correction strength and readout - mirrors inpaintPassNodes.
+    pub fn rollingPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]RollingPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(RollingPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .rolling_pass) continue;
+            const rs = node.rolling orelse manifest.RollingShutterField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .strength = rs.strength, .readout = rs.readout });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1156,7 +1494,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over, .mask_strength = sp.mask_strength, .mask_strength_param = sp.mask_strength_param });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1223,6 +1561,19 @@ pub const Lens = struct {
                 .blend_pass => .blend,
                 .blur_pass => .blur,
                 .grade_pass => .grade,
+                .dehaze_pass => .dehaze,
+                .relight_pass => .relight,
+                .glare_pass => .glare,
+                .vignette_pass => .vignette,
+                .lowlight_pass => .lowlight,
+                .undistort_pass => .undistort,
+                .awb_pass => .awb,
+                .stabilize_pass => .stabilize,
+                .zoom_pass => .zoom,
+                .dereflect_pass => .dereflect,
+                .harmonize_pass => .harmonize,
+                .inpaint_pass => .inpaint,
+                .rolling_pass => .rolling,
                 .bloom_pass => .bloom,
                 .dof_pass => .dof,
                 .fog_pass => .fog,
@@ -1483,6 +1834,19 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .video = if (node_type == .video_texture) node.video else null,
             .splat = if (node_type == .splat_cloud) node.splat else null,
             .grade = if (node_type == .grade_pass) node.grade else null,
+            .dehaze = if (node_type == .dehaze_pass) node.dehaze else null,
+            .relight = if (node_type == .relight_pass) node.relight else null,
+            .glare = if (node_type == .glare_pass) node.glare else null,
+            .vignette = if (node_type == .vignette_pass) node.vignette else null,
+            .lowlight = if (node_type == .lowlight_pass) node.lowlight else null,
+            .undistort = if (node_type == .undistort_pass) node.undistort else null,
+            .awb = if (node_type == .awb_pass) node.awb else null,
+            .stabilize = if (node_type == .stabilize_pass) node.stabilize else null,
+            .zoom = if (node_type == .zoom_pass) node.zoom else null,
+            .dereflect = if (node_type == .dereflect_pass) node.dereflect else null,
+            .harmonize = if (node_type == .harmonize_pass) node.harmonize else null,
+            .inpaint = if (node_type == .inpaint_pass) node.inpaint else null,
+            .rolling = if (node_type == .rolling_pass) node.rolling else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .dof = if (node_type == .dof_pass) node.dof else null,
             .fog = if (node_type == .fog_pass) node.fog else null,

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 58u
+#define GOSS_ABI_MINOR 66u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -576,6 +576,26 @@ goss_status goss_session_body_result_at(goss_session *session, uint32_t index, g
  * A zero size clears it. Kept for depth occlusion against the content. */
 goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far);
 
+/* Graph thread. Submits the camera intrinsics an undistort.pass corrects for:
+ * the focal lengths and principal point in pixels of the submitted frame, and
+ * the radial distortion coefficients (k1, k2 read; further terms ignored). A
+ * zero focal length or zero coefficient count clears them. */
+goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len);
+
+/* Feeds one device gravity sample (an orientation vector, any scale) with its
+ * timestamp in microseconds. A rolling.pass reads the image-plane angular
+ * velocity derived from consecutive samples to correct rolling-shutter skew; the
+ * host submits one per frame from the IMU. A near-zero vector clears the stream. */
+goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us);
+
+/* Submits one exposure of an HDR bracket, fed only to bracket-source
+ * temporal.fuse nodes (the live camera feeds the rest); the fusion publishes
+ * once the ring holds a full bracket. The NV12 form takes the same planes as
+ * submit_frame_copy, the RGBA form width*height*4 bytes row-major. Returns
+ * goss_status_again when no bracket-source temporal.fuse node is active. */
+goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride);
+goss_status goss_session_submit_frame_bracket_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height);
+
 /* Segments a host-provided still RGBA image (width*height*4 bytes, row-major):
  * converts it to NV12 and feeds the running segmenter, so the next render
  * picks up the mask the way a camera frame would. Returns goss_status_again
@@ -880,6 +900,37 @@ goss_status goss_session_parameter_value(goss_session *session, const uint8_t *n
  * interleaved s16) that play_sound triggers produced, for the SDK to hand to
  * the platform audio output. Writes silence when no lens sound is active. */
 goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames);
+
+/* Graph thread. Reads the latest caption an audio.infer node CTC-decoded, by the
+ * node's id. Writes up to capacity bytes of UTF-8 into out and the full length
+ * into out_len (so a caller can size a buffer). Returns goss_status_again when
+ * the named node has no caption binding or has decoded nothing yet. */
+goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* One diarized caption segment: the times it spanned, the speaker who spoke it
+ * (a diarize binding's clustered id), and the byte length of its text (read
+ * through goss_session_caption_segment_text). Layout: 24 bytes. */
+typedef struct goss_caption_segment {
+    int64_t start_us;
+    int64_t end_us;
+    uint32_t speaker;
+    uint32_t text_len;
+} goss_caption_segment;
+
+/* Graph thread. Reads one recent diarized caption segment by index (0 the
+ * newest) into out; the text comes through goss_session_caption_segment_text.
+ * Returns goss_status_again when the index is past the segments held. */
+goss_status goss_session_caption_segment(goss_session *session, uint32_t index, goss_caption_segment *out);
+
+/* Graph thread. Reads one recent diarized caption segment's UTF-8 text by index
+ * (0 the newest), up to capacity bytes into out with the full length in out_len.
+ * Returns goss_status_again when the index is past the segments held. */
+goss_status goss_session_caption_segment_text(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* Graph thread. Enables (non-zero) or disables on-device dubbing: when on, a
+ * dub-bound audio.infer node synthesizes its decoded caption or translation to
+ * speech and plays it into the lens mixer. Off by default. */
+goss_status goss_session_set_dubbing(goss_session *session, uint32_t enabled);
 
 /* Graph thread. Folds the active lens sound into the caller's outgoing
  * call/live track: mic (interleaved f32 at sample_rate/channels, or NULL for

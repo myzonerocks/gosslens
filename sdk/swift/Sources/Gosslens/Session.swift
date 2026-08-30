@@ -76,6 +76,22 @@ public final class GossSession: @unchecked Sendable {
         try checked(goss_session_submit_frame_rgba_copy(handle, &raw, rgba, stride))
     }
 
+    /// Submits one exposure of an HDR bracket, fed only to bracket-source
+    /// temporal.fuse nodes (the live camera feeds the rest); the fusion
+    /// publishes once the ring holds a full bracket.
+    public func submitFrameBracket(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, colorStandard: GossColorStandard = .bt709, colorRange: GossColorRange = .video) throws {
+        var raw = GossFrameDesc(width: width, height: height, pixelFormat: .nv12, colorStandard: colorStandard, colorRange: colorRange, rotationDegrees: 0, mirrored: false, timestampUs: 0).raw
+        try checked(goss_session_submit_frame_bracket(handle, &raw, y, yStride, uv, uvStride))
+    }
+
+    /// Submits one RGBA exposure of an HDR bracket, converted to NV12 and fed to
+    /// bracket-source temporal.fuse nodes.
+    public func submitFrameBracketRgba(_ rgba: [UInt8], width: UInt32, height: UInt32) throws {
+        try rgba.withUnsafeBufferPointer { buf in
+            try checked(goss_session_submit_frame_bracket_rgba(handle, buf.baseAddress, width, height))
+        }
+    }
+
     /// Zero-copy submission of a platform hardware buffer (an AHardwareBuffer
     /// on Android); hardwareBuffer is the opaque platform handle. False means
     /// the buffer could not be imported, the signal to fall back to

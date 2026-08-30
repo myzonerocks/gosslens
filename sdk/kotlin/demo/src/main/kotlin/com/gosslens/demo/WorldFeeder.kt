@@ -4,7 +4,6 @@ import com.google.ar.core.Camera
 import com.google.ar.core.Frame
 import com.google.ar.core.Plane
 import com.google.ar.core.TrackingState
-import com.gosslens.Gosslens
 import com.gosslens.GossSession
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -59,8 +58,8 @@ class WorldFeeder(private val session: GossSession) {
         lightBuffer.putFloat(frame.lightEstimate.pixelIntensity)
         lightBuffer.putFloat(0f)
 
-        Gosslens.nativeSubmitWorld(
-            session.handle, stateBuffer, planesBuffer, planes.size,
+        session.submitWorld(
+            stateBuffer, planesBuffer, planes.size,
             anchorsBuffer, anchors.size, lightBuffer,
         )
     }

@@ -354,12 +354,127 @@ empty block leaves the frame untouched. Like `blur.pass` it ships no asset
 and is always ready; it lets a lens warm, cool, brighten, desaturate,
 posterize or invert without authoring a LUT.
 
+A `grade` block may also name a `"mask"` channel (one of the segmentation mask
+channels, such as `teeth`, `sclera`, or `face_skin`), scoping the grade to that
+region: the graded result blends over the original by the channel's soft mask,
+so a whitening grade lands on the teeth or a skin-tone lift on the face while the
+rest of the frame is untouched. With no `mask` the whole frame is graded.
+
 A `"bloom.pass"` node is a glow post-effect. It carries a `"bloom":
 {"threshold", "intensity"}` block: it extracts the frame's highlights - what
 sits above `threshold` in luma - blurs them, and adds that blurred glow back
 over the frame scaled by `intensity`, so bright areas bleed a soft halo.
 Both fields are optional with engine defaults. Like `blur.pass` and
 `grade.pass` it ships no asset and is always ready.
+
+A `"dehaze.pass"` node is a single-pass dehaze post-effect. It carries a
+`"dehaze": {"strength"}` block (0..1, default 1): a dark-channel-prior estimate
+of the atmospheric veil on each pixel drives a transmission recovery that pulls
+the scene radiance back out from under it, so a hazy frame gains contrast and
+its washed highlights come down. Strength 0 leaves the frame untouched. Like
+`grade.pass` it ships no asset and is always ready.
+
+A `"relight.pass"` node is a parametric directional relight post-effect. It
+carries a `"relight": {"preset", "strength", "angle"}` block: a soft key light
+from `angle` (degrees, 0 lights from the right) brightens the frame on the light
+side and shades the far side, scaled by `strength` (0..1, default 1). A named
+`preset` (`rembrandt`, `butterfly`, `clamshell`, `loop`, `split`, `rim`) seeds
+the angle and strength to a studio look, and an explicit `angle` or `strength`
+overrides it. Strength 0 leaves the frame untouched. Like `grade.pass` it ships
+no asset and is always ready.
+
+A `"glare.pass"` node is a specular-highlight rolloff post-effect. It carries a
+`"glare": {"strength", "threshold"}` block: a pixel whose luma sits above
+`threshold` (0..1, default 0.8) is pulled back down toward it by `strength`
+(0..1, default 1), so a blown-out specular recovers while the rest of the frame
+holds. Strength 0 leaves the frame untouched. Like `grade.pass` it ships no
+asset and is always ready.
+
+A `"vignette.pass"` node is a radial luma-gain post-effect. It carries a
+`"vignette": {"strength", "radius"}` block: the distance from the frame centre is
+rolled in from `radius` (0..1 of the half-diagonal, default 0.5, inside which the
+frame is untouched) out to the corner, and that falloff scales the gain
+`strength` (-1..1, default 0.5). A positive strength lifts the darkened corners,
+correcting a lens vignette; a negative strength sinks them for a stylistic one.
+Strength 0 leaves the frame untouched. Like `grade.pass` it ships no asset and is
+always ready.
+
+A `"lowlight.pass"` node is a night-mode lift post-effect. It carries a
+`"lowlight": {"strength", "denoise"}` block: a shadow-weighted blur of each
+pixel's neighbourhood damps the noise that lives in dark regions by `denoise`
+(0..1, default 0.5), then a gamma curve raises the shadows by `strength` (0..1,
+default 0.6) while holding the highlights near white. With both 0 the frame is
+untouched. Like `grade.pass` it ships no asset and is always ready.
+
+An `"undistort.pass"` node is a lens-distortion correction post-effect. It
+carries an `"undistort": {"strength"}` block (0..1, default 1) that blends toward
+the corrected sample. The radial coefficients and principal point come from the
+camera intrinsics the host submits through the ABI, not the manifest: for each
+output pixel the sampler reads the input at the radius the true point sits at,
+`r_d = r*(1 + k1 r^2 + k2 r^4)`, straightening a barrel or pincushion frame. With
+no intrinsics submitted the node is inert. It ships no asset and is always ready.
+
+An `"awb.pass"` node is a one-tap auto-enhance post-effect. It carries an `"awb":
+{"strength"}` block (0..1, default 1) that blends in a correction estimated per
+frame from a small downsample of the whole frame: gray-world per-channel gains
+that pull the average color toward neutral, then an auto-levels stretch that maps
+the luma black and white points to the full range. Nothing is authored; the
+estimate adapts to the scene. Strength 0 leaves the frame untouched. It ships no
+asset and is always ready.
+
+A `"stabilize.pass"` node is an electronic image stabilization post-effect. It
+carries a `"stabilize": {"strength"}` block (0..1, default 1) that blends in the
+correction. Each frame the engine estimates the global motion since the previous
+one, integrates it into the camera path, low-passes that into a smoothed path,
+and crops and shifts the frame to hold on the smoothed path instead of the raw
+jittery one. The smoothing level rides the recording policy's stabilization knob
+(off, standard, cinematic); with it off the node is inert. It ships no asset and
+is always ready.
+
+A `"zoom.pass"` node is a digital region zoom post-effect. It carries a `"zoom":
+{"factor", "cx", "cy"}` block: the region around the normalized centre (`cx`,
+`cy`, default the frame centre) is magnified by `factor` (1..8, default 1) to fill
+the frame, so a sub-region fills the output and reads sharper after an upscale
+pass downstream. Factor 1 with a centred point is the identity. It ships no asset
+and is always ready.
+
+A `"dereflect.pass"` node is a localized specular attenuation post-effect. It
+carries a `"dereflect": {"strength"}` block (0..1, default 1): a glass reflection
+or glare sits as high-frequency detail over the bright regions of the frame, so
+the pass pulls each pixel's detail (its difference from the neighbourhood mean)
+back toward that mean, weighted by the pixel's brightness and by `strength`. Dark
+regions and strength 0 are untouched. It ships no asset and is always ready.
+
+A `"harmonize.pass"` node is a statistical color transfer between the person and
+its background. It carries a `"harmonize": {"strength", "direction"}` block:
+`strength` (0..1, default 1) blends the match in, and `direction` (0 or 1, default
+0) picks which region is recolored, 0 matching the person to the background and 1
+the reverse. It reads the person segmentation mask on the host thread, measures
+each region's mean and spread of color from the frame, and applies a Reinhard
+transfer (subtract the source mean, scale by the ratio of spreads, add the
+destination mean) inside the chosen region, so an inserted subject takes on the
+color cast of where it now sits. Without a person mask, or at strength 0, it holds
+the frame through, the standard capability degradation. It ships no asset.
+
+A `"inpaint.pass"` node is a content-aware fill. It carries an `"inpaint":
+{"mask", "radius"}` block: `mask` names the channel that marks the region to
+remove (an object, a blemish, a passerby), and `radius` (0..0.5 of the frame,
+default 0.08) how far to search outward for the color that fills it. Each masked
+pixel is replaced by the color of the nearest unmasked boundary, gathered along
+rays cast outward and weighted by inverse distance, so the hole takes on the
+surrounding content while the unmasked pixels hold. With no mask on the named
+channel it holds the frame through, the standard capability degradation. It ships
+no asset.
+
+A `"rolling.pass"` node is a rolling-shutter correction. It carries a `"rolling":
+{"strength", "readout"}` block: `strength` (0..1, default 1) scales the
+correction, and `readout` (0..0.05s, default 0.02) is the sensor's frame readout
+time the per-row skew scales by. A sensor reads its rows top-to-bottom over that
+readout, so camera rotation during it skews each scanline; the engine derives the
+image-plane motion from the orientation stream (submitted through
+`goss_session_submit_orientation`) and this pass counter-shifts each row by its
+readout offset from the centre. With no orientation submitted the motion is zero
+and it holds the frame through. It ships no asset.
 
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
@@ -565,9 +680,12 @@ refracts the frame through a sphere and lets the surround through),
 `sphere_refraction` (the same refraction but the classic crystal ball, black
 outside the sphere), `bulge` (magnify toward the center), `pinch` (pull the
 image inward), `swirl` (twist about the center), `liquify` (freeform
-multi-point push/pull), or `face_scale` (scale the whole tracked face about its
-own center). `center_x` and `center_y` place the distortion, `radius`
-sizes it, and `strength` scales how hard it pushes, with zero an identity.
+multi-point push/pull), `face_scale` (scale the whole tracked face about its
+own center), `roll_lock` (counter-rotate the frame to level the horizon),
+`gaze_correct` (redirect the eyes back toward the lens), or `auto_frame` (steer
+the tracked face to a target anchor and size). `center_x` and
+`center_y` place the distortion, `radius` sizes it, and `strength` scales how
+hard it pushes, with zero an identity.
 
 `face_scale` is a landmark-anchored transform: it ignores the static center and
 radius and takes both from the tracked face each frame, then scales the face
@@ -577,6 +695,26 @@ inset), easing to identity by the region's rim so the surround is untouched. It
 needs a tracked face like `reshape.bank`; with no face it holds the frame
 through. The `face-inset`, `face-stretch`, and `face-cutout` reference lenses
 show the three landmark-anchored face transforms.
+
+`roll_lock` levels the horizon: it reads the device roll from the orientation
+stream (submitted through `goss_session_submit_orientation`, falling back to the
+tracked head's roll), and rotates the whole frame about its center by that angle
+so a tilted horizon comes level. `strength` scales the correction and zero is an
+identity; with no orientation and no tracked face it reads no roll and holds the
+frame through.
+
+`gaze_correct` redirects the eyes toward the lens: it reads the gaze from the
+tracked face's eyeLook blendshapes and pushes each pupil, at its iris centroid,
+opposite the measured gaze, the same summed liquify displacement confined to a
+per-eye `radius`. `strength` scales the redirection and zero is an identity. It
+needs a tracked face; with none it holds the frame through.
+
+`auto_frame` keeps the subject framed: it reads the tracked face's center and
+covering size each frame, eased by a running mean so a moving subject tracks
+without snapping, then applies a whole-frame affine that moves the face to the
+target anchor (`center_x`, `center_y`) and scales it toward the target covering
+fraction (`strength`). It needs a tracked face; with none it holds the frame
+through.
 `refractive_index` is the glass index the two sphere modes bend the view ray by;
 the displacement modes ignore it. `aspect_auto` keeps the region circular on
 screen by correcting for the frame's aspect.
@@ -692,6 +830,12 @@ way, so a bundled image, a video, or a generative texture (a diffusion or
 "mask_mode": "over"` lays a generative restyle onto the face and nowhere else.
 With no live segmentation the sprite stays hidden and the camera holds through,
 either way. A sprite with no `mask` draws over the frame at its rect as usual.
+
+In `over` mode a `"mask_strength"` (0 to 1, default 1) mixes the restyle onto its
+region: 1 is the full restyle, 0 holds the camera, and a value between is a
+partial blend, so a de-age, beauty, or harmonization restyle dials in by degree.
+`"mask_strength_param"` binds it to a live parameter for a slider. `behind` mode
+ignores it and keys at full strength (a greenscreen is not a partial blend).
 
 A sprite carries an optional `"interaction"` block so a finger can move it:
 `{"drag", "pinch", "rotate", "tap_event"}`. With `"drag"` a single finger that
@@ -827,6 +971,16 @@ like the rest of the bundle: its size, tensor count, and tensor sizes are
 bounded, and every value read back is finiteness-guarded, so a hostile or
 oversized model fails to load rather than reaching the frame.
 
+The heavy inference workers a lens loads - `ml.infer` nets, diffusion restyles,
+and `splat.cloud` clouds - share one per-session budget, so a lens stacking many
+nets loads only up to the budget and leaves the rest inert rather than
+oversubscribing the device and overheating it. When an enhance chain does stack
+these deterministic post-effects, the engine draws them in a fixed order that
+keeps each one working on the input it expects: geometry first (undistort, then
+stabilize), then resolution (super-resolution), then cleanup (denoise, dehaze,
+low-light), then tone (grade, auto white balance), then relight and harmonize,
+and beauty last.
+
 The `"outputs"` array binds scalars from the model into parameters. Each entry
 names a `"param"` and reads from output `"tensor"` (default 0) either the value
 at `"index"` (the default `"reduce"` of `"element"`) or, with
@@ -838,6 +992,74 @@ writes a detected box's coordinates or a keypoint's position into parameters,
 and a sprite's placement parameters (or a shader) read them to follow the
 found object.
 
+A `"temporal.fuse"` node is the multi-frame sibling of `ml.infer`: it runs a
+model with several square-RGB image inputs, fed a ring of the last N frames, and
+draws the model's fused output image through a sprite the way a diffusion restyle
+does. It carries a `"temporal"` block: `"model"` names the net under `assets/`,
+`"frames"` (2..8) how many inputs it fuses, `"sprite"` the sprite it draws
+through, `"mode"` the fusion (`denoise` averages a run to cut noise,
+`interpolate` blends two frames by a `"phase"` 0..1, `hdr` merges an exposure
+bracket), and `"source"` where the frames come from (`camera` the live feed, or
+`bracket` a submitted exposure set). The ring advances once per distinct frame
+timestamp, so a live camera never fills it with copies of the latest frame, and
+it fuses only once the ring holds a full set. Inference runs off the frame thread
+like `ml.infer`, and the model is bounded and finiteness-guarded the same way.
+
+An `"audio.infer"` node is the microphone sibling of `ml.infer`: it runs a
+bundled model whose one input is a window of the latest microphone samples
+(mono, drawn from a ring the engine fills as audio arrives) and binds the model's
+scalar outputs into parameters through the same `"outputs"` array. It carries an
+`"audio"` block, `{"model", "outputs"}`, draws nothing, and drives the lens from
+sound the way `ml.infer` drives it from the camera - an audio-reactive parameter,
+a viseme for a talking avatar, a caption. It is bounded and sandboxed like every
+author model, and it counts against the same per-session heavy-worker budget.
+
+An `audio.infer` node may carry a `"caption"` block, `{"tensor", "labels"}`, that
+greedy-CTC-decodes an output tensor of `[timesteps, vocab]` logits into text (per
+timestep the argmax class, dropping the blank at index 0 and collapsing
+consecutive repeats), mapping the surviving classes to a bundled labels file
+(`assets/<labels>.txt`, one label per line, the blank first). The decoded text is
+read back through the ABI by the node's id, for the app to draw as a live
+subtitle. It may also carry a `"diarize"` block, `{"embed_tensor", "max_speakers",
+"threshold", "param"}`, that clusters a speaker-embedding output: each embedding
+is cosine-matched against a bounded set of speaker centroids, matching the nearest
+within `threshold` (and updating it) or allocating a new speaker up to
+`max_speakers`, and the matched speaker index drives `param`. Each decoded
+utterance is also recorded as a caption segment, tagged with the speaker who
+spoke it and the times it spanned, into a ring the host reads back through the
+caption-segment ABI as a speaker-tagged transcript.
+
+For translation the node's model is the encoder and a `"translate"` block,
+`{"decoder", "tokens", "memory_tensor", "max_tokens", "bos", "eos"}`, names a
+second bundled decoder step model. The engine runs a greedy autoregressive loop:
+it feeds the encoder memory and the previous token (starting at `bos`) to the
+decoder each step, takes the argmax, and stops on `eos` or after `max_tokens` (a
+fixed-iteration bound, so it never hangs), detokenizing the tokens through a
+bundled `tokens` file into the recognized text, read back through the caption ABI
+like any other caption.
+
+An `audio.infer` node may also carry a `"dub"` block, `{"model", "rate"}`, naming
+a bundled text-to-speech model. When the host enables dubbing through the ABI and
+the node's decoded caption or translation changes, the engine feeds the text to
+the model, synthesizes the output PCM to speech, and plays it into the lens mixer
+at `rate`, so the audio the SDK pulls carries the voice-over. Dubbing is off by
+default, since a dub speaks over the room.
+
+An `"audio.enhance"` node cleans the outgoing microphone. Like the other audio
+nodes it draws nothing; it carries an `"enhance": {"strength"}` block (0..1,
+default 1). When one is active, the output mix runs a deterministic noise
+reduction over the microphone before it is summed with the lens voices, a
+one-pole low-pass that pulls the high-frequency hiss down and a soft gate that
+eases the near-silent noise floor toward zero, blended in by `strength` so zero
+leaves the mic untouched. It needs no model.
+
+A `"voice.transform"` node changes the outgoing voice. It draws nothing and
+carries a `"voice": {"pitch"}` block (0.5..2, default 1): the output mix pitch
+shifts the microphone by the `pitch` ratio, above 1 higher and below 1 lower,
+through a two-tap delay line swept at the ratio with a constant-power crossfade,
+so the pitch changes while the track keeps its length. A ratio of one is a
+passthrough. It needs no model.
+
 An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
 that binds a whole output tensor as a segmentation mask. The tensor is read as
 a square single-channel image, resampled to the engine's mask resolution, and
@@ -845,6 +1067,21 @@ fed to the named mask `"channel"` (the same channel names the beauty and shader
 passes key against), so a lens author's own segmenter drives the identical
 compositing the built-in segmenters do. A model whose bound tensor is not a
 square single-channel plane keeps driving its parameters and feeds no mask.
+
+An `ml.infer` node may carry an `"aux": {"reference"}` block for a model that
+takes a second input: a bundled reference image (`assets/<reference>.png`)
+sampled into the model's second square-RGB input every inference, so a net is
+conditioned on a reference (a makeup, style, or identity transfer). A model that
+declares two inputs requires the reference and is otherwise rejected at load; a
+one-input model ignores the block. The frame is always the first input.
+
+The second input may instead be the previous output frame, through
+`"aux": {"temporal": true}`. The engine holds the last frame's sampled plane and
+feeds it into the model's second input each inference, so a recurrent net fuses
+the current frame with the one before it (temporal denoise, upscale, or
+stabilize). The second input must be the same square size as the first; the very
+first frame is its own previous, so a cold start is not a black plane.
+`temporal` and `reference` are mutually exclusive.
 
 An `ml.infer` node may carry a `"style"` block, `{"tensor", "sprite"}`, for a
 model that restyles the whole frame. The tensor is read as a square
@@ -856,6 +1093,13 @@ picture is whatever the model last produced. This is the neural style-transfer
 path: a restyle net loads like any other author model, runs off the frame
 thread under the same bounds, and draws through the sprite the composite chain
 already knows how to place, turn, and fade.
+
+The style output is read at whatever square side the model emits, so the same
+binding carries an enhancement whose output is larger than its input: a
+super-resolution, denoise, deblur, dehaze, or glare-removal net draws its result
+through the sprite at the enlarged side. The preview draws it at the swap chain's
+size, so the extra detail of an upscale is fully preserved down the capture path;
+pair a super-resolution lens with a high-resolution capture to keep it.
 
 A `"diffusion"` node runs an on-device latent-diffusion restyle. Like the other
 behavior nodes it draws nothing itself; it carries a `"diffusion"` block naming
@@ -1184,11 +1428,76 @@ animation), hair-recolor (segmentation; the hair mask channel), face-paint
 `"anchor": "face"`). world-anchor (world) is proven separately on the
 deterministic replay camera track. The byo-ml path is proven in the same
 harness: an `ml.infer` node runs a bundled TFLite segmenter and a bundled ONNX
-net, each driving a lens parameter from the frame; an author ONNX segmenter's
-output reaches the subject mask channel; an `argmax` reduce reads a
+net, each driving a lens parameter from the frame; an audio.infer node runs a
+bounded model over the microphone window and drives a parameter, a doubling net
+reading about twice a constant tone and near zero on silence; an audio.infer
+caption binding greedy-CTC-decodes a logits tensor into text read back by node
+id, a synthetic net's fixed logits decoding to a known word; an audio.infer
+diarize binding clusters embeddings into speakers, a flat tone and an alternating
+tone reading as two distinct speakers and the flat tone returning to its own;
+an audio.infer translate binding runs a greedy autoregressive decoder over the
+encoder memory, a synthetic transition decoder walking bos to a to b to eos and
+yielding "ab"; an audio.infer dub binding synthesizes the decoded caption to
+speech and plays it into the mixer, the pulled audio carrying a voice with
+dubbing on and silent with it off; an author ONNX
+segmenter's output reaches the subject mask channel; an `argmax` reduce reads a
 classifier's predicted class into a parameter; a model output moves a sprite
 through its placement parameters; a restyle net's output image draws through a
-sprite; a diffusion loop over a bundled encoder, unet, and decoder restyles
+sprite; a super-resolution net whose output is a larger square than its input
+draws through the style sprite at the enlarged side (16 from an 8 input);
+a two-input ml.infer net conditions on a bundled reference, feeding both inputs
+and drawing, where the same model with no reference is rejected at load;
+a dehaze.pass lifts the atmospheric veil, strength 1 darkening a hazy frame
+where strength 0 leaves it untouched; a relight.pass lights the frame
+directionally, angle 0 brightening the right over the left where the uniform
+strength-0 frame stays even; a glare.pass recovers a blown highlight, strength 1
+pulling the bright region down toward the threshold where the normal region
+holds; a vignette.pass applies a radial luma-gain, a positive strength lifting
+the corners and a negative sinking them where the centre inside the radius holds;
+a lowlight.pass lifts a dark noisy region far more than it moves a highlight and
+cuts the shadow noise, where the strength-0 denoise-0 control is untouched;
+an undistort.pass applies the submitted radial map, a positive k1 shrinking a
+centred disk and a negative growing it, where no intrinsics leaves it inert;
+a grade.pass naming a channel grades inside its mask in full and attenuates
+outside it, where the unmasked grade changes that outside too;
+an awb.pass estimates a gray-world balance from the frame thumb and neutralizes a
+color cast, pulling the channel spread to under half where strength 0 is untouched;
+a per-session inference budget caps the heavy workers, four ml.infer nets all
+loading under a budget of eight but only two under a budget of two;
+a stabilize.pass steadies a jittering camera, the settled inter-frame motion
+falling to under half of the same lens with stabilization off;
+a zoom.pass magnifies a centred region, a factor of 2 growing a centred disk
+toward four times its area;
+a dereflect.pass attenuates high-frequency detail in the bright regions far more
+than the dark, the bright texture softening to under half while the dark holds;
+a harmonize.pass matches the person's color distribution to the background, the
+subject's red falling and blue rising toward the background while it holds;
+an inpaint.pass fills a masked object from its surrounding boundary, the removed
+region's red falling and blue rising toward the field while the field holds;
+a rolling.pass with a submitted camera rotation shifts each scanline by its
+readout offset, a straight edge slanting under motion and holding without it;
+a roll_lock warp levels the horizon from the orientation stream, a tilted bar
+coming level under a submitted device roll and holding without one;
+a gaze_correct warp reads the eyeLook blendshapes and redirects the pupils, the
+eye region shifting under a measured gaze while a far corner holds;
+an auto_frame warp steers the tracked face to the anchor and target size, an
+off-center small face recentering and growing while it holds without a face;
+a temporal.fuse net averages a ring of the last N frames through its sprite, a
+dark and a bright frame reading their mean, distinct from either;
+a temporal.fuse interpolate net blends two frames by the authored phase, a low
+phase reading toward the first frame and a high phase toward the second;
+a temporal.fuse hdr net merges an exposure bracket submitted through the
+frame-bracket op to its mean, holding off until the whole bracket lands;
+an audio.enhance node cleans the outgoing microphone, a tone buried under
+per-sample hiss losing its high-frequency step energy while a control holds;
+a voice.transform node pitch-shifts the outgoing microphone by its ratio, a
+300 Hz tone's fundamental scaling by 1.5 while the track keeps its length;
+a diarized caption segment lands in the read-back ring, a decoded utterance
+held with the times it spanned and its speaker, metadata and text read apart;
+a temporal ml.infer net feeds the previous output frame into its second input,
+a recurrent sum of the frame and its previous reading about twice a constant gray
+where the same graph on a zero reference reads it once;
+a diffusion loop over a bundled encoder, unet, and decoder restyles
 the frame and draws it through a sprite; a diffusion lens with no encoder
 generates from seeded noise and a text embedding, drawing the image through a
 sprite; a diffusion lens keyed to the person channel composites its
@@ -1196,7 +1505,10 @@ generated image as the background behind the segmented subject; an img2img
 diffusion lens with temporal coherence warps its previous frame by optical flow
 and blends it into the restyle, holding the sprite steady across frames; and an
 img2img diffusion lens masked to the face_skin channel in over mode composites
-its restyle onto the face matte and holds the camera elsewhere; a diffusion
+its restyle onto the face matte and holds the camera elsewhere; a masked-over
+sprite mixes onto its region by mask_strength, the masked region moving from
+camera at 0 to the full restyle at 1 while the region outside it never changes
+with strength; a diffusion
 node targeting a mesh.face node binds its generated image as the face mesh's
 material texture; a splat.cloud node lifts the camera frame to a 3D point
 set with a bundled model and draws it as a billboard cloud; a splat.cloud in mesh

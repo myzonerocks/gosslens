@@ -16,6 +16,73 @@ pub const CreateError = error{ Unsupported, InvalidModel, ModelRejected, OutOfMe
 /// The most output tensors a byo-ml model may expose, a bound not a promise.
 pub const max_outputs = 8;
 
+/// The second input plane of a two-input (reference-conditioned) model: its
+/// square, the sample scratch, and the owned reference RGBA the core resamples
+/// into input 1 each compute. Built by setupAux with live errdefers so a
+/// partial allocation never leaks; deinit frees all three.
+const AuxPlane = struct {
+    sq: ml_sample.Square,
+    tensor: []f32,
+    nchw_scratch: []f32,
+    pixels: []u8,
+    width: u32,
+    height: u32,
+
+    fn deinit(self: AuxPlane, gpa: std.mem.Allocator) void {
+        gpa.free(self.tensor);
+        gpa.free(self.nchw_scratch);
+        gpa.free(self.pixels);
+    }
+};
+
+/// Builds the aux plane for a two-input model: input 1 must be one square-RGB
+/// image, and the caller must ship a reference at least width*height*4 bytes.
+fn setupAux(gpa: std.mem.Allocator, engine: *ml_engine.Engine, rgba: []const u8, width: u32, height: u32) CreateError!AuxPlane {
+    const need = @as(usize, width) * height * 4;
+    if (width == 0 or height == 0 or rgba.len < need) return error.InvalidModel;
+    var dims_buf: [8]i32 = undefined;
+    const dims = engine.inputDims(1, &dims_buf) catch return error.InvalidModel;
+    const sq = ml_sample.detectSquareRgb(dims) orelse return error.InvalidModel;
+    const tensor = gpa.alloc(f32, @as(usize, sq.side) * sq.side * 3) catch return error.OutOfMemory;
+    errdefer gpa.free(tensor);
+    const scratch = if (sq.layout == .nchw)
+        gpa.alloc(f32, @as(usize, sq.side) * sq.side * 3) catch return error.OutOfMemory
+    else
+        gpa.alloc(f32, 0) catch return error.OutOfMemory;
+    errdefer gpa.free(scratch);
+    const pixels = gpa.dupe(u8, rgba[0..need]) catch return error.OutOfMemory;
+    return .{ .sq = sq, .tensor = tensor, .nchw_scratch = scratch, .pixels = pixels, .width = width, .height = height };
+}
+
+/// The second input of a temporal model: input 1 must be a square RGB the same
+/// size as input 0 (both the frame), so the previous frame swaps in cleanly.
+/// `prev` holds the last frame's sampled NHWC plane, zeroed at first.
+const TemporalPlane = struct {
+    sq: ml_sample.Square,
+    nchw_scratch: []f32,
+    prev: []f32,
+
+    fn deinit(self: TemporalPlane, gpa: std.mem.Allocator) void {
+        gpa.free(self.nchw_scratch);
+        gpa.free(self.prev);
+    }
+};
+
+fn setupTemporal(gpa: std.mem.Allocator, engine: *ml_engine.Engine, input_side: u32) CreateError!TemporalPlane {
+    var dims_buf: [8]i32 = undefined;
+    const dims = engine.inputDims(1, &dims_buf) catch return error.InvalidModel;
+    const sq = ml_sample.detectSquareRgb(dims) orelse return error.InvalidModel;
+    if (sq.side != input_side) return error.InvalidModel;
+    const scratch = if (sq.layout == .nchw)
+        gpa.alloc(f32, @as(usize, sq.side) * sq.side * 3) catch return error.OutOfMemory
+    else
+        gpa.alloc(f32, 0) catch return error.OutOfMemory;
+    errdefer gpa.free(scratch);
+    const prev = gpa.alloc(f32, @as(usize, sq.side) * sq.side * 3) catch return error.OutOfMemory;
+    @memset(prev, 0);
+    return .{ .sq = sq, .nchw_scratch = scratch, .prev = prev };
+}
+
 /// A loaded author model: its backend engine, the reused RGB input plane, and
 /// an owned copy of each output tensor so a reader never touches the live
 /// engine output the next invoke overwrites. Outputs read zero until publish.
@@ -29,6 +96,23 @@ pub const Core = struct {
     /// Planar scratch the NHWC sample transposes into for an NCHW model; empty
     /// for an NHWC model, which writes its input tensor straight through.
     nchw_scratch: []f32,
+    /// An optional second input plane: a bundled reference image the model is
+    /// conditioned on (makeup, style, or identity transfer). Set only when the
+    /// model declares two square-RGB inputs. aux_pixels is the owned reference
+    /// RGBA the core resamples into input 1 each compute.
+    aux_sq: ?ml_sample.Square = null,
+    aux_tensor: []f32 = &.{},
+    aux_nchw_scratch: []f32 = &.{},
+    aux_pixels: []u8 = &.{},
+    aux_width: u32 = 0,
+    aux_height: u32 = 0,
+    /// Temporal mode: input 1 is the PREVIOUS frame, held here as the last
+    /// frame's sampled NHWC plane and swapped in each compute, so a two-input
+    /// model fuses the current and previous frame (interpolation, temporal
+    /// denoise). Mutually exclusive with the reference aux above.
+    temporal: bool = false,
+    prev_input1: []f32 = &.{},
+    prev_valid: bool = false,
     output_count: u32,
     outputs: [max_outputs][]f32,
     published: bool = false,
@@ -36,7 +120,7 @@ pub const Core = struct {
     /// Loads the model under the sandbox bounds. Rejects a model whose input is
     /// not one square RGB image (NHWC or NCHW), whose output count is outside
     /// the bound, or whose bytes or tensors exceed the bounds.
-    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*Core {
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*Core {
         const core = gpa.create(Core) catch return error.OutOfMemory;
         errdefer gpa.destroy(core);
 
@@ -52,7 +136,7 @@ pub const Core = struct {
 
         const in_count = engine.inputCount();
         const out_count = engine.outputCount();
-        if (in_count != 1) return error.InvalidModel;
+        if (in_count < 1 or in_count > 2) return error.InvalidModel;
         if (out_count == 0 or out_count > max_outputs) return error.InvalidModel;
 
         var in_dims_buf: [8]i32 = undefined;
@@ -68,6 +152,21 @@ pub const Core = struct {
             try gpa.alloc(f32, 0);
         errdefer gpa.free(nchw_scratch);
 
+        // A two-input model reads a second plane: a temporal model takes the
+        // previous frame, otherwise a bundled reference. A one-input model
+        // leaves both null.
+        var aux: ?AuxPlane = null;
+        errdefer if (aux) |a| a.deinit(gpa);
+        var temp: ?TemporalPlane = null;
+        errdefer if (temp) |t| t.deinit(gpa);
+        if (in_count == 2) {
+            if (temporal) {
+                temp = try setupTemporal(gpa, &engine, input_side);
+            } else {
+                aux = try setupAux(gpa, &engine, aux_rgba orelse return error.InvalidModel, aux_width, aux_height);
+            }
+        }
+
         // The largest tensor and the tensor count feed the sandbox admission,
         // so an oversized or many-tensor model never allocates its buffers. A
         // warm-up over zeroed input discovers every output length across both
@@ -76,6 +175,15 @@ pub const Core = struct {
         var largest: u64 = @as(u64, input_side) * input_side * 3 * @sizeOf(f32);
         @memset(input_tensor, 0);
         ml_sample.writeSampled(&engine, 0, in_sq, input_tensor, nchw_scratch) catch return error.InvalidModel;
+        if (aux) |a| {
+            const ref = sampler.Frame{ .pixels = .{ .rgba8 = a.pixels }, .width = a.width, .height = a.height };
+            ml_sample.writeFrame(&engine, 1, a.sq, ref, a.tensor, a.nchw_scratch) catch return error.InvalidModel;
+            largest = @max(largest, a.tensor.len * @sizeOf(f32));
+        }
+        if (temp) |t| {
+            ml_sample.writeSampled(&engine, 1, t.sq, t.prev, t.nchw_scratch) catch return error.InvalidModel;
+            largest = @max(largest, t.prev.len * @sizeOf(f32));
+        }
         engine.invoke() catch return error.InvalidModel;
         for (0..out_count) |i| {
             const floats = engine.outputFloats(i) catch return error.InvalidModel;
@@ -101,6 +209,14 @@ pub const Core = struct {
             .input_side = input_side,
             .input_tensor = input_tensor,
             .nchw_scratch = nchw_scratch,
+            .aux_sq = if (aux) |a| a.sq else if (temp) |t| t.sq else null,
+            .aux_tensor = if (aux) |a| a.tensor else &.{},
+            .aux_nchw_scratch = if (aux) |a| a.nchw_scratch else if (temp) |t| t.nchw_scratch else &.{},
+            .aux_pixels = if (aux) |a| a.pixels else &.{},
+            .aux_width = if (aux) |a| a.width else 0,
+            .aux_height = if (aux) |a| a.height else 0,
+            .temporal = temporal,
+            .prev_input1 = if (temp) |t| t.prev else &.{},
             .output_count = @intCast(out_count),
             .outputs = outputs,
         };
@@ -111,6 +227,10 @@ pub const Core = struct {
         const gpa = core.gpa;
         for (core.outputs[0..core.output_count]) |buf| gpa.free(buf);
         core.engine.deinit();
+        gpa.free(core.aux_tensor);
+        gpa.free(core.aux_nchw_scratch);
+        gpa.free(core.aux_pixels);
+        gpa.free(core.prev_input1);
         gpa.free(core.nchw_scratch);
         gpa.free(core.input_tensor);
         gpa.free(core.model_bytes);
@@ -122,7 +242,22 @@ pub const Core = struct {
     /// so a compute allocates nothing.
     pub fn compute(core: *Core, frame: sampler.Frame) bool {
         ml_sample.writeFrame(&core.engine, 0, core.in_sq, frame, core.input_tensor, core.nchw_scratch) catch return false;
+        if (core.aux_sq) |sq| {
+            if (core.temporal) {
+                // Input 1 is the previous frame; the first frame is its own
+                // previous so a cold start is not a black plane.
+                const src = if (core.prev_valid) core.prev_input1 else core.input_tensor;
+                ml_sample.writeSampled(&core.engine, 1, sq, src, core.aux_nchw_scratch) catch return false;
+            } else {
+                const ref = sampler.Frame{ .pixels = .{ .rgba8 = core.aux_pixels }, .width = core.aux_width, .height = core.aux_height };
+                ml_sample.writeFrame(&core.engine, 1, sq, ref, core.aux_tensor, core.aux_nchw_scratch) catch return false;
+            }
+        }
         core.engine.invoke() catch return false;
+        if (core.temporal) {
+            @memcpy(core.prev_input1, core.input_tensor);
+            core.prev_valid = true;
+        }
         return true;
     }
 
@@ -188,6 +323,400 @@ pub const Core = struct {
         if (buf.len != dst.len) return false;
         @memcpy(dst, buf);
         return true;
+    }
+};
+
+/// A synchronous audio inference core: loads a bounded author model whose single
+/// input is a 1-D window of PCM samples, writes a window in, invokes, and reads
+/// scalar outputs, driving a lens parameter from the microphone. Sandboxed like
+/// the frame core; run directly at tick since an audio window is small.
+pub const AudioCore = struct {
+    gpa: std.mem.Allocator,
+    model_bytes: []u8,
+    engine: ml_engine.Engine,
+    input_len: usize,
+    input_scratch: []f32,
+    output_count: u32,
+    outputs: [max_outputs][]f32,
+    published: bool = false,
+
+    /// The largest window a bounded audio model may take, so a hostile shape
+    /// never allocates an unbounded buffer.
+    const max_input_len: usize = 1 << 20;
+
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*AudioCore {
+        const self = gpa.create(AudioCore) catch return error.OutOfMemory;
+        errdefer gpa.destroy(self);
+        if (model_bytes.len > bounds.max_model_bytes) return error.ModelRejected;
+        const owned = gpa.dupe(u8, model_bytes) catch return error.OutOfMemory;
+        errdefer gpa.free(owned);
+        var engine = ml_engine.Engine.init(gpa, owned, threads) catch return error.InvalidModel;
+        errdefer engine.deinit();
+        const in_count = engine.inputCount();
+        const out_count = engine.outputCount();
+        if (in_count != 1) return error.InvalidModel;
+        if (out_count == 0 or out_count > max_outputs) return error.InvalidModel;
+        var dims_buf: [8]i32 = undefined;
+        const in_dims = engine.inputDims(0, &dims_buf) catch return error.InvalidModel;
+        var in_len: usize = 1;
+        for (in_dims) |d| {
+            if (d <= 0) return error.InvalidModel;
+            in_len *= @intCast(d);
+        }
+        if (in_len == 0 or in_len > max_input_len) return error.InvalidModel;
+        const scratch = gpa.alloc(f32, in_len) catch return error.OutOfMemory;
+        errdefer gpa.free(scratch);
+        @memset(scratch, 0);
+        // A warm-up over silence discovers every output length and validates the
+        // ops resolve, so a broken model is rejected at load, not at the mic.
+        engine.writeInput(0, std.mem.sliceAsBytes(scratch)) catch return error.InvalidModel;
+        engine.invoke() catch return error.InvalidModel;
+        var output_lens: [max_outputs]usize = @splat(0);
+        var largest: u64 = @as(u64, in_len) * @sizeOf(f32);
+        for (0..out_count) |i| {
+            const floats = engine.outputFloats(i) catch return error.InvalidModel;
+            output_lens[i] = floats.len;
+            largest = @max(largest, floats.len * @sizeOf(f32));
+        }
+        if (!bounds.admits(owned.len, in_count + out_count, largest)) return error.ModelRejected;
+        var outputs: [max_outputs][]f32 = @splat(&.{});
+        var built: usize = 0;
+        errdefer for (outputs[0..built]) |buf| gpa.free(buf);
+        for (0..out_count) |i| {
+            outputs[i] = gpa.alloc(f32, output_lens[i]) catch return error.OutOfMemory;
+            @memset(outputs[i], 0);
+            built += 1;
+        }
+        self.* = .{
+            .gpa = gpa,
+            .model_bytes = owned,
+            .engine = engine,
+            .input_len = in_len,
+            .input_scratch = scratch,
+            .output_count = @intCast(out_count),
+            .outputs = outputs,
+        };
+        return self;
+    }
+
+    pub fn deinit(self: *AudioCore) void {
+        const gpa = self.gpa;
+        for (self.outputs[0..self.output_count]) |buf| gpa.free(buf);
+        self.engine.deinit();
+        gpa.free(self.input_scratch);
+        gpa.free(self.model_bytes);
+        gpa.destroy(self);
+    }
+
+    /// Writes a window of PCM into the model input (padded or truncated to its
+    /// length), invokes, and copies the outputs into owned buffers. False on a
+    /// backend error, leaving the last published outputs intact.
+    pub fn compute(self: *AudioCore, window: []const f32) bool {
+        const n = @min(window.len, self.input_len);
+        @memcpy(self.input_scratch[0..n], window[0..n]);
+        if (n < self.input_len) @memset(self.input_scratch[n..], 0);
+        self.engine.writeInput(0, std.mem.sliceAsBytes(self.input_scratch)) catch return false;
+        self.engine.invoke() catch return false;
+        for (0..self.output_count) |i| {
+            const floats = self.engine.outputFloats(i) catch return false;
+            const m = @min(floats.len, self.outputs[i].len);
+            @memcpy(self.outputs[i][0..m], floats[0..m]);
+        }
+        self.published = true;
+        return true;
+    }
+
+    pub fn readOutput(self: *const AudioCore, tensor: u32, index: u32) f32 {
+        if (tensor >= self.output_count) return 0;
+        const buf = self.outputs[tensor];
+        if (index >= buf.len) return 0;
+        const v = buf[index];
+        return if (v == v) v else 0;
+    }
+
+    pub fn argmaxOutput(self: *const AudioCore, tensor: u32) u32 {
+        if (tensor >= self.output_count) return 0;
+        const buf = self.outputs[tensor];
+        var best: u32 = 0;
+        var best_v: f32 = -std.math.inf(f32);
+        for (buf, 0..) |v, i| {
+            if (v == v and v > best_v) {
+                best_v = v;
+                best = @intCast(i);
+            }
+        }
+        return best;
+    }
+
+    pub fn outputLen(self: *const AudioCore, tensor: u32) usize {
+        if (tensor >= self.output_count) return 0;
+        return self.outputs[tensor].len;
+    }
+
+    /// The whole published output tensor, for a consumer that reads a sequence
+    /// (a caption's logits) rather than one element. Empty when out of range.
+    pub fn outputSlice(self: *const AudioCore, tensor: u32) []const f32 {
+        if (tensor >= self.output_count) return &.{};
+        return self.outputs[tensor];
+    }
+
+    pub fn hasPublished(self: *const AudioCore) bool {
+        return self.published;
+    }
+
+    pub fn inputLen(self: *const AudioCore) usize {
+        return self.input_len;
+    }
+};
+
+/// A bounded, generic model runner used off the audio path: it loads a model and
+/// lets a caller write float inputs by index, invoke, and read float outputs. The
+/// autoregressive translation decoder drives its step model through this, feeding
+/// the encoder memory and the previous token each step.
+pub const GenericCore = struct {
+    gpa: std.mem.Allocator,
+    model_bytes: []u8,
+    engine: ml_engine.Engine,
+    in_count: usize,
+    out_count: usize,
+
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*GenericCore {
+        const self = gpa.create(GenericCore) catch return error.OutOfMemory;
+        errdefer gpa.destroy(self);
+        if (model_bytes.len > bounds.max_model_bytes) return error.ModelRejected;
+        const owned = gpa.dupe(u8, model_bytes) catch return error.OutOfMemory;
+        errdefer gpa.free(owned);
+        const engine = ml_engine.Engine.init(gpa, owned, threads) catch return error.InvalidModel;
+        const in_count = engine.inputCount();
+        const out_count = engine.outputCount();
+        if (in_count == 0 or out_count == 0) {
+            var e = engine;
+            e.deinit();
+            return error.InvalidModel;
+        }
+        self.* = .{ .gpa = gpa, .model_bytes = owned, .engine = engine, .in_count = in_count, .out_count = out_count };
+        return self;
+    }
+
+    pub fn deinit(self: *GenericCore) void {
+        const gpa = self.gpa;
+        self.engine.deinit();
+        gpa.free(self.model_bytes);
+        gpa.destroy(self);
+    }
+
+    /// Writes an input tensor from floats; the length must match the tensor's
+    /// element count. False on a backend or shape error.
+    pub fn writeFloats(self: *GenericCore, index: usize, floats: []const f32) bool {
+        if (index >= self.in_count) return false;
+        self.engine.writeInput(index, std.mem.sliceAsBytes(floats)) catch return false;
+        return true;
+    }
+
+    pub fn invoke(self: *GenericCore) bool {
+        self.engine.invoke() catch return false;
+        return true;
+    }
+
+    /// The output tensor, valid until the next invoke; empty on error or a bad
+    /// index. The caller reads it immediately (an argmax) before invoking again.
+    pub fn output(self: *const GenericCore, index: usize) []const f32 {
+        if (index >= self.out_count) return &.{};
+        return self.engine.outputFloats(index) catch &.{};
+    }
+
+    pub fn inputLen(self: *const GenericCore, index: usize) usize {
+        if (index >= self.in_count) return 0;
+        var dims_buf: [8]i32 = undefined;
+        const dims = self.engine.inputDims(index, &dims_buf) catch return 0;
+        var n: usize = 1;
+        for (dims) |d| {
+            if (d <= 0) return 0;
+            n *= @intCast(d);
+        }
+        return n;
+    }
+};
+
+/// A multi-frame fusion core: a model with `frames` square-RGB image inputs and
+/// an optional trailing scalar phase input, fed a ring of the last N sampled
+/// frames so it fuses across time. The ring advances once per distinct frame
+/// timestamp; the fused output publishes into an owned buffer for the sprite.
+pub const TemporalCore = struct {
+    gpa: std.mem.Allocator,
+    model_bytes: []u8,
+    engine: ml_engine.Engine,
+    frames: u32,
+    in_sq: ml_sample.Square,
+    input_side: u32,
+    /// `frames` sampled NHWC planes, indexed as a ring; oldest is (head - filled).
+    ring: [][]f32,
+    nchw_scratch: []f32,
+    head: u32 = 0,
+    filled: u32 = 0,
+    last_ts: i64 = 0,
+    has_ts: bool = false,
+    /// A trailing scalar input the model reads as the interpolation phase, when it
+    /// declares one input past the frame count.
+    has_phase: bool = false,
+    phase: f32 = 0.5,
+    style_out: []f32,
+    published: bool = false,
+
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, frames_req: u32) CreateError!*TemporalCore {
+        if (frames_req < 2 or frames_req > 8) return error.InvalidModel;
+        const core = gpa.create(TemporalCore) catch return error.OutOfMemory;
+        errdefer gpa.destroy(core);
+        if (model_bytes.len > bounds.max_model_bytes) return error.ModelRejected;
+        const owned = gpa.dupe(u8, model_bytes) catch return error.OutOfMemory;
+        errdefer gpa.free(owned);
+        var engine = ml_engine.Engine.init(gpa, owned, threads) catch return error.InvalidModel;
+        errdefer engine.deinit();
+
+        const in_count = engine.inputCount();
+        const out_count = engine.outputCount();
+        if (out_count == 0) return error.InvalidModel;
+        const has_phase = in_count == frames_req + 1;
+        if (in_count != frames_req and !has_phase) return error.InvalidModel;
+
+        var dims_buf: [8]i32 = undefined;
+        const first_dims = engine.inputDims(0, &dims_buf) catch return error.InvalidModel;
+        const in_sq = ml_sample.detectSquareRgb(first_dims) orelse return error.InvalidModel;
+        const input_side: u32 = in_sq.side;
+        // Every image input must be the same square, so the ring feeds them all.
+        for (1..frames_req) |i| {
+            const d = engine.inputDims(i, &dims_buf) catch return error.InvalidModel;
+            const sq = ml_sample.detectSquareRgb(d) orelse return error.InvalidModel;
+            if (sq.side != input_side or sq.layout != in_sq.layout) return error.InvalidModel;
+        }
+
+        const plane = @as(usize, input_side) * input_side * 3;
+        const nchw_scratch = if (in_sq.layout == .nchw)
+            gpa.alloc(f32, plane) catch return error.OutOfMemory
+        else
+            try gpa.alloc(f32, 0);
+        errdefer gpa.free(nchw_scratch);
+
+        var ring = gpa.alloc([]f32, frames_req) catch return error.OutOfMemory;
+        var built: usize = 0;
+        errdefer {
+            for (ring[0..built]) |r| gpa.free(r);
+            gpa.free(ring);
+        }
+        for (0..frames_req) |i| {
+            ring[i] = gpa.alloc(f32, plane) catch return error.OutOfMemory;
+            @memset(ring[i], 0);
+            built += 1;
+        }
+
+        // Warm up over the zeroed ring to discover the output length and validate
+        // every op, and admit the model under the sandbox on the largest tensor.
+        var largest: u64 = @as(u64, plane) * @sizeOf(f32);
+        for (0..frames_req) |i| {
+            ml_sample.writeSampled(&engine, i, in_sq, ring[i], nchw_scratch) catch return error.InvalidModel;
+        }
+        if (has_phase) {
+            const p = [_]f32{0.5};
+            engine.writeInput(frames_req, std.mem.sliceAsBytes(&p)) catch return error.InvalidModel;
+        }
+        engine.invoke() catch return error.InvalidModel;
+        const out0 = engine.outputFloats(0) catch return error.InvalidModel;
+        const out_len = out0.len;
+        largest = @max(largest, out_len * @sizeOf(f32));
+        if (out_len == 0 or out_len % 3 != 0) return error.InvalidModel;
+        if (!bounds.admits(owned.len, in_count + out_count, largest)) return error.ModelRejected;
+
+        const style_out = gpa.alloc(f32, out_len) catch return error.OutOfMemory;
+        errdefer gpa.free(style_out);
+        @memset(style_out, 0);
+
+        core.* = .{
+            .gpa = gpa,
+            .model_bytes = owned,
+            .engine = engine,
+            .frames = frames_req,
+            .in_sq = in_sq,
+            .input_side = input_side,
+            .ring = ring,
+            .nchw_scratch = nchw_scratch,
+            .has_phase = has_phase,
+            .style_out = style_out,
+        };
+        return core;
+    }
+
+    pub fn deinit(core: *TemporalCore) void {
+        const gpa = core.gpa;
+        gpa.free(core.style_out);
+        for (core.ring) |r| gpa.free(r);
+        gpa.free(core.ring);
+        gpa.free(core.nchw_scratch);
+        core.engine.deinit();
+        gpa.free(core.model_bytes);
+        gpa.destroy(core);
+    }
+
+    /// Samples one frame into the ring, advancing it only when the timestamp
+    /// differs from the last frame ringed, so a repeated frame does not fill the
+    /// ring with copies. Returns whether the ring advanced.
+    pub fn feed(core: *TemporalCore, frame: sampler.Frame, timestamp_us: i64) bool {
+        if (core.has_ts and timestamp_us == core.last_ts) return false;
+        sampler.sampleRegion(frame, sampler.frameSquare(frame.width, frame.height), .unit, core.input_side, core.ring[core.head]);
+        core.head = (core.head + 1) % core.frames;
+        if (core.filled < core.frames) core.filled += 1;
+        core.last_ts = timestamp_us;
+        core.has_ts = true;
+        return true;
+    }
+
+    /// Whether the ring holds a full set of frames to fuse.
+    pub fn ready(core: *const TemporalCore) bool {
+        return core.filled >= core.frames;
+    }
+
+    /// Sets the interpolation phase a phase-input model reads, clamped to [0,1].
+    pub fn setPhase(core: *TemporalCore, phase: f32) void {
+        core.phase = std.math.clamp(phase, 0, 1);
+    }
+
+    /// Writes the ring oldest-to-newest into the image inputs, the phase into the
+    /// scalar input when present, and invokes, leaving the fused image in the
+    /// engine for publish. False while the ring is not yet full or on a backend
+    /// error.
+    pub fn compute(core: *TemporalCore) bool {
+        if (!core.ready()) return false;
+        const oldest = (core.head + core.frames - core.filled) % core.frames;
+        for (0..core.frames) |i| {
+            const slot = (oldest + i) % core.frames;
+            ml_sample.writeSampled(&core.engine, i, core.in_sq, core.ring[slot], core.nchw_scratch) catch return false;
+        }
+        if (core.has_phase) {
+            const p = [_]f32{core.phase};
+            core.engine.writeInput(core.frames, std.mem.sliceAsBytes(&p)) catch return false;
+        }
+        core.engine.invoke() catch return false;
+        return true;
+    }
+
+    /// Copies the fused output image into the owned buffer for a concurrent reader.
+    pub fn publish(core: *TemporalCore) void {
+        const src = core.engine.outputFloats(0) catch return;
+        if (src.len == core.style_out.len) @memcpy(core.style_out, src);
+        core.published = true;
+    }
+
+    pub fn copyStyle(core: *const TemporalCore, dst: []f32) bool {
+        if (!core.published or dst.len != core.style_out.len) return false;
+        @memcpy(dst, core.style_out);
+        return true;
+    }
+
+    pub fn styleLen(core: *const TemporalCore) usize {
+        return core.style_out.len;
+    }
+
+    pub fn layoutIsNchw(core: *const TemporalCore) bool {
+        return core.in_sq.layout == .nchw;
     }
 };
 

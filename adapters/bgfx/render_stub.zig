@@ -340,12 +340,13 @@ pub const Renderer = struct {
         _ = lut_texture;
     }
 
-    pub fn submitBlendPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, background_texture: TextureHandle, mask_texture: TextureHandle) void {
+    pub fn submitBlendPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, background_texture: TextureHandle, mask_texture: TextureHandle, strength: f32) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
         _ = background_texture;
         _ = mask_texture;
+        _ = strength;
     }
 
     pub fn submitBlurPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, step: [2]f32) void {
@@ -476,11 +477,134 @@ pub const Renderer = struct {
         _ = aspect;
     }
 
-    pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [12]f32) void {
+    pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [12]f32, mask_texture: TextureHandle, masked: bool) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
         _ = grade;
+        _ = mask_texture;
+        _ = masked;
+    }
+
+    pub fn submitDehazePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, strength: f32, texel_w: f32, texel_h: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = strength;
+        _ = texel_w;
+        _ = texel_h;
+    }
+
+    pub fn submitRelightPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params3: [3]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params3;
+    }
+
+    pub fn submitGlarePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, strength: f32, threshold: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = strength;
+        _ = threshold;
+    }
+
+    pub fn submitVignettePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, strength: f32, radius: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = strength;
+        _ = radius;
+    }
+
+    pub fn submitLowLightPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, strength: f32, denoise: f32, texel_w: f32, texel_h: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = strength;
+        _ = denoise;
+        _ = texel_w;
+        _ = texel_h;
+    }
+
+    pub fn submitUndistortPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, k1: f32, k2: f32, strength: f32, aspect: f32, cx: f32, cy: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = k1;
+        _ = k2;
+        _ = strength;
+        _ = aspect;
+        _ = cx;
+        _ = cy;
+    }
+
+    pub fn submitAwbPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, gains: [3]f32, strength: f32, black: f32, white: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = gains;
+        _ = strength;
+        _ = black;
+        _ = white;
+    }
+
+    pub fn submitStabilizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, shift: [2]f32, inset: f32, strength: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = shift;
+        _ = inset;
+        _ = strength;
+    }
+
+    pub fn submitZoomPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, factor: f32, cx: f32, cy: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = factor;
+        _ = cx;
+        _ = cy;
+    }
+
+    pub fn submitDereflectPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, strength: f32, texel_w: f32, texel_h: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = strength;
+        _ = texel_w;
+        _ = texel_h;
+    }
+
+    pub fn submitHarmonizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, fg_mean: [3]f32, fg_std: [3]f32, bg_mean: [3]f32, bg_std: [3]f32, strength: f32, direction: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = fg_mean;
+        _ = fg_std;
+        _ = bg_mean;
+        _ = bg_std;
+        _ = strength;
+        _ = direction;
+    }
+
+    pub fn submitInpaintPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, radius: f32, aspect: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = radius;
+        _ = aspect;
+    }
+
+    pub fn submitRollingPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, skew_x: f32, skew_y: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = skew_x;
+        _ = skew_y;
     }
 
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
@@ -981,6 +1105,50 @@ pub const Renderer = struct {
     }
 
     pub fn loadGradeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadDehazeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadRelightProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadGlareProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadVignetteProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadLowLightProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadUndistortProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadAwbProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadStabilizeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadZoomProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadDereflectProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadHarmonizeProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

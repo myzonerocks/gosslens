@@ -248,6 +248,71 @@ extension GossSession {
         }
     }
 
+    /// Submits the camera intrinsics an undistort.pass corrects for: the focal
+    /// lengths and principal point in pixels of the submitted frame, and the
+    /// radial distortion coefficients (k1, k2 read). An empty array or zero
+    /// focal length clears them, leaving an undistort.pass inert.
+    public func submitCameraIntrinsics(fx: Float, fy: Float, cx: Float, cy: Float, distortion: [Float]) throws {
+        if distortion.isEmpty {
+            try checked(goss_session_submit_camera_intrinsics(handle, 0, 0, 0, 0, nil, 0))
+            return
+        }
+        try distortion.withUnsafeBufferPointer { buf in
+            try checked(goss_session_submit_camera_intrinsics(handle, fx, fy, cx, cy, buf.baseAddress, UInt32(buf.count)))
+        }
+    }
+
+    /// Submits one device gravity sample with its timestamp in microseconds. A
+    /// rolling.pass reads the image-plane motion derived from consecutive samples
+    /// to correct rolling-shutter skew; feed one per frame from the IMU. A
+    /// near-zero vector clears the stream, leaving a rolling.pass inert.
+    public func submitOrientation(gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Int64) throws {
+        try checked(goss_session_submit_orientation(handle, gravityX, gravityY, gravityZ, timestampUs))
+    }
+
+    /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer
+    /// node synthesizes its decoded caption or translation to speech and plays it
+    /// into the lens mixer. Off by default; a host turns it on for a voice-over.
+    public func setDubbing(_ enabled: Bool) throws {
+        try checked(goss_session_set_dubbing(handle, enabled ? 1 : 0))
+    }
+
+    /// The latest caption an audio.infer node decoded, by the node's id, or nil
+    /// when that node has no caption binding or nothing decoded yet. On-device ASR
+    /// the app can draw as a live subtitle. A length probe sizes the buffer.
+    public func captionText(_ nodeId: String) -> String? {
+        let id = Array(nodeId.utf8)
+        var needed: Int = 0
+        guard goss_session_caption_text(handle, id, id.count, nil, 0, &needed) == GOSS_OK, needed > 0 else { return nil }
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        guard goss_session_caption_text(handle, id, id.count, &out, out.count, &written) == GOSS_OK else { return nil }
+        return String(decoding: out[0..<written], as: UTF8.self)
+    }
+
+    /// One diarized caption segment: the times it spanned, the speaker who spoke
+    /// it (a diarize binding's clustered id), and its text.
+    public struct CaptionSegment {
+        public let startUs: Int64
+        public let endUs: Int64
+        public let speaker: UInt32
+        public let text: String
+    }
+
+    /// The recent diarized caption segment at `index` (0 the newest), or nil when
+    /// the index is past the segments held. A speaker-tagged transcript the app
+    /// can draw as diarized subtitles.
+    public func captionSegment(_ index: UInt32) -> CaptionSegment? {
+        var seg = goss_caption_segment()
+        guard goss_session_caption_segment(handle, index, &seg) == GOSS_OK else { return nil }
+        var out = [UInt8](repeating: 0, count: Int(seg.text_len))
+        var written: Int = 0
+        if seg.text_len > 0 {
+            guard goss_session_caption_segment_text(handle, index, &out, out.count, &written) == GOSS_OK else { return nil }
+        }
+        return CaptionSegment(startUs: seg.start_us, endUs: seg.end_us, speaker: seg.speaker, text: String(decoding: out[0..<written], as: UTF8.self))
+    }
+
     /// Segments a host-provided still image through the running segmenter:
     /// rgba is width by height RGBA8 pixels, row major. The mask reaches the
     /// active lens the way a camera frame's would. Throws again with no

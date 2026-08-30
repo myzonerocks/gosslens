@@ -73,6 +73,46 @@ void main()
 	// unmasked warp; below 1 it eases the displacement toward none.
 	float gate = texture2D(s_texDepth, uv).r;
 
+	if (mode > 8.5) {
+		// auto_frame: a global affine that repositions and scales the tracked face
+		// to a target anchor and size. u_warp.yz is the smoothed face center,
+		// u_warp.w the smoothed scale, and u_warpParams.xy the target anchor; a
+		// pixel past the frame edge clamps so the border holds instead of wrapping.
+		vec2 faceC = cen;
+		float scale = rad;
+		vec2 anchorpt = vec2(amount, idx);
+		vec2 srcuv = faceC + (uv - anchorpt) / scale;
+		gl_FragColor = texture2D(s_texColor, clamp(srcuv, 0.0, 1.0));
+		return;
+	}
+
+	if (mode > 7.5) {
+		// gaze_correct: two eye push points redirect the pupils, the same summed
+		// liquify displacement, so an off-camera gaze is nudged back to the lens.
+		vec2 disp = liquifyDisp(uv, aspect);
+		vec2 srcuv = uv - disp;
+		if (gate < 1.0) srcuv = mix(uv, srcuv, gate);
+		gl_FragColor = texture2D(s_texColor, srcuv);
+		return;
+	}
+
+	if (mode > 6.5) {
+		// roll_lock: counter-rotate the frame about the center to level the
+		// horizon. u_warpParams.x carries the signed angle the engine derived
+		// from the device roll; the y term is aspect-corrected so the turn is
+		// round on screen and the sample stays in gamut by clamping.
+		float ca = cos(amount);
+		float sa = sin(amount);
+		vec2 d = uv - cen;
+		d.y *= aspect;
+		vec2 rd = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca);
+		rd.y /= aspect;
+		vec2 srcuv = cen + rd;
+		if (gate < 1.0) srcuv = mix(uv, srcuv, gate);
+		gl_FragColor = texture2D(s_texColor, clamp(srcuv, 0.0, 1.0));
+		return;
+	}
+
 	if (mode > 5.5) {
 		// face_scale: scale the frame about the face center within its radius.
 		// A positive amount enlarges the face, negative shrinks it; the region

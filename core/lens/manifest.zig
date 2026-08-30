@@ -264,6 +264,128 @@ pub const GradeField = struct {
     grayscale: f32 = 0,
     invert: f32 = 0,
     posterize: f32 = 0,
+    /// An optional mask channel: with one named, the grade applies only inside
+    /// that region (a teeth-whiten, an eye-brighten, a skin-tone lift); with none
+    /// the whole frame is graded.
+    mask_channel: ?u8 = null,
+};
+
+pub const DehazeField = struct {
+    /// A dehaze.pass node's strength (0..1): how strongly the dark-channel
+    /// transmission recovery lifts the atmospheric veil off the frame.
+    strength: f32 = 1,
+};
+
+pub const RelightField = struct {
+    /// A relight.pass node's directional key light: `strength` (0..1) how far it
+    /// brightens the light side and shades the far side, `angle` the light
+    /// direction in degrees (0 lights from the right). A named `preset` seeds
+    /// both to a studio look; an explicit angle or strength overrides it.
+    strength: f32 = 1,
+    angle: f32 = 0,
+};
+
+/// The angle and strength a named studio-lighting preset seeds a relight.pass
+/// with, or null for an unknown name. Angles follow the field convention, 0 from
+/// the right and rising counter-clockwise, so 90 is from above and 180 the left.
+pub fn relightPreset(name: []const u8) ?[2]f32 {
+    if (std.mem.eql(u8, name, "rembrandt")) return .{ 135, 0.85 };
+    if (std.mem.eql(u8, name, "butterfly")) return .{ 90, 0.7 };
+    if (std.mem.eql(u8, name, "clamshell")) return .{ 90, 0.45 };
+    if (std.mem.eql(u8, name, "loop")) return .{ 110, 0.6 };
+    if (std.mem.eql(u8, name, "split")) return .{ 180, 1.0 };
+    if (std.mem.eql(u8, name, "rim")) return .{ 200, 0.9 };
+    return null;
+}
+
+pub const GlareField = struct {
+    /// A glare.pass node's specular rolloff: `strength` (0..1) how far a pixel
+    /// above `threshold` luma is pulled back down, so blown speculars recover.
+    strength: f32 = 1,
+    threshold: f32 = 0.8,
+};
+
+pub const VignetteField = struct {
+    /// A vignette.pass node's radial luma-gain: `strength` scales the gain at the
+    /// corner (positive lifts a darkened lens vignette, negative sinks the edges
+    /// for a stylistic one), rolled in from `radius` (0..1 of the half-diagonal,
+    /// inside which the frame is untouched) out to the corner.
+    strength: f32 = 0.5,
+    radius: f32 = 0.5,
+};
+
+pub const LowLightField = struct {
+    /// A lowlight.pass node's night lift: `strength` (0..1) raises the shadows
+    /// with a gamma curve while holding the highlights, and `denoise` (0..1)
+    /// blends the shadows toward their neighbourhood to damp the noise a lift
+    /// exposes. Both 0 leaves the frame untouched.
+    strength: f32 = 0.6,
+    denoise: f32 = 0.5,
+};
+
+pub const UndistortField = struct {
+    /// An undistort.pass node's `strength` (0..1) blends toward the lens-corrected
+    /// sample. The radial coefficients and principal point come from the camera
+    /// intrinsics the host submits; with none submitted the node is inert.
+    strength: f32 = 1,
+};
+
+pub const AwbField = struct {
+    /// An awb.pass node's `strength` (0..1) blends in a one-tap auto-enhance: a
+    /// gray-world white balance and auto-levels stretch estimated per frame from
+    /// the whole frame. 0 leaves the frame untouched.
+    strength: f32 = 1,
+};
+
+pub const StabilizeField = struct {
+    /// A stabilize.pass node's `strength` (0..1) blends in electronic image
+    /// stabilization: the frame is cropped and shifted to hold on a smoothed
+    /// camera path. The smoothing rides the recording policy's stabilization knob
+    /// (off leaves it inert); strength 0 leaves the frame untouched.
+    strength: f32 = 1,
+};
+
+pub const ZoomField = struct {
+    /// A zoom.pass node's digital region magnify: `factor` (>= 1) scales the
+    /// region around (`cx`, `cy`) up to fill the frame. Factor 1 with a centred
+    /// point is the identity.
+    factor: f32 = 1,
+    cx: f32 = 0.5,
+    cy: f32 = 0.5,
+};
+
+pub const DereflectField = struct {
+    /// A dereflect.pass node's `strength` (0..1): how far a bright pixel's
+    /// high-frequency detail is pulled toward its neighbourhood mean, attenuating
+    /// a glass reflection or glare that sits over the bright regions. 0 is
+    /// untouched.
+    strength: f32 = 1,
+};
+
+pub const HarmonizeField = struct {
+    /// A harmonize.pass node's statistical color transfer between the person mask
+    /// and its complement: `strength` (0..1) blends the match, and `direction`
+    /// picks which region moves (0 matches the foreground to the background, 1 the
+    /// reverse). The engine measures the region statistics from the frame.
+    strength: f32 = 1,
+    direction: u8 = 0,
+};
+
+pub const InpaintField = struct {
+    /// An inpaint.pass node's content-aware fill. `mask` names the region to
+    /// remove (an object, blemish or passerby) and `radius` (0..0.5 of the frame)
+    /// how far to search outward for the surrounding color that fills it.
+    mask_channel: u8 = head_channel,
+    radius: f32 = 0.08,
+};
+
+pub const RollingShutterField = struct {
+    /// A rolling.pass node's rolling-shutter correction. `strength` (0..1) scales
+    /// the correction, and `readout` (0..0.05s) is the sensor's frame readout time
+    /// the per-row skew scales by. The camera motion comes from the orientation
+    /// stream; with none submitted the pass holds the frame through.
+    strength: f32 = 1,
+    readout: f32 = 0.02,
 };
 
 pub const BloomField = struct {
@@ -490,7 +612,7 @@ pub const WarpField = struct {
     /// within a radius: the two sphere modes bend the frame through glass,
     /// bulge, pinch and swirl displace it, liquify sums push points, and
     /// face_scale scales the whole tracked face about its own center.
-    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl, liquify, face_scale } = .glass_sphere,
+    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl, liquify, face_scale, roll_lock, gaze_correct, auto_frame } = .glass_sphere,
     /// The distortion center in normalized frame coordinates.
     center_x: f32 = 0.5,
     center_y: f32 = 0.5,
@@ -680,6 +802,10 @@ pub const SpriteField = struct {
     /// (a greenscreen behind the subject), `over` fills where it is on (a
     /// restyle of that region, e.g. a generative face onto the face matte).
     mask_mode: SpriteMaskMode = .behind,
+    /// Over-mode only: how strongly the restyle mixes onto its region, 0 leaves
+    /// the frame and 1 is the full restyle; `mask_strength_param` binds it live.
+    mask_strength: f32 = 1,
+    mask_strength_param: []const u8 = "",
 };
 
 pub const SpriteMaskMode = enum { behind, over };
@@ -879,6 +1005,99 @@ pub const MlField = struct {
     outputs: []const MlOutput,
     mask: ?MlMask = null,
     style: ?MlStyle = null,
+    /// A bundled reference image (assets/<stem>.png) sampled into the model's
+    /// second input, for a net conditioned on a reference (makeup, style, or
+    /// identity transfer). Empty for a one-input model.
+    aux_reference: []const u8 = "",
+    /// A two-input net whose second input is the previous output frame, for a
+    /// recurrent pass that fuses across time (denoise, stabilize, upscale).
+    /// Mutually exclusive with aux_reference.
+    temporal: bool = false,
+};
+
+/// A temporal.fuse node's model slot: a net with `frames` square-RGB image
+/// inputs fed a ring of the last N frames, its fused output drawn through the
+/// named `sprite`. `mode` labels the fusion (interpolate, hdr, denoise) and
+/// `source` where the frames come from (the live camera, or a submitted bracket).
+pub const TemporalField = struct {
+    model: []const u8,
+    frames: u32 = 2,
+    mode: enum { interpolate, hdr, denoise } = .denoise,
+    source: enum { camera, bracket } = .camera,
+    /// The interpolation phase a phase-input model reads (0 the first frame, 1
+    /// the last), for an interpolate fusion. Ignored by a model with no phase
+    /// input.
+    phase: f32 = 0.5,
+    sprite: []const u8,
+};
+
+/// A caption binding on an audio.infer node: an output tensor of [timesteps,
+/// vocab] logits the engine greedy-CTC-decodes into text, using a bundled labels
+/// file (assets/<labels>.txt, one vocab label per line, the blank label first).
+pub const CaptionField = struct {
+    tensor: u32 = 0,
+    labels: []const u8,
+};
+
+/// A diarize binding on an audio.infer node: an output tensor holding a speaker
+/// embedding the engine cosine-matches against a bounded set of speaker
+/// centroids, allocating a new speaker when nothing is within `threshold` up to
+/// `max_speakers`. The matched speaker index drives `param`.
+pub const DiarizeField = struct {
+    embed_tensor: u32 = 0,
+    max_speakers: u32 = 8,
+    threshold: f32 = 0.75,
+    param: []const u8,
+};
+
+/// A translate binding on an audio.infer node: the node's own model is the
+/// encoder (its `memory_tensor` output), and a bundled `decoder` step model runs
+/// a greedy loop - memory plus previous token each step, argmax, stop on `eos` or
+/// `max_tokens` - detokenized through a `tokens` file into text read as a caption.
+pub const TranslateField = struct {
+    decoder: []const u8,
+    tokens: []const u8,
+    memory_tensor: u32 = 0,
+    max_tokens: u32 = 48,
+    bos: u32 = 0,
+    eos: u32 = 1,
+};
+
+/// A dub binding on an audio.infer node: a bundled text-to-speech `model` whose
+/// input is the node's decoded caption or translation (its characters) and whose
+/// output is PCM, synthesized and played into the lens mixer at `rate` when the
+/// host enables dubbing and the text changes.
+pub const DubField = struct {
+    model: []const u8,
+    rate: u32 = 22050,
+};
+
+/// An audio.infer node: a bounded author model whose one input is a window of
+/// microphone PCM, the scalar output bindings it drives into parameters (the way
+/// an ml.infer node drives parameters from the camera frame), and an optional
+/// caption binding that decodes a logits tensor into recognized text.
+pub const AudioField = struct {
+    model: []const u8,
+    outputs: []const MlOutput,
+    caption: ?CaptionField = null,
+    diarize: ?DiarizeField = null,
+    translate: ?TranslateField = null,
+    dub: ?DubField = null,
+};
+
+/// An audio.enhance node's microphone cleanup: `strength` (0..1) how far a
+/// deterministic noise reduction pulls the high-frequency hiss and the near
+/// silent noise floor out of the outgoing microphone track, applied in the
+/// output mix. Zero leaves the mic untouched.
+pub const AudioEnhanceField = struct {
+    strength: f32 = 1,
+};
+
+/// A voice.transform node's real-time voice change: `pitch` (0.5..2) the ratio
+/// the outgoing microphone's pitch is shifted by, 1 unchanged, above 1 higher and
+/// below 1 lower, the duration preserved. Applied in the output mix.
+pub const VoiceTransformField = struct {
+    pitch: f32 = 1,
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -949,6 +1168,14 @@ pub const Node = struct {
     logic_graph: ?LogicGraphSpec = null,
     /// Set on an ml.infer node: the bring-your-own model slot.
     ml: ?MlField = null,
+    /// Set on a temporal.fuse node: the multi-frame fusion model slot.
+    temporal: ?TemporalField = null,
+    /// Set on an audio.infer node: the microphone model slot.
+    audio: ?AudioField = null,
+    /// Set on an audio.enhance node: its microphone noise-reduction strength.
+    audio_enhance: ?AudioEnhanceField = null,
+    /// Set on a voice.transform node: its microphone pitch-shift ratio.
+    voice_transform: ?VoiceTransformField = null,
     diffusion: ?DiffusionField = null,
     /// Set on a splat.cloud node: the model that lifts the frame to a point cloud.
     splat: ?SplatField = null,
@@ -973,6 +1200,32 @@ pub const Node = struct {
     morph_weights: []const []const u8 = &.{},
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
+    /// Set only on a dehaze.pass node: its dark-channel dehaze strength.
+    dehaze: ?DehazeField = null,
+    /// Set only on a relight.pass node: its directional key light.
+    relight: ?RelightField = null,
+    /// Set only on a glare.pass node: its specular-highlight rolloff.
+    glare: ?GlareField = null,
+    /// Set only on a vignette.pass node: its radial luma-gain.
+    vignette: ?VignetteField = null,
+    /// Set only on a lowlight.pass node: its shadow lift and denoise.
+    lowlight: ?LowLightField = null,
+    /// Set only on an undistort.pass node: its correction strength.
+    undistort: ?UndistortField = null,
+    /// Set only on an awb.pass node: its auto-enhance blend strength.
+    awb: ?AwbField = null,
+    /// Set only on a stabilize.pass node: its stabilization blend strength.
+    stabilize: ?StabilizeField = null,
+    /// Set only on a zoom.pass node: its digital region magnify.
+    zoom: ?ZoomField = null,
+    /// Set only on a dereflect.pass node: its specular attenuation strength.
+    dereflect: ?DereflectField = null,
+    /// Set only on a harmonize.pass node: its fg/bg color transfer.
+    harmonize: ?HarmonizeField = null,
+    /// Set only on an inpaint.pass node: its removal mask and search radius.
+    inpaint: ?InpaintField = null,
+    /// Set only on a rolling.pass node: its correction strength and readout time.
+    rolling: ?RollingShutterField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -1674,6 +1927,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var model_control: ?ModelControl = null;
         var logic_graph_spec: ?LogicGraphSpec = null;
         var ml_field: ?MlField = null;
+        var audio_field: ?AudioField = null;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
         var particle_field: ?ParticleField = null;
@@ -1843,9 +2097,223 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(gv.object, "grayscale")) |v| field.grayscale = @floatCast(numberOf(v) orelse field.grayscale);
                 if (getField(gv.object, "invert")) |v| field.invert = @floatCast(numberOf(v) orelse field.invert);
                 if (getField(gv.object, "posterize")) |v| field.posterize = @floatCast(numberOf(v) orelse field.posterize);
+                if (getField(gv.object, "mask")) |v| {
+                    if (v == .string) {
+                        if (maskChannelIndex(v.string)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "grade mask names an unknown channel '{s}'", .{v.string});
+                    }
+                }
                 grade_field = field;
             }
             path.pop(gmark);
+        }
+        var dehaze_field: ?DehazeField = null;
+        if (getField(object, "dehaze")) |dv| {
+            const dmark = path.push("dehaze");
+            if (!std.mem.eql(u8, node_type, "dehaze.pass")) {
+                try diags.add(path.slice(), "dehaze is a dehaze.pass field, found it on '{s}'", .{node_type});
+            } else if (dv != .object) {
+                try diags.add(path.slice(), "dehaze must be an object", .{});
+            } else {
+                var field: DehazeField = .{};
+                if (getField(dv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                dehaze_field = field;
+            }
+            path.pop(dmark);
+        }
+        var relight_field: ?RelightField = null;
+        if (getField(object, "relight")) |rv| {
+            const rmark = path.push("relight");
+            if (!std.mem.eql(u8, node_type, "relight.pass")) {
+                try diags.add(path.slice(), "relight is a relight.pass field, found it on '{s}'", .{node_type});
+            } else if (rv != .object) {
+                try diags.add(path.slice(), "relight must be an object", .{});
+            } else {
+                var field: RelightField = .{};
+                // A named studio-lighting preset seeds the angle and strength; an
+                // explicit angle or strength below overrides it, so a lens can
+                // start from a look and nudge it.
+                if (getField(rv.object, "preset")) |v| {
+                    const name = try expectString(diags, path, v) orelse "";
+                    if (relightPreset(name)) |p| {
+                        field.angle = p[0];
+                        field.strength = p[1];
+                    } else if (name.len > 0) {
+                        try diags.add(path.slice(), "relight preset names an unknown light '{s}'", .{name});
+                    }
+                }
+                if (getField(rv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(rv.object, "angle")) |v| field.angle = @floatCast(numberOf(v) orelse field.angle);
+                relight_field = field;
+            }
+            path.pop(rmark);
+        }
+        var glare_field: ?GlareField = null;
+        if (getField(object, "glare")) |gv| {
+            const glmark = path.push("glare");
+            if (!std.mem.eql(u8, node_type, "glare.pass")) {
+                try diags.add(path.slice(), "glare is a glare.pass field, found it on '{s}'", .{node_type});
+            } else if (gv != .object) {
+                try diags.add(path.slice(), "glare must be an object", .{});
+            } else {
+                var field: GlareField = .{};
+                if (getField(gv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(gv.object, "threshold")) |v| field.threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.threshold)), 0, 1);
+                glare_field = field;
+            }
+            path.pop(glmark);
+        }
+        var vignette_field: ?VignetteField = null;
+        if (getField(object, "vignette")) |vv| {
+            const vmark = path.push("vignette");
+            if (!std.mem.eql(u8, node_type, "vignette.pass")) {
+                try diags.add(path.slice(), "vignette is a vignette.pass field, found it on '{s}'", .{node_type});
+            } else if (vv != .object) {
+                try diags.add(path.slice(), "vignette must be an object", .{});
+            } else {
+                var field: VignetteField = .{};
+                if (getField(vv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), -1, 1);
+                if (getField(vv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0, 0.99);
+                vignette_field = field;
+            }
+            path.pop(vmark);
+        }
+        var lowlight_field: ?LowLightField = null;
+        if (getField(object, "lowlight")) |lv| {
+            const lmark = path.push("lowlight");
+            if (!std.mem.eql(u8, node_type, "lowlight.pass")) {
+                try diags.add(path.slice(), "lowlight is a lowlight.pass field, found it on '{s}'", .{node_type});
+            } else if (lv != .object) {
+                try diags.add(path.slice(), "lowlight must be an object", .{});
+            } else {
+                var field: LowLightField = .{};
+                if (getField(lv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(lv.object, "denoise")) |v| field.denoise = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.denoise)), 0, 1);
+                lowlight_field = field;
+            }
+            path.pop(lmark);
+        }
+        var undistort_field: ?UndistortField = null;
+        if (getField(object, "undistort")) |uv| {
+            const umark = path.push("undistort");
+            if (!std.mem.eql(u8, node_type, "undistort.pass")) {
+                try diags.add(path.slice(), "undistort is an undistort.pass field, found it on '{s}'", .{node_type});
+            } else if (uv != .object) {
+                try diags.add(path.slice(), "undistort must be an object", .{});
+            } else {
+                var field: UndistortField = .{};
+                if (getField(uv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                undistort_field = field;
+            }
+            path.pop(umark);
+        }
+        var awb_field: ?AwbField = null;
+        if (getField(object, "awb")) |av| {
+            const amark = path.push("awb");
+            if (!std.mem.eql(u8, node_type, "awb.pass")) {
+                try diags.add(path.slice(), "awb is an awb.pass field, found it on '{s}'", .{node_type});
+            } else if (av != .object) {
+                try diags.add(path.slice(), "awb must be an object", .{});
+            } else {
+                var field: AwbField = .{};
+                if (getField(av.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                awb_field = field;
+            }
+            path.pop(amark);
+        }
+        var stabilize_field: ?StabilizeField = null;
+        if (getField(object, "stabilize")) |sv| {
+            const smark = path.push("stabilize");
+            if (!std.mem.eql(u8, node_type, "stabilize.pass")) {
+                try diags.add(path.slice(), "stabilize is a stabilize.pass field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "stabilize must be an object", .{});
+            } else {
+                var field: StabilizeField = .{};
+                if (getField(sv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                stabilize_field = field;
+            }
+            path.pop(smark);
+        }
+        var zoom_field: ?ZoomField = null;
+        if (getField(object, "zoom")) |zv| {
+            const zmark = path.push("zoom");
+            if (!std.mem.eql(u8, node_type, "zoom.pass")) {
+                try diags.add(path.slice(), "zoom is a zoom.pass field, found it on '{s}'", .{node_type});
+            } else if (zv != .object) {
+                try diags.add(path.slice(), "zoom must be an object", .{});
+            } else {
+                var field: ZoomField = .{};
+                if (getField(zv.object, "factor")) |v| field.factor = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.factor)), 1, 8);
+                if (getField(zv.object, "cx")) |v| field.cx = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.cx)), 0, 1);
+                if (getField(zv.object, "cy")) |v| field.cy = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.cy)), 0, 1);
+                zoom_field = field;
+            }
+            path.pop(zmark);
+        }
+        var dereflect_field: ?DereflectField = null;
+        if (getField(object, "dereflect")) |dv| {
+            const dmark = path.push("dereflect");
+            if (!std.mem.eql(u8, node_type, "dereflect.pass")) {
+                try diags.add(path.slice(), "dereflect is a dereflect.pass field, found it on '{s}'", .{node_type});
+            } else if (dv != .object) {
+                try diags.add(path.slice(), "dereflect must be an object", .{});
+            } else {
+                var field: DereflectField = .{};
+                if (getField(dv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                dereflect_field = field;
+            }
+            path.pop(dmark);
+        }
+        var harmonize_field: ?HarmonizeField = null;
+        if (getField(object, "harmonize")) |hv| {
+            const hmark = path.push("harmonize");
+            if (!std.mem.eql(u8, node_type, "harmonize.pass")) {
+                try diags.add(path.slice(), "harmonize is a harmonize.pass field, found it on '{s}'", .{node_type});
+            } else if (hv != .object) {
+                try diags.add(path.slice(), "harmonize must be an object", .{});
+            } else {
+                var field: HarmonizeField = .{};
+                if (getField(hv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(hv.object, "direction")) |v| {
+                    if (v == .integer and v.integer >= 0) field.direction = if (v.integer > 0) 1 else 0;
+                }
+                harmonize_field = field;
+            }
+            path.pop(hmark);
+        }
+        var inpaint_field: ?InpaintField = null;
+        if (getField(object, "inpaint")) |iv| {
+            const imark = path.push("inpaint");
+            if (!std.mem.eql(u8, node_type, "inpaint.pass")) {
+                try diags.add(path.slice(), "inpaint is an inpaint.pass field, found it on '{s}'", .{node_type});
+            } else if (iv != .object) {
+                try diags.add(path.slice(), "inpaint must be an object", .{});
+            } else {
+                var field: InpaintField = .{};
+                if (getField(iv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0, 0.5);
+                if (getField(iv.object, "mask")) |v| {
+                    if (v == .string) {
+                        if (maskChannelIndex(v.string)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "inpaint mask names an unknown channel '{s}'", .{v.string});
+                    }
+                }
+                inpaint_field = field;
+            }
+            path.pop(imark);
+        }
+        var rolling_field: ?RollingShutterField = null;
+        if (getField(object, "rolling")) |rv| {
+            const rmark = path.push("rolling");
+            if (!std.mem.eql(u8, node_type, "rolling.pass")) {
+                try diags.add(path.slice(), "rolling is a rolling.pass field, found it on '{s}'", .{node_type});
+            } else if (rv != .object) {
+                try diags.add(path.slice(), "rolling must be an object", .{});
+            } else {
+                var field: RollingShutterField = .{};
+                if (getField(rv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(rv.object, "readout")) |v| field.readout = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.readout)), 0, 0.05);
+                rolling_field = field;
+            }
+            path.pop(rmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -2461,6 +2929,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         if (std.mem.eql(u8, name, "behind")) field.mask_mode = .behind else if (std.mem.eql(u8, name, "over")) field.mask_mode = .over else try diags.add(path.slice(), "sprite mask_mode is 'behind' or 'over', found '{s}'", .{name});
                     }
                 }
+                if (getField(sv.object, "mask_strength")) |v| field.mask_strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.mask_strength)), 0.0, 1.0);
+                if (getField(sv.object, "mask_strength_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.mask_strength_param = try arena.dupe(u8, s);
+                }
                 if (getField(sv.object, "interaction")) |iv| {
                     if (iv == .object) {
                         var it: Interaction = .{};
@@ -3023,6 +3495,49 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(ml_mark);
         }
+        if (getField(object, "audio")) |av| {
+            const audio_mark = path.push("audio");
+            if (!std.mem.eql(u8, node_type, "audio.infer")) {
+                try diags.add(path.slice(), "audio is an audio.infer field, found it on '{s}'", .{node_type});
+            } else if (av != .object) {
+                try diags.add(path.slice(), "audio must be an object", .{});
+            } else {
+                audio_field = try parseAudioField(diags, path, arena, av.object);
+            }
+            path.pop(audio_mark);
+        }
+        var temporal_field: ?TemporalField = null;
+        if (getField(object, "temporal")) |tv| {
+            const temporal_mark = path.push("temporal");
+            if (!std.mem.eql(u8, node_type, "temporal.fuse")) {
+                try diags.add(path.slice(), "temporal is a temporal.fuse field, found it on '{s}'", .{node_type});
+            } else if (tv != .object) {
+                try diags.add(path.slice(), "temporal must be an object", .{});
+            } else {
+                temporal_field = try parseTemporalField(diags, path, arena, tv.object);
+            }
+            path.pop(temporal_mark);
+        }
+        var audio_enhance_field: ?AudioEnhanceField = null;
+        if (std.mem.eql(u8, node_type, "audio.enhance")) {
+            var field: AudioEnhanceField = .{};
+            if (getField(object, "enhance")) |ev| {
+                if (ev == .object) {
+                    if (getField(ev.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                }
+            }
+            audio_enhance_field = field;
+        }
+        var voice_transform_field: ?VoiceTransformField = null;
+        if (std.mem.eql(u8, node_type, "voice.transform")) {
+            var field: VoiceTransformField = .{};
+            if (getField(object, "voice")) |vv| {
+                if (vv == .object) {
+                    if (getField(vv.object, "pitch")) |v| field.pitch = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.pitch)), 0.5, 2);
+                }
+            }
+            voice_transform_field = field;
+        }
         var diffusion_field: ?DiffusionField = null;
         if (getField(object, "diffusion")) |dv| {
             const diff_mark = path.push("diffusion");
@@ -3091,6 +3606,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .control = model_control,
             .logic_graph = logic_graph_spec,
             .ml = ml_field,
+            .temporal = temporal_field,
+            .audio = audio_field,
+            .audio_enhance = audio_enhance_field,
+            .voice_transform = voice_transform_field,
             .diffusion = diffusion_field,
             .splat = splat_field,
             .body_anchor = body_anchor,
@@ -3104,6 +3623,19 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .clip_weights = clip_weights,
             .morph_weights = morph_weights,
             .grade = grade_field,
+            .dehaze = dehaze_field,
+            .relight = relight_field,
+            .glare = glare_field,
+            .vignette = vignette_field,
+            .lowlight = lowlight_field,
+            .undistort = undistort_field,
+            .awb = awb_field,
+            .stabilize = stabilize_field,
+            .zoom = zoom_field,
+            .dereflect = dereflect_field,
+            .harmonize = harmonize_field,
+            .inpaint = inpaint_field,
+            .rolling = rolling_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,
@@ -3249,20 +3781,10 @@ fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
     return field;
 }
 
-fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?MlField {
-    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
-    if (model.len == 0) {
-        try diags.add(path.slice(), "ml needs a model file", .{});
-        return null;
-    }
-    var input_width: u32 = 0;
-    var input_height: u32 = 0;
-    if (getField(object, "input_width")) |v| {
-        if (v == .integer and v.integer >= 0) input_width = @intCast(v.integer);
-    }
-    if (getField(object, "input_height")) |v| {
-        if (v == .integer and v.integer >= 0) input_height = @intCast(v.integer);
-    }
+/// Parses an ml or audio node's `outputs` array: each entry binds a scalar - an
+/// element at an index, or the argmax over the tensor - of a model output to a
+/// named parameter.
+fn parseMlOutputs(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}![]const MlOutput {
     var outputs: std.ArrayList(MlOutput) = .empty;
     if (getField(object, "outputs")) |ov| {
         if (ov == .array) {
@@ -3290,6 +3812,161 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
             }
         }
     }
+    return outputs.toOwnedSlice(arena);
+}
+
+/// Parses an audio.infer node's `audio` block: a bounded PCM-window model and the
+/// scalar output bindings it drives into parameters.
+fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?AudioField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "audio needs a model file", .{});
+        return null;
+    }
+    var caption: ?CaptionField = null;
+    if (getField(object, "caption")) |cv| {
+        const cmark = path.push("caption");
+        if (cv != .object) {
+            try diags.add(path.slice(), "audio caption must be an object", .{});
+        } else {
+            const labels = if (getField(cv.object, "labels")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (labels.len == 0) {
+                try diags.add(path.slice(), "audio caption needs a labels file", .{});
+            } else {
+                var field: CaptionField = .{ .labels = try arena.dupe(u8, labels) };
+                if (getField(cv.object, "tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) field.tensor = @intCast(v.integer);
+                }
+                caption = field;
+            }
+        }
+        path.pop(cmark);
+    }
+    var diarize: ?DiarizeField = null;
+    if (getField(object, "diarize")) |dv| {
+        const dmark = path.push("diarize");
+        if (dv != .object) {
+            try diags.add(path.slice(), "audio diarize must be an object", .{});
+        } else {
+            const param = if (getField(dv.object, "param")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (param.len == 0) {
+                try diags.add(path.slice(), "audio diarize needs a param", .{});
+            } else {
+                var field: DiarizeField = .{ .param = try arena.dupe(u8, param) };
+                if (getField(dv.object, "embed_tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) field.embed_tensor = @intCast(v.integer);
+                }
+                if (getField(dv.object, "max_speakers")) |v| {
+                    if (v == .integer and v.integer > 0) field.max_speakers = @intCast(v.integer);
+                }
+                if (getField(dv.object, "threshold")) |v| {
+                    field.threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.threshold)), 0, 1);
+                }
+                diarize = field;
+            }
+        }
+        path.pop(dmark);
+    }
+    var translate: ?TranslateField = null;
+    if (getField(object, "translate")) |tv| {
+        const tmark = path.push("translate");
+        if (tv != .object) {
+            try diags.add(path.slice(), "audio translate must be an object", .{});
+        } else {
+            const decoder = if (getField(tv.object, "decoder")) |v| (try expectString(diags, path, v) orelse "") else "";
+            const tokens = if (getField(tv.object, "tokens")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (decoder.len == 0 or tokens.len == 0) {
+                try diags.add(path.slice(), "audio translate needs a decoder and tokens file", .{});
+            } else {
+                var field: TranslateField = .{ .decoder = try arena.dupe(u8, decoder), .tokens = try arena.dupe(u8, tokens) };
+                if (getField(tv.object, "memory_tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) field.memory_tensor = @intCast(v.integer);
+                }
+                if (getField(tv.object, "max_tokens")) |v| {
+                    if (v == .integer and v.integer > 0) field.max_tokens = @intCast(v.integer);
+                }
+                if (getField(tv.object, "bos")) |v| {
+                    if (v == .integer and v.integer >= 0) field.bos = @intCast(v.integer);
+                }
+                if (getField(tv.object, "eos")) |v| {
+                    if (v == .integer and v.integer >= 0) field.eos = @intCast(v.integer);
+                }
+                translate = field;
+            }
+        }
+        path.pop(tmark);
+    }
+    var dub: ?DubField = null;
+    if (getField(object, "dub")) |dv| {
+        const dmark = path.push("dub");
+        if (dv != .object) {
+            try diags.add(path.slice(), "audio dub must be an object", .{});
+        } else {
+            const dub_model = if (getField(dv.object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (dub_model.len == 0) {
+                try diags.add(path.slice(), "audio dub needs a model file", .{});
+            } else {
+                var field: DubField = .{ .model = try arena.dupe(u8, dub_model) };
+                if (getField(dv.object, "rate")) |v| {
+                    if (v == .integer and v.integer > 0) field.rate = @intCast(v.integer);
+                }
+                dub = field;
+            }
+        }
+        path.pop(dmark);
+    }
+    return .{
+        .model = try arena.dupe(u8, model),
+        .outputs = try parseMlOutputs(diags, path, arena, object),
+        .caption = caption,
+        .diarize = diarize,
+        .translate = translate,
+        .dub = dub,
+    };
+}
+
+fn parseTemporalField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?TemporalField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "temporal needs a model file", .{});
+        return null;
+    }
+    const sprite = if (getField(object, "sprite")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (sprite.len == 0) {
+        try diags.add(path.slice(), "temporal needs a sprite to draw its fused output", .{});
+        return null;
+    }
+    var field: TemporalField = .{ .model = try arena.dupe(u8, model), .sprite = try arena.dupe(u8, sprite) };
+    if (getField(object, "frames")) |v| {
+        if (v == .integer) field.frames = @intCast(std.math.clamp(v.integer, 2, 8));
+    }
+    if (getField(object, "mode")) |v| {
+        const name = try expectString(diags, path, v) orelse "";
+        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "temporal mode names an unknown fusion '{s}'", .{name});
+    }
+    if (getField(object, "source")) |v| {
+        const name = try expectString(diags, path, v) orelse "";
+        if (std.meta.stringToEnum(@TypeOf(field.source), name)) |sname| field.source = sname else try diags.add(path.slice(), "temporal source names an unknown source '{s}'", .{name});
+    }
+    if (getField(object, "phase")) |v| field.phase = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.phase)), 0, 1);
+    return field;
+}
+
+fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?MlField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "ml needs a model file", .{});
+        return null;
+    }
+    var input_width: u32 = 0;
+    var input_height: u32 = 0;
+    if (getField(object, "input_width")) |v| {
+        if (v == .integer and v.integer >= 0) input_width = @intCast(v.integer);
+    }
+    if (getField(object, "input_height")) |v| {
+        if (v == .integer and v.integer >= 0) input_height = @intCast(v.integer);
+    }
+    const outputs_slice = try parseMlOutputs(diags, path, arena, object);
     var mask: ?MlMask = null;
     if (getField(object, "mask")) |mv| {
         const mask_mark = path.push("mask");
@@ -3329,13 +4006,35 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         }
         path.pop(style_mark);
     }
+    var aux_reference: []const u8 = "";
+    var temporal = false;
+    if (getField(object, "aux")) |av| {
+        const aux_mark = path.push("aux");
+        if (av != .object) {
+            try diags.add(path.slice(), "ml aux must be an object", .{});
+        } else {
+            if (getField(av.object, "reference")) |v| {
+                aux_reference = try expectString(diags, path, v) orelse "";
+            }
+            if (getField(av.object, "temporal")) |v| {
+                temporal = v == .bool and v.bool;
+            }
+        }
+        path.pop(aux_mark);
+    }
+    if (temporal and aux_reference.len > 0) {
+        try diags.add(path.slice(), "ml aux cannot set both reference and temporal", .{});
+        temporal = false;
+    }
     return .{
         .model = try arena.dupe(u8, model),
         .input_width = input_width,
         .input_height = input_height,
-        .outputs = try outputs.toOwnedSlice(arena),
+        .outputs = outputs_slice,
         .mask = mask,
         .style = style,
+        .aux_reference = try arena.dupe(u8, aux_reference),
+        .temporal = temporal,
     };
 }
 
@@ -3835,6 +4534,34 @@ test "a node input naming an unknown node id fails cross reference" {
         if (std.mem.indexOf(u8, d.message, "unknown node id") != null) found = true;
     }
     try t.expect(found);
+}
+
+test "a relight preset seeds the light, an explicit value overrides it" {
+    const seeded =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "l", "type": "relight.pass", "inputs": {"frame": "camera"}, "params": {},
+        \\    "relight": {"preset": "rembrandt"}}
+        \\ ], "triggers": []}
+    ;
+    var m1 = try parseOk(seeded);
+    defer m1.deinit();
+    const r1 = m1.nodes[0].relight.?;
+    try t.expectEqual(@as(f32, 135), r1.angle);
+    try t.expectEqual(@as(f32, 0.85), r1.strength);
+
+    const overridden =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "l", "type": "relight.pass", "inputs": {"frame": "camera"}, "params": {},
+        \\    "relight": {"preset": "split", "angle": 45}}
+        \\ ], "triggers": []}
+    ;
+    var m2 = try parseOk(overridden);
+    defer m2.deinit();
+    const r2 = m2.nodes[0].relight.?;
+    try t.expectEqual(@as(f32, 45), r2.angle);
+    try t.expectEqual(@as(f32, 1.0), r2.strength);
 }
 
 test "a cloth field parses on a model node" {

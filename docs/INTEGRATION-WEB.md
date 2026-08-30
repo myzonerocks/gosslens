@@ -248,6 +248,17 @@ pixel, row major, with the near and far range it spans:
 
 An empty array clears it. The engine keeps the latest map for the occlusion pass.
 
+## Camera intrinsics
+
+If the camera reports its calibration, feed it once so an `undistort.pass` can
+straighten wide-angle lens distortion. The focal lengths and principal point are
+in pixels of the submitted frame, followed by the radial coefficients (k1, k2):
+
+    // fx, fy, cx, cy from the platform's camera calibration, then:
+    session.submitCameraIntrinsics(fx, fy, cx, cy, new Float32Array([k1, k2]));
+
+An empty array clears them, leaving an `undistort.pass` inert.
+
 ## Geofilters
 
 A lens can gate on place. Feed a location fix from the Geolocation API and
@@ -341,6 +352,13 @@ resamples the lens sound to your track's rate and sums it in, so there is
 nothing to hand-mix (pass `null` for the mic to send the lens sound over
 silence). `pullAudio` still pulls the lens sound alone for local WebAudio
 playback with no call in progress.
+
+When the lens carries an `audio.infer` node with a caption binding, the engine
+runs on-device ASR over the mic and `captionText` reads the decoded text by the
+node's id, for the page to draw as a live subtitle:
+
+    const line = session.captionText("caption");
+    if (line) subtitleEl.textContent = line;
 
 ## Method names
 

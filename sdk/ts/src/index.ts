@@ -1489,6 +1489,89 @@ export class GossSession {
     this.mod.ccall("goss_session_submit_depth", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, width, height, near, far]);
   }
 
+  /// Submits the camera intrinsics an undistort.pass corrects for: the focal
+  /// lengths and principal point in pixels of the submitted frame, and the
+  /// radial distortion coefficients (k1, k2 read). An empty array or zero focal
+  /// length clears them, leaving an undistort.pass inert.
+  submitCameraIntrinsics(fx: number, fy: number, cx: number, cy: number, distortion: Float32Array): void {
+    if (distortion.length === 0) {
+      this.mod.ccall("goss_session_submit_camera_intrinsics", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, 0, 0, 0, 0, 0, 0]);
+      return;
+    }
+    const ptr = this.scratch(distortion.length * 4);
+    this.mod.HEAPF32.set(distortion, ptr >> 2);
+    this.mod.ccall("goss_session_submit_camera_intrinsics", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, fx, fy, cx, cy, ptr, distortion.length]);
+  }
+
+  /// Submits one device gravity sample with its timestamp in microseconds. A
+  /// rolling.pass reads the image-plane motion derived from consecutive samples
+  /// to correct rolling-shutter skew; feed one per frame from the IMU. A
+  /// near-zero vector clears the stream, leaving a rolling.pass inert.
+  submitOrientation(gravityX: number, gravityY: number, gravityZ: number, timestampUs: bigint = 0n): void {
+    this.mod.ccall("goss_session_submit_orientation", "number", ["number", "number", "number", "number", "number"], [this.handle, gravityX, gravityY, gravityZ, timestampUs]);
+  }
+
+  /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer node
+  /// synthesizes its decoded caption or translation to speech and plays it into
+  /// the lens mixer. Off by default; a host turns it on for a voice-over.
+  setDubbing(enabled: boolean): void {
+    this.mod.ccall("goss_session_set_dubbing", "number", ["number", "number"], [this.handle, enabled ? 1 : 0]);
+  }
+
+  /// The latest caption an audio.infer node decoded, by the node's id, or null
+  /// when that node has no caption binding or nothing decoded yet. On-device ASR
+  /// the app can draw as a live subtitle. A length probe sizes the buffer.
+  captionText(nodeId: string): string | null {
+    const id = new TextEncoder().encode(nodeId);
+    const idPtr = this.mod.ccall("goss_alloc", "number", ["number"], [id.length || 1]) as number;
+    this.mod.HEAPU8.set(id, idPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const readLen = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number"];
+    const probe = this.mod.ccall("goss_session_caption_text", "number", args, [this.handle, idPtr, id.length, 0, 0, lenPtr]) as number;
+    const needed = readLen();
+    let result: string | null = null;
+    if (probe === 0 && needed > 0) {
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      const status = this.mod.ccall("goss_session_caption_text", "number", args, [this.handle, idPtr, id.length, outPtr, needed, lenPtr]) as number;
+      const written = readLen();
+      if (status === 0) result = new TextDecoder().decode(this.mod.HEAPU8.slice(outPtr, outPtr + written));
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [idPtr, id.length || 1]);
+    return result;
+  }
+
+  /// The recent diarized caption segment at index (0 the newest), or null when
+  /// the index is past the segments held: the times it spanned, the speaker who
+  /// spoke it, and its text, a speaker-tagged transcript for diarized subtitles.
+  captionSegment(index: number): { startUs: bigint; endUs: bigint; speaker: number; text: string } | null {
+    const segPtr = this.mod.ccall("goss_alloc", "number", ["number"], [24]) as number;
+    const status = this.mod.ccall("goss_session_caption_segment", "number", ["number", "number", "number"], [this.handle, index, segPtr]) as number;
+    if (status !== 0) {
+      this.mod.ccall("goss_free", null, ["number", "number"], [segPtr, 24]);
+      return null;
+    }
+    const dv = new DataView(this.mod.HEAPU8.buffer, segPtr, 24);
+    const startUs = dv.getBigInt64(0, true);
+    const endUs = dv.getBigInt64(8, true);
+    const speaker = dv.getUint32(16, true);
+    const textLen = dv.getUint32(20, true);
+    this.mod.ccall("goss_free", null, ["number", "number"], [segPtr, 24]);
+    let text = "";
+    if (textLen > 0) {
+      const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [textLen]) as number;
+      const st = this.mod.ccall("goss_session_caption_segment_text", "number", ["number", "number", "number", "number", "number"], [this.handle, index, outPtr, textLen, lenPtr]) as number;
+      const written = new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+      if (st === 0) text = new TextDecoder().decode(this.mod.HEAPU8.slice(outPtr, outPtr + written));
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, textLen]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+    return { startUs, endUs, speaker, text };
+  }
+
   /// Segments a host-provided still image through the running segmenter: rgba
   /// is width by height RGBA8 pixels, row major. The mask reaches the active
   /// lens the way a camera frame's would.
@@ -1496,6 +1579,35 @@ export class GossSession {
     const ptr = this.scratch(rgba.length);
     this.mod.HEAPU8.set(rgba, ptr);
     this.mod.ccall("goss_session_submit_segmentation_image", "number", ["number", "number", "number", "number"], [this.handle, ptr, width, height]);
+  }
+
+  /// Submits one RGBA exposure of an HDR bracket (width by height RGBA8, row
+  /// major), converted to NV12 and fed to bracket-source temporal.fuse nodes; the
+  /// fusion publishes once the ring holds a full bracket.
+  submitFrameBracketRgba(rgba: Uint8Array, width: number, height: number): void {
+    const ptr = this.scratch(rgba.length);
+    this.mod.HEAPU8.set(rgba, ptr);
+    this.mod.ccall("goss_session_submit_frame_bracket_rgba", "number", ["number", "number", "number", "number"], [this.handle, ptr, width, height]);
+  }
+
+  /// Submits one NV12 exposure of an HDR bracket, fed to bracket-source
+  /// temporal.fuse nodes. y and uv are the plane bytes as submitFrameCopy takes.
+  submitFrameBracket(y: Uint8Array, yStride: number, uv: Uint8Array, uvStride: number, width: number, height: number, colorStandard = 1, colorRange = 0): void {
+    const yPtr = this.mod.ccall("goss_alloc", "number", ["number"], [y.length]) as number;
+    this.mod.HEAPU8.set(y, yPtr);
+    const uvPtr = this.mod.ccall("goss_alloc", "number", ["number"], [uv.length]) as number;
+    this.mod.HEAPU8.set(uv, uvPtr);
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, colorStandard, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, colorRange, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 24, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
+    this.mod.ccall("goss_session_submit_frame_bracket", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, this.frameDescPtr, yPtr, yStride, uvPtr, uvStride]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [yPtr, y.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [uvPtr, uv.length]);
   }
 
   /// Samples a reference photo's makeup color per face part, so a tint.pass

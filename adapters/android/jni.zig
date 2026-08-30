@@ -128,6 +128,44 @@ export fn Java_com_gosslens_Gosslens_nativeCompilePrompt(env: *JniEnv, cls: jobj
     return @intFromEnum(status);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSetDubbing(env: *JniEnv, cls: jobject, session: i64, enabled: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_set_dubbing(sessionFromHandle(session), @intCast(@max(enabled, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeCaptionText(env: *JniEnv, cls: jobject, session: i64, node_id_buffer: jobject, node_id_len: i32, out_buffer: jobject, out_capacity: i64, len_buffer: jobject) i32 {
+    _ = cls;
+    const node_id = getDirectBufferAddress(env, node_id_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_len: *align(1) u64 = @ptrCast(len_bytes);
+    const out: ?[*]u8 = getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_session_caption_text(sessionFromHandle(session), @ptrCast(node_id), @intCast(@max(node_id_len, 0)), out, @intCast(@max(out_capacity, 0)), &written);
+    out_len.* = written;
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeCaptionSegment(env: *JniEnv, cls: jobject, session: i64, index: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var seg: abi.CaptionSegment = undefined;
+    const status = abi.goss_session_caption_segment(sessionFromHandle(session), @intCast(@max(index, 0)), &seg);
+    if (status == .ok) @memcpy(bytes[0..@sizeOf(abi.CaptionSegment)], std.mem.asBytes(&seg));
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeCaptionSegmentText(env: *JniEnv, cls: jobject, session: i64, index: i32, out_buffer: jobject, out_capacity: i64, len_buffer: jobject) i32 {
+    _ = cls;
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_len: *align(1) u64 = @ptrCast(len_bytes);
+    const out: ?[*]u8 = getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_session_caption_segment_text(sessionFromHandle(session), @intCast(@max(index, 0)), out, @intCast(@max(out_capacity, 0)), &written);
+    out_len.* = written;
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSessionCreate(env: *JniEnv, cls: jobject, engine: i64, frame_budget_us: i32) i64 {
     _ = env;
     _ = cls;
@@ -347,6 +385,28 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitFrameCopy(
     return @intFromEnum(abi.goss_session_submit_frame_copy(sessionFromHandle(session), &desc, y, @intCast(@max(y_stride, 0)), uv, @intCast(@max(uv_stride, 0))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitFrameBracket(env: *JniEnv, cls: jobject, session: i64, y_buffer: jobject, y_stride: i32, uv_buffer: jobject, uv_stride: i32, width: i32, height: i32, color_standard: i32, color_range: i32, timestamp_us: i64) i32 {
+    _ = cls;
+    const y = getDirectBufferAddress(env, y_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const uv = getDirectBufferAddress(env, uv_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var desc: abi.FrameDesc = .{
+        .width = @intCast(@max(width, 0)),
+        .height = @intCast(@max(height, 0)),
+        .pixel_format = 0,
+        .color_standard = @intCast(@max(color_standard, 0)),
+        .color_range = @intCast(@max(color_range, 0)),
+        .flags = 0,
+        .timestamp_us = timestamp_us,
+    };
+    return @intFromEnum(abi.goss_session_submit_frame_bracket(sessionFromHandle(session), &desc, y, @intCast(@max(y_stride, 0)), uv, @intCast(@max(uv_stride, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSubmitFrameBracketRgba(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, width: i32, height: i32) i32 {
+    _ = cls;
+    const rgba = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_submit_frame_bracket_rgba(sessionFromHandle(session), rgba, @intCast(@max(width, 0)), @intCast(@max(height, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSubmitHardwareBuffer(
     env: *JniEnv,
     cls: jobject,
@@ -489,6 +549,20 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitDepth(env: *JniEnv, cls: jobjec
     const bytes = getDirectBufferAddress(env, depth_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const depth: [*]const f32 = @ptrCast(@alignCast(bytes));
     return @intFromEnum(abi.goss_session_submit_depth(sessionFromHandle(session), depth, @intCast(@max(width, 0)), @intCast(@max(height, 0)), near, far));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSubmitCameraIntrinsics(env: *JniEnv, cls: jobject, session: i64, fx: f32, fy: f32, cx: f32, cy: f32, distortion_buffer: jobject, distortion_len: i32) i32 {
+    _ = cls;
+    if (distortion_len == 0) return @intFromEnum(abi.goss_session_submit_camera_intrinsics(sessionFromHandle(session), 0, 0, 0, 0, null, 0));
+    const bytes = getDirectBufferAddress(env, distortion_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const distortion: [*]const f32 = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_submit_camera_intrinsics(sessionFromHandle(session), fx, fy, cx, cy, distortion, @intCast(@max(distortion_len, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSubmitOrientation(env: *JniEnv, cls: jobject, session: i64, gravity_x: f32, gravity_y: f32, gravity_z: f32, timestamp_us: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_submit_orientation(sessionFromHandle(session), gravity_x, gravity_y, gravity_z, timestamp_us));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeSubmitSegmentationImage(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, width: i32, height: i32) i32 {

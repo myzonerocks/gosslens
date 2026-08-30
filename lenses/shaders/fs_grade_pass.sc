@@ -3,15 +3,19 @@ $input v_texcoord0
 #include <bgfx_shader.sh>
 
 SAMPLER2D(s_texColor, 0);
+SAMPLER2D(s_texMask, 1);
 uniform vec4 u_grade[3];
 
 // A grade.pass node's color adjustment: tone (exposure, brightness,
 // contrast), white balance (temperature, tint), then hue, saturation,
 // grayscale, posterize and invert applied in that order. Every term
 // defaults to the identity, so an empty grade leaves the frame untouched.
+// u_grade[2].z gates a masked grade: on, the graded result blends over the
+// original only inside the named channel; off, the whole frame is graded.
 void main()
 {
 	vec4 color = texture2D(s_texColor, v_texcoord0);
+	vec3 orig = color.rgb;
 	vec3 rgb = color.rgb;
 
 	float exposure = u_grade[0].x;
@@ -57,6 +61,12 @@ void main()
 	}
 
 	rgb = mix(rgb, vec3_splat(1.0) - rgb, invertAmount);
+
+	// A masked grade keeps the original outside the channel; unmasked grades all.
+	if (u_grade[2].z > 0.5) {
+		float m = texture2D(s_texMask, v_texcoord0).r;
+		rgb = mix(orig, rgb, m);
+	}
 
 	gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), color.a);
 }

@@ -44,6 +44,19 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+    internal external fun nativeSubmitFrameBracket(
+        session: Long,
+        yBuffer: ByteBuffer,
+        yStride: Int,
+        uvBuffer: ByteBuffer,
+        uvStride: Int,
+        width: Int,
+        height: Int,
+        colorStandard: Int,
+        colorRange: Int,
+        timestampUs: Long,
+    ): Int
+    internal external fun nativeSubmitFrameBracketRgba(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeReportFrame(session: Long, frameTimeUs: Int, thermal: Int): Int
     internal external fun nativeEnableFaceTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
     internal external fun nativeDisableFaceTracking(session: Long)
@@ -89,6 +102,12 @@ object Gosslens {
     internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
+    internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
+    internal external fun nativeSubmitOrientation(session: Long, gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Int
+    internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
+    internal external fun nativeCaptionSegment(session: Long, index: Int, out: ByteBuffer): Int
+    internal external fun nativeCaptionSegmentText(session: Long, index: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
+    internal external fun nativeSetDubbing(session: Long, enabled: Int): Int
     internal external fun nativeSubmitSegmentationImage(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeSetMakeupReference(session: Long, rgba: ByteBuffer, width: Int, height: Int, landmarks: ByteBuffer, count: Int): Int
     internal external fun nativeBodyCount(session: Long): Int
@@ -913,6 +932,21 @@ class GossSession private constructor(
         return Gosslens.nativeSubmitAvatarSourceRgba(handle, buf, width, height) == 0
     }
 
+    /** Feeds the platform's world understanding into the session: the camera
+     * pose and projection state, tracked planes, anchors, and light estimate,
+     * each a direct ByteBuffer laid out as the world ABI structs. Drives the
+     * world.tracking_state trigger and world-anchored lens content. */
+    fun submitWorld(
+        stateBuffer: ByteBuffer,
+        planesBuffer: ByteBuffer,
+        planeCount: Int,
+        anchorsBuffer: ByteBuffer,
+        anchorCount: Int,
+        lightBuffer: ByteBuffer,
+    ): Boolean = Gosslens.nativeSubmitWorld(
+        handle, stateBuffer, planesBuffer, planeCount, anchorsBuffer, anchorCount, lightBuffer,
+    ) == 0
+
     /** Stands the segmentation worker up from a raw model - a selfie or hair
      * segmenter .tflite; [model] is a direct buffer of the model bytes. Once
      * enabled, trackFrame feeds it the same frame it feeds the trackers. */
@@ -1042,6 +1076,80 @@ class GossSession private constructor(
         return Gosslens.nativeSubmitDepth(handle, buf, width, height, near, far) == 0
     }
 
+    /** Submits the camera intrinsics an undistort.pass corrects for: the focal
+     * lengths and principal point in pixels of the submitted frame, and the
+     * radial distortion coefficients (k1, k2 read). An empty array or zero
+     * focal length clears them, leaving an undistort.pass inert. */
+    fun submitCameraIntrinsics(fx: Float, fy: Float, cx: Float, cy: Float, distortion: FloatArray): Boolean {
+        if (distortion.isEmpty()) return Gosslens.nativeSubmitCameraIntrinsics(handle, 0f, 0f, 0f, 0f, stage(4), 0) == 0
+        val buf = stage(distortion.size * 4)
+        buf.asFloatBuffer().put(distortion)
+        buf.rewind()
+        return Gosslens.nativeSubmitCameraIntrinsics(handle, fx, fy, cx, cy, buf, distortion.size) == 0
+    }
+
+    /** Submits one device gravity sample with its timestamp in microseconds. A
+     * rolling.pass reads the image-plane motion derived from consecutive samples
+     * to correct rolling-shutter skew; feed one per frame from the IMU. A
+     * near-zero vector clears the stream, leaving a rolling.pass inert. */
+    fun submitOrientation(gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Boolean =
+        Gosslens.nativeSubmitOrientation(handle, gravityX, gravityY, gravityZ, timestampUs) == 0
+
+    /** Enables or disables on-device dubbing: when on, a dub-bound audio.infer
+     * node synthesizes its decoded caption or translation to speech and plays it
+     * into the lens mixer. Off by default; a host turns it on for a voice-over. */
+    fun setDubbing(enabled: Boolean): Boolean =
+        Gosslens.nativeSetDubbing(handle, if (enabled) 1 else 0) == 0
+
+    /** The latest caption an audio.infer node decoded, by the node's id, or null
+     * when that node has no caption binding or nothing decoded yet. On-device ASR
+     * the app can draw as a live subtitle. A length probe sizes the buffer. */
+    fun captionText(nodeId: String): String? {
+        val idBytes = nodeId.toByteArray(Charsets.UTF_8)
+        val idBuf = ByteBuffer.allocateDirect(maxOf(idBytes.size, 1))
+        idBuf.put(idBytes)
+        idBuf.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeCaptionText(handle, idBuf, idBytes.size, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        if (needed <= 0) return null
+        val out = ByteBuffer.allocateDirect(needed)
+        if (Gosslens.nativeCaptionText(handle, idBuf, idBytes.size, out, needed.toLong(), len) != 0) return null
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return String(result, Charsets.UTF_8)
+    }
+
+    /** One diarized caption segment: the times it spanned, the speaker who spoke
+     * it, and its text. */
+    data class CaptionSegment(val startUs: Long, val endUs: Long, val speaker: Int, val text: String)
+
+    /** The recent diarized caption segment at [index] (0 the newest), or null when
+     * the index is past the segments held: a speaker-tagged transcript the app can
+     * draw as diarized subtitles. */
+    fun captionSegment(index: Int): CaptionSegment? {
+        val seg = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeCaptionSegment(handle, index, seg) != 0) return null
+        val startUs = seg.getLong(0)
+        val endUs = seg.getLong(8)
+        val speaker = seg.getInt(16)
+        val textLen = seg.getInt(20)
+        var text = ""
+        if (textLen > 0) {
+            val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+            val out = ByteBuffer.allocateDirect(textLen)
+            if (Gosslens.nativeCaptionSegmentText(handle, index, out, textLen.toLong(), len) == 0) {
+                val written = len.getLong(0).toInt()
+                val bytes = ByteArray(written)
+                out.get(bytes)
+                text = String(bytes, Charsets.UTF_8)
+            }
+        }
+        return CaptionSegment(startUs, endUs, speaker, text)
+    }
+
     /** Segments a host-provided still image through the running segmenter:
      * rgba is width by height RGBA8 pixels, row major. The mask reaches the
      * active lens the way a camera frame's would. */
@@ -1050,6 +1158,31 @@ class GossSession private constructor(
         buf.put(rgba)
         buf.rewind()
         return Gosslens.nativeSubmitSegmentationImage(handle, buf, width, height) == 0
+    }
+
+    /** Submits one exposure of an HDR bracket, fed only to bracket-source
+     * temporal.fuse nodes; the fusion publishes once the ring holds a full
+     * bracket. y and uv are direct NV12 plane buffers, as submitFrameCopy takes. */
+    fun submitFrameBracket(
+        y: ByteBuffer,
+        yStride: Int,
+        uv: ByteBuffer,
+        uvStride: Int,
+        width: Int,
+        height: Int,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
+    ): Boolean = Gosslens.nativeSubmitFrameBracket(
+        handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, 0L,
+    ) == 0
+
+    /** Submits one RGBA exposure of an HDR bracket (width by height RGBA8, row
+     * major), converted to NV12 and fed to bracket-source temporal.fuse nodes. */
+    fun submitFrameBracketRgba(rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = stage(rgba.size)
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeSubmitFrameBracketRgba(handle, buf, width, height) == 0
     }
 
     /** Samples a reference photo's makeup color per face part, so a tint.pass

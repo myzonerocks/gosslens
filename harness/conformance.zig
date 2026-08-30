@@ -1980,6 +1980,471 @@ const OnnxPb = struct {
     }
 };
 
+/// A synthetic audio model: Add(x, x) over a [1, N] window, doubling every
+/// sample, so the output's first element is twice the newest window sample.
+fn buildOnnxAudioProbe(a: std.mem.Allocator, n: i64) []const u8 {
+    const add = onnxNode(a, "Add", &.{ "x", "x" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, add);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, n }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, n }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes an audio.infer lens: a bounded window model driving the `level`
+/// parameter from the microphone, plus the model asset.
+fn writeAudioLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.audio-infer","version":"1.0.0","display_name":"BYO Audio","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"level","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[{"tensor":0,"index":0,"param":"level"}]}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates the audio lens, submits blocks of constant-amplitude audio while
+/// ticking, and reports the `level` parameter once the worker has run over the
+/// ring window (the default sentinel flips to a real value).
+fn runAudioLevel(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, amp: f32) !f32 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, amp);
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var value: f32 = -999.0;
+    var polls: usize = 0;
+    while (value == -999.0) {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + polls * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "level", "level".len, &value);
+        polls += 1;
+        if (polls > 100000) return error.AudioInferTimedOut;
+    }
+    return value;
+}
+
+/// Proves the audio.infer core: a bounded window model runs over the microphone
+/// ring and drives a lens parameter. A doubling net reads about twice the
+/// amplitude of a constant tone and near zero on silence, so it sees real audio.
+fn proveAudioInfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxAudioProbe(arena.allocator(), 256);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-infer/assets");
+    try writeAudioLens("zig-out/audio-infer", model);
+
+    const loud = try runAudioLevel(gpa, engine, "zig-out/audio-infer", 0.3);
+    const quiet = try runAudioLevel(gpa, engine, "zig-out/audio-infer", 0.0);
+    if (!(loud > 0.4 and loud < 0.8)) {
+        std.debug.print("conformance: FAIL audio.infer did not read about twice a 0.3 tone (level {d})\n", .{loud});
+        return false;
+    }
+    if (!(quiet > -0.05 and quiet < 0.05)) {
+        std.debug.print("conformance: FAIL audio.infer did not read near zero on silence (level {d})\n", .{quiet});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.infer node runs a bounded model over the microphone window and drives a parameter: a doubling net reads about twice a 0.3 tone ({d:.3}) and near zero on silence ({d:.3})\n", .{ loud, quiet });
+    return true;
+}
+
+/// A synthetic caption net: MatMul(window[1,8], W[8,9]) yields [1,9] logits read
+/// as three timesteps of three classes. W is built so a positive constant window
+/// argmaxes each timestep to h, blank, i, which greedy-CTC-decodes to "hi".
+fn buildOnnxCaptionProbe(a: std.mem.Allocator) []const u8 {
+    const n = 8;
+    const m = 9; // 3 timesteps * 3 classes
+    // Per output column the target logit weight; classes are blank(0), h(1), i(2).
+    const desired = [_]f32{ 0, 1, 0, 1, 0, 0, 0, 0, 1 };
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, n);
+    w.varintField(1, m);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..n) |_| for (0..m) |j| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(desired[j] / @as(f32, n)), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    };
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const mm = onnxNode(a, "MatMul", &.{ "x", "W" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, mm);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, n }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ n, m }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, m }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a caption lens: an audio.infer node with a caption binding, plus the
+/// model and a three-line labels file (blank, h, i).
+fn writeCaptionLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.caption","version":"1.0.0","display_name":"Caption","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"caption":{"tensor":0,"labels":"labels"}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+    const labels_path = try std.fmt.allocPrint(page, "{s}/assets/labels.txt", .{dir});
+    defer page.free(labels_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = labels_path, .data = "_\nh\ni" });
+}
+
+/// Activates the caption lens, submits audio while ticking, and reads the decoded
+/// caption by the node id once it lands. Caller owns the returned text.
+fn runCaption(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, node_id: []const u8) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, 0.3);
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var buf: [256]u8 = undefined;
+    var polls: usize = 0;
+    while (true) : (polls += 1) {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + polls * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        var out_len: usize = 0;
+        const st = abi.goss_session_caption_text(session, node_id.ptr, node_id.len, &buf, buf.len, &out_len);
+        if (st == .ok and out_len > 0) return gpa.dupe(u8, buf[0..out_len]);
+        if (polls > 100000) return error.CaptionTimedOut;
+    }
+}
+
+/// Proves on-device ASR captions: an audio.infer node CTC-decodes a logits tensor
+/// into text read back by node id. The synthetic net's fixed logits decode to the
+/// known word "hi", so the whole path - window, model, greedy CTC, labels, and the
+/// caption ABI - is exercised end to end.
+fn proveCaption(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxCaptionProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/caption/assets");
+    try writeCaptionLens("zig-out/caption", model);
+
+    const text = try runCaption(gpa, engine, "zig-out/caption", "aud");
+    defer gpa.free(text);
+    if (!std.mem.eql(u8, text, "hi")) {
+        std.debug.print("conformance: FAIL caption decoded '{s}', wanted 'hi'\n", .{text});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.infer caption binding greedy-CTC-decodes a logits tensor into text read by node id: the synthetic net's fixed logits decode to 'hi'\n", .{});
+    return true;
+}
+
+/// A synthetic speaker-embedding net: MatMul(window[1,4], W[4,2]) yields a
+/// two-dimensional embedding whose first axis is the window's constant energy and
+/// second its alternating energy, so a flat tone and an alternating tone map to
+/// orthogonal embeddings the diarizer reads as two speakers.
+fn buildOnnxDiarizeProbe(a: std.mem.Allocator) []const u8 {
+    const n = 4;
+    const d = 2;
+    const wv = [_]f32{ 1, 1, 1, -1, 1, 1, 1, -1 }; // [4,2] row-major: sum axis, alternating axis
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, n);
+    w.varintField(1, d);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (wv) |v| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(v), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const mm = onnxNode(a, "MatMul", &.{ "x", "W" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, mm);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, n }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ n, d }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, d }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a diarize lens: an audio.infer node whose embedding output drives a
+/// `speaker` parameter, plus the model.
+fn writeDiarizeLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.diarize","version":"1.0.0","display_name":"Diarize","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"speaker","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"diarize":{"embed_tensor":0,"max_speakers":8,"threshold":0.75,"param":"speaker"}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Submits an audio pattern several times through the diarize lens and returns
+/// the speaker parameter it settled on.
+fn diarizeSpeaker(session: *abi.Session, engine: *abi.Engine, pattern: []const f32, ts: *i64) f32 {
+    const signals = std.mem.zeroes(abi.LensSignals);
+    for (0..6) |_| {
+        _ = abi.goss_session_submit_audio(session, pattern.ptr, @intCast(pattern.len), 48000, 1, ts.*);
+        ts.* += 1000;
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    }
+    _ = engine;
+    var value: f32 = -999;
+    _ = abi.goss_session_parameter_value(session, "speaker", "speaker".len, &value);
+    return value;
+}
+
+/// Proves speaker diarization: an audio.infer embedding output is clustered into
+/// speaker ids. A flat tone and an alternating tone map to orthogonal embeddings,
+/// so they read as two distinct speakers, and returning to the first tone reads
+/// the first speaker again, showing stable clustering.
+fn proveDiarize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxDiarizeProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/diarize/assets");
+    try writeDiarizeLens("zig-out/diarize", model);
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/diarize", "zig-out/diarize".len) != .ok) return error.ActivationFailed;
+
+    const flat = [_]f32{ 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5 };
+    const alt = [_]f32{ 0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5 };
+    var ts: i64 = 1000;
+    const s_flat = diarizeSpeaker(session, engine, &flat, &ts);
+    const s_alt = diarizeSpeaker(session, engine, &alt, &ts);
+    const s_flat2 = diarizeSpeaker(session, engine, &flat, &ts);
+    if (s_flat == s_alt) {
+        std.debug.print("conformance: FAIL diarize gave the two tones the same speaker ({d})\n", .{s_flat});
+        return false;
+    }
+    if (s_flat != s_flat2) {
+        std.debug.print("conformance: FAIL diarize did not return the first tone to its speaker ({d} vs {d})\n", .{ s_flat, s_flat2 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.infer diarize binding clusters embeddings into speakers: a flat tone and an alternating tone read as two distinct speakers ({d}, {d}) and the flat tone returns to its own ({d})\n", .{ s_flat, s_alt, s_flat2 });
+    return true;
+}
+
+/// A synthetic translation decoder: MatMul(prev_onehot[1,4], W[4,4]) yields the
+/// next-token logits, ignoring the memory input. W is a transition matrix where
+/// bos leads to "a", "a" to "b", and "b" to eos, so the greedy loop emits "ab".
+fn buildOnnxTranslateDecoder(a: std.mem.Allocator) []const u8 {
+    const v = 4; // tokens: bos(0), a(1), b(2), eos(3)
+    const wv = [_]f32{ 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0 };
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, v);
+    w.varintField(1, v);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (wv) |vv| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(vv), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const mm = onnxNode(a, "MatMul", &.{ "prev", "W" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, mm);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "mem", &.{ 1, 4 })); // input 0, the encoder memory (unused here)
+    g.bytesField(11, onnxValueInfo(a, "prev", &.{ 1, v })); // input 1, the previous token one-hot
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ v, v }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, v }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a translate lens: an audio.infer node whose model is the encoder and
+/// whose translate binding names the decoder step model, plus both models and a
+/// four-line tokens file.
+fn writeTranslateLens(dir: []const u8, encoder: []const u8, decoder: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.translate","version":"1.0.0","display_name":"Translate","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"translate":{"decoder":"decoder.onnx","tokens":"tokens","memory_tensor":0,"max_tokens":8,"bos":0,"eos":3}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const enc_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(enc_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = enc_path, .data = encoder });
+    const dec_path = try std.fmt.allocPrint(page, "{s}/assets/decoder.onnx", .{dir});
+    defer page.free(dec_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = dec_path, .data = decoder });
+    const tokens_path = try std.fmt.allocPrint(page, "{s}/assets/tokens.txt", .{dir});
+    defer page.free(tokens_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = tokens_path, .data = "<bos>\na\nb\n<eos>" });
+}
+
+/// Proves live translation: an audio.infer encoder feeds a greedy autoregressive
+/// decoder loop that emits tokens until eos, detokenized into text read like a
+/// caption. The synthetic transition decoder walks bos to "a" to "b" to eos, so
+/// the whole encode then decode loop yields "ab".
+fn proveTranslate(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const encoder = buildOnnxAudioProbe(arena.allocator(), 4);
+    const decoder = buildOnnxTranslateDecoder(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/translate/assets");
+    try writeTranslateLens("zig-out/translate", encoder, decoder);
+
+    const text = try runCaption(gpa, engine, "zig-out/translate", "aud");
+    defer gpa.free(text);
+    if (!std.mem.eql(u8, text, "ab")) {
+        std.debug.print("conformance: FAIL translate decoded '{s}', wanted 'ab'\n", .{text});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.infer translate binding runs a greedy autoregressive decoder over the encoder memory: the synthetic transition decoder walks bos to 'a' to 'b' to eos, yielding 'ab'\n", .{});
+    return true;
+}
+
+/// A synthetic text-to-speech model: MatMul(chars[1,16], W[16,256]) yields a PCM
+/// block, so a non-empty caption (its characters) synthesizes a non-zero voice.
+fn buildOnnxDubProbe(a: std.mem.Allocator) []const u8 {
+    const chars_n = 16;
+    const samp = 256;
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, chars_n);
+    w.varintField(1, samp);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..chars_n * samp) |_| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(@as(f32, 0.5)), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const mm = onnxNode(a, "MatMul", &.{ "chars", "W" }, &.{"pcm"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, mm);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "chars", &.{ 1, chars_n }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ chars_n, samp }));
+    g.bytesField(12, onnxValueInfo(a, "pcm", &.{ 1, samp }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a dub lens: an audio.infer node that captions and also dubs, plus the
+/// caption model, the tts model, and the labels file.
+fn writeDubLens(dir: []const u8, caption_model: []const u8, tts_model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.dub","version":"1.0.0","display_name":"Dub","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"caption":{"tensor":0,"labels":"labels"},"dub":{"model":"tts.onnx","rate":22050}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const enc_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(enc_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = enc_path, .data = caption_model });
+    const tts_path = try std.fmt.allocPrint(page, "{s}/assets/tts.onnx", .{dir});
+    defer page.free(tts_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = tts_path, .data = tts_model });
+    const labels_path = try std.fmt.allocPrint(page, "{s}/assets/labels.txt", .{dir});
+    defer page.free(labels_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = labels_path, .data = "_\nh\ni" });
+}
+
+/// Activates the dub lens with dubbing on or off, submits audio while ticking so
+/// the caption decodes and the dub fires, then pulls the mixed lens audio and
+/// returns its total energy.
+fn dubEnergy(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, enabled: u32) !u64 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    _ = abi.goss_session_set_dubbing(session, enabled);
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, 0.3);
+    const signals = std.mem.zeroes(abi.LensSignals);
+    for (0..20) |k| {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + k * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    }
+    var out = [_]i16{0} ** 4096;
+    _ = abi.goss_session_pull_audio(session, &out, 2048);
+    var e: u64 = 0;
+    for (out) |v| e += @abs(@as(i64, v));
+    return e;
+}
+
+/// Proves on-device dubbing: with dubbing enabled a dub-bound audio.infer node
+/// synthesizes its decoded caption to speech and plays it into the lens mixer, so
+/// the pulled audio carries a voice; with dubbing off the same lens is silent.
+fn proveDub(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const caption_model = buildOnnxCaptionProbe(arena.allocator());
+    const tts_model = buildOnnxDubProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dub/assets");
+    try writeDubLens("zig-out/dub", caption_model, tts_model);
+
+    const on = try dubEnergy(gpa, engine, "zig-out/dub", 1);
+    const off = try dubEnergy(gpa, engine, "zig-out/dub", 0);
+    if (on == 0) {
+        std.debug.print("conformance: FAIL dubbing enabled produced no voice in the pulled audio\n", .{});
+        return false;
+    }
+    if (off != 0) {
+        std.debug.print("conformance: FAIL dubbing disabled still played a voice (energy {d})\n", .{off});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a dub binding synthesizes the decoded caption to speech and plays it into the mixer: the pulled audio carries a voice with dubbing on ({d}) and is silent with it off ({d})\n", .{ on, off });
+    return true;
+}
+
 /// Emits an ONNX net that sums the three input channels (a 1x1 conv with unit
 /// weights) then averages the plane, so its one output is the frame's mean
 /// brightness. NCHW input [1,3,8,8] exercises the core's channel transpose.
@@ -2051,6 +2516,60 @@ fn onnxValueInfo(a: std.mem.Allocator, name: []const u8, dims: []const i64) []co
     vi.bytesField(1, name);
     vi.bytesField(2, typ.buf.items);
     return vi.buf.items;
+}
+
+/// A one-element float initializer tensor, the constant a Mul scales its input by.
+fn onnxScalarInit(a: std.mem.Allocator, name: []const u8, value: f32) []const u8 {
+    var t: OnnxPb = .{ .a = a };
+    t.varintField(1, 1); // dims = [1]
+    t.varintField(2, 1); // data_type FLOAT
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, @bitCast(value), .little);
+    t.bytesField(9, &b); // raw_data
+    t.bytesField(8, name); // name
+    return t.buf.items;
+}
+
+/// A net that averages N square-RGB image inputs: it chains Add across f0..f(N-1)
+/// then scales by 1/N, so the output is the per-pixel mean of the fed frames.
+fn onnxMeanModel(a: std.mem.Allocator, n: usize, side: i64) []const u8 {
+    var g: OnnxPb = .{ .a = a };
+    var acc: []const u8 = "f0";
+    var i: usize = 1;
+    while (i < n) : (i += 1) {
+        const in_name = std.fmt.allocPrint(a, "f{d}", .{i}) catch unreachable;
+        const out_name = std.fmt.allocPrint(a, "t{d}", .{i}) catch unreachable;
+        g.bytesField(1, onnxNode(a, "Add", &.{ acc, in_name }, &.{out_name}, &.{}));
+        acc = out_name;
+    }
+    g.bytesField(5, onnxScalarInit(a, "scale", 1.0 / @as(f32, @floatFromInt(n))));
+    g.bytesField(1, onnxNode(a, "Mul", &.{ acc, "scale" }, &.{"y"}, &.{}));
+    for (0..n) |k| {
+        const name = std.fmt.allocPrint(a, "f{d}", .{k}) catch unreachable;
+        g.bytesField(11, onnxValueInfo(a, name, &.{ 1, 3, side, side }));
+    }
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 3, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// A net that interpolates two frames by a scalar phase t: y = f0 + t*(f1 - f0),
+/// so t=0 is the first frame, t=1 the second, and the phase input rides input 2.
+fn onnxLerpModel(a: std.mem.Allocator, side: i64) []const u8 {
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, onnxNode(a, "Sub", &.{ "f1", "f0" }, &.{"d"}, &.{}));
+    g.bytesField(1, onnxNode(a, "Mul", &.{ "d", "t" }, &.{"td"}, &.{}));
+    g.bytesField(1, onnxNode(a, "Add", &.{ "f0", "td" }, &.{"y"}, &.{}));
+    g.bytesField(11, onnxValueInfo(a, "f0", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "f1", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "t", &.{1}));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 3, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
 }
 
 fn writeOnnxLens(dir: []const u8, model: []const u8) !void {
@@ -2484,6 +3003,2368 @@ fn proveMlInferStyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A super-resolution probe: an identity 1x1 conv, then a Concat along height
+/// and a Concat along width, so a side-S input yields a 2S x 2S output, the
+/// enlarge a real super-resolution net performs.
+fn buildOnnxSuperResProbe(a: std.mem.Allocator, side: i64) []const u8 {
+    var w: OnnxPb = .{ .a = a };
+    inline for (.{ 3, 3, 1, 1 }) |d| w.varintField(1, d);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..3) |m| for (0..3) |cc| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(@as(f32, if (m == cc) 1 else 0)), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    };
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const conv = onnxNode(a, "Conv", &.{ "x", "W" }, &.{"y"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    const cat_h = onnxNode(a, "Concat", &.{ "y", "y" }, &.{"y2"}, &.{.{ .name = "axis", .i = 2 }});
+    const cat_w = onnxNode(a, "Concat", &.{ "y2", "y2" }, &.{"out"}, &.{.{ .name = "axis", .i = 3 }});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(1, cat_h);
+    g.bytesField(1, cat_w);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ 3, 3, 1, 1 }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, 3, 2 * side, 2 * side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Runs a style lens from `dir` until its output texture lands, then reports the
+/// style texture's square side (0 if it never landed).
+fn runStyleSideOnce(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !u32 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.MlStyleActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+    _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return 0;
+    }
+    return abi.styleTextureSide(session);
+}
+
+/// Proves super-resolution: a model whose output is a larger square than its
+/// input draws through the style sprite at that enlarged side, so the upscaled
+/// image reaches the pipeline. The synthetic net doubles an 8-side input to 16.
+fn proveMlInferSuperRes(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxSuperResProbe(arena.allocator(), 8);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-superres/assets");
+    try writeOnnxStyleLens("zig-out/ml-superres", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const side_a = try runStyleSideOnce(engine, "zig-out/ml-superres", person);
+    const side_b = try runStyleSideOnce(engine, "zig-out/ml-superres", person);
+    if (side_a != 16 or side_b != 16) {
+        std.debug.print("conformance: FAIL super-resolution output side {d}/{d}, wanted 16 (2x the 8 input)\n", .{ side_a, side_b });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a super-resolution model whose output is a larger square than its input draws through the style sprite at the enlarged side (16 from an 8 input)\n", .{});
+    return true;
+}
+
+/// A reference-conditioned probe: Add(frame, reference), two square-RGB inputs
+/// to one output, so a net that consumes a second input plane is exercised. Add
+/// is symmetric, so the proof holds whichever input the engine orders first.
+fn buildOnnxAuxProbe(a: std.mem.Allocator, side: i64) []const u8 {
+    const add = onnxNode(a, "Add", &.{ "x", "ref" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, add);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "ref", &.{ 1, 3, side, side }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, 3, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a style lens whose ml.infer node conditions on a bundled reference
+/// image (aux.reference), plus the model and the reference png.
+fn writeOnnxAuxLens(dir: []const u8, model: []const u8, ref_png: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-aux","version":"1.0.0","display_name":"BYO Aux","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"restyle","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[],"aux":{"reference":"ref"},"style":{"tensor":0,"sprite":"canvas"}}},
+        \\  {"id":"canvas","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
+        \\   "sprite":{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+    const ref_path = try std.fmt.allocPrint(page, "{s}/assets/ref.png", .{dir});
+    defer page.free(ref_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = ref_path, .data = ref_png });
+}
+
+/// Whether a style lens from `dir` produces its texture within a bounded number
+/// of frames; false means its worker never loaded (the negative control).
+fn styleReadyBounded(engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return false;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    for (0..600) |_| {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (abi.styleTextureCount(session) > 0) return true;
+    }
+    return false;
+}
+
+/// Proves the reference-conditioned second input: a two-input net (frame plus a
+/// bundled reference) feeds both inputs and draws through the style sprite; the
+/// negative control proves the reference is required, the same two-input model
+/// with no reference rejected at load and never drawing.
+fn proveMlInferAux(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxAuxProbe(arena.allocator(), 8);
+
+    const ref = try gpa.alloc(u8, @as(usize, 32) * 32 * 4);
+    defer gpa.free(ref);
+    var i: usize = 0;
+    while (i < ref.len) : (i += 4) {
+        ref[i + 0] = 40;
+        ref[i + 1] = 80;
+        ref[i + 2] = 120;
+        ref[i + 3] = 255;
+    }
+    var ref_png: std.ArrayList(u8) = .empty;
+    defer ref_png.deinit(gpa);
+    try png.encodeRgba(gpa, &ref_png, ref, 32, 32);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-aux/assets");
+    try writeOnnxAuxLens("zig-out/ml-aux", model, ref_png.items);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-aux-noref/assets");
+    try writeOnnxStyleLens("zig-out/ml-aux-noref", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const with_ref = try runStyleSideOnce(engine, "zig-out/ml-aux", person);
+    if (with_ref == 0) {
+        std.debug.print("conformance: FAIL a two-input reference net never drew\n", .{});
+        return false;
+    }
+    const no_ref = try styleReadyBounded(engine, "zig-out/ml-aux-noref", person);
+    if (no_ref) {
+        std.debug.print("conformance: FAIL a two-input model with no reference still loaded\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a two-input ml.infer net conditions on a bundled reference: with the reference it feeds both inputs and draws, and the same model with no reference is rejected at load\n", .{});
+    return true;
+}
+
+/// Writes a style lens whose ml.infer node reads the previous output frame into
+/// its second input (aux.temporal), plus the model. No reference png: input 1 is
+/// the last frame, not a bundled image.
+fn writeOnnxTemporalLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-temporal","version":"1.0.0","display_name":"BYO Temporal","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"restyle","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[],"aux":{"temporal":true},"style":{"tensor":0,"sprite":"canvas"}}},
+        \\  {"id":"canvas","type":"sprite.2d","inputs":{"frame":"camera"},"params":{},
+        \\   "sprite":{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates a style lens, feeds one constant frame until its output texture
+/// lands, then holds the frame long enough for the recurrent second input to
+/// settle, and captures the composited result. Caller owns the returned RGBA.
+fn captureStyleSteady(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return error.StyleNeverLanded;
+    }
+    // The frame is constant, so a handful more computes settle the previous-frame
+    // input onto that same frame before the capture reads the steady output.
+    for (0..48) |_| {
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves the temporal second input: a recurrent Add(frame, previous) fed a
+/// constant gray settles input 1 onto that gray and reads about twice the gray;
+/// the control is the same graph on a black reference (a zero input 1) reading
+/// the gray once, so the brighter temporal output proves the previous frame.
+fn proveMlInferTemporal(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxAuxProbe(arena.allocator(), 8);
+
+    // A uniform mid-gray frame, dim enough that twice its value stays unclamped.
+    const gray = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(gray);
+    var p: usize = 0;
+    while (p + 4 <= gray.len) : (p += 4) {
+        gray[p + 0] = 90;
+        gray[p + 1] = 90;
+        gray[p + 2] = 90;
+        gray[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = gray }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    // The control: the same two-input graph conditioned on a black reference, so
+    // its second input is a zero plane rather than the previous frame.
+    const black = try gpa.alloc(u8, @as(usize, 32) * 32 * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    var i: usize = 3;
+    while (i < black.len) : (i += 4) black[i] = 255;
+    var black_png: std.ArrayList(u8) = .empty;
+    defer black_png.deinit(gpa);
+    try png.encodeRgba(gpa, &black_png, black, 32, 32);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-temporal/assets");
+    try writeOnnxTemporalLens("zig-out/ml-temporal", model);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-temporal-ref/assets");
+    try writeOnnxAuxLens("zig-out/ml-temporal-ref", model, black_png.items);
+
+    const temporal_shot = try captureStyleSteady(gpa, engine, "zig-out/ml-temporal", planes);
+    defer gpa.free(temporal_shot);
+    const ref_shot = try captureStyleSteady(gpa, engine, "zig-out/ml-temporal-ref", planes);
+    defer gpa.free(ref_shot);
+
+    const temporal_sum = sumRgb(temporal_shot);
+    const ref_sum = sumRgb(ref_shot);
+    // The recurrent output carries the gray twice; the zero-reference control
+    // carries it once. Require a clear margin above the once-gray control.
+    if (temporal_sum <= ref_sum + ref_sum / 2) {
+        std.debug.print("conformance: FAIL temporal sum {d} not clearly above the zero-reference {d}\n", .{ temporal_sum, ref_sum });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a temporal ml.infer net feeds the previous output frame into its second input: a recurrent sum of the frame and its previous reads about twice a constant gray, measurably brighter than the same graph on a zero reference\n", .{});
+    return true;
+}
+
+/// Writes a dehaze.pass lens at a static strength (no asset).
+fn writeDehazeLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.dehaze","version":"1.0.0","display_name":"Dehaze","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"d","type":"dehaze.pass","inputs":{{"frame":"camera"}},"params":{{}},"dehaze":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Activates a full-frame post lens from `dir`, submits the frame, and captures
+/// the composited result; caller owns the returned RGBA.
+fn captureDehazeShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Sums the rgb bytes of a capture, a stand-in for its overall brightness.
+fn sumRgb(shot: []const u8) u64 {
+    var total: u64 = 0;
+    var i: usize = 0;
+    while (i + 4 <= shot.len) : (i += 4) {
+        total += @as(u64, shot[i]) + shot[i + 1] + shot[i + 2];
+    }
+    return total;
+}
+
+/// Proves the deterministic dehaze pass: a dehaze.pass lifts the atmospheric
+/// veil off a hazy frame. At strength 0 the frame is untouched; at strength 1
+/// the dark-channel transmission recovery pulls the bright veil down, so the
+/// output differs from the identity and is measurably darker.
+fn proveDehaze(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A bright, low-contrast hazy frame: a veil the dehaze pass lifts.
+    const hazy = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(hazy);
+    var p: usize = 0;
+    while (p + 4 <= hazy.len) : (p += 4) {
+        hazy[p + 0] = 190;
+        hazy[p + 1] = 200;
+        hazy[p + 2] = 210;
+        hazy[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = hazy }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dehaze-0");
+    try writeDehazeLens("zig-out/dehaze-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dehaze-1");
+    try writeDehazeLens("zig-out/dehaze-1", 1.0);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/dehaze-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/dehaze-1", planes);
+    defer gpa.free(shot1);
+
+    const changed = countDiff(shot0, shot1);
+    const bright0 = sumRgb(shot0);
+    const bright1 = sumRgb(shot1);
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL dehaze at strength 1 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (!(bright1 < bright0)) {
+        std.debug.print("conformance: FAIL dehaze did not darken the veiled frame ({d} vs {d})\n", .{ bright1, bright0 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a dehaze.pass lifts the atmospheric veil: strength 1 pulls the dark-channel transmission down, darkening a hazy frame where strength 0 leaves it untouched ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
+/// Writes a relight.pass lens at a static strength and light angle (no asset).
+fn writeRelightLens(dir: []const u8, strength: f32, angle: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.relight","version":"1.0.0","display_name":"Relight","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"r","type":"relight.pass","inputs":{{"frame":"camera"}},"params":{{}},"relight":{{"strength":{d:.3},"angle":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, angle });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Sums the rgb bytes over the left third (side 0) or right third (side 1) of
+/// the 400-wide capture, so a directional effect's two sides can be compared.
+fn sumThird(shot: []const u8, side: usize) u64 {
+    var total: u64 = 0;
+    const w: usize = 400;
+    const h: usize = 300;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        const x0: usize = if (side == 0) 0 else (w * 2) / 3;
+        const x1: usize = if (side == 0) w / 3 else w;
+        var x: usize = x0;
+        while (x < x1) : (x += 1) {
+            const idx = (y * w + x) * 4;
+            total += @as(u64, shot[idx]) + shot[idx + 1] + shot[idx + 2];
+        }
+    }
+    return total;
+}
+
+/// Proves the parametric directional relight: a relight.pass at angle 0 lights
+/// the frame from the right, so the right side brightens and the left shades,
+/// where a uniform frame under strength 0 stays even side to side.
+fn proveRelight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const grayf = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(grayf);
+    var q: usize = 0;
+    while (q + 4 <= grayf.len) : (q += 4) {
+        grayf[q + 0] = 128;
+        grayf[q + 1] = 128;
+        grayf[q + 2] = 128;
+        grayf[q + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = grayf }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/relight-0");
+    try writeRelightLens("zig-out/relight-0", 0.0, 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/relight-1");
+    try writeRelightLens("zig-out/relight-1", 1.0, 0.0);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/relight-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/relight-1", planes);
+    defer gpa.free(shot1);
+
+    const changed = countDiff(shot0, shot1);
+    const left1 = sumThird(shot1, 0);
+    const right1 = sumThird(shot1, 1);
+    const left0 = sumThird(shot0, 0);
+    const right0 = sumThird(shot0, 1);
+    const id_gap = if (right0 > left0) right0 - left0 else left0 - right0;
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL relight at strength 1 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (!(right1 > left1) or (right1 - left1) <= id_gap) {
+        std.debug.print("conformance: FAIL relight did not light from the right (left {d}, right {d}, identity gap {d})\n", .{ left1, right1, id_gap });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a relight.pass lights the frame directionally: at angle 0 the right side brightens over the left where the uniform strength-0 frame stays even ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
+/// Writes a glare.pass lens at a static strength and threshold (no asset).
+fn writeGlareLens(dir: []const u8, strength: f32, threshold: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.glare","version":"1.0.0","display_name":"Glare","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"g","type":"glare.pass","inputs":{{"frame":"camera"}},"params":{{}},"glare":{{"strength":{d:.3},"threshold":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, threshold });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the specular glare rolloff: a glare.pass pulls a bright highlight down
+/// while a normal-luma region holds. The frame is blown out on the left and
+/// mid-toned on the right; strength 1 recovers the left where the right barely
+/// moves, and strength 0 is untouched.
+fn proveGlare(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const v: u8 = if (col < width / 2) 240 else 100;
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/glare-0");
+    try writeGlareLens("zig-out/glare-0", 0.0, 0.8);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/glare-1");
+    try writeGlareLens("zig-out/glare-1", 1.0, 0.8);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/glare-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/glare-1", planes);
+    defer gpa.free(shot1);
+
+    const changed = countDiff(shot0, shot1);
+    const bright0 = sumThird(shot0, 0);
+    const bright1 = sumThird(shot1, 0);
+    const normal0 = sumThird(shot0, 1);
+    const normal1 = sumThird(shot1, 1);
+    const normal_gap = if (normal1 > normal0) normal1 - normal0 else normal0 - normal1;
+    const bright_drop = if (bright0 > bright1) bright0 - bright1 else 0;
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL glare at strength 1 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (!(bright1 < bright0) or normal_gap > bright_drop / 4) {
+        std.debug.print("conformance: FAIL glare did not recover the highlight while holding the normal region (bright drop {d}, normal gap {d})\n", .{ bright_drop, normal_gap });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a glare.pass recovers a blown highlight: strength 1 pulls the bright region down toward the threshold where the normal region barely moves and strength 0 is untouched ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
+/// Sums the rgb bytes of a rectangular block of the 400x300 capture.
+fn sumBlock(shot: []const u8, x0: usize, y0: usize, x1: usize, y1: usize) u64 {
+    var total: u64 = 0;
+    const w: usize = 400;
+    var y: usize = y0;
+    while (y < y1) : (y += 1) {
+        var x: usize = x0;
+        while (x < x1) : (x += 1) {
+            const idx = (y * w + x) * 4;
+            total += @as(u64, shot[idx]) + shot[idx + 1] + shot[idx + 2];
+        }
+    }
+    return total;
+}
+
+/// Writes a vignette.pass lens at a static strength and radius (no asset).
+fn writeVignetteLens(dir: []const u8, strength: f32, radius: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.vignette","version":"1.0.0","display_name":"Vignette","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"v","type":"vignette.pass","inputs":{{"frame":"camera"}},"params":{{}},"vignette":{{"strength":{d:.3},"radius":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, radius });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the radial vignette gain: a uniform gray frame stays uniform at
+/// strength 0. A positive strength lifts the corners (correcting a lens
+/// vignette) while the centre inside the radius holds; a negative strength sinks
+/// them. The corner block moves the expected way and the centre barely does.
+fn proveVignette(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    var p: usize = 0;
+    while (p + 4 <= f.len) : (p += 4) {
+        f[p + 0] = 128;
+        f[p + 1] = 128;
+        f[p + 2] = 128;
+        f[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/vignette-0");
+    try writeVignetteLens("zig-out/vignette-0", 0.0, 0.3);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/vignette-pos");
+    try writeVignetteLens("zig-out/vignette-pos", 0.8, 0.3);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/vignette-neg");
+    try writeVignetteLens("zig-out/vignette-neg", -0.8, 0.3);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/vignette-0", planes);
+    defer gpa.free(shot0);
+    const shot_pos = try captureDehazeShot(gpa, engine, "zig-out/vignette-pos", planes);
+    defer gpa.free(shot_pos);
+    const shot_neg = try captureDehazeShot(gpa, engine, "zig-out/vignette-neg", planes);
+    defer gpa.free(shot_neg);
+
+    // Top-left corner (radially far, past the radius) versus a centre block.
+    const corner0 = sumBlock(shot0, 0, 0, 80, 60);
+    const corner_pos = sumBlock(shot_pos, 0, 0, 80, 60);
+    const corner_neg = sumBlock(shot_neg, 0, 0, 80, 60);
+    const center0 = sumBlock(shot0, 160, 120, 240, 180);
+    const center_pos = sumBlock(shot_pos, 160, 120, 240, 180);
+
+    const changed = countDiff(shot0, shot_pos);
+    const corner_lift = if (corner_pos > corner0) corner_pos - corner0 else 0;
+    const center_move = if (center_pos > center0) center_pos - center0 else center0 - center_pos;
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL vignette at strength 0.8 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (!(corner_pos > corner0) or !(corner_neg < corner0)) {
+        std.debug.print("conformance: FAIL vignette corner did not lift on positive and sink on negative (0 {d}, pos {d}, neg {d})\n", .{ corner0, corner_pos, corner_neg });
+        return false;
+    }
+    if (center_move * 4 > corner_lift) {
+        std.debug.print("conformance: FAIL vignette moved the centre inside the radius (centre move {d}, corner lift {d})\n", .{ center_move, corner_lift });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a vignette.pass applies a radial luma-gain: a positive strength lifts the corners and a negative sinks them while the centre inside the radius holds ({d} pixels changed)\n", .{changed});
+    return true;
+}
+
+/// Sums the absolute rgb step between horizontally adjacent pixels over a
+/// vertical third of the 400x300 capture, a stand-in for its high-frequency
+/// noise. side 0 is the left third, 2 the right.
+fn roughnessThird(shot: []const u8, side: usize) u64 {
+    var total: u64 = 0;
+    const w: usize = 400;
+    const h: usize = 300;
+    const x0: usize = if (side == 0) 0 else (w * 2) / 3;
+    const x1: usize = if (side == 0) w / 3 else w;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        var x: usize = x0;
+        while (x + 1 < x1) : (x += 1) {
+            const a = (y * w + x) * 4;
+            const b = (y * w + x + 1) * 4;
+            inline for (0..3) |ch| {
+                const da: i32 = @as(i32, shot[a + ch]) - @as(i32, shot[b + ch]);
+                total += @abs(da);
+            }
+        }
+    }
+    return total;
+}
+
+/// Writes a lowlight.pass lens at a static lift strength and denoise (no asset).
+fn writeLowLightLens(dir: []const u8, strength: f32, denoise: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.lowlight","version":"1.0.0","display_name":"Low Light","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"l","type":"lowlight.pass","inputs":{{"frame":"camera"}},"params":{{}},"lowlight":{{"strength":{d:.3},"denoise":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, denoise });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the low-light night lift: a dark noisy region and a bright region. At
+/// strength 1 with denoise the shadows lift far more than the highlights hold,
+/// and the shadow noise (adjacent-pixel step) drops; the 0/0 control is
+/// untouched.
+fn proveLowLight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        // Left half: a dark 1px checkerboard (noisy shadow). Right half: a bright
+        // near-flat region (the highlight to hold).
+        const v: u8 = if (col < width / 2) (if ((row + col) % 2 == 0) @as(u8, 20) else 60) else 235;
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/lowlight-0");
+    try writeLowLightLens("zig-out/lowlight-0", 0.0, 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/lowlight-1");
+    try writeLowLightLens("zig-out/lowlight-1", 1.0, 0.8);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/lowlight-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/lowlight-1", planes);
+    defer gpa.free(shot1);
+
+    const shadow0 = sumThird(shot0, 0);
+    const shadow1 = sumThird(shot1, 0);
+    const high0 = sumThird(shot0, 2);
+    const high1 = sumThird(shot1, 2);
+    const rough0 = roughnessThird(shot0, 0);
+    const rough1 = roughnessThird(shot1, 0);
+
+    const changed = countDiff(shot0, shot1);
+    const shadow_lift = if (shadow1 > shadow0) shadow1 - shadow0 else 0;
+    const high_move = if (high1 > high0) high1 - high0 else high0 - high1;
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL lowlight at strength 1 left the frame identical to the 0/0 control\n", .{});
+        return false;
+    }
+    if (!(shadow1 > shadow0) or shadow_lift < high_move * 3) {
+        std.debug.print("conformance: FAIL lowlight did not lift the shadows far more than the highlights held (shadow lift {d}, highlight move {d})\n", .{ shadow_lift, high_move });
+        return false;
+    }
+    // A substantial cut proves the denoise; the exact fraction tracks the
+    // shadow-weight curve, and the lift re-expands what noise remains.
+    if (!(rough1 * 3 < rough0 * 2)) {
+        std.debug.print("conformance: FAIL lowlight denoise did not cut the shadow noise (rough {d} -> {d})\n", .{ rough0, rough1 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a lowlight.pass lifts the shadows far more than it moves the highlights and cuts the shadow noise substantially ({d} pixels changed, roughness {d} -> {d})\n", .{ changed, rough0, rough1 });
+    return true;
+}
+
+/// Writes an undistort.pass lens at a static correction strength (no asset).
+fn writeUndistortLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.undistort","version":"1.0.0","display_name":"Undistort","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"u","type":"undistort.pass","inputs":{{"frame":"camera"}},"params":{{}},"undistort":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Activates an undistort lens, submits the given intrinsics (an empty
+/// distortion clears them), holds the frame, and captures the composited result.
+fn captureUndistortShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, fx: f32, cx: f32, cy: f32, distortion: []const f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    _ = abi.goss_session_submit_camera_intrinsics(session, fx, fx, cx, cy, if (distortion.len == 0) null else distortion.ptr, @intCast(distortion.len));
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Counts the bright (near-white) pixels of a capture, a stand-in for a white
+/// region's area.
+fn brightArea(shot: []const u8) u64 {
+    var count: u64 = 0;
+    var i: usize = 0;
+    while (i + 4 <= shot.len) : (i += 4) {
+        if (@as(u32, shot[i]) + shot[i + 1] + shot[i + 2] > 600) count += 1;
+    }
+    return count;
+}
+
+/// Proves the intrinsics-driven undistort: a centred white disk on black. A
+/// positive k1 samples the input further out for a given output radius, so the
+/// disk shrinks; a negative k1 magnifies it. The submitted coefficient drives
+/// the effect, and with no intrinsics the node is inert.
+fn proveUndistort(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const u = @as(f32, @floatFromInt(col)) / @as(f32, width) - 0.5;
+        const v = @as(f32, @floatFromInt(row)) / @as(f32, height) - 0.5;
+        const white = (u * u + v * v) < 0.3 * 0.3;
+        const val: u8 = if (white) 255 else 0;
+        f[idx + 0] = val;
+        f[idx + 1] = val;
+        f[idx + 2] = val;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/undistort");
+    try writeUndistortLens("zig-out/undistort", 1.0);
+
+    // The principal point at the frame centre, a square pixel aspect, and the
+    // radial coefficient submitted three ways.
+    const shrink = [_]f32{ 0.6, 0.0 };
+    const grow = [_]f32{ -0.6, 0.0 };
+    const none = [_]f32{};
+    const shot_shrink = try captureUndistortShot(gpa, engine, "zig-out/undistort", planes, 400, 200, 150, &shrink);
+    defer gpa.free(shot_shrink);
+    const shot_grow = try captureUndistortShot(gpa, engine, "zig-out/undistort", planes, 400, 200, 150, &grow);
+    defer gpa.free(shot_grow);
+    const shot_none = try captureUndistortShot(gpa, engine, "zig-out/undistort", planes, 0, 0, 0, &none);
+    defer gpa.free(shot_none);
+
+    const area_shrink = brightArea(shot_shrink);
+    const area_grow = brightArea(shot_grow);
+    const area_none = brightArea(shot_none);
+    if (!(area_shrink < area_none)) {
+        std.debug.print("conformance: FAIL undistort with a positive k1 did not shrink the disk (shrink {d}, none {d})\n", .{ area_shrink, area_none });
+        return false;
+    }
+    if (!(area_grow > area_none)) {
+        std.debug.print("conformance: FAIL undistort with a negative k1 did not grow the disk (grow {d}, none {d})\n", .{ area_grow, area_none });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an undistort.pass applies the submitted radial map: a positive k1 shrinks a centred disk and a negative grows it, where no intrinsics leaves it inert (areas {d} < {d} < {d})\n", .{ area_shrink, area_none, area_grow });
+    return true;
+}
+
+/// The spread between the brightest and dimmest channel mean of a capture, a
+/// stand-in for a color cast: a neutral frame's channels sit close together, a
+/// cast pushes one apart.
+fn channelSpread(shot: []const u8) u64 {
+    var sum = [3]u64{ 0, 0, 0 };
+    var i: usize = 0;
+    while (i + 4 <= shot.len) : (i += 4) {
+        sum[0] += shot[i];
+        sum[1] += shot[i + 1];
+        sum[2] += shot[i + 2];
+    }
+    const hi = @max(sum[0], @max(sum[1], sum[2]));
+    const lo = @min(sum[0], @min(sum[1], sum[2]));
+    return hi - lo;
+}
+
+/// Writes an awb.pass lens at a static blend strength (no asset).
+fn writeAwbLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.awb","version":"1.0.0","display_name":"Auto Enhance","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"a","type":"awb.pass","inputs":{{"frame":"camera"}},"params":{{}},"awb":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the one-tap auto-enhance: a blue-cast frame estimated from the frame
+/// thumb has its gray-world gains pull the channels back together. At strength 1
+/// the channel spread collapses toward neutral; strength 0 is untouched.
+fn proveAwb(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A vertical luma ramp with a blue cast: a spread the gray-world balance
+    // removes, and a luma range the auto-levels leaves near intact.
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const base: u8 = @intCast((row * 200) / height);
+        f[idx + 0] = base;
+        f[idx + 1] = base;
+        f[idx + 2] = @intCast(@min(@as(usize, base) + 55, 255));
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/awb-0");
+    try writeAwbLens("zig-out/awb-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/awb-1");
+    try writeAwbLens("zig-out/awb-1", 1.0);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/awb-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/awb-1", planes);
+    defer gpa.free(shot1);
+
+    const spread0 = channelSpread(shot0);
+    const spread1 = channelSpread(shot1);
+    const changed = countDiff(shot0, shot1);
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL awb at strength 1 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (spread0 == 0 or spread1 * 2 >= spread0) {
+        std.debug.print("conformance: FAIL awb did not pull the cast channels together (spread {d} -> {d})\n", .{ spread0, spread1 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an awb.pass estimates a gray-world balance from the frame thumb and neutralizes a color cast: strength 1 pulls the channel spread to under half where strength 0 is untouched ({d} -> {d})\n", .{ spread0, spread1 });
+    return true;
+}
+
+/// Writes a lens with `count` bare ml.infer nodes, all sharing one bundled model,
+/// to exercise the per-session heavy-worker budget.
+fn writeMlBudgetLens(dir: []const u8, model: []const u8, count: usize) !void {
+    const page = std.heap.page_allocator;
+    var nodes: std.ArrayList(u8) = .empty;
+    defer nodes.deinit(page);
+    for (0..count) |i| {
+        if (i > 0) try nodes.append(page, ',');
+        const one = try std.fmt.allocPrint(page, "{{\"id\":\"m{d}\",\"type\":\"ml.infer\",\"params\":{{}},\"ml\":{{\"model\":\"model.tflite\",\"outputs\":[]}}}}", .{i});
+        defer page.free(one);
+        try nodes.appendSlice(page, one);
+    }
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.ml-budget","version":"1.0.0","display_name":"Budget","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{s}],
+        \\ "triggers":[]}}
+    , .{nodes.items});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.tflite", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates the budget lens on a fresh session under the given worker budget and
+/// reports how many heavy workers it loaded.
+fn workersUnderBudget(engine: *abi.Engine, dir: []const u8, budget: u32) !u32 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    abi.setMlWorkerBudget(session, budget);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    return abi.mlWorkerCount(session);
+}
+
+/// Proves the per-session inference budget: a lens with more heavy nets than the
+/// budget loads only up to it, leaving the rest inert so a stacked enhance chain
+/// cannot oversubscribe the device. A generous budget loads them all.
+fn proveInferenceBudget(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const model = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(32 << 20));
+    defer gpa.free(model);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-budget/assets");
+    try writeMlBudgetLens("zig-out/ml-budget", model, 4);
+
+    const all = try workersUnderBudget(engine, "zig-out/ml-budget", 8);
+    const capped = try workersUnderBudget(engine, "zig-out/ml-budget", 2);
+    if (all != 4) {
+        std.debug.print("conformance: FAIL a generous budget did not load all four nets (loaded {d})\n", .{all});
+        return false;
+    }
+    if (capped != 2) {
+        std.debug.print("conformance: FAIL the budget did not cap the workers at 2 (loaded {d})\n", .{capped});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a per-session inference budget caps the heavy workers: four ml.infer nets all load under a budget of eight but only two load under a budget of two, the rest left inert\n", .{});
+    return true;
+}
+
+/// The total absolute byte difference between two captures, a magnitude-sensitive
+/// stand-in for how much the frame moved (unlike a pixel count, which saturates
+/// on a smooth gradient at any shift).
+fn sumAbsDiff(a: []const u8, b: []const u8) u64 {
+    var total: u64 = 0;
+    var i: usize = 0;
+    while (i + 4 <= a.len) : (i += 4) {
+        inline for (0..3) |ch| {
+            const d: i32 = @as(i32, a[i + ch]) - @as(i32, b[i + ch]);
+            total += @abs(d);
+        }
+    }
+    return total;
+}
+
+/// Writes a stabilize.pass lens (no asset).
+fn writeStabilizeLens(dir: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.stabilize","version":"1.0.0","display_name":"Stabilize","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"s","type":"stabilize.pass","inputs":{"frame":"camera"},"params":{},"stabilize":{"strength":1.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// A low-frequency textured pattern shifted horizontally by `shift` pixels: coarse
+/// enough to survive the thumb downsample so the global-motion solve recovers the
+/// shift, and the stabilizer can counter it.
+fn buildJitteredFrame(gpa: std.mem.Allocator, shift: f32) ![]u8 {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const xf = @as(f32, @floatFromInt(col)) - shift;
+        const yf: f32 = @floatFromInt(row);
+        const val = std.math.clamp(128.0 + 85.0 * @sin(xf * 0.03) + 55.0 * @sin(yf * 0.035), 0.0, 255.0);
+        const v: u8 = @intFromFloat(val);
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    return f;
+}
+
+/// Runs a jittering sequence through the stabilize lens under a recording-policy
+/// stabilization level and reports the total inter-frame motion of the composited
+/// output over the settled tail. A lower sum means a steadier result.
+fn captureStabilizeSequence(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, level: u32) !u64 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    var policy: abi.RecordingPolicy = .{};
+    policy.stabilization = level;
+    _ = abi.goss_session_set_recording_policy(session, &policy);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+
+    const count = 16;
+    var prev_shot: ?[]u8 = null;
+    defer if (prev_shot) |p| gpa.free(p);
+    var total: u64 = 0;
+    for (0..count) |k| {
+        // A horizontal jitter around a still camera: large enough to register on
+        // the downsampled thumb, slow enough that the per-frame motion stays
+        // inside the single-level solve's small-motion range.
+        const shift = 22.0 * @sin(@as(f32, @floatFromInt(k)) * 0.6);
+        const frame = try buildJitteredFrame(gpa, shift);
+        defer gpa.free(frame);
+        const src: sampler.Frame = .{ .pixels = .{ .rgba8 = frame }, .width = width, .height = height };
+        const planes = try rgbaToNv12(gpa, src);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast(1000 + k * 33000) };
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        var w: u32 = 0;
+        var h: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+            gpa.free(shot);
+            return error.CaptureFailed;
+        }
+        // Sum inter-frame motion only over the settled tail, past the warm-up.
+        if (k >= 6) {
+            if (prev_shot) |p| total += sumAbsDiff(p, shot);
+        }
+        if (prev_shot) |p| gpa.free(p);
+        prev_shot = shot;
+    }
+    return total;
+}
+
+/// Proves the electronic stabilizer wired to the recording policy: a jittering
+/// camera run through a stabilize.pass holds far steadier than the same lens with
+/// stabilization off. The engine estimates the global motion per frame, smooths
+/// the camera path, and shifts each frame onto it.
+fn proveStabilize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/stabilize");
+    try writeStabilizeLens("zig-out/stabilize");
+
+    const raw = try captureStabilizeSequence(gpa, engine, "zig-out/stabilize", 0);
+    const stabilized = try captureStabilizeSequence(gpa, engine, "zig-out/stabilize", 1);
+    if (raw == 0) {
+        std.debug.print("conformance: FAIL the jittering sequence produced no motion to stabilize\n", .{});
+        return false;
+    }
+    if (stabilized * 2 >= raw) {
+        std.debug.print("conformance: FAIL stabilization did not steady the jitter (raw {d}, stabilized {d})\n", .{ raw, stabilized });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a stabilize.pass steadies a jittering camera: with the recording policy's stabilization on the settled inter-frame motion falls to under half of the same lens with it off ({d} -> {d})\n", .{ raw, stabilized });
+    return true;
+}
+
+/// Writes a zoom.pass lens at a static factor, centred (no asset).
+fn writeZoomLens(dir: []const u8, factor: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.zoom","version":"1.0.0","display_name":"Zoom","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"z","type":"zoom.pass","inputs":{{"frame":"camera"}},"params":{{}},"zoom":{{"factor":{d:.3},"cx":0.5,"cy":0.5}}}}],
+        \\ "triggers":[]}}
+    , .{factor});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the digital region zoom: a centred white disk magnified by the factor
+/// fills more of the frame. At factor 1 the disk keeps its area; at factor 2 it
+/// grows toward four times it (the area of a doubled radius).
+fn proveZoom(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const u = @as(f32, @floatFromInt(col)) / @as(f32, width) - 0.5;
+        const v = @as(f32, @floatFromInt(row)) / @as(f32, height) - 0.5;
+        const white = (u * u + v * v) < 0.15 * 0.15;
+        const val: u8 = if (white) 255 else 0;
+        f[idx + 0] = val;
+        f[idx + 1] = val;
+        f[idx + 2] = val;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/zoom-1");
+    try writeZoomLens("zig-out/zoom-1", 1.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/zoom-2");
+    try writeZoomLens("zig-out/zoom-2", 2.0);
+
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/zoom-1", planes);
+    defer gpa.free(shot1);
+    const shot2 = try captureDehazeShot(gpa, engine, "zig-out/zoom-2", planes);
+    defer gpa.free(shot2);
+
+    const area1 = brightArea(shot1);
+    const area2 = brightArea(shot2);
+    if (area1 == 0) {
+        std.debug.print("conformance: FAIL the zoom test frame had no disk to magnify\n", .{});
+        return false;
+    }
+    if (area2 <= area1 * 2) {
+        std.debug.print("conformance: FAIL zoom factor 2 did not magnify the disk (area {d} -> {d})\n", .{ area1, area2 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a zoom.pass magnifies a centred region: a factor of 2 grows a centred disk toward four times its area ({d} -> {d})\n", .{ area1, area2 });
+    return true;
+}
+
+/// Writes a dereflect.pass lens at a static strength (no asset).
+fn writeDereflectLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.dereflect","version":"1.0.0","display_name":"Dereflect","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"d","type":"dereflect.pass","inputs":{{"frame":"camera"}},"params":{{}},"dereflect":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the localized specular attenuation: a dark textured half and a bright
+/// textured half. At strength 1 the high-frequency detail (the checkerboard) in
+/// the bright half is pulled toward the local mean far more than in the dark
+/// half, so a reflection over the bright regions softens while the dark holds.
+fn proveDereflect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const checker = (row + col) % 2 == 0;
+        const v: u8 = if (col < width / 2)
+            (if (checker) @as(u8, 20) else 60) // dark textured half
+        else
+            (if (checker) @as(u8, 200) else 240); // bright textured half
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dereflect-0");
+    try writeDereflectLens("zig-out/dereflect-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dereflect-1");
+    try writeDereflectLens("zig-out/dereflect-1", 1.0);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/dereflect-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/dereflect-1", planes);
+    defer gpa.free(shot1);
+
+    const dark0 = roughnessThird(shot0, 0);
+    const dark1 = roughnessThird(shot1, 0);
+    const bright0 = roughnessThird(shot0, 2);
+    const bright1 = roughnessThird(shot1, 2);
+    if (bright0 == 0) {
+        std.debug.print("conformance: FAIL the dereflect test frame had no bright texture to attenuate\n", .{});
+        return false;
+    }
+    // The bright half's high-frequency detail is cut substantially.
+    if (!(bright1 * 2 < bright0)) {
+        std.debug.print("conformance: FAIL dereflect did not soften the bright reflection texture ({d} -> {d})\n", .{ bright0, bright1 });
+        return false;
+    }
+    // The dark half is largely held (a much smaller relative drop than the bright).
+    const bright_drop = bright0 - bright1;
+    const dark_drop = if (dark0 > dark1) dark0 - dark1 else 0;
+    if (!(bright_drop > dark_drop * 3)) {
+        std.debug.print("conformance: FAIL dereflect attenuated the dark half as much as the bright (dark drop {d}, bright drop {d})\n", .{ dark_drop, bright_drop });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a dereflect.pass attenuates high-frequency detail in the bright regions far more than the dark: the bright texture softens to under half while the dark holds (bright {d} -> {d}, dark {d} -> {d})\n", .{ bright0, bright1, dark0, dark1 });
+    return true;
+}
+
+fn writeHarmonizeLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.harmonize","version":"1.0.0","display_name":"Harmonize","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"h","type":"harmonize.pass","inputs":{{"frame":"camera"}},"params":{{}},"harmonize":{{"strength":{d:.3},"direction":0}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Captures a harmonize.pass shot with the person region on the left. The CPU
+/// person mask feeds the region statistics and the same mask on channel 0 keys
+/// the shader, both injected once the first frame has filled the thumb.
+fn captureHarmonizeShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, mask: []const f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    abi.injectPersonMaskCpu(session, @ptrCast(mask.ptr));
+    abi.injectMaskChannel(session, 0, @ptrCast(mask.ptr));
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        abi.injectPersonMaskCpu(session, @ptrCast(mask.ptr));
+        abi.injectMaskChannel(session, 0, @ptrCast(mask.ptr));
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Mean rgb of the capture columns in [col_lo, col_hi), each channel 0..255.
+fn regionMean(shot: []const u8, col_lo: usize, col_hi: usize) [3]f64 {
+    var sum = [3]f64{ 0, 0, 0 };
+    var n: f64 = 0;
+    for (0..300) |row| {
+        for (col_lo..col_hi) |col| {
+            const idx = (row * 400 + col) * 4;
+            inline for (0..3) |ch| sum[ch] += @floatFromInt(shot[idx + ch]);
+            n += 1;
+        }
+    }
+    return .{ sum[0] / n, sum[1] / n, sum[2] / n };
+}
+
+/// Proves the statistical color transfer: a warm subject on the left, a cool
+/// background on the right, split by the person mask. At strength 1 the person
+/// region takes on the background's color distribution, so its red falls and blue
+/// rises toward the background while the background itself holds.
+fn proveHarmonize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const person = col < width / 2;
+        f[idx + 0] = if (person) 210 else 60; // warm subject vs cool background
+        f[idx + 1] = 70;
+        f[idx + 2] = if (person) 60 else 210;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const mask = try gpa.alloc(f32, abi.segmentation_mask_len);
+    defer gpa.free(mask);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        mask[row * mask_side + col] = if (col < mask_side / 2) 1.0 else 0.0;
+    };
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/harmonize-0");
+    try writeHarmonizeLens("zig-out/harmonize-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/harmonize-1");
+    try writeHarmonizeLens("zig-out/harmonize-1", 1.0);
+
+    const shot0 = try captureHarmonizeShot(gpa, engine, "zig-out/harmonize-0", planes, mask);
+    defer gpa.free(shot0);
+    const shot1 = try captureHarmonizeShot(gpa, engine, "zig-out/harmonize-1", planes, mask);
+    defer gpa.free(shot1);
+
+    // A left strip well inside the person region, and a right strip inside the
+    // background, both clear of the mask boundary.
+    const fg0 = regionMean(shot0, 40, 150);
+    const fg1 = regionMean(shot1, 40, 150);
+    const bg0 = regionMean(shot0, 250, 360);
+    const bg1 = regionMean(shot1, 250, 360);
+
+    // The person region moves toward the cool background: red down, blue up.
+    if (!(fg1[0] < fg0[0] - 20 and fg1[2] > fg0[2] + 20)) {
+        std.debug.print("conformance: FAIL harmonize did not shift the person toward the background (fg red {d:.1}->{d:.1}, blue {d:.1}->{d:.1})\n", .{ fg0[0], fg1[0], fg0[2], fg1[2] });
+        return false;
+    }
+    // The background region is held: the mask reads zero there, so it barely moves.
+    const bg_shift = @abs(bg1[0] - bg0[0]) + @abs(bg1[2] - bg0[2]);
+    const fg_shift = @abs(fg1[0] - fg0[0]) + @abs(fg1[2] - fg0[2]);
+    if (!(bg_shift * 5 < fg_shift)) {
+        std.debug.print("conformance: FAIL harmonize disturbed the background as much as the subject (bg shift {d:.1}, fg shift {d:.1})\n", .{ bg_shift, fg_shift });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a harmonize.pass matches the person's color distribution to the background: the subject's red falls and blue rises toward the background (fg {d:.0},{d:.0},{d:.0} -> {d:.0},{d:.0},{d:.0}) while the background holds\n", .{ fg0[0], fg0[1], fg0[2], fg1[0], fg1[1], fg1[2] });
+    return true;
+}
+
+fn writeInpaintLens(dir: []const u8, radius: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.inpaint","version":"1.0.0","display_name":"Inpaint","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"i","type":"inpaint.pass","inputs":{{"frame":"camera"}},"params":{{}},"inpaint":{{"mask":"person","radius":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{radius});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Captures an inpaint.pass shot. When a removal mask is passed it is uploaded on
+/// channel 0 so the pass fills that region; with none the readiness gate holds
+/// the frame through, the capability degradation the proof leans on.
+fn captureInpaintShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, mask: ?[]const f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        if (mask) |m| abi.injectMaskChannel(session, 0, @ptrCast(m.ptr));
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Mean rgb of the capture box [col_lo,col_hi) x [row_lo,row_hi), each channel 0..255.
+fn boxMean(shot: []const u8, col_lo: usize, col_hi: usize, row_lo: usize, row_hi: usize) [3]f64 {
+    var sum = [3]f64{ 0, 0, 0 };
+    var n: f64 = 0;
+    for (row_lo..row_hi) |row| {
+        for (col_lo..col_hi) |col| {
+            const idx = (row * 400 + col) * 4;
+            inline for (0..3) |ch| sum[ch] += @floatFromInt(shot[idx + ch]);
+            n += 1;
+        }
+    }
+    return .{ sum[0] / n, sum[1] / n, sum[2] / n };
+}
+
+/// Proves content-aware fill: a red object square on a blue field named as the
+/// removal mask. With no mask the readiness gate holds the frame through so the
+/// square stays red; with the mask uploaded the pass fills the square from the
+/// surrounding blue, so its red falls and blue rises while the field holds.
+fn proveInpaint(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const u = @as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(width));
+        const v = @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(height));
+        const object = u >= 0.45 and u < 0.55 and v >= 0.433 and v < 0.567;
+        f[idx + 0] = if (object) 220 else 40; // red object on a blue field
+        f[idx + 1] = 40;
+        f[idx + 2] = if (object) 40 else 220;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const mask = try gpa.alloc(f32, abi.segmentation_mask_len);
+    defer gpa.free(mask);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        const u = @as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(mask_side));
+        const v = @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(mask_side));
+        mask[row * mask_side + col] = if (u >= 0.45 and u < 0.55 and v >= 0.433 and v < 0.567) 1.0 else 0.0;
+    };
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/inpaint");
+    try writeInpaintLens("zig-out/inpaint", 0.09);
+
+    const shot0 = try captureInpaintShot(gpa, engine, "zig-out/inpaint", planes, null);
+    defer gpa.free(shot0);
+    const shot1 = try captureInpaintShot(gpa, engine, "zig-out/inpaint", planes, mask);
+    defer gpa.free(shot1);
+
+    // The very centre of the object square, and a blue patch off to the side.
+    const obj0 = boxMean(shot0, 190, 210, 140, 160);
+    const obj1 = boxMean(shot1, 190, 210, 140, 160);
+    const field0 = boxMean(shot0, 30, 90, 140, 160);
+    const field1 = boxMean(shot1, 30, 90, 140, 160);
+
+    if (!(obj0[0] > 150 and obj0[2] < 100)) {
+        std.debug.print("conformance: FAIL the inpaint object square did not read red before the fill ({d:.0},{d:.0},{d:.0})\n", .{ obj0[0], obj0[1], obj0[2] });
+        return false;
+    }
+    // The removed region fills toward the surrounding blue: red down, blue up.
+    if (!(obj1[0] < obj0[0] - 60 and obj1[2] > obj0[2] + 60)) {
+        std.debug.print("conformance: FAIL inpaint did not fill the object from its surroundings (obj red {d:.0}->{d:.0}, blue {d:.0}->{d:.0})\n", .{ obj0[0], obj1[0], obj0[2], obj1[2] });
+        return false;
+    }
+    // The surrounding field is untouched (the mask reads zero there).
+    const field_shift = @abs(field1[0] - field0[0]) + @abs(field1[2] - field0[2]);
+    if (!(field_shift < 12)) {
+        std.debug.print("conformance: FAIL inpaint disturbed the surrounding field (shift {d:.1})\n", .{field_shift});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an inpaint.pass fills the masked object from its surrounding boundary: the removed square's red falls and blue rises toward the field ({d:.0},{d:.0},{d:.0} -> {d:.0},{d:.0},{d:.0}) while the field holds\n", .{ obj0[0], obj0[1], obj0[2], obj1[0], obj1[1], obj1[2] });
+    return true;
+}
+
+fn writeWarpModeLens(dir: []const u8, mode: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.warp-mode","version":"1.0.0","display_name":"Warp","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"w","type":"warp.pass","inputs":{{"frame":"camera"}},"params":{{}},"warp":{{"mode":"{s}","strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ mode, strength });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+fn writeRollingLens(dir: []const u8, strength: f32, readout: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.rolling","version":"1.0.0","display_name":"Rolling","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"r","type":"rolling.pass","inputs":{{"frame":"camera"}},"params":{{}},"rolling":{{"strength":{d:.3},"readout":{d:.4}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, readout });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Captures a rolling.pass shot. When motion is asked, two gravity samples a
+/// known interval apart are submitted so the engine derives a horizontal angular
+/// velocity; with none the orientation stream stays empty and the pass is inert.
+fn captureRollingShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, motion: bool) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    if (motion) {
+        _ = abi.goss_session_submit_orientation(session, 0, -1, 0, 0);
+        _ = abi.goss_session_submit_orientation(session, 0.2, -0.98, 0, 50_000);
+    }
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Mean column of the black-to-white transition across rows [row_lo, row_hi),
+/// the edge position; 0 if a row held no edge.
+fn edgeColumn(shot: []const u8, row_lo: usize, row_hi: usize) f64 {
+    var sum: f64 = 0;
+    var n: f64 = 0;
+    for (row_lo..row_hi) |row| {
+        var col: usize = 0;
+        while (col < 400) : (col += 1) {
+            if (shot[(row * 400 + col) * 4] > 128) {
+                sum += @floatFromInt(col);
+                n += 1;
+                break;
+            }
+        }
+    }
+    return if (n > 0) sum / n else 0;
+}
+
+/// Proves rolling-shutter correction: a straight vertical edge with a camera
+/// rotation submitted through the orientation stream. The engine derives the
+/// horizontal motion from consecutive gravity samples and counter-shifts each
+/// scanline by its readout offset, slanting the edge; still, it stays vertical.
+fn proveRolling(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const v: u8 = if (col < width / 2) 0 else 255; // a straight vertical edge
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/rolling");
+    try writeRollingLens("zig-out/rolling", 1.0, 0.05);
+
+    const still = try captureRollingShot(gpa, engine, "zig-out/rolling", planes, false);
+    defer gpa.free(still);
+    const moved = try captureRollingShot(gpa, engine, "zig-out/rolling", planes, true);
+    defer gpa.free(moved);
+
+    const still_top = edgeColumn(still, 30, 70);
+    const still_bot = edgeColumn(still, 230, 270);
+    const moved_top = edgeColumn(moved, 30, 70);
+    const moved_bot = edgeColumn(moved, 230, 270);
+
+    if (still_top == 0 or moved_top == 0) {
+        std.debug.print("conformance: FAIL the rolling test frame held no detectable edge\n", .{});
+        return false;
+    }
+    // With no motion the edge is vertical: top and bottom columns agree.
+    if (!(@abs(still_top - still_bot) < 8)) {
+        std.debug.print("conformance: FAIL rolling shifted a still frame (top {d:.0}, bottom {d:.0})\n", .{ still_top, still_bot });
+        return false;
+    }
+    // Under the submitted rotation the scanlines shift by their readout offset,
+    // so the edge slants: top and bottom columns diverge well past the still.
+    const moved_slant = @abs(moved_top - moved_bot);
+    if (!(moved_slant > 40)) {
+        std.debug.print("conformance: FAIL rolling did not slant the edge under motion (top {d:.0}, bottom {d:.0})\n", .{ moved_top, moved_bot });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a rolling.pass counter-shifts each scanline by its readout offset under a submitted camera rotation: a straight edge slants {d:.0}px top-to-bottom with motion ({d:.0} -> {d:.0}) and holds vertical without it\n", .{ moved_slant, moved_top, moved_bot });
+    return true;
+}
+
+/// Captures a roll_lock warp shot. When a gravity vector is passed it is fed
+/// through the orientation stream so the level correction has a tilt to counter;
+/// with none the pass reads no roll and holds the frame through.
+fn captureRollShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, gravity: ?[3]f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    if (gravity) |g| _ = abi.goss_session_submit_orientation(session, g[0], g[1], g[2], 1000);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Least-squares slope (rows per column) of the bright bar's centre row across
+/// the capture columns, the bar's tilt; small is level.
+fn barSlope(shot: []const u8) f64 {
+    var n: f64 = 0;
+    var sx: f64 = 0;
+    var sy: f64 = 0;
+    var sxx: f64 = 0;
+    var sxy: f64 = 0;
+    var col: usize = 40;
+    while (col < 360) : (col += 4) {
+        var best_row: usize = 0;
+        var best: u16 = 0;
+        for (0..300) |row| {
+            const lum = shot[(row * 400 + col) * 4];
+            if (lum > best) {
+                best = lum;
+                best_row = row;
+            }
+        }
+        if (best < 128) continue;
+        const x: f64 = @floatFromInt(col);
+        const y: f64 = @floatFromInt(best_row);
+        n += 1;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+    const denom = n * sxx - sx * sx;
+    return if (denom != 0) (n * sxy - sx * sy) / denom else 0;
+}
+
+/// Proves horizon-lock: a bright bar slanted 20 degrees, and a device gravity
+/// tilted the same. The engine derives the roll from the orientation stream and
+/// the roll_lock warp counter-rotates the frame, leveling the bar; with no
+/// orientation the pass reads no roll and holds the frame byte-identical.
+fn proveRollLock(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const slope0: f64 = 0.36397; // tan(20 degrees)
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    const cxp: f64 = @floatFromInt(width / 2);
+    const cyp: f64 = @floatFromInt(height / 2);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const bar_center = cyp + slope0 * (@as(f64, @floatFromInt(col)) - cxp);
+        const on = @abs(@as(f64, @floatFromInt(row)) - bar_center) < 9.0;
+        const v: u8 = if (on) 240 else 20;
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/rolllock");
+    try writeWarpModeLens("zig-out/rolllock", "roll_lock", 1.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/rolllock-0");
+    try writeWarpModeLens("zig-out/rolllock-0", "roll_lock", 0.0);
+
+    // A 20-degree device roll: gravity tips out of straight-down by the same angle.
+    const tilt = [3]f32{ 0.34202, -0.93969, 0 };
+    const control = try captureRollShot(gpa, engine, "zig-out/rolllock-0", planes, tilt);
+    defer gpa.free(control);
+    const leveled = try captureRollShot(gpa, engine, "zig-out/rolllock", planes, tilt);
+    defer gpa.free(leveled);
+    const no_imu = try captureRollShot(gpa, engine, "zig-out/rolllock", planes, null);
+    defer gpa.free(no_imu);
+
+    // With no orientation the pass reads no roll and holds the frame through.
+    if (!std.mem.eql(u8, no_imu, control)) {
+        std.debug.print("conformance: FAIL roll_lock altered the frame with no orientation submitted\n", .{});
+        return false;
+    }
+    const control_slope = @abs(barSlope(control));
+    const leveled_slope = @abs(barSlope(leveled));
+    if (!(control_slope > 0.2)) {
+        std.debug.print("conformance: FAIL the roll_lock test bar was not measurably tilted ({d:.3})\n", .{control_slope});
+        return false;
+    }
+    if (!(leveled_slope < control_slope * 0.4)) {
+        std.debug.print("conformance: FAIL roll_lock did not level the tilted bar (control slope {d:.3}, leveled {d:.3})\n", .{ control_slope, leveled_slope });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a roll_lock warp counter-rotates the frame by the roll the orientation stream carries: a 20-degree tilted bar levels from slope {d:.3} to {d:.3} while it holds byte-identical with no orientation\n", .{ control_slope, leveled_slope });
+    return true;
+}
+
+/// A synthetic face on a circle with the iris loops placed at two eyes and an
+/// eyeLook gaze set, so a gaze_correct warp has irises to redirect. The gaze is
+/// out-left, a clear horizontal look off the lens.
+fn gazeFace() abi.FaceResult {
+    var synthetic = std.mem.zeroes(abi.FaceResult);
+    synthetic.presence = 1.0;
+    const lm_count = synthetic.landmarks.len / 3;
+    synthetic.landmark_count_out = @intCast(lm_count);
+    const cxp: f32 = @as(f32, @floatFromInt(width)) / 2.0;
+    const cyp: f32 = @as(f32, @floatFromInt(height)) / 2.0;
+    for (0..lm_count) |lm| {
+        const ang = @as(f32, @floatFromInt(lm)) / @as(f32, @floatFromInt(lm_count)) * std.math.tau;
+        synthetic.landmarks[lm * 3 + 0] = cxp + 110.0 * @cos(ang);
+        synthetic.landmarks[lm * 3 + 1] = cyp + 110.0 * @sin(ang);
+        synthetic.landmarks[lm * 3 + 2] = 0;
+    }
+    // The iris loops sit at the two eyes so their centroids land where the
+    // redirect should push.
+    for ([_]u16{ 474, 475, 476, 477 }) |idx| {
+        synthetic.landmarks[idx * 3 + 0] = cxp - 45.0;
+        synthetic.landmarks[idx * 3 + 1] = cyp - 25.0;
+    }
+    for ([_]u16{ 469, 470, 471, 472 }) |idx| {
+        synthetic.landmarks[idx * 3 + 0] = cxp + 45.0;
+        synthetic.landmarks[idx * 3 + 1] = cyp - 25.0;
+    }
+    // blendshape_names[14] is eyeLookInRight and [15] eyeLookOutLeft, both a
+    // look to the subject's left, pinned by a face module test.
+    synthetic.blendshapes[15] = 1.0;
+    synthetic.blendshapes[14] = 1.0;
+    return synthetic;
+}
+
+/// Proves gaze correction: a synthetic face looking off the lens, its irises at
+/// two eyes. The gaze_correct warp reads the gaze from the blendshapes and pushes
+/// each pupil back toward the lens, so the eye region shifts versus a strength-0
+/// control while the no-face frame and a far corner stay byte-identical.
+fn proveGazeCorrect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const cap_w: usize = 400;
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..height) |row| for (0..width) |col| {
+        const i = (row * @as(usize, width) + col) * 4;
+        frame_rgba[i + 0] = @intCast(col * 255 / (@as(usize, width) - 1));
+        frame_rgba[i + 1] = @intCast(row * 255 / (@as(usize, height) - 1));
+        frame_rgba[i + 2] = 128;
+        frame_rgba[i + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const face = gazeFace();
+    const faces_one = [_]abi.FaceResult{face};
+    const no_faces = [_]abi.FaceResult{};
+
+    const gaze_json =
+        \\{"glf":"1.0","id":"goss.reference.gaze","version":"1.0.0","display_name":"Gaze","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"gaze_correct","strength":0.15,"radius":0.12}}],"triggers":[]}
+    ;
+    const control_json =
+        \\{"glf":"1.0","id":"goss.reference.gaze-control","version":"1.0.0","display_name":"Gaze Control","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"gaze_correct","strength":0.0,"radius":0.12}}],"triggers":[]}
+    ;
+
+    const redirected = try captureSubmittedFaceShot(gpa, engine, planes, gaze_json, &faces_one);
+    defer gpa.free(redirected);
+    const redirected2 = try captureSubmittedFaceShot(gpa, engine, planes, gaze_json, &faces_one);
+    defer gpa.free(redirected2);
+    const control = try captureSubmittedFaceShot(gpa, engine, planes, control_json, &faces_one);
+    defer gpa.free(control);
+    const no_face = try captureSubmittedFaceShot(gpa, engine, planes, gaze_json, &no_faces);
+    defer gpa.free(no_face);
+    const plain = try captureSubmittedFaceShot(gpa, engine, planes, null, &no_faces);
+    defer gpa.free(plain);
+
+    if (!std.mem.eql(u8, redirected, redirected2)) {
+        std.debug.print("conformance: FAIL gaze_correct is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, no_face, plain)) {
+        std.debug.print("conformance: FAIL gaze_correct altered the frame with no face - not keyed to the eyes\n", .{});
+        return false;
+    }
+    var gcx: f32 = 0;
+    var gcy: f32 = 0;
+    const changed = changedRegion(redirected, control, cap_w, 300, &gcx, &gcy);
+    if (!(changed > 200)) {
+        std.debug.print("conformance: FAIL gaze_correct did not redirect the eye region ({d} px changed)\n", .{changed});
+        return false;
+    }
+    if (!cornerBlockEqual(redirected, control, cap_w, 40)) {
+        std.debug.print("conformance: FAIL gaze_correct changed a far corner outside the eyes\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a gaze_correct warp reads the gaze from the blendshapes and redirects the pupils at the iris centroids: the eye region shifts ({d} px) versus a strength-0 control while a far corner and the no-face frame stay byte-identical\n", .{changed});
+    return true;
+}
+
+/// The mean red value over the capture's center block, a stand-in for the fused
+/// gray the sprite draws there.
+fn centerGray(shot: []const u8) u16 {
+    var sum: u64 = 0;
+    var n: u64 = 0;
+    for (120..180) |row| {
+        for (160..240) |col| {
+            sum += shot[(row * 400 + col) * 4];
+            n += 1;
+        }
+    }
+    return @intCast(sum / n);
+}
+
+/// The centroid column and pixel count of the bright marker in a capture, the
+/// pixels whose red passes the threshold; count 0 leaves the column at zero.
+fn brightMarker(shot: []const u8, threshold: u8) struct { cx: f64, count: usize } {
+    var sum_x: f64 = 0;
+    var count: usize = 0;
+    for (0..300) |row| {
+        for (0..400) |col| {
+            if (shot[(row * 400 + col) * 4] > threshold) {
+                sum_x += @floatFromInt(col);
+                count += 1;
+            }
+        }
+    }
+    return .{ .cx = if (count > 0) sum_x / @as(f64, @floatFromInt(count)) else 0, .count = count };
+}
+
+/// Proves auto-framing: a small face off to the left of the frame, marked by a
+/// bright dot at its center. The auto_frame warp steers the face toward the
+/// target anchor and grows it to the target size, so the marker moves toward the
+/// frame center and enlarges; with no face it holds the frame through.
+fn proveAutoFrame(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    const dot_x: f64 = 140;
+    const dot_y: f64 = 110;
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const dx = @as(f64, @floatFromInt(col)) - dot_x;
+        const dy = @as(f64, @floatFromInt(row)) - dot_y;
+        const on = dx * dx + dy * dy < 12.0 * 12.0;
+        const v: u8 = if (on) 240 else 20;
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    // A small synthetic face centered on the marker, so its center and covering
+    // size drive the reframe toward the anchor and target size.
+    var synthetic = std.mem.zeroes(abi.FaceResult);
+    synthetic.presence = 1.0;
+    const lm_count = synthetic.landmarks.len / 3;
+    synthetic.landmark_count_out = @intCast(lm_count);
+    for (0..lm_count) |lm| {
+        const ang = @as(f32, @floatFromInt(lm)) / @as(f32, @floatFromInt(lm_count)) * std.math.tau;
+        synthetic.landmarks[lm * 3 + 0] = @as(f32, @floatCast(dot_x)) + 38.0 * @cos(ang);
+        synthetic.landmarks[lm * 3 + 1] = @as(f32, @floatCast(dot_y)) + 38.0 * @sin(ang);
+    }
+    const faces_one = [_]abi.FaceResult{synthetic};
+    const no_faces = [_]abi.FaceResult{};
+
+    const frame_json =
+        \\{"glf":"1.0","id":"goss.reference.autoframe","version":"1.0.0","display_name":"Auto Frame","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"auto_frame","strength":0.4,"center_x":0.5,"center_y":0.42}}],"triggers":[]}
+    ;
+
+    const framed = try captureSubmittedFaceShot(gpa, engine, planes, frame_json, &faces_one);
+    defer gpa.free(framed);
+    const framed2 = try captureSubmittedFaceShot(gpa, engine, planes, frame_json, &faces_one);
+    defer gpa.free(framed2);
+    const no_face = try captureSubmittedFaceShot(gpa, engine, planes, frame_json, &no_faces);
+    defer gpa.free(no_face);
+    const plain = try captureSubmittedFaceShot(gpa, engine, planes, null, &no_faces);
+    defer gpa.free(plain);
+
+    if (!std.mem.eql(u8, framed, framed2)) {
+        std.debug.print("conformance: FAIL auto_frame is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, no_face, plain)) {
+        std.debug.print("conformance: FAIL auto_frame altered the frame with no face - not keyed to the face\n", .{});
+        return false;
+    }
+    const before = brightMarker(plain, 180);
+    const after = brightMarker(framed, 180);
+    if (before.count == 0 or after.count == 0) {
+        std.debug.print("conformance: FAIL the auto_frame marker was not found\n", .{});
+        return false;
+    }
+    // The marker moves toward the frame center (anchor x 0.5 -> column 200).
+    if (!(@abs(after.cx - 200.0) < @abs(before.cx - 200.0) - 20.0)) {
+        std.debug.print("conformance: FAIL auto_frame did not recenter the face (marker column {d:.0} -> {d:.0})\n", .{ before.cx, after.cx });
+        return false;
+    }
+    // The small face is grown toward the target size, so the marker enlarges.
+    if (!(after.count > before.count * 3 / 2)) {
+        std.debug.print("conformance: FAIL auto_frame did not enlarge the small face (marker {d} px -> {d} px)\n", .{ before.count, after.count });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an auto_frame warp steers the tracked face to the target anchor and size: an off-center small face's marker recenters (column {d:.0} -> {d:.0}) and grows ({d} px -> {d} px), holding the frame through with no face\n", .{ before.cx, after.cx, before.count, after.count });
+    return true;
+}
+
+fn writeTemporalLens(dir: []const u8, model: []const u8, frames: u32, mode: []const u8, phase: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.temporal","version":"1.0.0","display_name":"Temporal","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"fuse","type":"temporal.fuse","params":{{}},"temporal":{{"model":"m.onnx","frames":{d},"mode":"{s}","phase":{d:.3},"sprite":"canvas"}}}},
+        \\  {{"id":"canvas","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},"sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}}}],
+        \\ "triggers":[]}}
+    , .{ frames, mode, phase });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/m.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+fn writeTemporalHdrLens(dir: []const u8, model: []const u8, frames: u32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.temporal-hdr","version":"1.0.0","display_name":"Temporal HDR","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"fuse","type":"temporal.fuse","params":{{}},"temporal":{{"model":"m.onnx","frames":{d},"mode":"hdr","source":"bracket","sprite":"canvas"}}}},
+        \\  {{"id":"canvas","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},"sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}}}],
+        \\ "triggers":[]}}
+    , .{frames});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/m.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+fn solidNv12(gpa: std.mem.Allocator, gray: u8) !Nv12Copy {
+    const rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(rgba);
+    var i: usize = 0;
+    while (i + 4 <= rgba.len) : (i += 4) {
+        rgba[i + 0] = gray;
+        rgba[i + 1] = gray;
+        rgba[i + 2] = gray;
+        rgba[i + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = rgba }, .width = width, .height = height };
+    return rgbaToNv12(gpa, frame);
+}
+
+/// Activates a temporal.fuse lens and feeds it a run of distinct solid-gray
+/// frames, each a distinct timestamp so the ring keeps them all, then waits for
+/// the fused image to publish and captures the sprite it draws. Null on timeout.
+fn captureTemporalShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, grays: []const u8) !?[]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (width + 1) / 2;
+    for (grays, 0..) |gray, i| {
+        const planes = try solidNv12(gpa, gray);
+        defer planes.deinit(gpa);
+        const desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 1000) };
+        // track_frame feeds the fusion worker its ring; re-fed until the worker
+        // rings this exact frame (deduped by timestamp), so the frames land in
+        // order before the next distinct one replaces the mailbox.
+        const want: u32 = @intCast(@min(i + 1, grays.len));
+        var spins: usize = 0;
+        while (abi.temporalRingFilled(session) < want) {
+            _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, width, planes.uv.ptr, half_w * 2);
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            std.Thread.yield() catch {};
+            c.glfwPollEvents();
+            spins += 1;
+            if (spins > 20000) return null;
+        }
+    }
+    // Wait for the fused image to publish and upload, then draw the sprite. The
+    // last frame stays current so the sprite composites over it.
+    const last = try solidNv12(gpa, grays[grays.len - 1]);
+    defer last.deinit(gpa);
+    const last_desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast(grays.len * 1000) };
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_submit_frame_copy(session, &last_desc, last.y.ptr, width, last.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        std.Thread.yield() catch {};
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 20000) return null;
+    }
+    var shot: []u8 = &.{};
+    for (0..8) |i| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 6) {
+            shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(shot);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return shot;
+}
+
+/// Proves multi-frame fusion: a two-input averaging net fed a dark then a bright
+/// frame draws their per-pixel mean through the sprite, distinct from either, and
+/// a three-frame lens averages three. The ring keeps distinct frames, not copies
+/// of the latest, or the mean would collapse to the last frame.
+fn proveTemporalFuse(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 16;
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-2/assets");
+    try writeTemporalLens("zig-out/temporal-2", onnxMeanModel(a, 2, side), 2, "denoise", 0.5);
+    const shot2 = (try captureTemporalShot(gpa, engine, "zig-out/temporal-2", &.{ 51, 204 })) orelse {
+        std.debug.print("conformance: FAIL temporal.fuse never published a fused image\n", .{});
+        return false;
+    };
+    defer gpa.free(shot2);
+    const mid = centerGray(shot2);
+    // The mean of 0.2 and 0.8 is 0.5, distinct from either fed frame.
+    if (!(mid > 110 and mid < 145)) {
+        std.debug.print("conformance: FAIL temporal.fuse did not average its two frames (center {d})\n", .{mid});
+        return false;
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-3/assets");
+    try writeTemporalLens("zig-out/temporal-3", onnxMeanModel(a, 3, side), 3, "denoise", 0.5);
+    const shot3 = (try captureTemporalShot(gpa, engine, "zig-out/temporal-3", &.{ 30, 128, 226 })) orelse {
+        std.debug.print("conformance: FAIL the three-frame temporal.fuse never published\n", .{});
+        return false;
+    };
+    defer gpa.free(shot3);
+    const mid3 = centerGray(shot3);
+    if (!(mid3 > 110 and mid3 < 145)) {
+        std.debug.print("conformance: FAIL the three-frame temporal.fuse did not average three frames (center {d})\n", .{mid3});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a temporal.fuse node fuses a ring of the last N frames through its sprite: a two-frame average of a dark and a bright frame reads {d} (their mean, distinct from either) and a three-frame average reads {d}\n", .{ mid, mid3 });
+    return true;
+}
+
+/// Proves frame interpolation: a phase-input net blends two frames by the
+/// authored phase, so a phase toward the first frame reads darker and toward the
+/// second reads brighter, the midpoint between them.
+fn proveTemporalInterpolate(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 16;
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-lerp-lo/assets");
+    try writeTemporalLens("zig-out/temporal-lerp-lo", onnxLerpModel(a, side), 2, "interpolate", 0.25);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-lerp-hi/assets");
+    try writeTemporalLens("zig-out/temporal-lerp-hi", onnxLerpModel(a, side), 2, "interpolate", 0.75);
+
+    const lo = (try captureTemporalShot(gpa, engine, "zig-out/temporal-lerp-lo", &.{ 40, 220 })) orelse {
+        std.debug.print("conformance: FAIL the interpolate lens never published (low phase)\n", .{});
+        return false;
+    };
+    defer gpa.free(lo);
+    const hi = (try captureTemporalShot(gpa, engine, "zig-out/temporal-lerp-hi", &.{ 40, 220 })) orelse {
+        std.debug.print("conformance: FAIL the interpolate lens never published (high phase)\n", .{});
+        return false;
+    };
+    defer gpa.free(hi);
+    const lo_g = centerGray(lo);
+    const hi_g = centerGray(hi);
+    // Phase 0.25 sits nearer the dark first frame, phase 0.75 nearer the bright
+    // second frame, so the high phase reads clearly brighter.
+    if (!(hi_g > lo_g + 40)) {
+        std.debug.print("conformance: FAIL temporal interpolate did not vary with phase (0.25 -> {d}, 0.75 -> {d})\n", .{ lo_g, hi_g });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a temporal.fuse interpolate net blends two frames by the authored phase: phase 0.25 reads {d} and phase 0.75 reads {d}, tracking from the first frame toward the second\n", .{ lo_g, hi_g });
+    return true;
+}
+
+/// Activates a bracket-source temporal.fuse lens and submits a run of exposures
+/// through the frame-bracket op, one at a time so the ring keeps them in order,
+/// asserting the fusion does not publish until the full bracket has landed, then
+/// captures the fused image. Null on timeout or an early publish.
+fn captureTemporalBracketShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, grays: []const u8) !?[]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (width + 1) / 2;
+    for (grays, 0..) |gray, i| {
+        const planes = try solidNv12(gpa, gray);
+        defer planes.deinit(gpa);
+        const desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        // One bracket submit per exposure; the op stamps its own sequence so the
+        // ring keeps each. Wait for it to ring before the next exposure.
+        if (abi.goss_session_submit_frame_bracket(session, &desc, planes.y.ptr, width, planes.uv.ptr, half_w * 2) != .ok) return error.BracketSubmitFailed;
+        const want: u32 = @intCast(i + 1);
+        var spins: usize = 0;
+        while (abi.temporalRingFilled(session) < want) {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            std.Thread.yield() catch {};
+            c.glfwPollEvents();
+            spins += 1;
+            if (spins > 20000) return null;
+        }
+        // The ring is not full until the last exposure, so nothing has published.
+        if (i + 1 < grays.len and abi.styleTextureCount(session) != 0) {
+            std.debug.print("conformance: FAIL temporal hdr published before the full bracket landed\n", .{});
+            return null;
+        }
+    }
+    const last = try solidNv12(gpa, grays[grays.len - 1]);
+    defer last.deinit(gpa);
+    const last_desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 2000 };
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_submit_frame_copy(session, &last_desc, last.y.ptr, width, last.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        std.Thread.yield() catch {};
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 20000) return null;
+    }
+    var shot: []u8 = &.{};
+    for (0..8) |i| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 6) {
+            shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(shot);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return shot;
+}
+
+/// Proves HDR exposure fusion: a three-exposure bracket submitted through the
+/// frame-bracket op fuses to its mean, distinct from any single exposure, and the
+/// fusion holds off until the whole bracket has landed. The exposures are fed as
+/// a bracket source, not the live camera.
+fn proveTemporalHdr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 16;
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-hdr/assets");
+    try writeTemporalHdrLens("zig-out/temporal-hdr", onnxMeanModel(a, 3, side), 3);
+    const shot = (try captureTemporalBracketShot(gpa, engine, "zig-out/temporal-hdr", &.{ 20, 100, 240 })) orelse {
+        std.debug.print("conformance: FAIL temporal hdr never fused the bracket\n", .{});
+        return false;
+    };
+    defer gpa.free(shot);
+    const fused = centerGray(shot);
+    // The mean of 20, 100 and 240 is 120, distinct from every single exposure.
+    if (!(fused > 105 and fused < 135)) {
+        std.debug.print("conformance: FAIL temporal hdr did not fuse the bracket to its mean (center {d})\n", .{fused});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a temporal.fuse hdr node merges an exposure bracket submitted through the frame-bracket op: three exposures fuse to their mean {d}, distinct from any single, and hold off until the whole bracket lands\n", .{fused});
+    return true;
+}
+
+fn writeAudioEnhanceLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.audio-enhance","version":"1.0.0","display_name":"Audio Enhance","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"clean","type":"audio.enhance","params":{{}},"enhance":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Mixes a mic buffer through an audio.enhance lens (no lens sound, so the output
+/// is the cleaned mic) and returns the i16 output track.
+fn captureMixOutput(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, mic: []const f32, sample_rate: u32) ![]i16 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const out = try gpa.alloc(i16, mic.len);
+    errdefer gpa.free(out);
+    if (abi.goss_session_mix_output_audio(session, mic.ptr, out.ptr, @intCast(mic.len), sample_rate, 1) != .ok) return error.MixFailed;
+    return out;
+}
+
+/// The total variation of an i16 track (the sum of absolute sample-to-sample
+/// steps), a proxy for its high-frequency energy: a hiss-laden signal steps hard
+/// every sample, a low-passed one steps gently.
+fn stepEnergy(track: []const i16) u64 {
+    var sum: u64 = 0;
+    for (1..track.len) |i| {
+        const d = @as(i32, track[i]) - @as(i32, track[i - 1]);
+        sum += @abs(d);
+    }
+    return sum;
+}
+
+/// Proves microphone noise suppression: a 500 Hz tone buried under a per-sample
+/// high-frequency hiss. An audio.enhance node low-passes the outgoing mic so the
+/// hiss (its high-frequency energy) drops sharply, while a strength-0 control
+/// passes the raw mic straight through.
+fn proveAudioDenoise(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sample_rate: u32 = 48000;
+    const n: usize = 4800;
+    const mic = try gpa.alloc(f32, n);
+    defer gpa.free(mic);
+    for (0..n) |i| {
+        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sample_rate));
+        const tone = 0.3 * @sin(2.0 * std.math.pi * 500.0 * t);
+        const hiss: f32 = if (i % 2 == 0) 0.35 else -0.35;
+        mic[i] = tone + hiss;
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-enh-0");
+    try writeAudioEnhanceLens("zig-out/audio-enh-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-enh-1");
+    try writeAudioEnhanceLens("zig-out/audio-enh-1", 1.0);
+
+    const raw = try captureMixOutput(gpa, engine, "zig-out/audio-enh-0", mic, sample_rate);
+    defer gpa.free(raw);
+    const cleaned = try captureMixOutput(gpa, engine, "zig-out/audio-enh-1", mic, sample_rate);
+    defer gpa.free(cleaned);
+
+    const tv_raw = stepEnergy(raw);
+    const tv_clean = stepEnergy(cleaned);
+    if (!(tv_raw > 0)) {
+        std.debug.print("conformance: FAIL the audio-enhance test mic had no high-frequency energy\n", .{});
+        return false;
+    }
+    // The hiss carries most of the raw signal's step energy; the low-pass cuts it
+    // to well under half.
+    if (!(tv_clean * 2 < tv_raw)) {
+        std.debug.print("conformance: FAIL audio.enhance did not suppress the mic hiss (step energy {d} -> {d})\n", .{ tv_raw, tv_clean });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.enhance node cleans the outgoing microphone: a tone buried under per-sample hiss loses its high-frequency step energy ({d} -> {d}) while a strength-0 control passes the raw mic through\n", .{ tv_raw, tv_clean });
+    return true;
+}
+
+fn writeVoiceLens(dir: []const u8, pitch: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.voice","version":"1.0.0","display_name":"Voice","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"vox","type":"voice.transform","params":{{}},"voice":{{"pitch":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{pitch});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Counts the hysteresis-gated zero crossings over the latter half of an i16
+/// track (past the delay-line fill), a proxy for its fundamental frequency: a
+/// crossing counts only when the signal swings fully from below -thresh to above
+/// +thresh or back, so crossfade ripple does not inflate the count.
+fn gatedCrossings(track: []const i16) u64 {
+    const thresh: i32 = 3000;
+    var count: u64 = 0;
+    var high = false;
+    var started = false;
+    for (track[track.len / 2 ..]) |sample| {
+        const v: i32 = sample;
+        if (v > thresh) {
+            if (started and !high) count += 1;
+            high = true;
+            started = true;
+        } else if (v < -thresh) {
+            if (started and high) count += 1;
+            high = false;
+            started = true;
+        }
+    }
+    return count;
+}
+
+/// Proves real-time voice change: a 300 Hz tone through a voice.transform node at
+/// pitch 1.5 comes out near 450 Hz, its fundamental shifted by the ratio while the
+/// track keeps its length; a pitch-1 control leaves the tone's pitch unchanged.
+fn proveVoiceTransform(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sample_rate: u32 = 48000;
+    const n: usize = 9600;
+    const mic = try gpa.alloc(f32, n);
+    defer gpa.free(mic);
+    for (0..n) |i| {
+        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sample_rate));
+        mic[i] = 0.5 * @sin(2.0 * std.math.pi * 300.0 * t);
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-1");
+    try writeVoiceLens("zig-out/voice-1", 1.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-up");
+    try writeVoiceLens("zig-out/voice-up", 1.5);
+
+    const flat = try captureMixOutput(gpa, engine, "zig-out/voice-1", mic, sample_rate);
+    defer gpa.free(flat);
+    const shifted = try captureMixOutput(gpa, engine, "zig-out/voice-up", mic, sample_rate);
+    defer gpa.free(shifted);
+
+    if (shifted.len != mic.len) {
+        std.debug.print("conformance: FAIL voice.transform changed the track length\n", .{});
+        return false;
+    }
+    const zc_flat = gatedCrossings(flat);
+    const zc_shift = gatedCrossings(shifted);
+    if (!(zc_flat > 0)) {
+        std.debug.print("conformance: FAIL the voice.transform control tone had no measurable pitch\n", .{});
+        return false;
+    }
+    const ratio = @as(f64, @floatFromInt(zc_shift)) / @as(f64, @floatFromInt(zc_flat));
+    // The fundamental should scale by the pitch ratio 1.5, within a tolerance for
+    // the crossfade and the discrete crossing count.
+    if (!(ratio > 1.3 and ratio < 1.7)) {
+        std.debug.print("conformance: FAIL voice.transform did not shift the pitch by the ratio (crossings {d} -> {d}, ratio {d:.2})\n", .{ zc_flat, zc_shift, ratio });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a voice.transform node pitch-shifts the outgoing microphone by its ratio while keeping the track length: a 300 Hz tone's fundamental scales {d:.2}x (crossings {d} -> {d}) at pitch 1.5, and a pitch-1 control holds\n", .{ ratio, zc_flat, zc_shift });
+    return true;
+}
+
+/// Proves the diarized caption segment read-back: a captioning audio.infer node's
+/// decoded utterance lands in the segment ring, tagged with the times it spanned
+/// and read back through the segment ABI, its metadata and text separate.
+fn proveCaptionSegment(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxCaptionProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/caption-seg/assets");
+    try writeCaptionLens("zig-out/caption-seg", model);
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/caption-seg", "zig-out/caption-seg".len) != .ok) return error.ActivationFailed;
+
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, 0.3);
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var seg: abi.CaptionSegment = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_caption_segment(session, 0, &seg) != .ok) : (polls += 1) {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + polls * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        if (polls > 100000) {
+            std.debug.print("conformance: FAIL the caption never landed in the segment ring\n", .{});
+            return false;
+        }
+    }
+    var buf: [256]u8 = undefined;
+    var out_len: usize = 0;
+    if (abi.goss_session_caption_segment_text(session, 0, &buf, buf.len, &out_len) != .ok) {
+        std.debug.print("conformance: FAIL the caption segment text was not readable\n", .{});
+        return false;
+    }
+    if (!(seg.text_len == 2 and out_len == 2 and std.mem.eql(u8, buf[0..out_len], "hi"))) {
+        std.debug.print("conformance: FAIL the caption segment did not carry the decoded text ('{s}', len {d})\n", .{ buf[0..out_len], seg.text_len });
+        return false;
+    }
+    if (!(seg.end_us > seg.start_us)) {
+        std.debug.print("conformance: FAIL the caption segment did not span a time ({d} -> {d})\n", .{ seg.start_us, seg.end_us });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diarized caption segment lands in the read-back ring: the decoded utterance 'hi' is held with the times it spanned ({d} -> {d}) and its speaker, its metadata and text read back separately\n", .{ seg.start_us, seg.end_us });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -2830,6 +5711,219 @@ fn proveMlInferFaceRestyle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF an img2img diffusion lens masked to the face_skin channel in over mode composites its restyle onto the face matte and holds the camera elsewhere\n", .{});
+    return true;
+}
+
+/// Writes a masked-over sprite.2d lens whose solid sprite mixes onto the
+/// face_skin channel by a static mask_strength, plus its one solid png asset.
+fn writeMaskStrengthLens(dir: []const u8, png_bytes: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.mask-strength","version":"1.0.0","display_name":"Mask Strength","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"tint","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},
+        \\   "sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0,"opacity":1.0,"mask":"face_skin","mask_mode":"over","mask_strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/tint.png", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = png_bytes });
+}
+
+/// Activates a mask-strength lens, injects the half face_skin matte, and
+/// captures the composited frame; caller owns the returned RGBA.
+fn captureMaskLens(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, mask: *const [abi.segmentation_mask_len]f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    // Land the sprite png, then hold the injected matte across the drawn frames.
+    for (0..8) |_| {
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    for (0..5) |_| {
+        abi.injectMaskChannel(session, 4, mask);
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Counts differing bytes over one clear region of the 400-wide capture: side 0
+/// is the left fifth-to-two-fifths (well inside the masked half), side 1 the
+/// right two columns (well outside). The middle band spans the mask's upsampled
+/// soft edge and is skipped, so neither region straddles the transition.
+fn halfDiff(a: []const u8, b: []const u8, side: usize) usize {
+    var changed: usize = 0;
+    const w: usize = 400;
+    const h: usize = 300;
+    var y: usize = 0;
+    while (y < h) : (y += 1) {
+        const x0: usize = if (side == 0) 0 else (w * 3) / 5;
+        const x1: usize = if (side == 0) (w * 2) / 5 else w;
+        var x: usize = x0;
+        while (x < x1) : (x += 1) {
+            const idx = (y * w + x) * 4;
+            if (!std.mem.eql(u8, a[idx .. idx + 4], b[idx .. idx + 4])) changed += 1;
+        }
+    }
+    return changed;
+}
+
+/// Proves the masked-composite strength knob: a masked-over sprite mixes onto
+/// its region by mask_strength. At 0 the region holds the camera, at 1 it is
+/// the full restyle, at 0.5 it differs from both; outside the mask nothing
+/// changes with strength, so the knob scales only the masked region.
+fn proveMaskStrength(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    // A solid blue full-frame sprite, distinct from any camera pixel.
+    const blue = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    defer gpa.free(blue);
+    var i: usize = 0;
+    while (i < blue.len) : (i += 4) {
+        blue[i + 0] = 0;
+        blue[i + 1] = 0;
+        blue[i + 2] = 255;
+        blue[i + 3] = 255;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, blue, 400, 300);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mask-strength-0/assets");
+    try writeMaskStrengthLens("zig-out/mask-strength-0", png_bytes.items, 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mask-strength-50/assets");
+    try writeMaskStrengthLens("zig-out/mask-strength-50", png_bytes.items, 0.5);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mask-strength-100/assets");
+    try writeMaskStrengthLens("zig-out/mask-strength-100", png_bytes.items, 1.0);
+
+    // Left half of the face_skin channel on, right half off.
+    const mask = try gpa.alloc(f32, abi.segmentation_mask_len);
+    defer gpa.free(mask);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        mask[row * mask_side + col] = if (col < mask_side / 2) 1.0 else 0.0;
+    };
+    const mask_arr: *const [abi.segmentation_mask_len]f32 = @ptrCast(mask.ptr);
+
+    const shot0 = try captureMaskLens(gpa, engine, "zig-out/mask-strength-0", planes, mask_arr);
+    defer gpa.free(shot0);
+    const shot50 = try captureMaskLens(gpa, engine, "zig-out/mask-strength-50", planes, mask_arr);
+    defer gpa.free(shot50);
+    const shot100 = try captureMaskLens(gpa, engine, "zig-out/mask-strength-100", planes, mask_arr);
+    defer gpa.free(shot100);
+
+    const masked_full = halfDiff(shot0, shot100, 0); // strength 1 vs 0, masked region
+    const masked_half_lo = halfDiff(shot50, shot0, 0); // 0.5 vs 0
+    const masked_half_hi = halfDiff(shot50, shot100, 0); // 0.5 vs 1
+    const outside_lo = halfDiff(shot0, shot50, 1); // outside mask, 0 vs 0.5
+    const outside_hi = halfDiff(shot0, shot100, 1); // outside mask, 0 vs 1
+
+    if (masked_full == 0) {
+        std.debug.print("conformance: FAIL mask_strength: the masked region did not change between strength 0 and 1\n", .{});
+        return false;
+    }
+    if (masked_half_lo == 0 or masked_half_hi == 0) {
+        std.debug.print("conformance: FAIL mask_strength: strength 0.5 matched an endpoint in the masked region\n", .{});
+        return false;
+    }
+    if (outside_lo != 0 or outside_hi != 0) {
+        std.debug.print("conformance: FAIL mask_strength: the region outside the mask changed with strength ({d}, {d})\n", .{ outside_lo, outside_hi });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a masked-over sprite mixes onto its region by mask_strength: the masked region moves from camera at 0 to the full restyle at 1 with 0.5 between ({d} pixels), while outside the mask nothing changes with strength\n", .{masked_full});
+    return true;
+}
+
+/// Writes a grade.pass lens that inverts the frame, optionally scoped to the
+/// face_skin channel (no asset).
+fn writeGradeMaskLens(dir: []const u8, invert: f32, masked: bool) !void {
+    const page = std.heap.page_allocator;
+    const mask_field = if (masked) ",\"mask\":\"face_skin\"" else "";
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.grade-mask","version":"1.0.0","display_name":"Grade Mask","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"g","type":"grade.pass","inputs":{{"frame":"camera"}},"params":{{}},"grade":{{"invert":{d:.3}{s}}}}}],
+        \\ "triggers":[]}}
+    , .{ invert, mask_field });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the masked grade: a grade.pass that names a channel grades only inside
+/// it. An invert scoped to a half face_skin mask flips the masked region and
+/// leaves the rest byte-identical, where the same invert with no mask flips the
+/// whole frame including that outside region.
+fn proveMaskedGrade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/grade-plain");
+    try writeGradeMaskLens("zig-out/grade-plain", 0.0, false);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/grade-masked");
+    try writeGradeMaskLens("zig-out/grade-masked", 1.0, true);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/grade-full");
+    try writeGradeMaskLens("zig-out/grade-full", 1.0, false);
+
+    // Left two fifths of the face_skin channel on (screen x < 160), well clear
+    // of the outside sample region (x >= 240) so no soft edge reaches it.
+    const mask = try gpa.alloc(f32, abi.segmentation_mask_len);
+    defer gpa.free(mask);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        mask[row * mask_side + col] = if (col < (mask_side * 2) / 5) 1.0 else 0.0;
+    };
+    const mask_arr: *const [abi.segmentation_mask_len]f32 = @ptrCast(mask.ptr);
+
+    const plain = try captureMaskLens(gpa, engine, "zig-out/grade-plain", planes, mask_arr);
+    defer gpa.free(plain);
+    const masked = try captureMaskLens(gpa, engine, "zig-out/grade-masked", planes, mask_arr);
+    defer gpa.free(masked);
+    const full = try captureMaskLens(gpa, engine, "zig-out/grade-full", planes, mask_arr);
+    defer gpa.free(full);
+
+    const masked_inside = halfDiff(masked, plain, 0); // masked grade, inside the mask
+    const masked_outside = halfDiff(masked, plain, 1); // masked grade, outside the mask
+    const full_inside = halfDiff(full, plain, 0); // unmasked grade, inside region
+    const full_outside = halfDiff(full, plain, 1); // unmasked grade, outside region
+    // Inside the mask the grade lands in full, matching the unmasked grade; the
+    // outside is strongly attenuated by the mask (a soft feathered edge, so a
+    // small residual near the boundary is expected, not the full change).
+    if (masked_inside < full_inside) {
+        std.debug.print("conformance: FAIL masked grade did not fully grade inside the mask ({d} vs unmasked {d})\n", .{ masked_inside, full_inside });
+        return false;
+    }
+    if (full_outside == 0) {
+        std.debug.print("conformance: FAIL the unmasked grade left the outside region unchanged, so the mask proved nothing\n", .{});
+        return false;
+    }
+    if (masked_outside * 10 >= full_outside) {
+        std.debug.print("conformance: FAIL masked grade did not attenuate the outside region ({d} vs unmasked {d})\n", .{ masked_outside, full_outside });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a grade.pass naming a channel grades inside it and attenuates outside it: an invert scoped to a face_skin mask flips the masked region in full ({d} pixels, matching the unmasked grade) while the outside falls to under a tenth ({d} vs {d})\n", .{ masked_inside, masked_outside, full_outside });
     return true;
 }
 
@@ -13627,6 +16721,16 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("color managed capture");
     if (!try proveMlInfer(gpa, engine)) return 1;
     watchHold("ml infer");
+    if (!try proveAudioInfer(gpa, engine)) return 1;
+    watchHold("audio infer");
+    if (!try proveCaption(gpa, engine)) return 1;
+    watchHold("audio caption");
+    if (!try proveDiarize(gpa, engine)) return 1;
+    watchHold("audio diarize");
+    if (!try proveTranslate(gpa, engine)) return 1;
+    watchHold("audio translate");
+    if (!try proveDub(gpa, engine)) return 1;
+    watchHold("audio dub");
     if (!try proveMlInferOnnx(gpa, engine)) return 1;
     watchHold("ml infer onnx");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;
@@ -13637,6 +16741,12 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer placement");
     if (!try proveMlInferStyle(gpa, engine)) return 1;
     watchHold("ml infer style");
+    if (!try proveMlInferSuperRes(gpa, engine)) return 1;
+    watchHold("ml infer super-res");
+    if (!try proveMlInferAux(gpa, engine)) return 1;
+    watchHold("ml infer aux reference");
+    if (!try proveMlInferTemporal(gpa, engine)) return 1;
+    watchHold("ml infer temporal");
     if (!try proveMlInferDiffusion(gpa, engine)) return 1;
     watchHold("ml infer diffusion");
     if (!try proveMlInferText2Img(gpa, engine)) return 1;
@@ -13647,6 +16757,56 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer coherence");
     if (!try proveMlInferFaceRestyle(gpa, engine)) return 1;
     watchHold("ml infer face restyle");
+    if (!try proveMaskStrength(gpa, engine)) return 1;
+    watchHold("mask strength");
+    if (!try proveMaskedGrade(gpa, engine)) return 1;
+    watchHold("masked grade");
+    if (!try proveDehaze(gpa, engine)) return 1;
+    watchHold("dehaze pass");
+    if (!try proveRelight(gpa, engine)) return 1;
+    watchHold("relight pass");
+    if (!try proveGlare(gpa, engine)) return 1;
+    watchHold("glare pass");
+    if (!try proveVignette(gpa, engine)) return 1;
+    watchHold("vignette pass");
+    if (!try proveLowLight(gpa, engine)) return 1;
+    watchHold("lowlight pass");
+    if (!try proveUndistort(gpa, engine)) return 1;
+    watchHold("undistort pass");
+    if (!try proveAwb(gpa, engine)) return 1;
+    watchHold("awb pass");
+    if (!try proveInferenceBudget(gpa, engine)) return 1;
+    watchHold("inference budget");
+    if (!try proveStabilize(gpa, engine)) return 1;
+    watchHold("stabilize pass");
+    if (!try proveZoom(gpa, engine)) return 1;
+    watchHold("zoom pass");
+    if (!try proveDereflect(gpa, engine)) return 1;
+    watchHold("dereflect pass");
+    if (!try proveHarmonize(gpa, engine)) return 1;
+    watchHold("harmonize pass");
+    if (!try proveInpaint(gpa, engine)) return 1;
+    watchHold("inpaint pass");
+    if (!try proveRolling(gpa, engine)) return 1;
+    watchHold("rolling pass");
+    if (!try proveRollLock(gpa, engine)) return 1;
+    watchHold("roll_lock warp");
+    if (!try proveGazeCorrect(gpa, engine)) return 1;
+    watchHold("gaze_correct warp");
+    if (!try proveAutoFrame(gpa, engine)) return 1;
+    watchHold("auto_frame warp");
+    if (!try proveTemporalFuse(gpa, engine)) return 1;
+    watchHold("temporal.fuse");
+    if (!try proveTemporalInterpolate(gpa, engine)) return 1;
+    watchHold("temporal interpolate");
+    if (!try proveTemporalHdr(gpa, engine)) return 1;
+    watchHold("temporal hdr");
+    if (!try proveAudioDenoise(gpa, engine)) return 1;
+    watchHold("audio enhance");
+    if (!try proveVoiceTransform(gpa, engine)) return 1;
+    watchHold("voice transform");
+    if (!try proveCaptionSegment(gpa, engine)) return 1;
+    watchHold("caption segment");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

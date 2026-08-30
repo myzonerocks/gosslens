@@ -1,4 +1,4 @@
-abi 0.58
+abi 0.66
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -92,6 +92,11 @@ type abi.CaptureUiIntent size=40 align=4
   field screen_flash_warmth offset=28 size=4
   field reserved0 offset=32 size=4
   field reserved1 offset=36 size=4
+type abi.CaptionSegment size=24 align=8
+  field start_us offset=0 size=8
+  field end_us offset=8 size=8
+  field speaker offset=16 size=4
+  field text_len offset=20 size=4
 fn uint32_t goss_abi_version(void)
 fn void *goss_alloc(size_t size)
 fn void goss_free(void *ptr, size_t size)
@@ -115,6 +120,10 @@ fn goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session 
 fn goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_session *session, uint64_t native_handle, uint32_t width, uint32_t height)
 fn goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)
 fn goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)
+fn goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_caption_segment(goss_session *session, uint32_t index, goss_caption_segment *out)
+fn goss_status goss_session_caption_segment_text(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_set_dubbing(goss_session *session, uint32_t enabled)
 fn goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)
 fn goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)
 fn goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)
@@ -193,6 +202,10 @@ fn goss_status goss_session_submit_bodies(goss_session *session, const goss_pose
 fn goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)
 fn goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)
 fn goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)
+fn goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)
+fn goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)
+fn goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)
+fn goss_status goss_session_submit_frame_bracket_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)
 fn goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)
 fn goss_status goss_session_set_makeup_reference(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height, const float *landmarks, uint32_t landmark_count)
 fn goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)

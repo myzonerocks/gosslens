@@ -157,6 +157,7 @@ pub const Renderer = struct {
     nv12_program: c.bgfx_program_handle_t,
     lut_program: c.bgfx_program_handle_t,
     blend_program: c.bgfx_program_handle_t,
+    blend_params_uniform: c.bgfx_uniform_handle_t,
     blur_program: c.bgfx_program_handle_t,
     dof_program: c.bgfx_program_handle_t,
     fog_program: c.bgfx_program_handle_t,
@@ -177,6 +178,34 @@ pub const Renderer = struct {
     env_program: c.bgfx_program_handle_t,
     envmap_program: c.bgfx_program_handle_t,
     grade_program: c.bgfx_program_handle_t,
+    dehaze_program: c.bgfx_program_handle_t,
+    dehaze_params_uniform: c.bgfx_uniform_handle_t,
+    relight_program: c.bgfx_program_handle_t,
+    relight_params_uniform: c.bgfx_uniform_handle_t,
+    glare_program: c.bgfx_program_handle_t,
+    glare_params_uniform: c.bgfx_uniform_handle_t,
+    vignette_program: c.bgfx_program_handle_t,
+    vignette_params_uniform: c.bgfx_uniform_handle_t,
+    lowlight_program: c.bgfx_program_handle_t,
+    lowlight_params_uniform: c.bgfx_uniform_handle_t,
+    undistort_program: c.bgfx_program_handle_t,
+    undistort_params_uniform: c.bgfx_uniform_handle_t,
+    undistort_center_uniform: c.bgfx_uniform_handle_t,
+    awb_program: c.bgfx_program_handle_t,
+    awb_params_uniform: c.bgfx_uniform_handle_t,
+    awb_level_uniform: c.bgfx_uniform_handle_t,
+    stabilize_program: c.bgfx_program_handle_t,
+    stabilize_params_uniform: c.bgfx_uniform_handle_t,
+    zoom_program: c.bgfx_program_handle_t,
+    zoom_params_uniform: c.bgfx_uniform_handle_t,
+    dereflect_program: c.bgfx_program_handle_t,
+    dereflect_params_uniform: c.bgfx_uniform_handle_t,
+    harmonize_program: c.bgfx_program_handle_t,
+    harmonize_params_uniform: c.bgfx_uniform_handle_t,
+    inpaint_program: c.bgfx_program_handle_t,
+    inpaint_params_uniform: c.bgfx_uniform_handle_t,
+    rolling_program: c.bgfx_program_handle_t,
+    rolling_params_uniform: c.bgfx_uniform_handle_t,
     bloom_extract_program: c.bgfx_program_handle_t,
     bloom_composite_program: c.bgfx_program_handle_t,
     composite_program: c.bgfx_program_handle_t,
@@ -454,6 +483,19 @@ pub const Renderer = struct {
         const env_program = try loadEnvProgram();
         const envmap_program = try loadEnvmapProgram();
         const grade_program = try loadGradeProgram();
+        const dehaze_program = try loadDehazeProgram();
+        const relight_program = try loadRelightProgram();
+        const glare_program = try loadGlareProgram();
+        const vignette_program = try loadVignetteProgram();
+        const lowlight_program = try loadLowLightProgram();
+        const undistort_program = try loadUndistortProgram();
+        const awb_program = try loadAwbProgram();
+        const stabilize_program = try loadStabilizeProgram();
+        const zoom_program = try loadZoomProgram();
+        const dereflect_program = try loadDereflectProgram();
+        const harmonize_program = try loadHarmonizeProgram();
+        const inpaint_program = try loadInpaintProgram();
+        const rolling_program = try loadRollingProgram();
         const bloom_extract_program = try loadBloomExtractProgram();
         const bloom_composite_program = try loadBloomCompositeProgram();
         const composite_program = try loadCompositeProgram();
@@ -542,6 +584,7 @@ pub const Renderer = struct {
             .nv12_program = nv12_program,
             .lut_program = lut_program,
             .blend_program = blend_program,
+            .blend_params_uniform = c.bgfx_create_uniform("u_blendParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .blur_program = blur_program,
             .dof_program = dof_program,
             .fog_program = fog_program,
@@ -562,6 +605,34 @@ pub const Renderer = struct {
             .env_program = env_program,
             .envmap_program = envmap_program,
             .grade_program = grade_program,
+            .dehaze_program = dehaze_program,
+            .dehaze_params_uniform = c.bgfx_create_uniform("u_dehaze", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .relight_program = relight_program,
+            .relight_params_uniform = c.bgfx_create_uniform("u_relight", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .glare_program = glare_program,
+            .glare_params_uniform = c.bgfx_create_uniform("u_glare", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .vignette_program = vignette_program,
+            .vignette_params_uniform = c.bgfx_create_uniform("u_vignette", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .lowlight_program = lowlight_program,
+            .lowlight_params_uniform = c.bgfx_create_uniform("u_lowlight", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .undistort_program = undistort_program,
+            .undistort_params_uniform = c.bgfx_create_uniform("u_undistort", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .undistort_center_uniform = c.bgfx_create_uniform("u_undistortC", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .awb_program = awb_program,
+            .awb_params_uniform = c.bgfx_create_uniform("u_awb", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .awb_level_uniform = c.bgfx_create_uniform("u_awbLevel", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .stabilize_program = stabilize_program,
+            .stabilize_params_uniform = c.bgfx_create_uniform("u_stabilize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .zoom_program = zoom_program,
+            .zoom_params_uniform = c.bgfx_create_uniform("u_zoom", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .dereflect_program = dereflect_program,
+            .dereflect_params_uniform = c.bgfx_create_uniform("u_dereflect", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .harmonize_program = harmonize_program,
+            .harmonize_params_uniform = c.bgfx_create_uniform("u_harmonize", c.BGFX_UNIFORM_TYPE_VEC4, 4),
+            .inpaint_program = inpaint_program,
+            .inpaint_params_uniform = c.bgfx_create_uniform("u_inpaint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .rolling_program = rolling_program,
+            .rolling_params_uniform = c.bgfx_create_uniform("u_rolling", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .bloom_extract_program = bloom_extract_program,
             .bloom_composite_program = bloom_composite_program,
             .composite_program = composite_program,
@@ -904,6 +975,158 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_grade_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_grade_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_grade_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// dehaze.pass's own fixed program: the single-pass dark-channel dehaze,
+    /// shared by every dehaze.pass node like grade_program.
+    pub fn loadDehazeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_dehaze_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_dehaze_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_dehaze_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_dehaze_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// relight.pass's own fixed program: the parametric directional relight,
+    /// shared by every relight.pass node like grade_program.
+    pub fn loadRelightProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_relight_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_relight_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_relight_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_relight_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// glare.pass's own fixed program: the specular-highlight rolloff, shared by
+    /// every glare.pass node like grade_program.
+    pub fn loadGlareProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_glare_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_glare_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_glare_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_glare_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// vignette.pass's own fixed program: the radial luma-gain, shared by every
+    /// vignette.pass node like grade_program.
+    pub fn loadVignetteProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_vignette_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_vignette_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_vignette_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_vignette_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// lowlight.pass's own fixed program: the shadow-lift + denoise, shared by
+    /// every lowlight.pass node like grade_program.
+    pub fn loadLowLightProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_lowlight_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_lowlight_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_lowlight_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_lowlight_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// undistort.pass's own fixed program: the inverse radial remap, shared by
+    /// every undistort.pass node like grade_program.
+    pub fn loadUndistortProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_undistort_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_undistort_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_undistort_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_undistort_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// awb.pass's own fixed program: the gray-world white balance and auto-levels,
+    /// shared by every awb.pass node like grade_program.
+    pub fn loadAwbProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_awb_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_awb_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_awb_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_awb_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// stabilize.pass's own fixed program: the crop-and-shift stabilization,
+    /// shared by every stabilize.pass node like grade_program.
+    pub fn loadStabilizeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_stabilize_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_stabilize_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_stabilize_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_stabilize_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// zoom.pass's own fixed program: the digital region magnify, shared by every
+    /// zoom.pass node like grade_program.
+    pub fn loadZoomProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_zoom_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_zoom_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_zoom_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_zoom_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// dereflect.pass's own fixed program: the localized specular attenuation,
+    /// shared by every dereflect.pass node like grade_program.
+    pub fn loadDereflectProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_dereflect_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_dereflect_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_dereflect_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_dereflect_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// harmonize.pass's own fixed program: the statistical color transfer, shared
+    /// by every harmonize.pass node like grade_program.
+    pub fn loadHarmonizeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_harmonize_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_harmonize_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_harmonize_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_harmonize_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    pub fn loadInpaintProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_inpaint_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_inpaint_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_inpaint_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_inpaint_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    pub fn loadRollingProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_rolling_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_rolling_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_rolling_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_rolling_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -1266,6 +1489,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.nv12_program);
         c.bgfx_destroy_program(r.lut_program);
         c.bgfx_destroy_program(r.blend_program);
+        c.bgfx_destroy_uniform(r.blend_params_uniform);
         c.bgfx_destroy_program(r.blur_program);
         c.bgfx_destroy_program(r.dof_program);
         c.bgfx_destroy_program(r.fog_program);
@@ -1286,6 +1510,34 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.env_program);
         c.bgfx_destroy_program(r.envmap_program);
         c.bgfx_destroy_program(r.grade_program);
+        c.bgfx_destroy_program(r.dehaze_program);
+        c.bgfx_destroy_uniform(r.dehaze_params_uniform);
+        c.bgfx_destroy_program(r.relight_program);
+        c.bgfx_destroy_uniform(r.relight_params_uniform);
+        c.bgfx_destroy_program(r.glare_program);
+        c.bgfx_destroy_uniform(r.glare_params_uniform);
+        c.bgfx_destroy_program(r.vignette_program);
+        c.bgfx_destroy_uniform(r.vignette_params_uniform);
+        c.bgfx_destroy_program(r.lowlight_program);
+        c.bgfx_destroy_uniform(r.lowlight_params_uniform);
+        c.bgfx_destroy_program(r.undistort_program);
+        c.bgfx_destroy_uniform(r.undistort_params_uniform);
+        c.bgfx_destroy_uniform(r.undistort_center_uniform);
+        c.bgfx_destroy_program(r.awb_program);
+        c.bgfx_destroy_uniform(r.awb_params_uniform);
+        c.bgfx_destroy_uniform(r.awb_level_uniform);
+        c.bgfx_destroy_program(r.stabilize_program);
+        c.bgfx_destroy_uniform(r.stabilize_params_uniform);
+        c.bgfx_destroy_program(r.zoom_program);
+        c.bgfx_destroy_uniform(r.zoom_params_uniform);
+        c.bgfx_destroy_program(r.dereflect_program);
+        c.bgfx_destroy_uniform(r.dereflect_params_uniform);
+        c.bgfx_destroy_program(r.harmonize_program);
+        c.bgfx_destroy_uniform(r.harmonize_params_uniform);
+        c.bgfx_destroy_program(r.inpaint_program);
+        c.bgfx_destroy_uniform(r.inpaint_params_uniform);
+        c.bgfx_destroy_program(r.rolling_program);
+        c.bgfx_destroy_uniform(r.rolling_params_uniform);
         c.bgfx_destroy_program(r.composite_program);
         c.bgfx_destroy_program(r.bloom_extract_program);
         c.bgfx_destroy_program(r.bloom_composite_program);
@@ -1827,11 +2079,13 @@ pub const Renderer = struct {
     /// view_id: the frame on unit 0, the lens's own background image on
     /// unit 1, the session's current segmentation mask on unit 2, the
     /// one fixed blend_program every blend.pass node shares.
-    pub fn submitBlendPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, background_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t) void {
+    pub fn submitBlendPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, background_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, strength: f32) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(1, r.tex_background, background_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        var params = [4]f32{ strength, 0, 0, 0 };
+        c.bgfx_set_uniform(r.blend_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.blend_program, 0, c.BGFX_DISCARD_ALL);
     }
@@ -2037,12 +2291,185 @@ pub const Renderer = struct {
     /// the frame on unit 0 and its color adjustment in u_grade (three vec4:
     /// tone, white balance with hue, then posterize and invert), the one
     /// fixed grade_program every grade.pass node shares.
-    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [12]f32) void {
+    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [12]f32, mask_texture: c.bgfx_texture_handle_t, masked: bool) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
-        c.bgfx_set_uniform(r.grade_params_uniform, &grade, 3);
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        // The free u_grade[2].z slot carries the mask enable, so a masked grade
+        // blends only inside the channel and an unmasked one grades the frame.
+        var packed_grade = grade;
+        packed_grade[10] = if (masked) 1 else 0;
+        c.bgfx_set_uniform(r.grade_params_uniform, &packed_grade, 3);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.grade_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one dehaze.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0 and u_dehaze (strength, texel width, texel height, 0), the one
+    /// fixed dehaze_program every node shares.
+    pub fn submitDehazePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, strength: f32, texel_w: f32, texel_h: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ strength, texel_w, texel_h, 0 };
+        c.bgfx_set_uniform(r.dehaze_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.dehaze_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one relight.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0 and u_relight (strength, light dir x, light dir y, 0), the one
+    /// fixed relight_program every node shares.
+    pub fn submitRelightPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params3: [3]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ params3[0], params3[1], params3[2], 0 };
+        c.bgfx_set_uniform(r.relight_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.relight_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one glare.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0 and u_glare (strength, threshold, 0, 0), the one fixed
+    /// glare_program every node shares.
+    pub fn submitGlarePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, strength: f32, threshold: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ strength, threshold, 0, 0 };
+        c.bgfx_set_uniform(r.glare_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.glare_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one vignette.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0 and u_vignette (strength, radius, 0, 0), the one fixed
+    /// vignette_program every node shares.
+    pub fn submitVignettePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, strength: f32, radius: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ strength, radius, 0, 0 };
+        c.bgfx_set_uniform(r.vignette_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.vignette_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one lowlight.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0 and u_lowlight (strength, denoise, texel w, texel h), the one
+    /// fixed lowlight_program every node shares.
+    pub fn submitLowLightPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, strength: f32, denoise: f32, texel_w: f32, texel_h: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ strength, denoise, texel_w, texel_h };
+        c.bgfx_set_uniform(r.lowlight_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.lowlight_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one undistort.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0, u_undistort (k1, k2, strength, aspect), and u_undistortC (cx,
+    /// cy normalized), the one fixed undistort_program every node shares.
+    pub fn submitUndistortPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, k1: f32, k2: f32, strength: f32, aspect: f32, cx: f32, cy: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ k1, k2, strength, aspect };
+        c.bgfx_set_uniform(r.undistort_params_uniform, &params, 1);
+        var center = [4]f32{ cx, cy, 0, 0 };
+        c.bgfx_set_uniform(r.undistort_center_uniform, &center, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.undistort_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one awb.pass node as a full-screen pass into view_id: the frame on
+    /// unit 0, u_awb (gainR, gainG, gainB, strength), and u_awbLevel (black,
+    /// white), the one fixed awb_program every node shares.
+    pub fn submitAwbPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, gains: [3]f32, strength: f32, black: f32, white: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ gains[0], gains[1], gains[2], strength };
+        c.bgfx_set_uniform(r.awb_params_uniform, &params, 1);
+        var level = [4]f32{ black, white, 0, 0 };
+        c.bgfx_set_uniform(r.awb_level_uniform, &level, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.awb_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one stabilize.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0 and u_stabilize (shift u, shift v, inset, strength), the one fixed
+    /// stabilize_program every node shares.
+    pub fn submitStabilizePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, shift: [2]f32, inset: f32, strength: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ shift[0], shift[1], inset, strength };
+        c.bgfx_set_uniform(r.stabilize_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.stabilize_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one zoom.pass node as a full-screen pass into view_id: the frame on
+    /// unit 0 and u_zoom (factor, center u, center v, 0), the one fixed zoom_program
+    /// every node shares.
+    pub fn submitZoomPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, factor: f32, cx: f32, cy: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ factor, cx, cy, 0 };
+        c.bgfx_set_uniform(r.zoom_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.zoom_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one dereflect.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0 and u_dereflect (strength, texel width, texel height, 0), the one
+    /// fixed dereflect_program every node shares.
+    pub fn submitDereflectPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, strength: f32, texel_w: f32, texel_h: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ strength, texel_w, texel_h, 0 };
+        c.bgfx_set_uniform(r.dereflect_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.dereflect_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one harmonize.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0, the region mask on unit 1, and u_harmonize (the foreground and
+    /// background means and standard deviations the engine measured, plus strength
+    /// and direction), the one fixed harmonize_program every node shares.
+    pub fn submitHarmonizePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, fg_mean: [3]f32, fg_std: [3]f32, bg_mean: [3]f32, bg_std: [3]f32, strength: f32, direction: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        var params = [16]f32{
+            fg_mean[0], fg_mean[1], fg_mean[2], strength,
+            fg_std[0],  fg_std[1],  fg_std[2],  direction,
+            bg_mean[0], bg_mean[1], bg_mean[2], 0,
+            bg_std[0],  bg_std[1],  bg_std[2],  0,
+        };
+        c.bgfx_set_uniform(r.harmonize_params_uniform, &params, 4);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.harmonize_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one inpaint.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0, the removal mask on unit 1, and u_inpaint (search radius, frame
+    /// aspect), the one fixed inpaint_program every node shares.
+    pub fn submitInpaintPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, radius: f32, aspect: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        var params = [4]f32{ radius, aspect, 0, 0 };
+        c.bgfx_set_uniform(r.inpaint_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.inpaint_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one rolling.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0 and u_rolling (the per-row skew the engine derived from the
+    /// orientation stream), the one fixed rolling_program every node shares.
+    pub fn submitRollingPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, skew_x: f32, skew_y: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ skew_x, skew_y, 0, 0 };
+        c.bgfx_set_uniform(r.rolling_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.rolling_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one lens stylize.pass node as a full-screen pass into view_id:

@@ -104,7 +104,7 @@ pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
 // its body - nothing else.
-pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent };
+pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment };
 
 pub const abi_functions = [_][]const u8{
     "uint32_t goss_abi_version(void)",
@@ -130,6 +130,10 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_session *session, uint64_t native_handle, uint32_t width, uint32_t height)",
     "goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)",
     "goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)",
+    "goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_caption_segment(goss_session *session, uint32_t index, goss_caption_segment *out)",
+    "goss_status goss_session_caption_segment_text(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_set_dubbing(goss_session *session, uint32_t enabled)",
     "goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)",
     "goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)",
@@ -208,6 +212,10 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
+    "goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)",
+    "goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)",
+    "goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
+    "goss_status goss_session_submit_frame_bracket_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_set_makeup_reference(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height, const float *landmarks, uint32_t landmark_count)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
@@ -527,7 +535,7 @@ const PendingGlbCollider = struct {
 
 /// A masked sprite's segmentation key: the channel and whether the sprite fills
 /// over that region (a restyle) or behind it (a greenscreen).
-const SpriteMask = struct { channel: u8, over: bool };
+const SpriteMask = struct { channel: u8, over: bool, strength: f32 = 1 };
 
 pub const Session = struct {
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
@@ -643,6 +651,48 @@ pub const Session = struct {
     /// each holding its output-to-parameter bindings; built from the bundle at
     /// activation, fed the camera frame, read into params each tick.
     ml_workers: std.ArrayListUnmanaged(MlWorker) = .empty,
+    /// The multi-frame fusion workers an active lens's temporal.fuse nodes drive,
+    /// each holding an N-frame ring; built at activation, fed the camera frame (or
+    /// a submitted bracket), their fused image drawn through a sprite.
+    temporal_workers: std.ArrayListUnmanaged(TemporalWorker) = .empty,
+    /// The audio inference workers an active lens's audio.infer nodes drive, each
+    /// holding its output-to-parameter bindings; built at activation, fed a
+    /// window of the microphone ring, read into params each tick.
+    audio_workers: std.ArrayListUnmanaged(AudioWorker) = .empty,
+    /// A ring of the latest mono microphone samples, written each submit_audio,
+    /// so an audio.infer worker reads a window without retaining the whole stream.
+    audio_ring: [audio_ring_len]f32 = @splat(0),
+    audio_ring_pos: usize = 0,
+    audio_ring_filled: bool = false,
+    /// Scratch the tick copies a worker's window into, in chronological order,
+    /// before handing it to the inference core. Allocated when the first audio
+    /// worker loads, sized to the ring.
+    audio_window: []f32 = &.{},
+    /// The timestamp of the latest submitted audio, so a diarized caption segment
+    /// can carry the times it spanned.
+    audio_timestamp_us: i64 = 0,
+    /// A ring of the most recent diarized caption segments, each a decoded caption
+    /// tagged with the speaker who spoke it and the times it spanned, read back
+    /// through the caption-segment ABI. Newest is (pos - 1).
+    caption_segments: [caption_seg_ring]SegmentEntry = @splat(.{}),
+    caption_seg_pos: usize = 0,
+    caption_seg_count: usize = 0,
+    /// Whether the host has enabled on-device dubbing: a dub-bound audio.infer
+    /// node then synthesizes its decoded text to speech and plays it into the
+    /// lens mixer. Off by default, since a dub speaks over the room.
+    dubbing_enabled: bool = false,
+    /// An active audio.enhance node's noise-reduction strength (0 when none), and
+    /// the per-channel low-pass state the output mix carries across chunks so the
+    /// microphone cleanup is continuous. Resolved at activation.
+    audio_enhance_strength: f32 = 0,
+    audio_enhance_lp: [8]f32 = @splat(0),
+    /// An active voice.transform node's pitch-shift ratio (1 when none), and the
+    /// per-channel delay line the output mix pitch-shifts the microphone through,
+    /// a two-tap crossfade sweep carried across chunks. Resolved at activation.
+    voice_pitch: f32 = 1,
+    voice_delay: [8][voice_delay_len]f32 = @splat(@splat(0)),
+    voice_wpos: usize = 0,
+    voice_phase: f32 = 0,
     /// The diffusion restyle workers an active lens's diffusion nodes drive,
     /// each drawing its decoded frame through a sprite; built from the bundle at
     /// activation, fed the camera frame, uploaded to their sprite each render.
@@ -1038,6 +1088,103 @@ pub const Session = struct {
     /// invert) - resolved once at activation since grade.pass ships no
     /// asset and needs no loader.
     grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [12]f32) = .empty,
+    /// The mask channel of each grade.pass node that scopes its grade to a
+    /// region; a node absent here grades the whole frame.
+    grade_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// The dark-channel dehaze strength of each spliced dehaze.pass node,
+    /// resolved once at activation like grade_params.
+    dehaze_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The directional key light of each spliced relight.pass node, packed as
+    /// (strength, light dir x, light dir y), resolved once at activation.
+    relight_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    /// The specular rolloff (strength, threshold) of each spliced glare.pass
+    /// node, resolved once at activation.
+    glare_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// The radial gain (strength, radius) of each spliced vignette.pass node,
+    /// resolved once at activation.
+    vignette_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// The lift and denoise (strength, denoise) of each spliced lowlight.pass
+    /// node, resolved once at activation.
+    lowlight_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// The correction strength of each spliced undistort.pass node, resolved
+    /// once at activation. The radial map itself rides the submitted intrinsics.
+    undistort_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The blend strength of each spliced awb.pass node, resolved once at
+    /// activation; the correction itself is estimated per frame from the thumb.
+    awb_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The blend strength of each spliced stabilize.pass node, resolved once at
+    /// activation; the shift and crop are estimated per frame by the stabilizer.
+    stabilize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The magnify factor and centre (factor, cx, cy) of each spliced zoom.pass
+    /// node, resolved once at activation.
+    zoom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    /// The attenuation strength of each spliced dereflect.pass node, resolved
+    /// once at activation.
+    dereflect_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The blend strength and transfer direction (strength, direction) of each
+    /// spliced harmonize.pass node, resolved once at activation; the region
+    /// statistics are measured per frame.
+    harmonize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// A CPU copy of the latest person segmentation mask, kept only when a
+    /// harmonize.pass node is active, so its region statistics can be measured on
+    /// the CPU without a GPU readback. Allocated to the mask resolution.
+    person_mask: []f32 = &.{},
+    person_mask_valid: bool = false,
+    wants_person_mask: bool = false,
+    /// The removal mask channel and search radius (channel, radius) of each
+    /// spliced inpaint.pass node, resolved once at activation.
+    inpaint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, InpaintParams) = .empty,
+    /// A small RGB downsample of the latest copied frame, filled at submit from
+    /// the frame bytes (no GPU readback), so an auto-enhance pass can estimate a
+    /// scene-adaptive correction from the whole frame's statistics.
+    frame_thumb: [thumb_side * thumb_side * 3]f32 = @splat(0),
+    thumb_valid: bool = false,
+    /// How many heavy inference workers (ml.infer, diffusion, splat clouds) this
+    /// session admits at once, and how many the active lens has loaded. A lens
+    /// past the budget leaves its extra nets inert rather than oversubscribing
+    /// the device, honoring the no-overheat mandate for a stacked enhance chain.
+    ml_worker_budget: u32 = default_ml_worker_budget,
+    ml_workers_loaded: u32 = 0,
+    /// Electronic image stabilization state, updated per submitted frame when the
+    /// recording policy asks for it: the previous frame's gray thumb, the
+    /// cumulative and low-pass-smoothed camera path, and the residual UV shift a
+    /// stabilize.pass applies to hold the frame on the smoothed path.
+    stab_prev_gray: [thumb_side * thumb_side]f32 = @splat(0),
+    stab_have_prev: bool = false,
+    stab_cum: [2]f32 = .{ 0, 0 },
+    stab_smooth: [2]f32 = .{ 0, 0 },
+    stab_shift: [2]f32 = .{ 0, 0 },
+    /// The camera intrinsics an undistort.pass corrects for: the two radial
+    /// coefficients, the principal point in pixels of the submitted frame
+    /// (normalized against the working size at draw), the pixel aspect (fx/fy),
+    /// and whether any have been submitted. Inert with none submitted.
+    intrinsics_set: bool = false,
+    intrinsics_k1: f32 = 0,
+    intrinsics_k2: f32 = 0,
+    intrinsics_cx: f32 = 0,
+    intrinsics_cy: f32 = 0,
+    intrinsics_aspect: f32 = 1,
+    /// The device orientation stream a rolling.pass reads for its correction: the
+    /// last gravity vector and its timestamp, whether one has arrived, and the
+    /// image-plane angular velocity (rad/s) derived from consecutive samples.
+    orientation_set: bool = false,
+    orientation_have_prev: bool = false,
+    orientation_prev: [3]f32 = .{ 0, 0, 0 },
+    orientation_prev_ts: i64 = 0,
+    orientation_omega: [2]f32 = .{ 0, 0 },
+    /// The correction strength and sensor readout time (strength, readout) of each
+    /// spliced rolling.pass node, resolved once at activation.
+    rolling_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// The smoothed face center and scale an auto_frame warp steers toward its
+    /// target each frame, a running mean so the reframing eases instead of
+    /// snapping. Invalid until the first face seeds it.
+    auto_frame_cx: f32 = 0.5,
+    auto_frame_cy: f32 = 0.5,
+    auto_frame_scale: f32 = 1,
+    auto_frame_valid: bool = false,
+    /// A monotonic sequence stamped on each submitted exposure so a bracket-source
+    /// temporal.fuse ring keeps every distinct exposure rather than deduping them.
+    bracket_seq: i64 = 0,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1092,6 +1239,9 @@ pub const Session = struct {
     /// and whether the sprite fills behind that region (greenscreen) or over it
     /// (a restyle). The generative background and full-face restyle ride this.
     sprite_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteMask) = .empty,
+    /// A masked sprite's over-mode strength parameter name, so a slider mixes
+    /// the restyle onto its region live (a partial de-age, beauty, harmonize).
+    sprite_mask_strength_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
     /// A model.gltf node's live turntable control, when it declares one, so the
     /// gestures orbit, dolly and roll it each tick.
     model_controls: std.AutoHashMapUnmanaged(graph.NodeIndex, ModelControlState) = .empty,
@@ -1879,6 +2029,108 @@ fn faceScaleCenter(s: *Session, width: u16, height: u16, rotation: u32, mirror: 
     return .{ .cx = cx, .cy = cy, .radius = @max(maxd * 1.2, 0.02) };
 }
 
+/// The smoothed affine an auto_frame warp applies: the tracked face's center and
+/// a scale that grows it toward the target covering fraction, both eased by a
+/// running mean so the reframing tracks a moving subject without snapping. Null
+/// with no face, the same hold-through face_scale degrades to.
+fn autoFrameAffine(s: *Session, width: u16, height: u16, rotation: u32, mirror: bool, aspect: f32, target_frac: f32) ?struct { cx: f32, cy: f32, scale: f32 } {
+    const fc = faceScaleCenter(s, width, height, rotation, mirror, aspect) orelse return null;
+    const current = @max(fc.radius, 0.02);
+    const raw_scale = std.math.clamp(@max(target_frac, 0.05) / current, 0.25, 4.0);
+    const alpha: f32 = 0.25;
+    if (!s.auto_frame_valid) {
+        s.auto_frame_cx = fc.cx;
+        s.auto_frame_cy = fc.cy;
+        s.auto_frame_scale = raw_scale;
+        s.auto_frame_valid = true;
+    } else {
+        s.auto_frame_cx += (fc.cx - s.auto_frame_cx) * alpha;
+        s.auto_frame_cy += (fc.cy - s.auto_frame_cy) * alpha;
+        s.auto_frame_scale += (raw_scale - s.auto_frame_scale) * alpha;
+    }
+    return .{ .cx = s.auto_frame_cx, .cy = s.auto_frame_cy, .scale = s.auto_frame_scale };
+}
+
+/// The device roll a roll_lock warp levels: the submitted gravity's tilt in the
+/// image plane when the orientation stream is fed, else the tracked head's roll,
+/// else zero so the pass is identity. Positive tips the frame toward the right.
+fn rollAngle(s: *Session) f32 {
+    if (s.orientation_set) return std.math.atan2(s.orientation_prev[0], -s.orientation_prev[1]);
+    var result: face.Result = undefined;
+    var flat: ?*const [face.landmark_count * 3]f32 = null;
+    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+        flat = &s.face_results[0].landmarks;
+    } else if (s.face_tracking) |worker| {
+        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+            flat = &result.landmarks;
+        }
+    }
+    const src = flat orelse return 0;
+    const m = face_geometry.estimateHeadPose(src) orelse return 0;
+    return headEuler(m).roll;
+}
+
+/// The horizontal and vertical gaze the eyeLook blendshapes carry, positive x
+/// to the subject's outer-left and positive y up, matching trigger.zig's gaze
+/// signals. Zero when the eyes look straight at the lens.
+fn gazeVector(bs: *const [face.blendshape_count]f32) [2]f32 {
+    const in_l = comptime face.blendshapeIndex("eyeLookInLeft").?;
+    const in_r = comptime face.blendshapeIndex("eyeLookInRight").?;
+    const out_l = comptime face.blendshapeIndex("eyeLookOutLeft").?;
+    const out_r = comptime face.blendshapeIndex("eyeLookOutRight").?;
+    const up_l = comptime face.blendshapeIndex("eyeLookUpLeft").?;
+    const up_r = comptime face.blendshapeIndex("eyeLookUpRight").?;
+    const dn_l = comptime face.blendshapeIndex("eyeLookDownLeft").?;
+    const dn_r = comptime face.blendshapeIndex("eyeLookDownRight").?;
+    const x = 0.5 * ((bs[out_l] + bs[in_r]) - (bs[in_l] + bs[out_r]));
+    const y = 0.5 * ((bs[up_l] + bs[up_r]) - (bs[dn_l] + bs[dn_r]));
+    return .{ x, y };
+}
+
+/// The centroid of one iris loop mapped from sensor pixels into the frame's
+/// normalized draw space, the way the preview blit lays the frame out.
+fn irisCentroidDraw(landmarks: *const [face.landmark_count * 3]f32, loop: []const u16, width: u16, height: u16, rotation: u32, mirror: bool) [2]f32 {
+    var sx: f32 = 0;
+    var sy: f32 = 0;
+    for (loop) |idx| {
+        sx += landmarks[@as(usize, idx) * 3];
+        sy += landmarks[@as(usize, idx) * 3 + 1];
+    }
+    const n: f32 = @floatFromInt(loop.len);
+    const u = (sx / n) / @as(f32, @floatFromInt(width));
+    const v = (sy / n) / @as(f32, @floatFromInt(height));
+    return face106.transformPoint(u, v, rotation, mirror);
+}
+
+/// The two liquify push points a gaze_correct warp redirects the eyes with: one
+/// at each iris centroid, pushing the pupil opposite the measured gaze so it
+/// reads back toward the lens. The strength scales the push in the shader, so the
+/// push carries only the direction here. Null with no face.
+fn gazeEyePoints(s: *Session, width: u16, height: u16, rotation: u32, mirror: bool) ?[2][4]f32 {
+    var result: face.Result = undefined;
+    var flat: ?*const [face.landmark_count * 3]f32 = null;
+    var bshapes: ?*const [face.blendshape_count]f32 = null;
+    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+        flat = &s.face_results[0].landmarks;
+        bshapes = &s.face_results[0].blendshapes;
+    } else if (s.face_tracking) |worker| {
+        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+            flat = &result.landmarks;
+            bshapes = &result.blendshapes;
+        }
+    }
+    const src = flat orelse return null;
+    const bs = bshapes orelse return null;
+    const gaze = gazeVector(bs);
+    const push = [2]f32{ -gaze[0], gaze[1] };
+    const left = irisCentroidDraw(src, &face.left_iris_loop, width, height, rotation, mirror);
+    const right = irisCentroidDraw(src, &face.right_iris_loop, width, height, rotation, mirror);
+    return .{
+        .{ left[0], left[1], push[0], push[1] },
+        .{ right[0], right[1], push[0], push[1] },
+    };
+}
+
 /// Grows the per-frame vertex staging to hold `floats`, called once per
 /// dynamic mesh at lens activation. Never runs on the frame path.
 fn reserveFrameStage(s: *Session, floats: usize) void {
@@ -1910,6 +2162,28 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // A grade pass ships no asset either; its params are resolved
             // at activation, so it is ready once they are in place.
             .grade => s.grade_params.contains(entry.graph_index),
+            .dehaze => s.dehaze_params.contains(entry.graph_index),
+            .relight => s.relight_params.contains(entry.graph_index),
+            .glare => s.glare_params.contains(entry.graph_index),
+            .vignette => s.vignette_params.contains(entry.graph_index),
+            .lowlight => s.lowlight_params.contains(entry.graph_index),
+            .undistort => s.undistort_params.contains(entry.graph_index),
+            .awb => s.awb_params.contains(entry.graph_index),
+            .stabilize => s.stabilize_params.contains(entry.graph_index),
+            .zoom => s.zoom_params.contains(entry.graph_index),
+            .dereflect => s.dereflect_params.contains(entry.graph_index),
+            // Harmonize measures its region from the CPU person mask; without a
+            // mask filled yet the node holds the frame through unchanged.
+            .harmonize => s.harmonize_params.contains(entry.graph_index),
+            // Inpaint needs its removal mask on the named channel; with none the
+            // node holds the frame through, the standard capability degradation.
+            .inpaint => if (s.inpaint_params.get(entry.graph_index)) |ip|
+                (if (ip.channel == 0) s.segmentation_texture != null else s.segmentation_class_textures[ip.channel] != null)
+            else
+                false,
+            // Rolling correction reads the orientation stream; with none the
+            // derived motion stays zero and the node holds the frame through.
+            .rolling => s.rolling_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -1953,6 +2227,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // bank, so it holds the frame through when no face is present.
             .warp => blk: {
                 const wp = s.warp_params.get(entry.graph_index) orelse break :blk false;
+                // auto_frame (mode 9) and gaze_correct (mode 8) ride the tracked
+                // face; roll_lock (mode 7) levels scenery and needs none; face_scale
+                // (mode 6) rides the face and holds through without one.
+                if (wp[0] > 7.5 and wp[0] < 8.5) break :blk reshapeFaceReady(s);
+                if (wp[0] > 8.5) break :blk reshapeFaceReady(s);
+                if (wp[0] > 6.5) break :blk true;
                 break :blk if (wp[0] > 5.5) reshapeFaceReady(s) else true;
             },
             // A reshape bank needs a tracked face to sculpt around, like dof
@@ -2161,7 +2441,241 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitGradePass(view_id, input_texture, grade);
+                // A named channel scopes the grade to its mask; an absent class
+                // serves the zero mask, so the grade fades to nothing there.
+                const masked = s.grade_masks.get(entry.graph_index);
+                const mask_tex = if (masked) |channel|
+                    (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
+                else
+                    r.zero_mask_texture;
+                r.submitGradePass(view_id, input_texture, grade, mask_tex, masked != null);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .dehaze => {
+                const strength = s.dehaze_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const texel_w = 1.0 / @as(f32, @floatFromInt(width));
+                const texel_h = 1.0 / @as(f32, @floatFromInt(height));
+                r.submitDehazePass(view_id, input_texture, strength, texel_w, texel_h);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .relight => {
+                const params = s.relight_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitRelightPass(view_id, input_texture, params);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .glare => {
+                const gp = s.glare_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitGlarePass(view_id, input_texture, gp[0], gp[1]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .vignette => {
+                const vp = s.vignette_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitVignettePass(view_id, input_texture, vp[0], vp[1]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .lowlight => {
+                const lp = s.lowlight_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const texel_w = 1.0 / @as(f32, @floatFromInt(width));
+                const texel_h = 1.0 / @as(f32, @floatFromInt(height));
+                r.submitLowLightPass(view_id, input_texture, lp[0], lp[1], texel_w, texel_h);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .undistort => {
+                const strength = s.undistort_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // Inert until intrinsics are submitted; then the principal point
+                // normalizes against the working size the frame is sampled at.
+                const eff = if (s.intrinsics_set) strength else 0;
+                const cx = if (s.intrinsics_set and width > 0) s.intrinsics_cx / @as(f32, @floatFromInt(width)) else 0.5;
+                const cy = if (s.intrinsics_set and height > 0) s.intrinsics_cy / @as(f32, @floatFromInt(height)) else 0.5;
+                r.submitUndistortPass(view_id, input_texture, s.intrinsics_k1, s.intrinsics_k2, eff, s.intrinsics_aspect, cx, cy);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .awb => {
+                const strength = s.awb_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // Estimate the correction from the frame thumb; an unfilled thumb
+                // gives identity gains and levels so the pass is a no-op.
+                const est = if (s.thumb_valid) estimateAwb(&s.frame_thumb) else AwbEstimate{ .gains = .{ 1, 1, 1 }, .black = 0, .white = 1 };
+                r.submitAwbPass(view_id, input_texture, est.gains, strength, est.black, est.white);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .stabilize => {
+                const strength = s.stabilize_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The shift and crop ride the recording policy; with stabilization
+                // off the inset is zero and the shift stays at rest, so the pass is
+                // a no-op regardless of strength.
+                const inset = if (stabTuning(s.recording_policy.stabilization)) |tune| tune.margin else 0;
+                r.submitStabilizePass(view_id, input_texture, s.stab_shift, inset, strength);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .zoom => {
+                const zp = s.zoom_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitZoomPass(view_id, input_texture, zp[0], zp[1], zp[2]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .dereflect => {
+                const strength = s.dereflect_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const texel_w = 1.0 / @as(f32, @floatFromInt(width));
+                const texel_h = 1.0 / @as(f32, @floatFromInt(height));
+                r.submitDereflectPass(view_id, input_texture, strength, texel_w, texel_h);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .harmonize => {
+                const hp = s.harmonize_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // Region statistics come from the CPU person mask sampled against the
+                // frame thumb; with either missing the strength drops to zero, so the
+                // Reinhard transfer is a no-op regardless of the authored value.
+                const mask_side = isqrt(s.person_mask.len);
+                const active = s.person_mask_valid and s.thumb_valid and mask_side > 0;
+                const stats = if (active) computeHarmonizeStats(s, mask_side) else std.mem.zeroes(HarmonizeStats);
+                const strength = if (active) hp[0] else 0;
+                const mask_tex = s.segmentation_texture orelse r.zero_mask_texture;
+                r.submitHarmonizePass(view_id, input_texture, mask_tex, stats.fg_mean, stats.fg_std, stats.bg_mean, stats.bg_std, strength, hp[1]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .inpaint => {
+                const ip = s.inpaint_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const mask_tex = if (ip.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[ip.channel] orelse r.zero_mask_texture;
+                const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                r.submitInpaintPass(view_id, input_texture, mask_tex, ip.radius, aspect);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .rolling => {
+                const rp = s.rolling_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The per-row skew is the derived image-plane motion scaled by the
+                // sensor readout and strength; with no orientation submitted the
+                // motion is zero and the pass holds the frame through.
+                const gain = if (s.orientation_set) rp[1] * rp[0] else 0;
+                r.submitRollingPass(view_id, input_texture, s.orientation_omega[0] * gain, s.orientation_omega[1] * gain);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2251,7 +2765,22 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // stays on the face. No face was gated out in the readiness pass.
                 var center = [2]f32{ wp[1], wp[2] };
                 var region_radius = wp[3];
-                if (wp[0] > 5.5) {
+                // roll_lock (mode 7) rotates the whole frame about the center by
+                // the derived roll, so its amount is the signed angle, not wp[4].
+                var amount = wp[4];
+                var param_y = wp[5];
+                if (wp[0] > 8.5) {
+                    // auto_frame packs the smoothed face center and scale into the
+                    // center/radius, and the authored anchor into the two params.
+                    const af = autoFrameAffine(s, width, height, rotation, mirror, aspect, wp[4]) orelse continue;
+                    center = .{ af.cx, af.cy };
+                    region_radius = af.scale;
+                    amount = wp[1];
+                    param_y = wp[2];
+                } else if (wp[0] > 6.5 and wp[0] < 7.5) {
+                    center = .{ 0.5, 0.5 };
+                    amount = rollAngle(s) * wp[4];
+                } else if (wp[0] > 5.5 and wp[0] < 6.5) {
                     const fc = faceScaleCenter(s, width, height, rotation, mirror, aspect) orelse continue;
                     center = .{ fc.cx, fc.cy };
                     region_radius = fc.radius;
@@ -2271,6 +2800,18 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     points[i] = .{ wp[10 + i * 4 + 0], wp[10 + i * 4 + 1], wp[10 + i * 4 + 2], wp[10 + i * 4 + 3] };
                     fall[i] = .{ wp[10 + manifest.warp_point_max * 4 + i], 0.0, 0.0, 0.0 };
                 }
+                // gaze_correct derives its two eye push points from the live iris
+                // centroids and the gaze the blendshapes carry, so the summed
+                // liquify redirect nudges each pupil back toward the lens.
+                var pt_count = wp[9];
+                if (wp[0] > 7.5 and wp[0] < 8.5) {
+                    const eyes = gazeEyePoints(s, width, height, rotation, mirror) orelse continue;
+                    points[0] = eyes[0];
+                    points[1] = eyes[1];
+                    fall[0] = .{ @max(wp[3], 0.01), 0, 0, 0 };
+                    fall[1] = .{ @max(wp[3], 0.01), 0, 0, 0 };
+                    pt_count = 2;
+                }
                 // A masked warp confines the displacement to its class: the
                 // named channel binds on unit 1 (an absent class serves the zero
                 // mask, so it moves nothing), while no mask binds the all-set
@@ -2279,7 +2820,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
                 else
                     r.default_mask_texture;
-                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], center[0], center[1], region_radius }, .{ wp[4], wp[5], aspect, 0.0 }, .{ wp[9], wp[7], wp[8], 0.0 }, &points, &fall);
+                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], center[0], center[1], region_radius }, .{ amount, param_y, aspect, 0.0 }, .{ pt_count, wp[7], wp[8], 0.0 }, &points, &fall);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2662,7 +3203,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
+                r.submitBlendPass(view_id, input_texture, background_texture, mask_texture, 1.0);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -2932,9 +3473,17 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // and its background input where off, so the two roles swap by
                     // mode: over puts the sprite on the mask, behind puts it off.
                     if (mask.over) {
-                        r.submitBlendPass(view_id, sprite_texture, input_texture, mask_texture);
+                        // Over mode mixes the restyle onto the region by a strength
+                        // (static, or a live slider); behind is a hard key at one.
+                        var strength = mask.strength;
+                        if (s.sprite_mask_strength_params.get(entry.graph_index)) |pname| {
+                            if (s.active_lens) |*lens| {
+                                if (lens.paramValue(pname)) |v| strength = std.math.clamp(v, 0, 1);
+                            }
+                        }
+                        r.submitBlendPass(view_id, sprite_texture, input_texture, mask_texture, strength);
                     } else {
-                        r.submitBlendPass(view_id, input_texture, sprite_texture, mask_texture);
+                        r.submitBlendPass(view_id, input_texture, sprite_texture, mask_texture, 1.0);
                     }
                     if (output) |target| {
                         input_texture = target.texture;
@@ -3720,9 +4269,25 @@ pub fn destroySession(session: *Session) void {
     session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
     session.sprite_masks.deinit(session.engine.gpa);
+    session.sprite_mask_strength_params.deinit(session.engine.gpa);
     session.model_controls.deinit(session.engine.gpa);
     session.sprite_anims.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
+    session.grade_masks.deinit(session.engine.gpa);
+    session.dehaze_params.deinit(session.engine.gpa);
+    session.relight_params.deinit(session.engine.gpa);
+    session.glare_params.deinit(session.engine.gpa);
+    session.vignette_params.deinit(session.engine.gpa);
+    session.lowlight_params.deinit(session.engine.gpa);
+    session.undistort_params.deinit(session.engine.gpa);
+    session.awb_params.deinit(session.engine.gpa);
+    session.stabilize_params.deinit(session.engine.gpa);
+    session.zoom_params.deinit(session.engine.gpa);
+    session.dereflect_params.deinit(session.engine.gpa);
+    session.harmonize_params.deinit(session.engine.gpa);
+    session.inpaint_params.deinit(session.engine.gpa);
+    session.rolling_params.deinit(session.engine.gpa);
+    if (session.person_mask.len > 0) session.engine.gpa.free(session.person_mask);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
@@ -3817,6 +4382,11 @@ pub fn destroySession(session: *Session) void {
     session.scene_worker = null;
     destroyMlWorkers(session);
     session.ml_workers.deinit(session.engine.gpa);
+    destroyTemporalWorkers(session);
+    session.temporal_workers.deinit(session.engine.gpa);
+    destroyAudioWorkers(session);
+    session.audio_workers.deinit(session.engine.gpa);
+    if (session.audio_window.len > 0) session.engine.gpa.free(session.audio_window);
     destroyDiffusionWorkers(session);
     session.diffusion_workers.deinit(session.engine.gpa);
     destroySplatWorkers(session);
@@ -4626,6 +5196,22 @@ pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f
     const slice = data[0 .. @as(usize, frame_count) * channels];
     s.audio.feed(slice, channels);
     s.audio_engine_fed = true;
+    s.audio_timestamp_us = timestamp_us;
+
+    // Downmix each frame to mono and write it into the microphone ring, so an
+    // audio.infer worker reads a window of the latest samples off the frame path.
+    var fi: usize = 0;
+    while (fi < frame_count) : (fi += 1) {
+        var mono: f32 = 0;
+        for (0..channels) |ch| mono += slice[fi * channels + ch];
+        mono /= @floatFromInt(channels);
+        s.audio_ring[s.audio_ring_pos] = mono;
+        s.audio_ring_pos += 1;
+        if (s.audio_ring_pos >= audio_ring_len) {
+            s.audio_ring_pos = 0;
+            s.audio_ring_filled = true;
+        }
+    }
 
     const e = s.engine;
     if (e.recording != null and e.recording_session == s) {
@@ -5815,6 +6401,8 @@ pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const F
         .uv = uploaded.uv,
         .conversion = math.color.yuvToRgb(standard, range),
     } } };
+    fillFrameThumbNv12(s, y_ptr, y_stride, uv_ptr, uv_stride, d.width, d.height, math.color.yuvToRgb(standard, range));
+    updateStabilization(s);
     s.copied_frames += 1;
     return .ok;
 }
@@ -6020,7 +6608,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.diffusion_workers.items.len == 0 and s.splat_workers.items.len == 0) return .again;
+    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.temporal_workers.items.len == 0 and s.audio_workers.items.len == 0 and s.diffusion_workers.items.len == 0 and s.splat_workers.items.len == 0) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -6048,6 +6636,12 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     }
     for (s.ml_workers.items) |mw| {
         ml_infer.submitNv12(mw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    for (s.temporal_workers.items) |tw| {
+        // A bracket-source fusion is fed only by the frame-bracket op; the live
+        // camera feeds the rest, one distinct frame per submit into the ring.
+        if (tw.is_bracket) continue;
+        ml_infer.temporalSubmitNv12(tw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     for (s.diffusion_workers.items) |dw| {
         diffusion.submitNv12(dw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
@@ -6204,6 +6798,23 @@ pub fn styleTextureCount(session: *Session) usize {
     return session.ml_style_textures.count();
 }
 
+/// The count of frames the first temporal.fuse worker has ringed, for the
+/// harness to pace its feed so the fusion ring keeps distinct frames in order.
+pub fn temporalRingFilled(session: *Session) u32 {
+    if (session.temporal_workers.items.len == 0) return 0;
+    return ml_infer.temporalFilled(session.temporal_workers.items[0].worker);
+}
+
+/// The square side of the first style worker's output texture, so a proof can
+/// assert a super-resolution model draws at a larger side than its input. Zero
+/// when no style worker is loaded.
+pub fn styleTextureSide(session: *Session) u32 {
+    for (session.ml_workers.items) |mw| {
+        if (mw.style_target != null and mw.style_side > 0) return mw.style_side;
+    }
+    return 0;
+}
+
 /// How many splat.cloud workers have produced their first point set, so a
 /// headless proof can wait for the cloud to become drawable.
 pub fn splatCloudReadyCount(session: *Session) usize {
@@ -6239,11 +6850,33 @@ pub fn injectMaskChannel(session: *Session, channel: usize, mask: *const [segmen
     }
 }
 
+/// Sets the CPU person mask a harmonize.pass measures its region statistics from,
+/// so the harness can prove the transfer without a running segmenter.
+pub fn injectPersonMaskCpu(session: *Session, mask: *const [segmentation.mask_len]f32) void {
+    if (session.person_mask.len != segmentation.mask_len) return;
+    @memcpy(session.person_mask, mask);
+    session.person_mask_valid = true;
+}
+
 /// How many of the active lens's particle nodes run on the GPU compute path,
 /// so the harness can prove the GPU sim was taken rather than the CPU fallback.
 pub fn activeGpuParticleSims(session: ?*Session) u32 {
     const s = session orelse return 0;
     return @intCast(s.gpu_particle_sims.count());
+}
+
+/// Sets how many heavy inference workers the session admits at once; the harness
+/// drives the enhance-stack budget down to prove a lens past it stays bounded.
+pub fn setMlWorkerBudget(session: ?*Session, budget: u32) void {
+    const s = session orelse return;
+    s.ml_worker_budget = budget;
+}
+
+/// How many heavy inference workers the active lens loaded, so the harness can
+/// prove the budget capped a stacked enhance chain.
+pub fn mlWorkerCount(session: ?*Session) u32 {
+    const s = session orelse return 0;
+    return s.ml_workers_loaded;
 }
 
 /// Reads the index-th submitted face. invalid_argument once index reaches
@@ -6339,6 +6972,122 @@ pub export fn goss_session_submit_depth(session: ?*Session, depth: ?[*]const f32
     return .ok;
 }
 
+/// Submits the camera intrinsics an undistort.pass corrects for: the focal
+/// lengths and principal point in pixels of the submitted frame, and the radial
+/// distortion coefficients (k1, k2 read; further terms ignored). A zero focal
+/// length or zero coefficient count clears them, leaving an undistort.pass inert.
+pub export fn goss_session_submit_camera_intrinsics(session: ?*Session, fx: f32, fy: f32, cx: f32, cy: f32, distortion: ?[*]const f32, distortion_len: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (fx <= 0 or fy <= 0 or distortion_len == 0) {
+        s.intrinsics_set = false;
+        s.intrinsics_k1 = 0;
+        s.intrinsics_k2 = 0;
+        return .ok;
+    }
+    const coeffs = distortion orelse return .invalid_argument;
+    s.intrinsics_k1 = coeffs[0];
+    s.intrinsics_k2 = if (distortion_len >= 2) coeffs[1] else 0;
+    s.intrinsics_cx = cx;
+    s.intrinsics_cy = cy;
+    s.intrinsics_aspect = fx / fy;
+    s.intrinsics_set = true;
+    return .ok;
+}
+
+/// Feeds one gravity sample (a unit-ish device orientation vector) with its
+/// timestamp. A rolling.pass reads the image-plane angular velocity this derives
+/// from consecutive samples; the host submits one per frame from the IMU.
+pub export fn goss_session_submit_orientation(session: ?*Session, gravity_x: f32, gravity_y: f32, gravity_z: f32, timestamp_us: i64) Status {
+    const s = session orelse return .invalid_argument;
+    var g = [3]f32{ gravity_x, gravity_y, gravity_z };
+    const mag = @sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+    if (mag < 1e-4) {
+        s.orientation_set = false;
+        s.orientation_have_prev = false;
+        s.orientation_omega = .{ 0, 0 };
+        return .ok;
+    }
+    for (&g) |*v| v.* /= mag;
+    s.orientation_set = true;
+    if (s.orientation_have_prev) {
+        const dt_us = timestamp_us - s.orientation_prev_ts;
+        if (dt_us > 0) {
+            const dt: f32 = @as(f32, @floatFromInt(dt_us)) / 1_000_000.0;
+            // The gravity direction's drift in the image plane over dt is the
+            // rate the sensor's rows skew by, the per-scanline motion the
+            // correction counters.
+            s.orientation_omega = .{ (g[0] - s.orientation_prev[0]) / dt, (g[1] - s.orientation_prev[1]) / dt };
+        }
+    }
+    s.orientation_prev = g;
+    s.orientation_prev_ts = timestamp_us;
+    s.orientation_have_prev = true;
+    return .ok;
+}
+
+/// Feeds one NV12 exposure into every bracket-source temporal.fuse ring, each
+/// distinct exposure a distinct timestamp so the ring keeps them all. The fusion
+/// publishes once the ring holds a full bracket.
+fn feedBracket(s: *Session, conversion: math.color.Conversion, width: u32, height: u32, y_plane: [*]const u8, y_stride: u32, uv_plane: [*]const u8, uv_stride: u32) void {
+    s.bracket_seq += 1;
+    for (s.temporal_workers.items) |tw| {
+        if (!tw.is_bracket) continue;
+        ml_infer.temporalSubmitNv12(tw.worker, width, height, s.bracket_seq, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+}
+
+/// Submits one NV12 exposure of an HDR bracket, fed only to bracket-source
+/// temporal.fuse nodes (the live camera feeds the rest). Again when no bracket
+/// node is active.
+pub export fn goss_session_submit_frame_bracket(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const y_plane = y orelse return .invalid_argument;
+    const uv_plane = uv orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
+    if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
+    var has_bracket = false;
+    for (s.temporal_workers.items) |tw| {
+        if (tw.is_bracket) has_bracket = true;
+    }
+    if (!has_bracket) return .again;
+    const standard: math.color.Standard = switch (d.color_standard) {
+        1 => .bt709,
+        2 => .bt2020,
+        else => .bt601,
+    };
+    const range: math.color.Range = if (d.color_range == 1) .full else .video;
+    feedBracket(s, math.color.yuvToRgb(standard, range), d.width, d.height, y_plane, y_stride, uv_plane, uv_stride);
+    return .ok;
+}
+
+/// Submits one RGBA exposure of an HDR bracket (width*height*4 bytes, row-major),
+/// converted to NV12 and fed to bracket-source temporal.fuse nodes. Again when no
+/// bracket node is active.
+pub export fn goss_session_submit_frame_bracket_rgba(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const pixels = rgba orelse return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    var has_bracket = false;
+    for (s.temporal_workers.items) |tw| {
+        if (tw.is_bracket) has_bracket = true;
+    }
+    if (!has_bracket) return .again;
+    const gpa = s.engine.gpa;
+    const w: usize = width;
+    const h: usize = height;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    const y_out = gpa.alloc(u8, w * h) catch return .out_of_memory;
+    defer gpa.free(y_out);
+    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return .out_of_memory;
+    defer gpa.free(uv_out);
+    image.argbToNv12(pixels[0 .. w * h * 4], @intCast(w), @intCast(h), .bt601, .video, y_out, uv_out) catch return .unsupported;
+    feedBracket(s, math.color.yuvToRgb(.bt601, .video), width, height, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
+    return .ok;
+}
+
 /// Segments a host-provided still RGBA image: converts it to NV12 and feeds
 /// the running segmenter, so the next render picks up the mask the same way a
 /// camera frame would. again when no segmenter is enabled.
@@ -6365,6 +7114,212 @@ pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?
 
 /// The mean RGB (0..1) of a reference image sampled at a landmark loop's
 /// points by nearest pixel, standing in for that face part's makeup color.
+/// The side of the square RGB thumbnail an auto-enhance pass reads: small enough
+/// that the per-frame reduction is a fixed handful of thousands of samples.
+const thumb_side = 32;
+
+/// How many heavy inference workers a session admits at once by default, the cap
+/// that keeps a lens stacking many nets from overheating the device.
+const default_ml_worker_budget: u32 = 8;
+
+/// Downsamples an NV12 frame into the session's RGB thumb, sampling the Y and UV
+/// planes at a thumb_side grid and converting each with the frame's color map.
+/// Bounded and CPU-only, so an auto-enhance pass has whole-frame statistics
+/// without a GPU readback.
+fn fillFrameThumbNv12(s: *Session, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32, width: u32, height: u32, conv: math.color.Conversion) void {
+    for (0..thumb_side) |ty| {
+        const sy = (ty * height) / thumb_side;
+        for (0..thumb_side) |tx| {
+            const sx = (tx * width) / thumb_side;
+            const yv = @as(f32, @floatFromInt(y[sy * y_stride + sx])) / 255.0;
+            const uo = (sy / 2) * uv_stride + (sx / 2) * 2;
+            const uu = @as(f32, @floatFromInt(uv[uo])) / 255.0;
+            const vv = @as(f32, @floatFromInt(uv[uo + 1])) / 255.0;
+            const rgb = conv.apply(.{ yv, uu, vv });
+            const o = (ty * thumb_side + tx) * 3;
+            s.frame_thumb[o + 0] = std.math.clamp(rgb[0], 0, 1);
+            s.frame_thumb[o + 1] = std.math.clamp(rgb[1], 0, 1);
+            s.frame_thumb[o + 2] = std.math.clamp(rgb[2], 0, 1);
+        }
+    }
+    s.thumb_valid = true;
+}
+
+/// The gray-world white balance and auto-levels an awb.pass applies, estimated
+/// from the frame thumb: per-channel gains that pull the average toward neutral,
+/// and the luma black and white points to stretch. Identity when the thumb is
+/// flat or absent.
+const AwbEstimate = struct { gains: [3]f32, black: f32, white: f32 };
+
+const HarmonizeStats = struct { fg_mean: [3]f32, fg_std: [3]f32, bg_mean: [3]f32, bg_std: [3]f32 };
+
+const InpaintParams = struct { channel: u8, radius: f32 };
+
+/// Per-channel mean and standard deviation of the person (foreground) and the
+/// rest of the frame (background), read from the frame thumb with the CPU person
+/// mask sampled at each thumb pixel. A region with no samples falls back to a
+/// mid-gray so the Reinhard transfer leaves it unchanged.
+fn computeHarmonizeStats(s: *const Session, mask_side: usize) HarmonizeStats {
+    var fg_sum = [3]f64{ 0, 0, 0 };
+    var fg_sq = [3]f64{ 0, 0, 0 };
+    var bg_sum = [3]f64{ 0, 0, 0 };
+    var bg_sq = [3]f64{ 0, 0, 0 };
+    var fg_n: f64 = 0;
+    var bg_n: f64 = 0;
+    for (0..thumb_side) |ty| {
+        const my = (ty * mask_side) / thumb_side;
+        for (0..thumb_side) |tx| {
+            const mx = (tx * mask_side) / thumb_side;
+            const fg = s.person_mask[my * mask_side + mx] > 0.5;
+            const o = (ty * thumb_side + tx) * 3;
+            inline for (0..3) |ch| {
+                const v: f64 = s.frame_thumb[o + ch];
+                if (fg) {
+                    fg_sum[ch] += v;
+                    fg_sq[ch] += v * v;
+                } else {
+                    bg_sum[ch] += v;
+                    bg_sq[ch] += v * v;
+                }
+            }
+            if (fg) fg_n += 1 else bg_n += 1;
+        }
+    }
+    var out: HarmonizeStats = undefined;
+    inline for (0..3) |ch| {
+        out.fg_mean[ch] = momentMean(fg_sum[ch], fg_n);
+        out.fg_std[ch] = momentStd(fg_sum[ch], fg_sq[ch], fg_n);
+        out.bg_mean[ch] = momentMean(bg_sum[ch], bg_n);
+        out.bg_std[ch] = momentStd(bg_sum[ch], bg_sq[ch], bg_n);
+    }
+    return out;
+}
+
+fn momentMean(sum: f64, n: f64) f32 {
+    if (n <= 0) return 0.5;
+    return @floatCast(sum / n);
+}
+
+fn momentStd(sum: f64, sq: f64, n: f64) f32 {
+    if (n <= 0) return 0.2;
+    const m = sum / n;
+    return @floatCast(@sqrt(@max(sq / n - m * m, 0)));
+}
+
+fn estimateAwb(thumb: []const f32) AwbEstimate {
+    var sum = [3]f32{ 0, 0, 0 };
+    var lmin: f32 = 1;
+    var lmax: f32 = 0;
+    const n = thumb.len / 3;
+    for (0..n) |i| {
+        const r = thumb[i * 3 + 0];
+        const g = thumb[i * 3 + 1];
+        const b = thumb[i * 3 + 2];
+        sum[0] += r;
+        sum[1] += g;
+        sum[2] += b;
+        const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+        lmin = @min(lmin, luma);
+        lmax = @max(lmax, luma);
+    }
+    const fn_: f32 = @floatFromInt(n);
+    const mr = sum[0] / fn_;
+    const mg = sum[1] / fn_;
+    const mb = sum[2] / fn_;
+    const gray = (mr + mg + mb) / 3.0;
+    // Gains pull each channel mean to the shared gray, clamped so a near-zero
+    // channel mean cannot blow the gain up.
+    const gain = struct {
+        fn f(mean: f32, target: f32) f32 {
+            if (mean < 0.02) return 1;
+            return std.math.clamp(target / mean, 0.25, 4.0);
+        }
+    }.f;
+    return .{ .gains = .{ gain(mr, gray), gain(mg, gray), gain(mb, gray) }, .black = lmin, .white = lmax };
+}
+
+/// Estimates the global translation between two grayscale thumbs by one
+/// Lucas-Kanade solve over the whole frame: the (u, v) that best explains the
+/// intensity change, in thumb pixels. This is the backward flow, pointing
+/// opposite the content motion. Zero when the frame is too flat to solve.
+fn globalTranslation(prev: []const f32, curr: []const f32, side: usize) [2]f32 {
+    var a11: f32 = 0;
+    var a12: f32 = 0;
+    var a22: f32 = 0;
+    var b1: f32 = 0;
+    var b2: f32 = 0;
+    const last = side - 1;
+    for (1..last) |y| {
+        for (1..last) |x| {
+            const i = y * side + x;
+            const ix = (curr[i + 1] - curr[i - 1]) * 0.5;
+            const iy = (curr[i + side] - curr[i - side]) * 0.5;
+            const it = curr[i] - prev[i];
+            a11 += ix * ix;
+            a12 += ix * iy;
+            a22 += iy * iy;
+            b1 += ix * it;
+            b2 += iy * it;
+        }
+    }
+    const det = a11 * a22 - a12 * a12;
+    if (!(det > 1e-3)) return .{ 0, 0 };
+    const u = (a22 * b1 - a12 * b2) / det;
+    const v = (a11 * b2 - a12 * b1) / det;
+    if (!(u == u) or !(v == v)) return .{ 0, 0 };
+    const cap: f32 = @floatFromInt(side / 4);
+    return .{ std.math.clamp(u, -cap, cap), std.math.clamp(v, -cap, cap) };
+}
+
+/// The smoothing a stabilization level applies: the low-pass factor toward the
+/// raw camera path (smaller is smoother) and the crop margin the correction
+/// stays within, so a stabilized frame never samples past its own edge.
+const StabTuning = struct { alpha: f32, margin: f32 };
+
+fn stabTuning(level: u32) ?StabTuning {
+    return switch (level) {
+        1 => .{ .alpha = 0.08, .margin = 0.10 },
+        2 => .{ .alpha = 0.03, .margin = 0.16 },
+        else => null,
+    };
+}
+
+/// Advances the electronic stabilizer one frame from the frame thumb: estimates
+/// the global motion by Lucas-Kanade, integrates it into the camera path,
+/// low-passes that into a smoothed path, and stores the residual UV shift a
+/// stabilize.pass applies. Inert until the recording policy asks for it.
+fn updateStabilization(s: *Session) void {
+    const tuning = stabTuning(s.recording_policy.stabilization) orelse {
+        s.stab_have_prev = false;
+        s.stab_shift = .{ 0, 0 };
+        return;
+    };
+    var curr_gray: [thumb_side * thumb_side]f32 = undefined;
+    for (0..thumb_side * thumb_side) |i| {
+        const o = i * 3;
+        curr_gray[i] = 0.299 * s.frame_thumb[o] + 0.587 * s.frame_thumb[o + 1] + 0.114 * s.frame_thumb[o + 2];
+    }
+    if (!s.stab_have_prev) {
+        @memcpy(&s.stab_prev_gray, &curr_gray);
+        s.stab_have_prev = true;
+        s.stab_shift = .{ 0, 0 };
+        return;
+    }
+    const bf = globalTranslation(&s.stab_prev_gray, &curr_gray, thumb_side);
+    // The backward flow points opposite the content motion; negate it for the
+    // frame-to-frame camera motion in thumb pixels, then integrate and smooth.
+    s.stab_cum[0] += -bf[0];
+    s.stab_cum[1] += -bf[1];
+    s.stab_smooth[0] += (s.stab_cum[0] - s.stab_smooth[0]) * tuning.alpha;
+    s.stab_smooth[1] += (s.stab_cum[1] - s.stab_smooth[1]) * tuning.alpha;
+    const side_f: f32 = @floatFromInt(thumb_side);
+    s.stab_shift = .{
+        std.math.clamp((s.stab_smooth[0] - s.stab_cum[0]) / side_f, -tuning.margin, tuning.margin),
+        std.math.clamp((s.stab_smooth[1] - s.stab_cum[1]) / side_f, -tuning.margin, tuning.margin),
+    };
+    @memcpy(&s.stab_prev_gray, &curr_gray);
+}
+
 fn averageLoopColor(rgba: []const u8, width: u32, height: u32, lm: [*]const f32, loop: []const u16) [3]f32 {
     var sum: [3]f32 = .{ 0, 0, 0 };
     var n: f32 = 0;
@@ -6863,6 +7818,13 @@ fn pollSegmentationMask(session: *Session) void {
     clearSegmentationTextures(session);
     session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, &mask);
 
+    // A harmonize.pass measures its region statistics from the CPU mask, so keep
+    // a copy when one is active.
+    if (session.wants_person_mask and session.person_mask.len == mask.len) {
+        @memcpy(session.person_mask, &mask);
+        session.person_mask_valid = true;
+    }
+
     // Class channels upload only when a consumer of the active lens names
     // them, shader or outline or tint, and the active model's label order
     // maps to them; the person channel (index zero) rides the subject
@@ -7219,6 +8181,25 @@ fn destroyBlendState(session: *Session) void {
     session.env_textures.clearRetainingCapacity();
     // grade.pass and bloom.pass hold only plain params, nothing to free.
     session.grade_params.clearRetainingCapacity();
+    session.grade_masks.clearRetainingCapacity();
+    session.dehaze_params.clearRetainingCapacity();
+    session.relight_params.clearRetainingCapacity();
+    session.glare_params.clearRetainingCapacity();
+    session.vignette_params.clearRetainingCapacity();
+    session.lowlight_params.clearRetainingCapacity();
+    session.undistort_params.clearRetainingCapacity();
+    session.awb_params.clearRetainingCapacity();
+    session.stabilize_params.clearRetainingCapacity();
+    session.zoom_params.clearRetainingCapacity();
+    session.dereflect_params.clearRetainingCapacity();
+    session.harmonize_params.clearRetainingCapacity();
+    session.inpaint_params.clearRetainingCapacity();
+    session.rolling_params.clearRetainingCapacity();
+    session.auto_frame_valid = false;
+    session.audio_enhance_strength = 0;
+    session.voice_pitch = 1;
+    session.wants_person_mask = false;
+    session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
@@ -7284,6 +8265,7 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
     session.sprite_masks.clearRetainingCapacity();
+    session.sprite_mask_strength_params.clearRetainingCapacity();
     session.model_controls.clearRetainingCapacity();
     var anim_it = session.sprite_anims.valueIterator();
     while (anim_it.next()) |anim| {
@@ -7437,6 +8419,8 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyMeshFaceState(session);
     destroyModelState(session);
     destroyMlWorkers(session);
+    destroyTemporalWorkers(session);
+    destroyAudioWorkers(session);
     destroyDiffusionWorkers(session);
     destroySplatWorkers(session);
     destroyChainOrder(session);
@@ -7616,6 +8600,8 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
 
 const audio_sample_rate: u32 = 48000;
 const audio_channels: u32 = 1;
+/// The delay-line length a voice.transform pitch shifter sweeps over, per channel.
+const voice_delay_len: usize = 1024;
 
 /// Frees the lens mixer and its decoded sounds. Safe with no audio active.
 fn destroySounds(s: *Session) void {
@@ -7716,6 +8702,64 @@ pub export fn goss_compile_prompt(engine: ?*Engine, prompt: ?[*]const u8, prompt
     return .ok;
 }
 
+/// Reads the latest caption an audio.infer node decoded, by the node's id. Writes
+/// up to capacity bytes of UTF-8 into out and the full length into out_len (so a
+/// caller can size a buffer), and returns again when the named node has no
+/// caption binding or no caption yet.
+pub export fn goss_session_caption_text(session: ?*Session, node_id: ?[*]const u8, node_id_len: usize, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const id_ptr = node_id orelse return .invalid_argument;
+    const id = id_ptr[0..node_id_len];
+    for (s.audio_workers.items) |aw| {
+        if (!(aw.has_caption or aw.has_translate) or !std.mem.eql(u8, aw.node_id, id)) continue;
+        const n = aw.caption_len;
+        if (out_len) |ol| ol.* = n;
+        if (out) |o| {
+            const m = @min(n, capacity);
+            @memcpy(o[0..m], aw.caption_buf[0..m]);
+        }
+        return .ok;
+    }
+    return .again;
+}
+
+/// Reads one recent diarized caption segment's metadata by index, 0 the newest.
+/// The text is read separately through goss_session_caption_segment_text. Again
+/// when the index is past the segments held.
+pub export fn goss_session_caption_segment(session: ?*Session, index: u32, out: ?*CaptionSegment) Status {
+    const s = session orelse return .invalid_argument;
+    const dst = out orelse return .invalid_argument;
+    if (index >= s.caption_seg_count) return .again;
+    const slot = (s.caption_seg_pos + caption_seg_ring - 1 - index) % caption_seg_ring;
+    const seg = &s.caption_segments[slot];
+    dst.* = .{ .start_us = seg.start_us, .end_us = seg.end_us, .speaker = seg.speaker, .text_len = @intCast(seg.text_len) };
+    return .ok;
+}
+
+/// Reads one recent diarized caption segment's text by index, 0 the newest. Again
+/// when the index is past the segments held.
+pub export fn goss_session_caption_segment_text(session: ?*Session, index: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (index >= s.caption_seg_count) return .again;
+    const slot = (s.caption_seg_pos + caption_seg_ring - 1 - index) % caption_seg_ring;
+    const seg = &s.caption_segments[slot];
+    if (out_len) |ol| ol.* = seg.text_len;
+    if (out) |o| {
+        const m = @min(seg.text_len, capacity);
+        @memcpy(o[0..m], seg.text[0..m]);
+    }
+    return .ok;
+}
+
+/// Enables or disables on-device dubbing: when on, a dub-bound audio.infer node
+/// synthesizes its decoded caption or translation to speech and plays it into the
+/// lens mixer. Off by default; a host turns it on for a translated voice-over.
+pub export fn goss_session_set_dubbing(session: ?*Session, enabled: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.dubbing_enabled = enabled != 0;
+    return .ok;
+}
+
 /// Pulls the next block of mixed lens audio (frames * channels, s16) for the
 /// SDK to play. Silence when no lens sound is active.
 pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: u32) Status {
@@ -7752,6 +8796,7 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
     // bounded chunk at a time, then sum with the mic. A missing mixer (no lens
     // sound) mixes silence, so the outgoing track is the mic alone.
     var lens_chunk: [1024]i16 = undefined;
+    var enhanced_buf: [1024 * 8]f32 = undefined;
     var done: u32 = 0;
     while (done < frame_count) {
         const n = @min(@as(u32, lens_chunk.len), frame_count - done);
@@ -7768,7 +8813,17 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
         }
         const base = @as(usize, done) * channels;
         const span = @as(usize, n) * channels;
-        const mic_chunk: ?[]const f32 = if (mic_slice) |m| m[base .. base + span] else null;
+        // An active audio.enhance node cleans the mic chunk and a voice.transform
+        // node pitch-shifts it before it is summed with the lens voices; with
+        // neither the raw mic passes straight through.
+        const mic_chunk: ?[]const f32 = blk: {
+            const raw = if (mic_slice) |m| m[base .. base + span] else break :blk null;
+            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1) break :blk raw;
+            @memcpy(enhanced_buf[0..span], raw);
+            if (s.audio_enhance_strength > 0) enhanceMic(s, enhanced_buf[0..span], n, channels);
+            if (s.voice_pitch != 1) voiceTransformMic(s, enhanced_buf[0..span], n, channels);
+            break :blk enhanced_buf[0..span];
+        };
         audio_mix.combine(lens, mic_chunk, out_slice[base .. base + span], n, channels);
         done += n;
     }
@@ -7789,6 +8844,19 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // activated from raw json, as on the web, gets its post-effects. Nodes
     // that need packaged assets stay not-ready until a directory load.
     createGradeParams(s, gpa) catch {};
+    createDehazeParams(s, gpa) catch {};
+    createRelightParams(s, gpa) catch {};
+    createGlareParams(s, gpa) catch {};
+    createVignetteParams(s, gpa) catch {};
+    createLowLightParams(s, gpa) catch {};
+    createUndistortParams(s, gpa) catch {};
+    createAwbParams(s, gpa) catch {};
+    createStabilizeParams(s, gpa) catch {};
+    createZoomParams(s, gpa) catch {};
+    createDereflectParams(s, gpa) catch {};
+    createHarmonizeParams(s, gpa) catch {};
+    createInpaintParams(s, gpa) catch {};
+    createRollingParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -7857,6 +8925,157 @@ fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(grades);
     for (grades) |g| {
         session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
+        if (g.mask_channel) |channel| session.grade_masks.put(gpa, g.graph_index, channel) catch {};
+    }
+}
+
+/// Resolves every spliced dehaze.pass node's strength into session.dehaze_params
+/// once at activation - mirrors createGradeParams, no asset or loader.
+fn createDehazeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.dehazePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.dehaze_params.put(gpa, n.graph_index, n.strength) catch {};
+    }
+}
+
+/// Resolves every spliced relight.pass node's directional light into
+/// session.relight_params once at activation - mirrors createDehazeParams.
+fn createRelightParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.relightPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.relight_params.put(gpa, n.graph_index, n.params) catch {};
+    }
+}
+
+/// Resolves every spliced glare.pass node's rolloff into session.glare_params
+/// once at activation - mirrors createDehazeParams.
+fn createGlareParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.glarePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.glare_params.put(gpa, n.graph_index, .{ n.strength, n.threshold }) catch {};
+    }
+}
+
+/// Resolves every spliced vignette.pass node's radial gain into
+/// session.vignette_params once at activation - mirrors createGlareParams.
+fn createVignetteParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.vignettePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.vignette_params.put(gpa, n.graph_index, .{ n.strength, n.radius }) catch {};
+    }
+}
+
+/// Resolves every spliced lowlight.pass node's lift and denoise into
+/// session.lowlight_params once at activation - mirrors createVignetteParams.
+fn createLowLightParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.lowlightPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.lowlight_params.put(gpa, n.graph_index, .{ n.strength, n.denoise }) catch {};
+    }
+}
+
+/// Resolves every spliced undistort.pass node's correction strength into
+/// session.undistort_params once at activation - mirrors createLowLightParams.
+fn createUndistortParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.undistortPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.undistort_params.put(gpa, n.graph_index, n.strength) catch {};
+    }
+}
+
+/// Resolves every spliced awb.pass node's blend strength into session.awb_params
+/// once at activation - mirrors createUndistortParams.
+fn createAwbParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.awbPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.awb_params.put(gpa, n.graph_index, n.strength) catch {};
+    }
+}
+
+/// Resolves every spliced stabilize.pass node's blend strength into
+/// session.stabilize_params once at activation - mirrors createAwbParams.
+fn createStabilizeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.stabilizePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.stabilize_params.put(gpa, n.graph_index, n.strength) catch {};
+    }
+}
+
+/// Resolves every spliced zoom.pass node's magnify into session.zoom_params once
+/// at activation - mirrors createStabilizeParams.
+fn createZoomParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.zoomPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.zoom_params.put(gpa, n.graph_index, .{ n.factor, n.cx, n.cy }) catch {};
+    }
+}
+
+/// Resolves every spliced dereflect.pass node's strength into
+/// session.dereflect_params once at activation - mirrors createZoomParams.
+fn createDereflectParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.dereflectPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.dereflect_params.put(gpa, n.graph_index, n.strength) catch {};
+    }
+}
+
+/// Resolves every spliced harmonize.pass node's (strength, direction) into
+/// session.harmonize_params once at activation, and asks the segmenter for a CPU
+/// person mask so the region statistics can be measured on the host thread.
+fn createHarmonizeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.harmonizePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    if (nodes.len == 0) return;
+    for (nodes) |n| {
+        const dir: f32 = @floatFromInt(n.direction);
+        session.harmonize_params.put(gpa, n.graph_index, .{ n.strength, dir }) catch {};
+    }
+    session.wants_person_mask = true;
+    if (session.person_mask.len != segmentation.mask_len) {
+        session.person_mask = gpa.alloc(f32, segmentation.mask_len) catch return;
+    }
+}
+
+/// Resolves every spliced inpaint.pass node's removal channel and radius into
+/// session.inpaint_params once at activation - mirrors createDereflectParams.
+fn createInpaintParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.inpaintPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.inpaint_params.put(gpa, n.graph_index, .{ .channel = n.mask_channel, .radius = n.radius }) catch {};
+    }
+}
+
+/// Resolves every spliced rolling.pass node's strength and readout into
+/// session.rolling_params once at activation - mirrors createInpaintParams.
+fn createRollingParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.rollingPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.rolling_params.put(gpa, n.graph_index, .{ n.strength, n.readout }) catch {};
     }
 }
 
@@ -8499,7 +9718,10 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
         }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
-        if (sprite.mask_channel) |channel| session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over }) catch {};
+        if (sprite.mask_channel) |channel| {
+            session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over, .strength = sprite.mask_strength }) catch {};
+            if (sprite.mask_strength_param.len > 0) session.sprite_mask_strength_params.put(gpa, sprite.graph_index, sprite.mask_strength_param) catch {};
+        }
         // An animated GIF upgrades the node to a video texture; a node with no
         // GIF falls through to the still or image-sequence PNG path.
         if (tryStartGifSprite(session, gpa, bundle_path, sprite)) continue;
@@ -8915,6 +10137,96 @@ fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     };
 }
 
+/// One second of mono audio at 48 kHz, the largest window an audio.infer model
+/// may read from the ring.
+const audio_ring_len: usize = 48000;
+
+/// The most bytes a decoded caption holds.
+const caption_max: usize = 512;
+
+/// The count of recent diarized caption segments the ring holds for read-back.
+const caption_seg_ring: usize = 16;
+
+/// One diarized caption segment held on the session: the text a speaker spoke and
+/// the times it spanned, an owned copy so the reader is not racing the worker.
+const SegmentEntry = struct {
+    start_us: i64 = 0,
+    end_us: i64 = 0,
+    speaker: u32 = 0,
+    text: [caption_max]u8 = undefined,
+    text_len: usize = 0,
+};
+
+/// The POD view of a diarized caption segment an SDK reads back. Layout: 24 bytes,
+/// static-asserted below.
+pub const CaptionSegment = extern struct {
+    start_us: i64,
+    end_us: i64,
+    speaker: u32,
+    text_len: u32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(CaptionSegment) == 24);
+}
+
+/// The largest speaker embedding a diarize binding may cluster.
+const max_embed_dim: usize = 512;
+
+/// One audio.infer worker ready to run: its synchronous inference core, the
+/// output-to-parameter bindings it drives each tick, and an optional caption
+/// binding that CTC-decodes a logits tensor into recognized text.
+const AudioWorker = struct {
+    worker: *ml_infer.AudioInfer,
+    outputs: []const manifest.MlOutput,
+    /// An owned copy of the node's id, so a caption reader finds this worker.
+    node_id: []u8,
+    has_caption: bool = false,
+    caption_tensor: u32 = 0,
+    /// The owned vocab labels, one per CTC class; index 0 is the blank.
+    labels: [][]u8 = &.{},
+    caption_buf: [caption_max]u8 = undefined,
+    caption_len: usize = 0,
+    /// A diarize binding clusters an embedding output into speaker ids: the owned
+    /// speaker-index parameter, the embedding tensor and dimension, the cosine
+    /// match threshold, and a bounded set of unit-vector centroids grown to a cap.
+    has_diarize: bool = false,
+    diarize_tensor: u32 = 0,
+    diarize_threshold: f32 = 0.75,
+    diarize_param: []u8 = &.{},
+    embed_dim: u32 = 0,
+    max_speakers: u32 = 0,
+    centroids: []f32 = &.{},
+    speaker_count: u32 = 0,
+    /// A translate binding runs a greedy autoregressive loop on a second decoder
+    /// model, feeding the encoder memory and the previous token each step and
+    /// detokenizing into caption_buf. tokens are the owned detokenizer strings.
+    has_translate: bool = false,
+    decoder: ?*ml_infer.GenericModel = null,
+    tokens: [][]u8 = &.{},
+    translate_memory_tensor: u32 = 0,
+    translate_max_tokens: u32 = 48,
+    translate_bos: u32 = 0,
+    translate_eos: u32 = 1,
+    onehot_scratch: []f32 = &.{},
+    /// A dub binding synthesizes the decoded text to speech: the TTS model, the
+    /// char-input scratch it feeds, the playback rate, and the last spoken text so
+    /// a repeated caption is not re-spoken every tick.
+    has_dub: bool = false,
+    tts: ?*ml_infer.GenericModel = null,
+    dub_rate: u32 = 22050,
+    dub_char_scratch: []f32 = &.{},
+    dub_last_len: usize = 0,
+    dub_last_buf: [caption_max]u8 = undefined,
+    /// The last caption this worker pushed as a diarized segment, its speaker, and
+    /// the timestamp the next segment starts from, so a segment is emitted once per
+    /// distinct utterance rather than every tick.
+    seg_last_len: usize = 0,
+    seg_last_buf: [caption_max]u8 = undefined,
+    seg_start_us: i64 = 0,
+    last_speaker: u32 = 0,
+};
+
 const MlWorker = struct {
     worker: *ml_infer.MlInfer,
     outputs: []const manifest.MlOutput,
@@ -8946,11 +10258,33 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
     const io = defaultIo();
     for (lens.manifest.nodes) |node| {
         const ml = node.ml orelse continue;
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: ml.infer node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, ml.model }) catch continue;
         defer gpa.free(path);
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
         defer gpa.free(bytes);
-        const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
+        // A two-input model reads a second plane. A temporal model takes the
+        // previous frame; a reference model conditions on a bundled image,
+        // decoded here and sampled by the worker into input 1 (create copies
+        // it, so the decode is freed on this return).
+        const worker = blk: {
+            if (ml.temporal) {
+                break :blk ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, true) catch continue;
+            }
+            if (ml.aux_reference.len > 0) {
+                const ref_path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, ml.aux_reference }) catch continue;
+                defer gpa.free(ref_path);
+                const ref_bytes = std.Io.Dir.cwd().readFileAlloc(io, ref_path, gpa, .limited(4 * 1024 * 1024)) catch continue;
+                defer gpa.free(ref_bytes);
+                const dec = image.decode(gpa, ref_bytes) catch continue;
+                defer gpa.free(dec.rgba);
+                break :blk ml_infer.create(gpa, bytes, .{}, 2, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch continue;
+            }
+            break :blk ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch continue;
+        };
 
         // A mask binding needs the bound tensor to be a square single-channel
         // plane; anything else leaves the node driving only its parameters.
@@ -9024,6 +10358,7 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             ml_infer.destroy(worker);
             return;
         };
+        session.ml_workers_loaded += 1;
     }
 }
 
@@ -9065,6 +10400,567 @@ fn pollMlOutputs(session: *Session) void {
             lens.setParam(out.param, value);
         }
     }
+}
+
+/// Resolves the active lens's audio.enhance and voice.transform nodes into the
+/// session, so the output mix cleans and pitch-shifts the microphone. The last of
+/// each wins; none leaves the mic untouched.
+fn resolveAudioEnhance(session: *Session) void {
+    session.audio_enhance_strength = 0;
+    session.audio_enhance_lp = @splat(0);
+    session.voice_pitch = 1;
+    session.voice_delay = @splat(@splat(0));
+    session.voice_wpos = 0;
+    session.voice_phase = 0;
+    const lens = if (session.active_lens) |*l| l else return;
+    for (lens.manifest.nodes) |node| {
+        if (node.audio_enhance) |ae| {
+            if (ae.strength > session.audio_enhance_strength) session.audio_enhance_strength = ae.strength;
+        }
+        if (node.voice_transform) |vt| session.voice_pitch = vt.pitch;
+    }
+}
+
+/// Cleans one interleaved output chunk's microphone samples in place: a one-pole
+/// low-pass carried per channel across chunks pulls the high-frequency hiss down,
+/// and a soft gate eases the near-silent noise floor toward zero, blended in by
+/// the enhance strength so zero is the raw mic.
+fn enhanceMic(session: *Session, mic: []f32, frame_count: u32, channels: u32) void {
+    const strength = session.audio_enhance_strength;
+    if (strength <= 0) return;
+    const alpha: f32 = 0.35;
+    const gate: f32 = 0.02;
+    for (0..frame_count) |f| {
+        for (0..channels) |c| {
+            const idx = f * channels + c;
+            const x = mic[idx];
+            session.audio_enhance_lp[c] += alpha * (x - session.audio_enhance_lp[c]);
+            var cleaned = session.audio_enhance_lp[c];
+            if (@abs(cleaned) < gate) cleaned *= @abs(cleaned) / gate;
+            mic[idx] = x + (cleaned - x) * strength;
+        }
+    }
+}
+
+/// Pitch-shifts one interleaved output chunk's microphone in place while keeping
+/// its duration, a two-tap delay line swept at the pitch ratio with a constant
+/// power crossfade that hides the wrap. The delay state carries across chunks so
+/// the shift is continuous; a ratio of one is a passthrough.
+fn voiceTransformMic(session: *Session, mic: []f32, frame_count: u32, channels: u32) void {
+    const pitch = session.voice_pitch;
+    if (pitch == 1) return;
+    const n: f32 = @floatFromInt(voice_delay_len);
+    const half = voice_delay_len / 2;
+    for (0..frame_count) |f| {
+        // The two read taps lag the write head by phase and phase+half, each with
+        // a half-sine gain so the pair sums to constant power across the sweep.
+        const phase = session.voice_phase;
+        const g1 = @sin(std.math.pi * phase / n);
+        const phase2 = if (phase + @as(f32, @floatFromInt(half)) >= n) phase + @as(f32, @floatFromInt(half)) - n else phase + @as(f32, @floatFromInt(half));
+        const g2 = @sin(std.math.pi * phase2 / n);
+        const wpos = session.voice_wpos;
+        for (0..channels) |c| {
+            const ci = @min(c, @as(usize, 7));
+            const idx = f * channels + c;
+            session.voice_delay[ci][wpos] = mic[idx];
+            const s1 = tapAt(&session.voice_delay[ci], wpos, phase);
+            const s2 = tapAt(&session.voice_delay[ci], wpos, phase2);
+            mic[idx] = g1 * s1 + g2 * s2;
+        }
+        session.voice_wpos = (wpos + 1) % voice_delay_len;
+        var np = session.voice_phase + (1.0 - pitch);
+        if (np < 0) np += n;
+        if (np >= n) np -= n;
+        session.voice_phase = np;
+    }
+}
+
+/// One linearly-interpolated delay-line tap `delay` samples behind the write head.
+fn tapAt(buf: *const [voice_delay_len]f32, wpos: usize, delay: f32) f32 {
+    const di: usize = @intFromFloat(delay);
+    const frac = delay - @as(f32, @floatFromInt(di));
+    const a = (wpos + voice_delay_len - (di % voice_delay_len)) % voice_delay_len;
+    const b = (a + voice_delay_len - 1) % voice_delay_len;
+    return buf[a] * (1.0 - frac) + buf[b] * frac;
+}
+
+/// Builds an audio inference worker for every audio.infer node from its bundled
+/// model, holding the node's output-to-parameter bindings. Best-effort per node,
+/// counted against the shared heavy-worker budget so the mic rail cannot
+/// oversubscribe the device.
+fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const io = defaultIo();
+    for (lens.manifest.nodes) |node| {
+        const audio = node.audio orelse continue;
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: audio.infer node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, audio.model }) catch continue;
+        defer gpa.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        defer gpa.free(bytes);
+        const worker = ml_infer.audioCreate(gpa, bytes, .{}, 2) catch continue;
+        const node_id = gpa.dupe(u8, node.id) catch {
+            ml_infer.audioDestroy(worker);
+            continue;
+        };
+        // A caption binding loads its vocab labels; a missing labels file leaves
+        // the node driving only its parameters, not captions.
+        var labels: [][]u8 = &.{};
+        var has_caption = false;
+        var caption_tensor: u32 = 0;
+        if (audio.caption) |cap| {
+            if (loadCaptionLabels(gpa, io, bundle_path, cap.labels)) |ls| {
+                labels = ls;
+                has_caption = true;
+                caption_tensor = cap.tensor;
+            }
+        }
+        // A diarize binding allocates the speaker centroids, sized to the
+        // embedding the worker's warm-up discovered; an unusable shape leaves it
+        // driving only its parameters.
+        var has_diarize = false;
+        var diarize_tensor: u32 = 0;
+        var diarize_threshold: f32 = 0.75;
+        var diarize_param: []u8 = &.{};
+        var embed_dim: u32 = 0;
+        var max_speakers: u32 = 0;
+        var centroids: []f32 = &.{};
+        if (audio.diarize) |di| {
+            const dim = ml_infer.audioOutputLen(worker, di.embed_tensor);
+            if (dim > 0 and dim <= max_embed_dim and di.max_speakers > 0) {
+                if (gpa.alloc(f32, dim * di.max_speakers)) |c| {
+                    if (gpa.dupe(u8, di.param)) |p| {
+                        centroids = c;
+                        diarize_param = p;
+                        has_diarize = true;
+                        diarize_tensor = di.embed_tensor;
+                        diarize_threshold = di.threshold;
+                        embed_dim = @intCast(dim);
+                        max_speakers = di.max_speakers;
+                    } else |_| gpa.free(c);
+                } else |_| {}
+            }
+        }
+        // A translate binding loads the decoder step model, the detokenizer, and
+        // the one-hot scratch for the previous token; a missing piece leaves the
+        // node driving only its other bindings.
+        var has_translate = false;
+        var decoder: ?*ml_infer.GenericModel = null;
+        var tokens: [][]u8 = &.{};
+        var onehot: []f32 = &.{};
+        var t_memory_tensor: u32 = 0;
+        var t_max_tokens: u32 = 48;
+        var t_bos: u32 = 0;
+        var t_eos: u32 = 1;
+        if (audio.translate) |tr| tr_blk: {
+            const dec_bytes = readBundleAsset(gpa, bundle_path, tr.decoder) orelse break :tr_blk;
+            defer gpa.free(dec_bytes);
+            const dec = ml_infer.genericCreate(gpa, dec_bytes, .{}, 2) catch break :tr_blk;
+            const toks = loadCaptionLabels(gpa, io, bundle_path, tr.tokens) orelse {
+                ml_infer.genericDestroy(dec);
+                break :tr_blk;
+            };
+            const oh = gpa.alloc(f32, toks.len) catch {
+                freeCaptionLabels(gpa, toks);
+                ml_infer.genericDestroy(dec);
+                break :tr_blk;
+            };
+            decoder = dec;
+            tokens = toks;
+            onehot = oh;
+            has_translate = true;
+            t_memory_tensor = tr.memory_tensor;
+            t_max_tokens = tr.max_tokens;
+            t_bos = tr.bos;
+            t_eos = tr.eos;
+        }
+        // A dub binding loads the text-to-speech model and its char-input scratch.
+        var has_dub = false;
+        var tts: ?*ml_infer.GenericModel = null;
+        var dub_rate: u32 = 22050;
+        var dub_chars: []f32 = &.{};
+        if (audio.dub) |db| dub_blk: {
+            const tts_bytes = readBundleAsset(gpa, bundle_path, db.model) orelse break :dub_blk;
+            defer gpa.free(tts_bytes);
+            const model = ml_infer.genericCreate(gpa, tts_bytes, .{}, 2) catch break :dub_blk;
+            const in_len = ml_infer.genericInputLen(model, 0);
+            if (in_len == 0 or in_len > caption_max) {
+                ml_infer.genericDestroy(model);
+                break :dub_blk;
+            }
+            const chars = gpa.alloc(f32, in_len) catch {
+                ml_infer.genericDestroy(model);
+                break :dub_blk;
+            };
+            tts = model;
+            dub_chars = chars;
+            has_dub = true;
+            dub_rate = db.rate;
+        }
+        session.audio_workers.append(gpa, .{
+            .worker = worker,
+            .outputs = audio.outputs,
+            .node_id = node_id,
+            .has_caption = has_caption,
+            .caption_tensor = caption_tensor,
+            .labels = labels,
+            .has_diarize = has_diarize,
+            .diarize_tensor = diarize_tensor,
+            .diarize_threshold = diarize_threshold,
+            .diarize_param = diarize_param,
+            .embed_dim = embed_dim,
+            .max_speakers = max_speakers,
+            .centroids = centroids,
+            .has_translate = has_translate,
+            .decoder = decoder,
+            .tokens = tokens,
+            .translate_memory_tensor = t_memory_tensor,
+            .translate_max_tokens = t_max_tokens,
+            .translate_bos = t_bos,
+            .translate_eos = t_eos,
+            .onehot_scratch = onehot,
+            .has_dub = has_dub,
+            .tts = tts,
+            .dub_rate = dub_rate,
+            .dub_char_scratch = dub_chars,
+        }) catch {
+            freeCaptionLabels(gpa, labels);
+            if (centroids.len > 0) gpa.free(centroids);
+            if (diarize_param.len > 0) gpa.free(diarize_param);
+            if (decoder) |d| ml_infer.genericDestroy(d);
+            freeCaptionLabels(gpa, tokens);
+            if (onehot.len > 0) gpa.free(onehot);
+            if (tts) |dm| ml_infer.genericDestroy(dm);
+            if (dub_chars.len > 0) gpa.free(dub_chars);
+            gpa.free(node_id);
+            ml_infer.audioDestroy(worker);
+            continue;
+        };
+        session.ml_workers_loaded += 1;
+        // The tick reads windows into one scratch, sized once to the ring.
+        if (session.audio_window.len == 0) {
+            session.audio_window = gpa.alloc(f32, audio_ring_len) catch &.{};
+        }
+    }
+}
+
+/// Loads a caption node's vocab: assets/<stem>.txt, one label per line, the CTC
+/// blank first. Returns owned lines, or null when the file is missing or empty.
+fn loadCaptionLabels(gpa: std.mem.Allocator, io: std.Io, bundle_path: []const u8, stem: []const u8) ?[][]u8 {
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.txt", .{ bundle_path, stem }) catch return null;
+    defer gpa.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024)) catch return null;
+    defer gpa.free(bytes);
+    var lines: std.ArrayListUnmanaged([]u8) = .empty;
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |raw| {
+        const line = if (raw.len > 0 and raw[raw.len - 1] == '\r') raw[0 .. raw.len - 1] else raw;
+        const owned = gpa.dupe(u8, line) catch break;
+        lines.append(gpa, owned) catch {
+            gpa.free(owned);
+            break;
+        };
+    }
+    if (lines.items.len == 0) {
+        lines.deinit(gpa);
+        return null;
+    }
+    return lines.toOwnedSlice(gpa) catch {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+        return null;
+    };
+}
+
+fn freeCaptionLabels(gpa: std.mem.Allocator, labels: [][]u8) void {
+    for (labels) |l| gpa.free(l);
+    if (labels.len > 0) gpa.free(labels);
+}
+
+/// Greedy CTC decode of a caption worker's [timesteps, vocab] logits into text:
+/// per timestep take the argmax class, drop the blank (index 0), and collapse
+/// consecutive repeats, mapping the surviving classes to their labels.
+fn decodeCaption(aw: *AudioWorker, logits: []const f32) void {
+    const vocab = aw.labels.len;
+    if (vocab == 0 or logits.len < vocab) {
+        aw.caption_len = 0;
+        return;
+    }
+    const timesteps = logits.len / vocab;
+    var out_len: usize = 0;
+    var prev: usize = std.math.maxInt(usize);
+    var ts: usize = 0;
+    while (ts < timesteps) : (ts += 1) {
+        const base = ts * vocab;
+        var best: usize = 0;
+        var best_v: f32 = logits[base];
+        for (1..vocab) |v| {
+            if (logits[base + v] > best_v) {
+                best_v = logits[base + v];
+                best = v;
+            }
+        }
+        if (best != 0 and best != prev) {
+            const label = aw.labels[best];
+            if (out_len + label.len <= aw.caption_buf.len) {
+                @memcpy(aw.caption_buf[out_len..][0..label.len], label);
+                out_len += label.len;
+            }
+        }
+        prev = best;
+    }
+    aw.caption_len = out_len;
+}
+
+/// Writes a 44-byte canonical mono 16-bit PCM WAV header for `frames` samples at
+/// `rate`, so the synthesized speech decodes through the mixer's memory loader.
+fn writeWavHeader(buf: []u8, frames: u32, rate: u32) void {
+    const data_bytes = frames * 2;
+    @memcpy(buf[0..4], "RIFF");
+    std.mem.writeInt(u32, buf[4..8], 36 + data_bytes, .little);
+    @memcpy(buf[8..12], "WAVE");
+    @memcpy(buf[12..16], "fmt ");
+    std.mem.writeInt(u32, buf[16..20], 16, .little);
+    std.mem.writeInt(u16, buf[20..22], 1, .little); // PCM
+    std.mem.writeInt(u16, buf[22..24], 1, .little); // mono
+    std.mem.writeInt(u32, buf[24..28], rate, .little);
+    std.mem.writeInt(u32, buf[28..32], rate * 2, .little); // byte rate
+    std.mem.writeInt(u16, buf[32..34], 2, .little); // block align
+    std.mem.writeInt(u16, buf[34..36], 16, .little); // bits per sample
+    @memcpy(buf[36..40], "data");
+    std.mem.writeInt(u32, buf[40..44], data_bytes, .little);
+}
+
+/// Wraps a synthesized PCM buffer as a WAV and plays it once through the lens
+/// mixer, creating the mixer on demand, so the dub voice mixes into the output
+/// the SDK pulls the way a play_sound trigger's sound does.
+fn speakPcm(s: *Session, pcm: []const f32, rate: u32) void {
+    const gpa = s.engine.gpa;
+    const frames: usize = pcm.len;
+    if (frames == 0) return;
+    const wav = gpa.alloc(u8, 44 + frames * 2) catch return;
+    defer gpa.free(wav);
+    writeWavHeader(wav, @intCast(frames), rate);
+    for (0..frames) |i| {
+        const v = std.math.clamp(pcm[i], -1, 1);
+        std.mem.writeInt(i16, wav[44 + i * 2 ..][0..2], @intFromFloat(v * 32767.0), .little);
+    }
+    if (s.audio_mixer == null) {
+        s.audio_mixer = audio_playback.Mixer.create(audio_sample_rate, audio_channels) catch return;
+        s.mix_resampler.reset();
+    }
+    const mixer = &s.audio_mixer.?;
+    const id = mixer.loadMemory(wav) catch return;
+    mixer.play(id, false, 1.0);
+}
+
+/// Speaks a dub worker's freshly decoded text: feeds its characters to the TTS
+/// model and plays the synthesized PCM through the mixer, but only when dubbing
+/// is enabled and the text changed, so a held caption is not re-spoken each tick.
+fn runDub(s: *Session, aw: *AudioWorker) void {
+    if (!s.dubbing_enabled) return;
+    const tts = aw.tts orelse return;
+    const n = aw.caption_len;
+    if (n == 0 or aw.dub_char_scratch.len == 0) return;
+    if (n == aw.dub_last_len and std.mem.eql(u8, aw.caption_buf[0..n], aw.dub_last_buf[0..n])) return;
+    @memset(aw.dub_char_scratch, 0);
+    const m = @min(n, aw.dub_char_scratch.len);
+    for (0..m) |i| aw.dub_char_scratch[i] = @as(f32, @floatFromInt(aw.caption_buf[i])) / 255.0;
+    if (!ml_infer.genericWriteFloats(tts, 0, aw.dub_char_scratch)) return;
+    if (!ml_infer.genericInvoke(tts)) return;
+    const pcm = ml_infer.genericOutput(tts, 0);
+    if (pcm.len == 0) return;
+    speakPcm(s, pcm, aw.dub_rate);
+    aw.dub_last_len = n;
+    @memcpy(aw.dub_last_buf[0..n], aw.caption_buf[0..n]);
+}
+
+/// Matches a speaker embedding to a diarize worker's centroids: normalizes it,
+/// takes the nearest centroid by cosine, and either updates that centroid (when
+/// within threshold) and returns its id, allocates a new speaker up to the cap,
+/// or reuses the nearest at the cap. Returns the speaker index.
+fn matchSpeaker(aw: *AudioWorker, emb: []const f32) u32 {
+    const dim = aw.embed_dim;
+    var norm_buf: [max_embed_dim]f32 = undefined;
+    var mag: f32 = 0;
+    for (0..dim) |i| mag += emb[i] * emb[i];
+    mag = @sqrt(mag);
+    if (!(mag > 1e-6)) return 0;
+    for (0..dim) |i| norm_buf[i] = emb[i] / mag;
+    const unit = norm_buf[0..dim];
+    var best_id: u32 = 0;
+    var best_cos: f32 = -2;
+    for (0..aw.speaker_count) |s| {
+        const c = aw.centroids[s * dim ..][0..dim];
+        var dot: f32 = 0;
+        for (0..dim) |i| dot += unit[i] * c[i];
+        if (dot > best_cos) {
+            best_cos = dot;
+            best_id = @intCast(s);
+        }
+    }
+    if (aw.speaker_count > 0 and best_cos >= aw.diarize_threshold) {
+        const c = aw.centroids[best_id * dim ..][0..dim];
+        var m: f32 = 0;
+        for (0..dim) |i| {
+            c[i] += unit[i];
+            m += c[i] * c[i];
+        }
+        m = @sqrt(m);
+        if (m > 1e-6) for (0..dim) |i| {
+            c[i] /= m;
+        };
+        return best_id;
+    }
+    if (aw.speaker_count < aw.max_speakers) {
+        const id = aw.speaker_count;
+        @memcpy(aw.centroids[id * dim ..][0..dim], unit);
+        aw.speaker_count += 1;
+        return id;
+    }
+    return best_id;
+}
+
+/// Runs a translate worker's greedy autoregressive decode: the encoder memory
+/// (the audio.infer output) feeds the decoder step model with the previous token
+/// each step, taking the argmax, until the eos token or max_tokens, detokenizing
+/// the surviving tokens into caption_buf. A fixed-iteration loop, so no hang.
+fn runTranslate(aw: *AudioWorker) void {
+    const dec = aw.decoder orelse return;
+    const memory = ml_infer.audioOutputSlice(aw.worker, aw.translate_memory_tensor);
+    const vocab = aw.tokens.len;
+    if (memory.len == 0 or vocab == 0 or aw.onehot_scratch.len < vocab) return;
+    // The decoder's memory input must match the encoder's memory length.
+    if (ml_infer.genericInputLen(dec, 0) != memory.len) return;
+    var out_len: usize = 0;
+    var prev: u32 = aw.translate_bos;
+    var step: u32 = 0;
+    while (step < aw.translate_max_tokens) : (step += 1) {
+        @memset(aw.onehot_scratch[0..vocab], 0);
+        if (prev < vocab) aw.onehot_scratch[prev] = 1;
+        if (!ml_infer.genericWriteFloats(dec, 0, memory)) break;
+        if (!ml_infer.genericWriteFloats(dec, 1, aw.onehot_scratch[0..vocab])) break;
+        if (!ml_infer.genericInvoke(dec)) break;
+        const logits = ml_infer.genericOutput(dec, 0);
+        if (logits.len == 0) break;
+        var best: u32 = 0;
+        var best_v: f32 = logits[0];
+        for (logits, 0..) |v, i| {
+            if (v > best_v) {
+                best_v = v;
+                best = @intCast(i);
+            }
+        }
+        if (best == aw.translate_eos) break;
+        const tok = if (best < vocab) aw.tokens[best] else "";
+        if (out_len + tok.len <= aw.caption_buf.len) {
+            @memcpy(aw.caption_buf[out_len..][0..tok.len], tok);
+            out_len += tok.len;
+        }
+        prev = best;
+    }
+    aw.caption_len = out_len;
+}
+
+/// Copies the newest `out.len` samples of the microphone ring into `out` in
+/// chronological order (oldest first), zero-padding the front when the ring has
+/// not filled that far yet.
+fn readAudioWindow(session: *const Session, out: []f32) void {
+    const n = out.len;
+    const available = if (session.audio_ring_filled) audio_ring_len else session.audio_ring_pos;
+    for (0..n) |k| {
+        const from_end = n - k; // 1 is the newest sample, n the oldest of the window
+        if (from_end > available) {
+            out[k] = 0;
+            continue;
+        }
+        const idx = (session.audio_ring_pos + audio_ring_len - from_end) % audio_ring_len;
+        out[k] = session.audio_ring[idx];
+    }
+}
+
+/// Runs each audio.infer worker over the latest microphone window and reads its
+/// outputs into the parameters it binds, so the model drives the lens from the
+/// mic the way pollMlOutputs drives it from the camera.
+fn pollAudioInfer(session: *Session) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    for (session.audio_workers.items) |*aw| {
+        const window_len = ml_infer.audioInputLen(aw.worker);
+        if (window_len == 0 or window_len > session.audio_window.len) continue;
+        const window = session.audio_window[0..window_len];
+        readAudioWindow(session, window);
+        if (!ml_infer.audioCompute(aw.worker, window)) continue;
+        for (aw.outputs) |out| {
+            const value: f32 = switch (out.reduce) {
+                .element => ml_infer.audioReadOutput(aw.worker, out.tensor, out.index),
+                .argmax => @floatFromInt(ml_infer.audioArgmax(aw.worker, out.tensor)),
+            };
+            lens.setParam(out.param, value);
+        }
+        if (aw.has_caption) {
+            decodeCaption(aw, ml_infer.audioOutputSlice(aw.worker, aw.caption_tensor));
+        }
+        if (aw.has_diarize) {
+            const emb = ml_infer.audioOutputSlice(aw.worker, aw.diarize_tensor);
+            if (aw.embed_dim > 0 and emb.len >= aw.embed_dim) {
+                aw.last_speaker = matchSpeaker(aw, emb[0..aw.embed_dim]);
+                lens.setParam(aw.diarize_param, @floatFromInt(aw.last_speaker));
+            }
+        }
+        if (aw.has_translate) {
+            runTranslate(aw);
+        }
+        if (aw.has_dub) {
+            runDub(session, aw);
+        }
+        pushCaptionSegment(session, aw);
+    }
+}
+
+/// Records a diarized segment when a captioning or translating worker's decoded
+/// text changes: the utterance, the speaker who spoke it, and the times it
+/// spanned, into the session ring for read-back. Nothing is pushed until the text
+/// changes, so a held caption is one segment, not one per tick.
+fn pushCaptionSegment(session: *Session, aw: *AudioWorker) void {
+    if (!(aw.has_caption or aw.has_translate)) return;
+    if (aw.caption_len == 0) return;
+    const text = aw.caption_buf[0..aw.caption_len];
+    if (aw.seg_last_len == aw.caption_len and std.mem.eql(u8, text, aw.seg_last_buf[0..aw.seg_last_len])) return;
+    var entry: SegmentEntry = .{
+        .start_us = aw.seg_start_us,
+        .end_us = session.audio_timestamp_us,
+        .speaker = if (aw.has_diarize) aw.last_speaker else 0,
+        .text_len = aw.caption_len,
+    };
+    @memcpy(entry.text[0..aw.caption_len], text);
+    session.caption_segments[session.caption_seg_pos] = entry;
+    session.caption_seg_pos = (session.caption_seg_pos + 1) % caption_seg_ring;
+    if (session.caption_seg_count < caption_seg_ring) session.caption_seg_count += 1;
+    @memcpy(aw.seg_last_buf[0..aw.caption_len], text);
+    aw.seg_last_len = aw.caption_len;
+    aw.seg_start_us = session.audio_timestamp_us;
+}
+
+/// Destroys every audio.infer worker, freeing its caption vocab, speaker
+/// centroids, and node id, and clears the list, at lens deactivation.
+fn destroyAudioWorkers(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.audio_workers.items) |aw| {
+        ml_infer.audioDestroy(aw.worker);
+        freeCaptionLabels(gpa, aw.labels);
+        if (aw.centroids.len > 0) gpa.free(aw.centroids);
+        if (aw.diarize_param.len > 0) gpa.free(aw.diarize_param);
+        if (aw.decoder) |d| ml_infer.genericDestroy(d);
+        freeCaptionLabels(gpa, aw.tokens);
+        if (aw.onehot_scratch.len > 0) gpa.free(aw.onehot_scratch);
+        if (aw.tts) |dm| ml_infer.genericDestroy(dm);
+        if (aw.dub_char_scratch.len > 0) gpa.free(aw.dub_char_scratch);
+        gpa.free(aw.node_id);
+    }
+    session.audio_workers.clearRetainingCapacity();
 }
 
 /// Uploads each ml.infer mask binding's output as its channel's mask texture,
@@ -9164,6 +11060,7 @@ fn pollMlStyle(session: *Session) void {
         render.Renderer.updateDynamicBgraTexture(mw.style_tex, @intCast(side), @intCast(side), mw.style_bgra);
         session.ml_style_textures.put(session.engine.gpa, target, mw.style_tex) catch {};
     }
+    pollTemporalStyle(session);
 }
 
 fn destroyMlWorkers(session: *Session) void {
@@ -9180,6 +11077,113 @@ fn destroyMlWorkers(session: *Session) void {
     }
     session.ml_workers.clearRetainingCapacity();
     session.ml_style_textures.clearRetainingCapacity();
+}
+
+const TemporalWorker = struct {
+    worker: *ml_infer.TemporalInfer,
+    /// A bracket-source worker is fed only by the frame-bracket op, so the live
+    /// camera feed skips it; a camera-source worker rides the live feed.
+    is_bracket: bool,
+    target: graph.NodeIndex,
+    style_side: u32,
+    style_f32: []f32,
+    style_bgra: []u8,
+    style_tex: render.TextureHandle,
+};
+
+/// Builds a fusion worker for every temporal.fuse node from its bundled model
+/// and the sprite it draws through. Best-effort per node: a missing, malformed,
+/// or oversized model, or a model whose image inputs do not match the declared
+/// frame count, leaves that node inert.
+fn createTemporalLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const io = defaultIo();
+    for (lens.manifest.nodes) |node| {
+        const tf = node.temporal orelse continue;
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: temporal.fuse node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, tf.model }) catch continue;
+        defer gpa.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        defer gpa.free(bytes);
+        const worker = ml_infer.temporalCreate(gpa, bytes, .{}, 2, tf.frames) catch continue;
+        ml_infer.temporalSetPhase(worker, tf.phase);
+        const target = generativeTargetNodeIndex(lens, gpa, &session.lens_graph, tf.sprite) orelse {
+            ml_infer.temporalDestroy(worker);
+            continue;
+        };
+        const len = ml_infer.temporalStyleLen(worker);
+        const side = isqrt(len / 3);
+        if (!(len > 0 and len % 3 == 0 and side * side == len / 3)) {
+            ml_infer.temporalDestroy(worker);
+            continue;
+        }
+        const style_f32 = gpa.alloc(f32, len) catch {
+            ml_infer.temporalDestroy(worker);
+            continue;
+        };
+        const style_bgra = gpa.alloc(u8, side * side * 4) catch {
+            gpa.free(style_f32);
+            ml_infer.temporalDestroy(worker);
+            continue;
+        };
+        session.temporal_workers.append(gpa, .{
+            .worker = worker,
+            .is_bracket = tf.source == .bracket,
+            .target = target,
+            .style_side = @intCast(side),
+            .style_f32 = style_f32,
+            .style_bgra = style_bgra,
+            .style_tex = .{ .idx = render.invalid_handle },
+        }) catch {
+            gpa.free(style_f32);
+            gpa.free(style_bgra);
+            ml_infer.temporalDestroy(worker);
+            return;
+        };
+        session.ml_workers_loaded += 1;
+    }
+}
+
+/// Uploads each temporal.fuse worker's fused image to the sprite it drives, the
+/// same style-texture rail ml.infer restyle uses. Render-path, like pollMlStyle.
+fn pollTemporalStyle(session: *Session) void {
+    for (session.temporal_workers.items) |*tw| {
+        if (tw.style_f32.len == 0) continue;
+        if (!ml_infer.temporalCopyStyle(tw.worker, tw.style_f32)) continue;
+        const side: usize = tw.style_side;
+        const plane = side * side;
+        const nchw = ml_infer.temporalLayoutIsNchw(tw.worker);
+        for (0..plane) |i| {
+            const rv = if (nchw) tw.style_f32[0 * plane + i] else tw.style_f32[i * 3 + 0];
+            const gv = if (nchw) tw.style_f32[1 * plane + i] else tw.style_f32[i * 3 + 1];
+            const bv = if (nchw) tw.style_f32[2 * plane + i] else tw.style_f32[i * 3 + 2];
+            tw.style_bgra[i * 4 + 0] = floatToU8(bv);
+            tw.style_bgra[i * 4 + 1] = floatToU8(gv);
+            tw.style_bgra[i * 4 + 2] = floatToU8(rv);
+            tw.style_bgra[i * 4 + 3] = 255;
+        }
+        if (tw.style_tex.idx == render.invalid_handle) {
+            tw.style_tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
+        }
+        render.Renderer.updateDynamicBgraTexture(tw.style_tex, @intCast(side), @intCast(side), tw.style_bgra);
+        session.ml_style_textures.put(session.engine.gpa, tw.target, tw.style_tex) catch {};
+    }
+}
+
+fn destroyTemporalWorkers(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.temporal_workers.items) |tw| {
+        if (tw.style_f32.len > 0) gpa.free(tw.style_f32);
+        if (tw.style_bgra.len > 0) gpa.free(tw.style_bgra);
+        if (tw.style_tex.idx != render.invalid_handle) {
+            if (session.engine.renderer) |*r| r.destroyTexture(tw.style_tex);
+        }
+        ml_infer.temporalDestroy(tw.worker);
+    }
+    session.temporal_workers.clearRetainingCapacity();
 }
 
 const SplatWorker = struct {
@@ -9209,9 +11213,13 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     const splats = lens.splatNodes(gpa, &session.lens_graph) catch return;
     defer gpa.free(splats);
     for (splats) |node| {
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: splat.cloud node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
         const bytes = readBundleAsset(gpa, bundle_path, node.model) orelse continue;
         defer gpa.free(bytes);
-        const worker = ml_infer.create(gpa, bytes, .{}, 2) catch continue;
+        const worker = ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch continue;
         const len = ml_infer.outputLen(worker, 0);
         // A colored cloud's model emits xyz then rgb per point, so its output is
         // a multiple of six; a plain one emits xyz only, a multiple of three.
@@ -9240,6 +11248,7 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             ml_infer.destroy(worker);
             continue;
         };
+        session.ml_workers_loaded += 1;
         // Reserve the staging the billboard cloud writes each frame, six vertices
         // of twelve floats per point, so the draw never falls back to a stale mesh.
         reserveFrameStage(session, @as(usize, count) * 6 * 12);
@@ -9349,6 +11358,10 @@ fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
     const lens = if (session.active_lens) |*l| l else return;
     for (lens.manifest.nodes) |node| {
         const df = node.diffusion orelse continue;
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: diffusion node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
         // The encoder is optional: without one the loop starts from seeded noise
         // (text to image) rather than the camera frame (img2img).
         const enc: []u8 = if (df.encoder.len > 0) (readBundleAsset(gpa, bundle_path, df.encoder) orelse continue) else &.{};
@@ -9388,6 +11401,7 @@ fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
             diffusion.destroy(worker);
             return;
         };
+        session.ml_workers_loaded += 1;
     }
 }
 
@@ -9883,10 +11897,30 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createVideoLoaders(session, gpa, bundle_path);
     try createTextTextures(session, gpa);
     try createModelLoaders(session, gpa, bundle_path);
+    // The heavy inference workers (ml.infer, diffusion, splat clouds) share one
+    // per-session budget so a lens stacking many nets cannot oversubscribe the
+    // device and overheat; the count resets before this lens's loaders run.
+    session.ml_workers_loaded = 0;
     createMlLoaders(session, gpa, bundle_path);
+    createTemporalLoaders(session, gpa, bundle_path);
+    createAudioLoaders(session, gpa, bundle_path);
+    resolveAudioEnhance(session);
     createDiffusionLoaders(session, gpa, bundle_path);
     createSplatLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
+    try createDehazeParams(session, gpa);
+    try createRelightParams(session, gpa);
+    try createGlareParams(session, gpa);
+    try createVignetteParams(session, gpa);
+    try createLowLightParams(session, gpa);
+    try createUndistortParams(session, gpa);
+    try createAwbParams(session, gpa);
+    try createStabilizeParams(session, gpa);
+    try createZoomParams(session, gpa);
+    try createDereflectParams(session, gpa);
+    try createHarmonizeParams(session, gpa);
+    try createInpaintParams(session, gpa);
+    try createRollingParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);
@@ -9933,6 +11967,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyMeshFaceState(s);
     destroyModelState(s);
     destroyMlWorkers(s);
+    destroyAudioWorkers(s);
     destroyDiffusionWorkers(s);
     destroySplatWorkers(s);
     destroyChainOrder(s);
@@ -10899,6 +12934,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     // Each model's latest inference lands in its bound parameters first, so a
     // script may read or override it and the effects see this tick's result.
     pollMlOutputs(s);
+    pollAudioInfer(s);
     // The script drives parameters before triggers and ramps read them, so
     // its writes flow into this tick's effects.
     runScript(s, &live_signals);
