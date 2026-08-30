@@ -24,6 +24,7 @@ pub const SignalKind = enum {
     param,
     event,
     geo_in_region,
+    geo_named_region,
     camera_zoom,
     camera_focus,
     camera_exposure,
@@ -56,7 +57,7 @@ pub const SignalKind = enum {
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
         .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
     };
 }
@@ -140,6 +141,10 @@ pub const Signals = struct {
     /// on-device from goss_session_submit_location; the location never crosses
     /// the ABI, only this boolean.
     geo_in_region: bool = false,
+    /// The names of the host's named geofences the current fix is inside, so
+    /// geo.in_region('name') fires for its own place. Empty with no fix or no
+    /// named region matched; borrows the session's store for the tick.
+    geo_regions: []const []const u8 = &.{},
     /// Whether the tracked device is inside the lens's trigger volume, computed
     /// on-device each tick from the submitted world pose and the manifest's
     /// volume region. False with no world tracking or no volume declared.
@@ -253,6 +258,12 @@ fn readBool(s: Signal, signals: Signals) bool {
             return false;
         },
         .geo_in_region => signals.geo_in_region,
+        .geo_named_region => {
+            for (signals.geo_regions) |name| {
+                if (std.mem.eql(u8, name, s.event_name)) return true;
+            }
+            return false;
+        },
         .device_in_volume => signals.device_in_volume,
         .hand_in_region => signals.hand_in_region,
         .camera_focus => signals.camera_focus,
@@ -692,6 +703,12 @@ const Parser = struct {
             return .{ .kind = .world_tracking_state };
         }
         if (std.mem.eql(u8, head, "geo") and std.mem.eql(u8, tail, "in_region")) {
+            // Bare geo.in_region reads the single default geofence; with a name
+            // it reads one of the host's named regions matched at tick.
+            if (self.current == .lparen) {
+                const name = try self.parseCall();
+                return .{ .kind = .geo_named_region, .event_name = try self.arena.dupe(u8, name) };
+            }
             return .{ .kind = .geo_in_region };
         }
         if (std.mem.eql(u8, head, "device") and std.mem.eql(u8, tail, "in_volume")) {
@@ -1109,6 +1126,16 @@ test "geo.in_region reads the on-device membership boolean" {
     defer expr.deinit();
     try t.expect(!evaluate(expr.root, .{}));
     try t.expect(evaluate(expr.root, .{ .geo_in_region = true }));
+}
+
+test "geo.in_region('name') reads its own named region among the matched set" {
+    var expr = try compileOk("geo.in_region('downtown')");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    // The default region boolean does not fire a named check.
+    try t.expect(!evaluate(expr.root, .{ .geo_in_region = true }));
+    try t.expect(!evaluate(expr.root, .{ .geo_regions = &.{"harbor"} }));
+    try t.expect(evaluate(expr.root, .{ .geo_regions = &.{ "harbor", "downtown" } }));
 }
 
 test "hand.in_region reads the on-device fingertip-membership boolean" {

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 70u
+#define GOSS_ABI_MINOR 72u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -815,6 +815,12 @@ goss_status goss_session_clear_geofence(goss_session *session);
 goss_status goss_session_set_geofence_bbox(goss_session *session, double min_lat, double min_lon, double max_lat, double max_lon);
 goss_status goss_session_set_geofence_polygon(goss_session *session, const double *coords, size_t vertex_count);
 goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m);
+/* Named circular geofences alongside the single default one, so a lens fires
+ * geo.in_region('name') for its own place among several. Re-adding a name
+ * replaces its region; the name is copied. clear_named_geofences empties the
+ * set and leaves the default geofence untouched. */
+goss_status goss_session_set_named_geofence(goss_session *session, const uint8_t *name, size_t name_len, double latitude, double longitude, double radius_m);
+goss_status goss_session_clear_named_geofences(goss_session *session);
 
 /* Brush board. The engine owns stroke state and the undo/redo stacks; the app
  * feeds points in normalized screen space and pulls the finished triangle

@@ -998,6 +998,20 @@ export fn Java_com_gosslens_Gosslens_nativeSetGeofencePolygon(env: *JniEnv, cls:
     return @intFromEnum(abi.goss_session_set_geofence_polygon(sessionFromHandle(session), coords, @intCast(@max(vertex_count, 0))));
 }
 
+/// name_buffer is a direct byte buffer of the region name, name_len bytes.
+export fn Java_com_gosslens_Gosslens_nativeSetNamedGeofence(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, latitude: f64, longitude: f64, radius_m: f64) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const name: [*]const u8 = @ptrCast(bytes);
+    return @intFromEnum(abi.goss_session_set_named_geofence(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), latitude, longitude, radius_m));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeClearNamedGeofences(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_clear_named_geofences(sessionFromHandle(session)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSetGeoAccuracy(env: *JniEnv, cls: jobject, session: i64, max_accuracy_m: f32) i32 {
     _ = env;
     _ = cls;

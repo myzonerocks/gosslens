@@ -1227,6 +1227,22 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
+  /// Adds a named circular geofence, so a lens fires geo.in_region('name') for
+  /// its own place among several; re-adding a name replaces its region.
+  setNamedGeofence(name: string, latitude: number, longitude: number, radiusM: number): void {
+    const bytes = new TextEncoder().encode(name);
+    if (bytes.length === 0) return;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    this.mod.HEAPU8.set(bytes, ptr);
+    this.mod.ccall("goss_session_set_named_geofence", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, bytes.length, latitude, longitude, radiusM]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+  }
+
+  /// Clears every named geofence; the default geofence is untouched.
+  clearNamedGeofences(): void {
+    this.mod.ccall("goss_session_clear_named_geofences", "number", ["number"], [this.handle]);
+  }
+
   /// Sets the worst fix accuracy (meters) that still counts as inside a region;
   /// zero clears the gate.
   setGeoAccuracy(maxAccuracyM: number): void {

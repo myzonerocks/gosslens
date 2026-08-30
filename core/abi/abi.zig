@@ -155,6 +155,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_clear_geofence(goss_session *session)",
     "goss_status goss_session_set_geofence_bbox(goss_session *session, double min_lat, double min_lon, double max_lat, double max_lon)",
     "goss_status goss_session_set_geofence_polygon(goss_session *session, const double *coords, size_t vertex_count)",
+    "goss_status goss_session_set_named_geofence(goss_session *session, const uint8_t *name, size_t name_len, double latitude, double longitude, double radius_m)",
+    "goss_status goss_session_clear_named_geofences(goss_session *session)",
     "goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m)",
     "goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)",
     "goss_status goss_session_brush_begin(goss_session *session)",
@@ -523,6 +525,24 @@ pub const GeoRegion = union(enum) {
             .bbox => |b| geo.withinBBox(lat, lon, b.min_lat, b.min_lon, b.max_lat, b.max_lon),
             .polygon => |p| geo.withinPolygon(lat, lon, p.verts[0..p.count]),
         };
+    }
+};
+
+/// The most named geofences a session may hold at once, a name each in the
+/// tick's matched-region view.
+const max_named_geofences: usize = 8;
+const max_geofence_name: usize = 48;
+
+/// A geofence a lens references by name, so a lens fires `geo.in_region('name')`
+/// for its own place among several the host has set. The name is copied into a
+/// fixed buffer, so the caller need not keep its string alive.
+const NamedGeofence = struct {
+    name_buf: [max_geofence_name]u8 = undefined,
+    name_len: u8 = 0,
+    region: GeoRegion,
+
+    fn name(self: *const NamedGeofence) []const u8 {
+        return self.name_buf[0..self.name_len];
     }
 };
 
@@ -1060,6 +1080,10 @@ pub const Session = struct {
     location_accuracy_m: f32 = 0,
     location_engine_fed: bool = false,
     geofence: ?GeoRegion = null,
+    /// Named geofences a lens fires by name, alongside the single default one.
+    /// A location inside a named region lights `geo.in_region('name')`.
+    named_geofences: [max_named_geofences]NamedGeofence = undefined,
+    named_geofence_count: u8 = 0,
     /// The worst fix accuracy that still counts as inside a region. Zero means no
     /// gate: any fix is trusted. A fix reporting a larger radius reads outside.
     geo_required_accuracy_m: f32 = 0,
@@ -6230,6 +6254,40 @@ pub export fn goss_session_set_geo_accuracy(session: ?*Session, max_accuracy_m: 
 pub export fn goss_session_clear_geofence(session: ?*Session) Status {
     const s = session orelse return .invalid_argument;
     s.geofence = null;
+    return .ok;
+}
+
+/// Adds a named circular geofence, so a lens fires `geo.in_region('name')` for
+/// its own place among several the host has set (distinct from the single
+/// default geofence). Re-adding a name replaces its region; the store holds up
+/// to max_named_geofences at once. The name is copied; the caller may free it.
+pub export fn goss_session_set_named_geofence(session: ?*Session, name: ?[*]const u8, name_len: usize, latitude: f64, longitude: f64, radius_m: f64) Status {
+    const s = session orelse return .invalid_argument;
+    const name_ptr = name orelse return .invalid_argument;
+    if (name_len == 0 or name_len > max_geofence_name) return .invalid_argument;
+    if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180 or !(radius_m > 0)) return .invalid_argument;
+    const name_slice = name_ptr[0..name_len];
+    const region: GeoRegion = .{ .circle = .{ .lat = latitude, .lon = longitude, .radius_m = radius_m } };
+    // Replace a same-named region in place, else append if there is room.
+    for (s.named_geofences[0..s.named_geofence_count]) |*ng| {
+        if (std.mem.eql(u8, ng.name(), name_slice)) {
+            ng.region = region;
+            return .ok;
+        }
+    }
+    if (s.named_geofence_count >= max_named_geofences) return .pool_exhausted;
+    var ng: NamedGeofence = .{ .region = region };
+    @memcpy(ng.name_buf[0..name_len], name_slice);
+    ng.name_len = @intCast(name_len);
+    s.named_geofences[s.named_geofence_count] = ng;
+    s.named_geofence_count += 1;
+    return .ok;
+}
+
+/// Clears every named geofence; the default geofence is untouched.
+pub export fn goss_session_clear_named_geofences(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.named_geofence_count = 0;
     return .ok;
 }
 
@@ -13885,13 +13943,26 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
             live_signals.device_in_volume = volumeContains(vol, .{ wfc[12], wfc[13], wfc[14] });
         }
     }
+    var geo_region_view: [max_named_geofences][]const u8 = undefined;
     if (s.location_engine_fed) {
+        // An accuracy gate, when set, refuses a fix vaguer than it asks for,
+        // so a lens does not fire on a location the device is unsure of.
+        const accurate = s.geo_required_accuracy_m == 0 or
+            (s.location_accuracy_m > 0 and s.location_accuracy_m <= s.geo_required_accuracy_m);
         if (s.geofence) |region| {
-            // An accuracy gate, when set, refuses a fix vaguer than it asks for,
-            // so a lens does not fire on a location the device is unsure of.
-            const accurate = s.geo_required_accuracy_m == 0 or
-                (s.location_accuracy_m > 0 and s.location_accuracy_m <= s.geo_required_accuracy_m);
             live_signals.geo_in_region = accurate and region.contains(s.location_lat, s.location_lon);
+        }
+        // Each named region the fix is inside lights geo.in_region('name'); the
+        // names borrow the session's store, valid for this tick only.
+        if (accurate) {
+            var matched: usize = 0;
+            for (s.named_geofences[0..s.named_geofence_count]) |*ng| {
+                if (ng.region.contains(s.location_lat, s.location_lon)) {
+                    geo_region_view[matched] = ng.name();
+                    matched += 1;
+                }
+            }
+            live_signals.geo_regions = geo_region_view[0..matched];
         }
     }
     // The events fired since the last tick reach the triggers for this tick
@@ -14602,6 +14673,36 @@ test "ticking with no active lens reports again; ticking a firing trigger advanc
     try t.expect(session.active_lens.?.param_values[0] < 1.0);
 
     try t.expectEqual(Status.invalid_argument, goss_session_tick_lens(session, 8_333, null));
+}
+
+test "a named geofence fires geo.in_region by name only inside its own region" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const manifest_json =
+        \\{"glf": "1.0", "id": "g", "version": "1.0.0", "display_name": "G", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "grade", "type": "grade.pass", "inputs": {"frame": "camera"}, "params": {}}],
+        \\ "triggers": [{"when": "geo.in_region('downtown')", "action": {"kind": "param_set", "target": "intensity", "to": 1.0}}]}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len));
+
+    // Two named regions; the lens only watches "downtown". A harbor-only fix
+    // leaves the parameter at its default.
+    try t.expectEqual(Status.ok, goss_session_set_named_geofence(session, "downtown", 8, 40.0, -74.0, 100.0));
+    try t.expectEqual(Status.ok, goss_session_set_named_geofence(session, "harbor", 6, 0.0, 0.0, 100.0));
+
+    var signals = std.mem.zeroes(LensSignals);
+    _ = goss_session_submit_location(session, 0.0, 0.0, 5.0, 1000);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
+    try t.expectEqual(@as(f32, 0.0), session.active_lens.?.param_values[0]);
+
+    // A fix at downtown's center lights its region, firing the trigger.
+    _ = goss_session_submit_location(session, 40.0, -74.0, 5.0, 2000);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
+    try t.expectEqual(@as(f32, 1.0), session.active_lens.?.param_values[0]);
 }
 
 test "a script node drives a parameter from a signal" {
