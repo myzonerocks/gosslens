@@ -966,6 +966,13 @@ fixed-iteration bound, so it never hangs), detokenizing the tokens through a
 bundled `tokens` file into the recognized text, read back through the caption ABI
 like any other caption.
 
+An `audio.infer` node may also carry a `"dub"` block, `{"model", "rate"}`, naming
+a bundled text-to-speech model. When the host enables dubbing through the ABI and
+the node's decoded caption or translation changes, the engine feeds the text to
+the model, synthesizes the output PCM to speech, and plays it into the lens mixer
+at `rate`, so the audio the SDK pulls carries the voice-over. Dubbing is off by
+default, since a dub speaks over the room.
+
 An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
 that binds a whole output tensor as a segmentation mask. The tensor is read as
 a square single-channel image, resampled to the engine's mask resolution, and
@@ -1343,7 +1350,9 @@ diarize binding clusters embeddings into speakers, a flat tone and an alternatin
 tone reading as two distinct speakers and the flat tone returning to its own;
 an audio.infer translate binding runs a greedy autoregressive decoder over the
 encoder memory, a synthetic transition decoder walking bos to a to b to eos and
-yielding "ab"; an author ONNX
+yielding "ab"; an audio.infer dub binding synthesizes the decoded caption to
+speech and plays it into the mixer, the pulled audio carrying a voice with
+dubbing on and silent with it off; an author ONNX
 segmenter's output reaches the subject mask channel; an `argmax` reduce reads a
 classifier's predicted class into a parameter; a model output moves a sprite
 through its placement parameters; a restyle net's output image draws through a

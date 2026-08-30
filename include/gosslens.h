@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 60u
+#define GOSS_ABI_MINOR 61u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -892,6 +892,11 @@ goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_
  * into out_len (so a caller can size a buffer). Returns goss_status_again when
  * the named node has no caption binding or has decoded nothing yet. */
 goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* Graph thread. Enables (non-zero) or disables on-device dubbing: when on, a
+ * dub-bound audio.infer node synthesizes its decoded caption or translation to
+ * speech and plays it into the lens mixer. Off by default. */
+goss_status goss_session_set_dubbing(goss_session *session, uint32_t enabled);
 
 /* Graph thread. Folds the active lens sound into the caller's outgoing
  * call/live track: mic (interleaved f32 at sample_rate/channels, or NULL for

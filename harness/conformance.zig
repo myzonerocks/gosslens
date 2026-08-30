@@ -2341,6 +2341,110 @@ fn proveTranslate(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A synthetic text-to-speech model: MatMul(chars[1,16], W[16,256]) yields a PCM
+/// block, so a non-empty caption (its characters) synthesizes a non-zero voice.
+fn buildOnnxDubProbe(a: std.mem.Allocator) []const u8 {
+    const chars_n = 16;
+    const samp = 256;
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, chars_n);
+    w.varintField(1, samp);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..chars_n * samp) |_| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(@as(f32, 0.5)), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const mm = onnxNode(a, "MatMul", &.{ "chars", "W" }, &.{"pcm"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, mm);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "chars", &.{ 1, chars_n }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ chars_n, samp }));
+    g.bytesField(12, onnxValueInfo(a, "pcm", &.{ 1, samp }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a dub lens: an audio.infer node that captions and also dubs, plus the
+/// caption model, the tts model, and the labels file.
+fn writeDubLens(dir: []const u8, caption_model: []const u8, tts_model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.dub","version":"1.0.0","display_name":"Dub","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"caption":{"tensor":0,"labels":"labels"},"dub":{"model":"tts.onnx","rate":22050}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const enc_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(enc_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = enc_path, .data = caption_model });
+    const tts_path = try std.fmt.allocPrint(page, "{s}/assets/tts.onnx", .{dir});
+    defer page.free(tts_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = tts_path, .data = tts_model });
+    const labels_path = try std.fmt.allocPrint(page, "{s}/assets/labels.txt", .{dir});
+    defer page.free(labels_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = labels_path, .data = "_\nh\ni" });
+}
+
+/// Activates the dub lens with dubbing on or off, submits audio while ticking so
+/// the caption decodes and the dub fires, then pulls the mixed lens audio and
+/// returns its total energy.
+fn dubEnergy(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, enabled: u32) !u64 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    _ = abi.goss_session_set_dubbing(session, enabled);
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, 0.3);
+    const signals = std.mem.zeroes(abi.LensSignals);
+    for (0..20) |k| {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + k * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    }
+    var out = [_]i16{0} ** 4096;
+    _ = abi.goss_session_pull_audio(session, &out, 2048);
+    var e: u64 = 0;
+    for (out) |v| e += @abs(@as(i64, v));
+    return e;
+}
+
+/// Proves on-device dubbing: with dubbing enabled a dub-bound audio.infer node
+/// synthesizes its decoded caption to speech and plays it into the lens mixer, so
+/// the pulled audio carries a voice; with dubbing off the same lens is silent.
+fn proveDub(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const caption_model = buildOnnxCaptionProbe(arena.allocator());
+    const tts_model = buildOnnxDubProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dub/assets");
+    try writeDubLens("zig-out/dub", caption_model, tts_model);
+
+    const on = try dubEnergy(gpa, engine, "zig-out/dub", 1);
+    const off = try dubEnergy(gpa, engine, "zig-out/dub", 0);
+    if (on == 0) {
+        std.debug.print("conformance: FAIL dubbing enabled produced no voice in the pulled audio\n", .{});
+        return false;
+    }
+    if (off != 0) {
+        std.debug.print("conformance: FAIL dubbing disabled still played a voice (energy {d})\n", .{off});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a dub binding synthesizes the decoded caption to speech and plays it into the mixer: the pulled audio carries a voice with dubbing on ({d}) and is silent with it off ({d})\n", .{ on, off });
+    return true;
+}
+
 /// Emits an ONNX net that sums the three input channels (a 1x1 conv with unit
 /// weights) then averages the plane, so its one output is the frame's mean
 /// brightness. NCHW input [1,3,8,8] exercises the core's channel transpose.
@@ -15419,6 +15523,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("audio diarize");
     if (!try proveTranslate(gpa, engine)) return 1;
     watchHold("audio translate");
+    if (!try proveDub(gpa, engine)) return 1;
+    watchHold("audio dub");
     if (!try proveMlInferOnnx(gpa, engine)) return 1;
     watchHold("ml infer onnx");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;

@@ -131,6 +131,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)",
     "goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)",
     "goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_set_dubbing(goss_session *session, uint32_t enabled)",
     "goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)",
     "goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)",
@@ -658,6 +659,10 @@ pub const Session = struct {
     /// before handing it to the inference core. Allocated when the first audio
     /// worker loads, sized to the ring.
     audio_window: []f32 = &.{},
+    /// Whether the host has enabled on-device dubbing: a dub-bound audio.infer
+    /// node then synthesizes its decoded text to speech and plays it into the
+    /// lens mixer. Off by default, since a dub speaks over the room.
+    dubbing_enabled: bool = false,
     /// The diffusion restyle workers an active lens's diffusion nodes drive,
     /// each drawing its decoded frame through a sprite; built from the bundle at
     /// activation, fed the camera frame, uploaded to their sprite each render.
@@ -8253,6 +8258,15 @@ pub export fn goss_session_caption_text(session: ?*Session, node_id: ?[*]const u
     return .again;
 }
 
+/// Enables or disables on-device dubbing: when on, a dub-bound audio.infer node
+/// synthesizes its decoded caption or translation to speech and plays it into the
+/// lens mixer. Off by default; a host turns it on for a translated voice-over.
+pub export fn goss_session_set_dubbing(session: ?*Session, enabled: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.dubbing_enabled = enabled != 0;
+    return .ok;
+}
+
 /// Pulls the next block of mixed lens audio (frames * channels, s16) for the
 /// SDK to play. Silence when no lens sound is active.
 pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: u32) Status {
@@ -9622,6 +9636,15 @@ const AudioWorker = struct {
     translate_bos: u32 = 0,
     translate_eos: u32 = 1,
     onehot_scratch: []f32 = &.{},
+    /// A dub binding synthesizes the decoded text to speech: the TTS model, the
+    /// char-input scratch it feeds, the playback rate, and the last spoken text so
+    /// a repeated caption is not re-spoken every tick.
+    has_dub: bool = false,
+    tts: ?*ml_infer.GenericModel = null,
+    dub_rate: u32 = 22050,
+    dub_char_scratch: []f32 = &.{},
+    dub_last_len: usize = 0,
+    dub_last_buf: [caption_max]u8 = undefined,
 };
 
 const MlWorker = struct {
@@ -9892,6 +9915,29 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             t_bos = tr.bos;
             t_eos = tr.eos;
         }
+        // A dub binding loads the text-to-speech model and its char-input scratch.
+        var has_dub = false;
+        var tts: ?*ml_infer.GenericModel = null;
+        var dub_rate: u32 = 22050;
+        var dub_chars: []f32 = &.{};
+        if (audio.dub) |db| dub_blk: {
+            const tts_bytes = readBundleAsset(gpa, bundle_path, db.model) orelse break :dub_blk;
+            defer gpa.free(tts_bytes);
+            const model = ml_infer.genericCreate(gpa, tts_bytes, .{}, 2) catch break :dub_blk;
+            const in_len = ml_infer.genericInputLen(model, 0);
+            if (in_len == 0 or in_len > caption_max) {
+                ml_infer.genericDestroy(model);
+                break :dub_blk;
+            }
+            const chars = gpa.alloc(f32, in_len) catch {
+                ml_infer.genericDestroy(model);
+                break :dub_blk;
+            };
+            tts = model;
+            dub_chars = chars;
+            has_dub = true;
+            dub_rate = db.rate;
+        }
         session.audio_workers.append(gpa, .{
             .worker = worker,
             .outputs = audio.outputs,
@@ -9914,6 +9960,10 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .translate_bos = t_bos,
             .translate_eos = t_eos,
             .onehot_scratch = onehot,
+            .has_dub = has_dub,
+            .tts = tts,
+            .dub_rate = dub_rate,
+            .dub_char_scratch = dub_chars,
         }) catch {
             freeCaptionLabels(gpa, labels);
             if (centroids.len > 0) gpa.free(centroids);
@@ -9921,6 +9971,8 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             if (decoder) |d| ml_infer.genericDestroy(d);
             freeCaptionLabels(gpa, tokens);
             if (onehot.len > 0) gpa.free(onehot);
+            if (tts) |dm| ml_infer.genericDestroy(dm);
+            if (dub_chars.len > 0) gpa.free(dub_chars);
             gpa.free(node_id);
             ml_infer.audioDestroy(worker);
             continue;
@@ -9999,6 +10051,69 @@ fn decodeCaption(aw: *AudioWorker, logits: []const f32) void {
         prev = best;
     }
     aw.caption_len = out_len;
+}
+
+/// Writes a 44-byte canonical mono 16-bit PCM WAV header for `frames` samples at
+/// `rate`, so the synthesized speech decodes through the mixer's memory loader.
+fn writeWavHeader(buf: []u8, frames: u32, rate: u32) void {
+    const data_bytes = frames * 2;
+    @memcpy(buf[0..4], "RIFF");
+    std.mem.writeInt(u32, buf[4..8], 36 + data_bytes, .little);
+    @memcpy(buf[8..12], "WAVE");
+    @memcpy(buf[12..16], "fmt ");
+    std.mem.writeInt(u32, buf[16..20], 16, .little);
+    std.mem.writeInt(u16, buf[20..22], 1, .little); // PCM
+    std.mem.writeInt(u16, buf[22..24], 1, .little); // mono
+    std.mem.writeInt(u32, buf[24..28], rate, .little);
+    std.mem.writeInt(u32, buf[28..32], rate * 2, .little); // byte rate
+    std.mem.writeInt(u16, buf[32..34], 2, .little); // block align
+    std.mem.writeInt(u16, buf[34..36], 16, .little); // bits per sample
+    @memcpy(buf[36..40], "data");
+    std.mem.writeInt(u32, buf[40..44], data_bytes, .little);
+}
+
+/// Wraps a synthesized PCM buffer as a WAV and plays it once through the lens
+/// mixer, creating the mixer on demand, so the dub voice mixes into the output
+/// the SDK pulls the way a play_sound trigger's sound does.
+fn speakPcm(s: *Session, pcm: []const f32, rate: u32) void {
+    const gpa = s.engine.gpa;
+    const frames: usize = pcm.len;
+    if (frames == 0) return;
+    const wav = gpa.alloc(u8, 44 + frames * 2) catch return;
+    defer gpa.free(wav);
+    writeWavHeader(wav, @intCast(frames), rate);
+    for (0..frames) |i| {
+        const v = std.math.clamp(pcm[i], -1, 1);
+        std.mem.writeInt(i16, wav[44 + i * 2 ..][0..2], @intFromFloat(v * 32767.0), .little);
+    }
+    if (s.audio_mixer == null) {
+        s.audio_mixer = audio_playback.Mixer.create(audio_sample_rate, audio_channels) catch return;
+        s.mix_resampler.reset();
+    }
+    const mixer = &s.audio_mixer.?;
+    const id = mixer.loadMemory(wav) catch return;
+    mixer.play(id, false, 1.0);
+}
+
+/// Speaks a dub worker's freshly decoded text: feeds its characters to the TTS
+/// model and plays the synthesized PCM through the mixer, but only when dubbing
+/// is enabled and the text changed, so a held caption is not re-spoken each tick.
+fn runDub(s: *Session, aw: *AudioWorker) void {
+    if (!s.dubbing_enabled) return;
+    const tts = aw.tts orelse return;
+    const n = aw.caption_len;
+    if (n == 0 or aw.dub_char_scratch.len == 0) return;
+    if (n == aw.dub_last_len and std.mem.eql(u8, aw.caption_buf[0..n], aw.dub_last_buf[0..n])) return;
+    @memset(aw.dub_char_scratch, 0);
+    const m = @min(n, aw.dub_char_scratch.len);
+    for (0..m) |i| aw.dub_char_scratch[i] = @as(f32, @floatFromInt(aw.caption_buf[i])) / 255.0;
+    if (!ml_infer.genericWriteFloats(tts, 0, aw.dub_char_scratch)) return;
+    if (!ml_infer.genericInvoke(tts)) return;
+    const pcm = ml_infer.genericOutput(tts, 0);
+    if (pcm.len == 0) return;
+    speakPcm(s, pcm, aw.dub_rate);
+    aw.dub_last_len = n;
+    @memcpy(aw.dub_last_buf[0..n], aw.caption_buf[0..n]);
 }
 
 /// Matches a speaker embedding to a diarize worker's centroids: normalizes it,
@@ -10135,6 +10250,9 @@ fn pollAudioInfer(session: *Session) void {
         if (aw.has_translate) {
             runTranslate(aw);
         }
+        if (aw.has_dub) {
+            runDub(session, aw);
+        }
     }
 }
 
@@ -10150,6 +10268,8 @@ fn destroyAudioWorkers(session: *Session) void {
         if (aw.decoder) |d| ml_infer.genericDestroy(d);
         freeCaptionLabels(gpa, aw.tokens);
         if (aw.onehot_scratch.len > 0) gpa.free(aw.onehot_scratch);
+        if (aw.tts) |dm| ml_infer.genericDestroy(dm);
+        if (aw.dub_char_scratch.len > 0) gpa.free(aw.dub_char_scratch);
         gpa.free(aw.node_id);
     }
     session.audio_workers.clearRetainingCapacity();

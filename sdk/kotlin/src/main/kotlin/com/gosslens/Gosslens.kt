@@ -91,6 +91,7 @@ object Gosslens {
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
     internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
+    internal external fun nativeSetDubbing(session: Long, enabled: Int): Int
     internal external fun nativeSubmitSegmentationImage(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeSetMakeupReference(session: Long, rgba: ByteBuffer, width: Int, height: Int, landmarks: ByteBuffer, count: Int): Int
     internal external fun nativeBodyCount(session: Long): Int
@@ -1070,6 +1071,12 @@ class GossSession private constructor(
         buf.rewind()
         return Gosslens.nativeSubmitCameraIntrinsics(handle, fx, fy, cx, cy, buf, distortion.size) == 0
     }
+
+    /** Enables or disables on-device dubbing: when on, a dub-bound audio.infer
+     * node synthesizes its decoded caption or translation to speech and plays it
+     * into the lens mixer. Off by default; a host turns it on for a voice-over. */
+    fun setDubbing(enabled: Boolean): Boolean =
+        Gosslens.nativeSetDubbing(handle, if (enabled) 1 else 0) == 0
 
     /** The latest caption an audio.infer node decoded, by the node's id, or null
      * when that node has no caption binding or nothing decoded yet. On-device ASR

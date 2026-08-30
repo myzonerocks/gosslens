@@ -1503,6 +1503,13 @@ export class GossSession {
     this.mod.ccall("goss_session_submit_camera_intrinsics", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, fx, fy, cx, cy, ptr, distortion.length]);
   }
 
+  /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer node
+  /// synthesizes its decoded caption or translation to speech and plays it into
+  /// the lens mixer. Off by default; a host turns it on for a voice-over.
+  setDubbing(enabled: boolean): void {
+    this.mod.ccall("goss_session_set_dubbing", "number", ["number", "number"], [this.handle, enabled ? 1 : 0]);
+  }
+
   /// The latest caption an audio.infer node decoded, by the node's id, or null
   /// when that node has no caption binding or nothing decoded yet. On-device ASR
   /// the app can draw as a live subtitle. A length probe sizes the buffer.

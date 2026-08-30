@@ -262,6 +262,13 @@ extension GossSession {
         }
     }
 
+    /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer
+    /// node synthesizes its decoded caption or translation to speech and plays it
+    /// into the lens mixer. Off by default; a host turns it on for a voice-over.
+    public func setDubbing(_ enabled: Bool) throws {
+        try checked(goss_session_set_dubbing(handle, enabled ? 1 : 0))
+    }
+
     /// The latest caption an audio.infer node decoded, by the node's id, or nil
     /// when that node has no caption binding or nothing decoded yet. On-device ASR
     /// the app can draw as a live subtitle. A length probe sizes the buffer.

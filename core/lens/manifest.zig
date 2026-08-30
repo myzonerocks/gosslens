@@ -1007,6 +1007,15 @@ pub const TranslateField = struct {
     eos: u32 = 1,
 };
 
+/// A dub binding on an audio.infer node: a bundled text-to-speech `model` whose
+/// input is the node's decoded caption or translation (its characters) and whose
+/// output is PCM, synthesized and played into the lens mixer at `rate` when the
+/// host enables dubbing and the text changes.
+pub const DubField = struct {
+    model: []const u8,
+    rate: u32 = 22050,
+};
+
 /// An audio.infer node: a bounded author model whose one input is a window of
 /// microphone PCM, the scalar output bindings it drives into parameters (the way
 /// an ml.infer node drives parameters from the camera frame), and an optional
@@ -1017,6 +1026,7 @@ pub const AudioField = struct {
     caption: ?CaptionField = null,
     diarize: ?DiarizeField = null,
     translate: ?TranslateField = null,
+    dub: ?DubField = null,
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -3702,12 +3712,32 @@ fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         }
         path.pop(tmark);
     }
+    var dub: ?DubField = null;
+    if (getField(object, "dub")) |dv| {
+        const dmark = path.push("dub");
+        if (dv != .object) {
+            try diags.add(path.slice(), "audio dub must be an object", .{});
+        } else {
+            const dub_model = if (getField(dv.object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (dub_model.len == 0) {
+                try diags.add(path.slice(), "audio dub needs a model file", .{});
+            } else {
+                var field: DubField = .{ .model = try arena.dupe(u8, dub_model) };
+                if (getField(dv.object, "rate")) |v| {
+                    if (v == .integer and v.integer > 0) field.rate = @intCast(v.integer);
+                }
+                dub = field;
+            }
+        }
+        path.pop(dmark);
+    }
     return .{
         .model = try arena.dupe(u8, model),
         .outputs = try parseMlOutputs(diags, path, arena, object),
         .caption = caption,
         .diarize = diarize,
         .translate = translate,
+        .dub = dub,
     };
 }
 

@@ -1,4 +1,4 @@
-abi 0.60
+abi 0.61
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -116,6 +116,7 @@ fn goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_sess
 fn goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)
 fn goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)
 fn goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_set_dubbing(goss_session *session, uint32_t enabled)
 fn goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)
 fn goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)
 fn goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)

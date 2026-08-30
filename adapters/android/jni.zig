@@ -128,6 +128,12 @@ export fn Java_com_gosslens_Gosslens_nativeCompilePrompt(env: *JniEnv, cls: jobj
     return @intFromEnum(status);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSetDubbing(env: *JniEnv, cls: jobject, session: i64, enabled: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_set_dubbing(sessionFromHandle(session), @intCast(@max(enabled, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeCaptionText(env: *JniEnv, cls: jobject, session: i64, node_id_buffer: jobject, node_id_len: i32, out_buffer: jobject, out_capacity: i64, len_buffer: jobject) i32 {
     _ = cls;
     const node_id = getDirectBufferAddress(env, node_id_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
