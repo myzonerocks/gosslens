@@ -848,6 +848,12 @@ pub const Session = struct {
     occluder_frame_target: ?render.Renderer.OffscreenTarget = null,
     occluder_frame_w: u16 = 0,
     occluder_frame_h: u16 = 0,
+    /// A background gaussian splat cloud draws into this before it is composited
+    /// behind the subject; kept off the chain ping-pong so the composite never
+    /// reads and writes one target at once. Null until a background splat draws.
+    splat_scene_target: ?render.Renderer.OffscreenTarget = null,
+    splat_scene_w: u16 = 0,
+    splat_scene_h: u16 = 0,
     /// cutout.pass nodes by graph index: their background color (rgb) and edge
     /// softness. The face matte keys the frame through, the rest goes flat color.
     cutout_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1516,6 +1522,18 @@ fn ensureOccluderFrame(s: *Session, width: u16, height: u16) !void {
     s.occluder_frame_target = try render.Renderer.createOffscreenTarget(width, height);
     s.occluder_frame_w = width;
     s.occluder_frame_h = height;
+}
+
+/// (Re)creates the session-owned target a background splat cloud draws into
+/// before it composites behind the subject, only on a size change or first use.
+/// Allocated lazily the first time a background splat draws, freed at teardown.
+fn ensureSplatScene(s: *Session, width: u16, height: u16) !void {
+    if (s.splat_scene_w == width and s.splat_scene_h == height and s.splat_scene_target != null) return;
+    if (s.splat_scene_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.splat_scene_target = null;
+    s.splat_scene_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.splat_scene_w = width;
+    s.splat_scene_h = height;
 }
 
 /// (Re)creates the session-owned target a matte.hair source refines the
@@ -3319,7 +3337,33 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         writeSplatGaussians(sw, verts);
                         render.Renderer.updateParticleMeshFaded(mesh, verts);
                     }
-                    r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio);
+                    switch (sw.placement) {
+                        .overlay => r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, null),
+                        .portal => {
+                            // Confine the cloud to a rect: the frame the blit laid
+                            // down shows outside, a window into the splat world.
+                            const sc = portalScissor(sw.portal, rect_w, rect_h);
+                            r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, sc);
+                        },
+                        .background => background: {
+                            // Draw the cloud into a dedicated scene target, then
+                            // composite the frame's subject over it by the subject
+                            // mask, so the splats sit behind as a 3D backdrop.
+                            ensureSplatScene(s, @intCast(rect_w), @intCast(rect_h)) catch {};
+                            const scene_target = s.splat_scene_target orelse {
+                                r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, null);
+                                break :background;
+                            };
+                            render.Renderer.setViewTarget(blit_view, scene_target, rect_w, rect_h);
+                            render.Renderer.setViewTarget(mesh_view, scene_target, rect_w, rect_h);
+                            r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, null);
+                            const blend_view = next_view_id;
+                            next_view_id += 1;
+                            if (output) |target| render.Renderer.setViewTarget(blend_view, target, rect_w, rect_h) else render.Renderer.setViewTarget(blend_view, null, output_width, output_height);
+                            const mask_tex = s.segmentation_texture orelse r.default_mask_texture;
+                            r.submitBlendPass(blend_view, input_texture, scene_target.texture, mask_tex, 1.0);
+                        },
+                    }
                 } else if (mesh_draw) {
                     // Connect the grid of points into a surface and draw it as a
                     // solid 3D mesh over the passed-through frame.
@@ -4355,6 +4399,7 @@ pub fn destroySession(session: *Session) void {
     session.env_params.deinit(session.engine.gpa);
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.occluder_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.splat_scene_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -11326,6 +11371,10 @@ const SplatWorker = struct {
     // rotation quaternion, opacity, and rgb per splat (stride fourteen), each
     // projected to an oriented screen ellipse and composited back-to-front.
     gaussian: bool,
+    // Where a gaussian cloud composites (over the frame, behind the subject, or
+    // inside the portal rect) and, for portal, the rect in normalized coords.
+    placement: manifest.SplatPlacement,
+    portal: [4]f32,
     positions: []f32,
     // Per-frame back-to-front draw order for the gaussian path, allocated once
     // at load and re-sorted each frame; empty for the point and mesh paths.
@@ -11381,6 +11430,8 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .selfie = node.selfie,
             .colored = node.colored,
             .gaussian = node.gaussian,
+            .placement = node.placement,
+            .portal = node.portal,
             .positions = positions,
             .order = order,
         }) catch {
@@ -11479,6 +11530,19 @@ fn writeSplatMesh(positions: []const f32, side: usize, colored: bool, out: []f32
 /// hostile or broken model can never poison a splat's geometry or color.
 fn finiteOr(v: f32, fallback: f32) f32 {
     return if (std.math.isFinite(v)) v else fallback;
+}
+
+/// Converts a portal's normalized rect (x, y, w, h) into a bgfx scissor in
+/// framebuffer pixels (top-left origin), clamped to the target so the window
+/// stays on screen. Used to confine a portal splat cloud to its rect.
+fn portalScissor(rect: [4]f32, w: u32, h: u32) [4]u16 {
+    const fw: f32 = @floatFromInt(w);
+    const fh: f32 = @floatFromInt(h);
+    const x = std.math.clamp(rect[0], 0, 1) * fw;
+    const y = std.math.clamp(rect[1], 0, 1) * fh;
+    const pw = std.math.clamp(rect[2], 0, 1 - std.math.clamp(rect[0], 0, 1)) * fw;
+    const ph = std.math.clamp(rect[3], 0, 1 - std.math.clamp(rect[1], 0, 1)) * fh;
+    return .{ @intFromFloat(x), @intFromFloat(y), @intFromFloat(pw), @intFromFloat(ph) };
 }
 
 /// Expands each gaussian splat into a camera-facing quad shaped by its projected

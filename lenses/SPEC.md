@@ -894,8 +894,8 @@ deterministic synthetic clip so the node still runs.
 
 A `"splat.cloud"` node draws 3D geometry a bundled model lifts from a frame.
 It carries a `"splat": {"model", "source", "draw", "point", "r", "g", "b",
-"colored"}` block: `model` names the net under `assets/`, whose output is a flat
-list of xyz positions (its length a multiple of three, one point per triple).
+"colored", "placement", "portal"}` block: `model` names the net under `assets/`,
+whose output is a flat list of xyz positions (its length a multiple of three).
 With `"colored"` the model emits rgb after xyz per point (its length a multiple
 of six) and each splat draws in its own color instead of the node `r`, `g`, `b`,
 so a photoreal selfie avatar carries the photo's color per point. `"source"`
@@ -911,7 +911,13 @@ opacity, and rgb per splat) and draws real anisotropic gaussian splats: each
 splat's covariance is projected to an oriented screen ellipse, the cloud is sorted
 back-to-front, and the ellipses composite with a premultiplied over-blend weighted
 by opacity, so a splat avatar or scene reads as a soft continuous volume rather
-than loose points. `r`, `g`, `b` are the color. The model runs on the inference rail like any author model, off the frame
+than loose points. `r`, `g`, `b` are the color. For a gaussian cloud, `"placement"`
+picks where it composites: `"overlay"` (the default) over the frame; `"background"`
+behind the segmented subject, so the splats form a 3D backdrop and the subject
+stays in front (it reads the same subject mask the blend and beauty passes do);
+`"portal"` confines the cloud to the `"portal"` rect (`[x, y, w, h]` in normalized
+frame coordinates), a window into the splat world while the frame passes through
+outside it. The model runs on the inference rail like any author model, off the frame
 thread; the engine reads its latest points and draws them in a perspective view,
 so the submitted camera pose orbits the geometry. Until the model produces its
 first points the node holds the frame through, the standard capability

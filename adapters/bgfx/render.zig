@@ -3179,7 +3179,7 @@ pub const Renderer = struct {
     /// draws the pre-oriented gaussian quads (already covariance-shaped and
     /// back-to-front sorted in `mesh`) with a premultiplied over-blend, so the
     /// sorted splats composite into a soft volume over the passed-through frame.
-    pub fn submitSplats(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, aspect_ratio: f32) void {
+    pub fn submitSplats(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, aspect_ratio: f32, scissor: ?[4]u16) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
         const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
@@ -3188,6 +3188,9 @@ pub const Renderer = struct {
         const model = math.Mat4.identity;
         _ = c.bgfx_set_transform(&model.cols, 1);
         c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
+        // A portal confines the splats to a rect; the frame the blit laid down
+        // shows outside it, so the cloud reads as a window into the splat world.
+        if (scissor) |s| _ = c.bgfx_set_scissor(s[0], s[1], s[2], s[3]);
         // Premultiplied over: the fragment already folds opacity and the gaussian
         // tail into rgb, so a back-to-front pass composites the sorted splats.
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_BLEND_FUNC(c.BGFX_STATE_BLEND_ONE, c.BGFX_STATE_BLEND_INV_SRC_ALPHA), 0);

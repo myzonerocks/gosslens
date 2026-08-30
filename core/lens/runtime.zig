@@ -420,6 +420,11 @@ pub const SplatNode = struct {
     /// splat carries a 3D covariance and opacity, projected to an oriented screen
     /// ellipse and composited back-to-front. Takes precedence over mesh.
     gaussian: bool,
+    /// Where a gaussian cloud composites: over the frame, behind the segmented
+    /// subject, or inside the portal rect.
+    placement: manifest.SplatPlacement,
+    /// The portal rect (x, y, w, h) in normalized frame coordinates.
+    portal: [4]f32,
     /// True runs the model once on a submitted selfie (an avatar) rather than the
     /// live camera each tick.
     selfie: bool,
@@ -1542,7 +1547,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .splat_cloud) continue;
             const sf = node.splat orelse continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .gaussian = sf.draw == .gaussian, .selfie = sf.source == .selfie, .colored = sf.colored });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .gaussian = sf.draw == .gaussian, .placement = sf.placement, .portal = sf.portal, .selfie = sf.source == .selfie, .colored = sf.colored });
         }
         return out.toOwnedSlice(gpa);
     }

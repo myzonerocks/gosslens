@@ -6479,15 +6479,16 @@ fn runSelfieSplatRgbaOnce(engine: *abi.Engine, dir: []const u8, rgba: []const u8
     return true;
 }
 
-fn writeSplatGaussianLens(dir: []const u8, model: []const u8) !void {
+fn writeSplatGaussianLens(dir: []const u8, model: []const u8, placement: []const u8, portal: [4]f32) !void {
     const page = std.heap.page_allocator;
-    const manifest_json =
-        \\{"glf":"1.0","id":"goss.reference.splat-gaussian","version":"1.0.0","display_name":"Gaussian Splat","engine_compat":">=0.5","capabilities":[],
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.splat-gaussian","version":"1.0.0","display_name":"Gaussian Splat","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
-        \\ "nodes":[{"id":"cloud","type":"splat.cloud","inputs":{"frame":"camera"},"params":{},
-        \\   "splat":{"model":"splat.onnx","source":"camera","draw":"gaussian","point":8.0}}],
-        \\ "triggers":[]}
-    ;
+        \\ "nodes":[{{"id":"cloud","type":"splat.cloud","inputs":{{"frame":"camera"}},"params":{{}},
+        \\   "splat":{{"model":"splat.onnx","source":"camera","draw":"gaussian","point":8.0,"placement":"{s}","portal":[{d:.3},{d:.3},{d:.3},{d:.3}]}}}}],
+        \\ "triggers":[]}}
+    , .{ placement, portal[0], portal[1], portal[2], portal[3] });
+    defer page.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
@@ -6497,12 +6498,14 @@ fn writeSplatGaussianLens(dir: []const u8, model: []const u8) !void {
 }
 
 /// Activates a gaussian splat lens, waits for the cloud to publish, and captures
-/// the composite over a black frame so the splats read as their own coverage.
-fn runSplatGaussianShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, out_w: *u32, out_h: *u32) ![]u8 {
+/// the composite over a black frame so the splats read as their own coverage. A
+/// non-null mask is injected as the subject channel for a background placement.
+fn runSplatGaussianShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, mask: ?[]const f32, out_w: *u32, out_h: *u32) ![]u8 {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
     if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.SplatActivationFailed;
+    if (mask) |m| abi.injectMaskChannel(session, 0, @ptrCast(m.ptr));
     const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
     const half_w = (planes.width + 1) / 2;
     var polls: usize = 0;
@@ -6582,10 +6585,10 @@ fn proveSplatGaussian(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     inline for (.{ "zig-out/splat-h", "zig-out/splat-v", "zig-out/splat-rb", "zig-out/splat-br" }) |d| {
         try std.Io.Dir.cwd().createDirPath(harness_io, d ++ "/assets");
     }
-    try writeSplatGaussianLens("zig-out/splat-h", model_h);
-    try writeSplatGaussianLens("zig-out/splat-v", model_v);
-    try writeSplatGaussianLens("zig-out/splat-rb", model_rb);
-    try writeSplatGaussianLens("zig-out/splat-br", model_br);
+    try writeSplatGaussianLens("zig-out/splat-h", model_h, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-v", model_v, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-rb", model_rb, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-br", model_br, "overlay", .{ 0, 0, 0, 0 });
 
     const dim: u32 = 320;
     const black_rgba = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
@@ -6596,15 +6599,15 @@ fn proveSplatGaussian(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 
     var w: u32 = 0;
     var h: u32 = 0;
-    const shot_h = try runSplatGaussianShot(gpa, engine, "zig-out/splat-h", black, &w, &h);
+    const shot_h = try runSplatGaussianShot(gpa, engine, "zig-out/splat-h", black, null, &w, &h);
     defer gpa.free(shot_h);
-    const shot_h2 = try runSplatGaussianShot(gpa, engine, "zig-out/splat-h", black, &w, &h);
+    const shot_h2 = try runSplatGaussianShot(gpa, engine, "zig-out/splat-h", black, null, &w, &h);
     defer gpa.free(shot_h2);
-    const shot_v = try runSplatGaussianShot(gpa, engine, "zig-out/splat-v", black, &w, &h);
+    const shot_v = try runSplatGaussianShot(gpa, engine, "zig-out/splat-v", black, null, &w, &h);
     defer gpa.free(shot_v);
-    const shot_rb = try runSplatGaussianShot(gpa, engine, "zig-out/splat-rb", black, &w, &h);
+    const shot_rb = try runSplatGaussianShot(gpa, engine, "zig-out/splat-rb", black, null, &w, &h);
     defer gpa.free(shot_rb);
-    const shot_br = try runSplatGaussianShot(gpa, engine, "zig-out/splat-br", black, &w, &h);
+    const shot_br = try runSplatGaussianShot(gpa, engine, "zig-out/splat-br", black, null, &w, &h);
     defer gpa.free(shot_br);
 
     const n = @as(usize, w) * h * 4;
@@ -6637,6 +6640,120 @@ fn proveSplatGaussian(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a gaussian splat.cloud draws anisotropic sorted splats: the x-elongated covariance reads {d}x{d} and the y-elongated {d}x{d}, and a near red splat composites over a far blue one (r {d} > b {d}), swapping with the depth, bit-stable\n", .{ eh.horiz, eh.vert, ev.horiz, ev.vert, crb[0], crb[2] });
+    return true;
+}
+
+fn sum3(rgb: [3]u8) u32 {
+    return @as(u32, rgb[0]) + rgb[1] + rgb[2];
+}
+
+/// A frame pixel's rgb at a normalized (u, v), for asserting a splat's presence
+/// or absence in a region.
+fn pixelAt(shot: []const u8, w: u32, h: u32, u: f32, v: f32) [3]u8 {
+    const x: usize = @intFromFloat(std.math.clamp(u, 0, 0.999) * @as(f32, @floatFromInt(w)));
+    const y: usize = @intFromFloat(std.math.clamp(v, 0, 0.999) * @as(f32, @floatFromInt(h)));
+    const o = (y * w + x) * 4;
+    return .{ shot[o], shot[o + 1], shot[o + 2] };
+}
+
+/// Proves the splat portal placement: a large gaussian cloud that fills the view
+/// in overlay is confined to a rect in portal mode, so a point outside the rect
+/// falls back to the frame while the rect centre still shows the cloud.
+fn proveSplatPortal(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const model = onnxConstModel(a, &.{ 0, 0, 0, 0.6, 0.6, 0.6, 0, 0, 0, 1, 1.0, 1, 1, 1 });
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/splat-overlay/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/splat-portal/assets");
+    const rect = [4]f32{ 0.35, 0.35, 0.3, 0.3 };
+    try writeSplatGaussianLens("zig-out/splat-overlay", model, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-portal", model, "portal", rect);
+
+    const dim: u32 = 320;
+    const black_rgba = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
+    defer gpa.free(black_rgba);
+    @memset(black_rgba, 0);
+    const black = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = black_rgba }, .width = dim, .height = dim });
+    defer black.deinit(gpa);
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const overlay = try runSplatGaussianShot(gpa, engine, "zig-out/splat-overlay", black, null, &w, &h);
+    defer gpa.free(overlay);
+    const portal = try runSplatGaussianShot(gpa, engine, "zig-out/splat-portal", black, null, &w, &h);
+    defer gpa.free(portal);
+
+    const outside_overlay = sum3(pixelAt(overlay, w, h, 0.08, 0.5));
+    const outside_portal = sum3(pixelAt(portal, w, h, 0.08, 0.5));
+    const inside_portal = sum3(pixelAt(portal, w, h, 0.5, 0.5));
+    if (!(outside_overlay > 120)) {
+        std.debug.print("conformance: FAIL the overlay cloud did not reach the point the portal must clip ({d})\n", .{outside_overlay});
+        return false;
+    }
+    if (!(outside_portal < 40)) {
+        std.debug.print("conformance: FAIL the portal did not clip the cloud outside its rect (lum {d})\n", .{outside_portal});
+        return false;
+    }
+    if (!(inside_portal > 120)) {
+        std.debug.print("conformance: FAIL the portal rect did not show the cloud (lum {d})\n", .{inside_portal});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a portal splat cloud is confined to its rect: a point outside reads {d} in overlay but {d} in portal, while the rect centre stays lit at {d}\n", .{ outside_overlay, outside_portal, inside_portal });
+    return true;
+}
+
+/// Proves the splat background placement: a gaussian cloud drawn behind the
+/// segmented subject, so the subject region shows the frame while the background
+/// region shows the cloud, unlike overlay where the cloud covers the subject too.
+fn proveSplatBackground(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const model = onnxConstModel(a, &.{ 0, 0, 0, 0.8, 0.8, 0.8, 0, 0, 0, 1, 1.0, 0, 1, 0 });
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/splat-bg-overlay/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/splat-bg/assets");
+    try writeSplatGaussianLens("zig-out/splat-bg-overlay", model, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-bg", model, "background", .{ 0, 0, 0, 0 });
+
+    const dim: u32 = 320;
+    const black_rgba = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
+    defer gpa.free(black_rgba);
+    @memset(black_rgba, 0);
+    const black = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = black_rgba }, .width = dim, .height = dim });
+    defer black.deinit(gpa);
+
+    // A vertical band on the left is the subject (mask 1), the right is background
+    // (mask 0); a vertical split so a mask y-flip cannot confound the assertion.
+    const mask = try gpa.alloc(f32, 256 * 256);
+    defer gpa.free(mask);
+    for (0..256) |y| for (0..256) |x| {
+        mask[y * 256 + x] = if (x < 102) 1.0 else 0.0;
+    };
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const overlay = try runSplatGaussianShot(gpa, engine, "zig-out/splat-bg-overlay", black, mask, &w, &h);
+    defer gpa.free(overlay);
+    const bg = try runSplatGaussianShot(gpa, engine, "zig-out/splat-bg", black, mask, &w, &h);
+    defer gpa.free(bg);
+
+    const subject_overlay = pixelAt(overlay, w, h, 0.28, 0.5)[1];
+    const subject_bg = sum3(pixelAt(bg, w, h, 0.28, 0.5));
+    const back_bg = pixelAt(bg, w, h, 0.72, 0.5)[1];
+    if (!(subject_overlay > 100)) {
+        std.debug.print("conformance: FAIL the overlay cloud did not cover the subject region ({d})\n", .{subject_overlay});
+        return false;
+    }
+    if (!(subject_bg < 60)) {
+        std.debug.print("conformance: FAIL the background placement did not keep the subject in front (lum {d})\n", .{subject_bg});
+        return false;
+    }
+    if (!(back_bg > 100)) {
+        std.debug.print("conformance: FAIL the background region did not show the splat cloud (g {d})\n", .{back_bg});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a background splat cloud sits behind the subject: the subject region reads green {d} in overlay but {d} behind the subject in background, while the background region shows the cloud (g {d})\n", .{ subject_overlay, subject_bg, back_bg });
     return true;
 }
 
@@ -17268,6 +17385,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer splat colored");
     if (!try proveSplatGaussian(gpa, engine)) return 1;
     watchHold("splat gaussian");
+    if (!try proveSplatPortal(gpa, engine)) return 1;
+    watchHold("splat portal");
+    if (!try proveSplatBackground(gpa, engine)) return 1;
+    watchHold("splat background");
     if (!try proveMlInferSelfieAvatar(gpa, engine)) return 1;
     watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;

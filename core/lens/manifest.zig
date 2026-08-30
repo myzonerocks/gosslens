@@ -1143,6 +1143,11 @@ pub const DiffusionField = struct {
 
 pub const SplatDraw = enum { points, mesh, gaussian };
 
+/// Where a gaussian splat cloud composites: `overlay` over the frame, `background`
+/// behind the segmented subject (a 3D backdrop), or `portal` confined to a bounded
+/// rect (a window into the splat world). Overlay and portal need no segmenter.
+pub const SplatPlacement = enum { overlay, background, portal };
+
 /// Where a splat.cloud's model reads its input. `camera` lifts the live frame
 /// each tick; `selfie` runs once on a still submitted through the ABI, so a
 /// photoreal avatar is generated from one photo and then held.
@@ -1161,6 +1166,12 @@ pub const SplatField = struct {
     g: f32 = 0.85,
     b: f32 = 0.8,
     colored: bool = false,
+    /// A gaussian cloud's compositing: over the frame, behind the subject, or
+    /// inside the portal rect. Ignored by the points and mesh draws.
+    placement: SplatPlacement = .overlay,
+    /// The portal rect (x, y, w, h) in normalized frame coordinates, used only by
+    /// portal placement; clamped so it stays on screen.
+    portal: [4]f32 = .{ 0.3, 0.2, 0.4, 0.6 },
 };
 
 pub const Node = struct {
@@ -3821,6 +3832,18 @@ fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
     if (getField(object, "b")) |v| field.b = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.b)), 0, 1);
     if (getField(object, "colored")) |v| {
         if (v == .bool) field.colored = v.bool;
+    }
+    if (getField(object, "placement")) |v| {
+        if (try expectString(diags, path, v)) |name| {
+            if (std.mem.eql(u8, name, "overlay")) field.placement = .overlay else if (std.mem.eql(u8, name, "background")) field.placement = .background else if (std.mem.eql(u8, name, "portal")) field.placement = .portal else try diags.add(path.slice(), "splat placement is 'overlay', 'background', or 'portal', found '{s}'", .{name});
+        }
+    }
+    if (getField(object, "portal")) |v| {
+        if (v == .array and v.array.items.len == 4) {
+            for (v.array.items, 0..) |item, i| {
+                field.portal[i] = std.math.clamp(@as(f32, @floatCast(numberOf(item) orelse field.portal[i])), 0, 1);
+            }
+        }
     }
     return field;
 }
