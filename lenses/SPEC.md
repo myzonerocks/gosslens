@@ -212,6 +212,13 @@ the mesh cycles only that segment; with no `clip_range` it plays the full clip,
 and a reversed or empty range is ignored. It applies to every clip the node
 blends, so a split composes with `clip_weights`.
 
+A `model.gltf` node may add `"path": {"points": [[x,y,z], ...], "duration",
+"loop"}` to walk the model along a navigation path: over `duration` seconds it
+moves from waypoint to waypoint at a constant time per segment, interpolating
+linearly between them, then loops back to the start or holds at the last point.
+The path translates the model's animated pose, so a walking clip can play while
+the path drives where the model goes; fewer than two points leaves it in place.
+
 A `model.gltf` node may add `"morph_weights"`: an array of parameter names,
 one per morph target (blendshape) in the order the glTF declares them. Each
 frame the runtime deforms the mesh by the weighted sum of those targets'

@@ -1240,6 +1240,9 @@ pub const Node = struct {
     /// clip into a sub-range the node plays and loops instead of the whole
     /// timeline. Null plays the full clip; an empty or reversed range is ignored.
     clip_range: ?[2]f32 = null,
+    /// model.gltf only: a navigation path the model walks over time; null holds
+    /// the model at its authored transform.
+    path: ?PathField = null,
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
     /// Set only on a dehaze.pass node: its dark-channel dehaze strength.
@@ -1428,6 +1431,15 @@ pub const Light = struct {
     ambient: f32 = 0.1,
     sky: [3]f32 = .{ 1, 1, 1 },
     ground: [3]f32 = .{ 1, 1, 1 },
+};
+
+/// A model.gltf node's navigation path: the model walks its waypoints in order
+/// over `duration` seconds, interpolating linearly between them, then loops or
+/// holds at the last point. Fewer than two points leaves the model in place.
+pub const PathField = struct {
+    points: []const [3]f32 = &.{},
+    duration: f32 = 1,
+    loop: bool = true,
 };
 
 pub const Manifest = struct {
@@ -3672,6 +3684,40 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             path.pop(cr_mark);
         }
 
+        var path_field: ?PathField = null;
+        if (getField(object, "path")) |pv| {
+            const p_mark = path.push("path");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "path is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (pv != .object) {
+                try diags.add(path.slice(), "path must be an object", .{});
+            } else {
+                var pf: PathField = .{};
+                if (getField(pv.object, "points")) |pts_v| {
+                    if (pts_v == .array and pts_v.array.items.len >= 1) {
+                        const pts = try arena.alloc([3]f32, pts_v.array.items.len);
+                        var ok = true;
+                        for (pts_v.array.items, 0..) |pt_v, pi| {
+                            if (!readVec3(pt_v, &pts[pi])) {
+                                try diags.add(path.slice(), "path point must be three numbers", .{});
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if (ok) pf.points = pts;
+                    } else {
+                        try diags.add(path.slice(), "path points must be an array of [x, y, z]", .{});
+                    }
+                }
+                if (getField(pv.object, "duration")) |v| pf.duration = @max(0.001, @as(f32, @floatCast(numberOf(v) orelse pf.duration)));
+                if (getField(pv.object, "loop")) |v| {
+                    if (v == .bool) pf.loop = v.bool;
+                }
+                path_field = pf;
+            }
+            path.pop(p_mark);
+        }
+
         var mask_channel: ?u8 = null;
         if (getField(object, "mask")) |mask_value| {
             const mask_mark = path.push("mask");
@@ -3733,6 +3779,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .particles = particle_field,
             .clip_weights = clip_weights,
             .clip_range = clip_range,
+            .path = path_field,
             .morph_weights = morph_weights,
             .grade = grade_field,
             .dehaze = dehaze_field,

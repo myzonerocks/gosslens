@@ -1412,7 +1412,38 @@ fn materialParams(loaded: LoadedModel) [8]f32 {
     return .{ loaded.emissive[0], loaded.emissive[1], loaded.emissive[2], loaded.metallic, loaded.roughness, 0, 0, 0 };
 }
 
+/// The world position a navigation path reaches at elapsed_seconds: the path is
+/// walked at constant time per segment over its duration, looping or holding at
+/// the last point. Fewer than two points yields the single point or the origin.
+fn pathPosition(path: manifest.PathField, elapsed_seconds: f32) [3]f32 {
+    if (path.points.len == 0) return .{ 0, 0, 0 };
+    if (path.points.len == 1) return path.points[0];
+    const seg_count: f32 = @floatFromInt(path.points.len - 1);
+    const now = if (path.loop) @mod(elapsed_seconds, path.duration) else std.math.clamp(elapsed_seconds, 0, path.duration);
+    const seg_dur = path.duration / seg_count;
+    var seg: usize = @intFromFloat(now / seg_dur);
+    if (seg >= path.points.len - 1) seg = path.points.len - 2;
+    const local = std.math.clamp((now - @as(f32, @floatFromInt(seg)) * seg_dur) / seg_dur, 0, 1);
+    const a = path.points[seg];
+    const b = path.points[seg + 1];
+    return .{ a[0] + (b[0] - a[0]) * local, a[1] + (b[1] - a[1]) * local, a[2] + (b[2] - a[2]) * local };
+}
+
 fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
+    const base = basePoseMatrix(loaded, elapsed_seconds, lens, graph_index);
+    // A navigation path walks the model over time: translate its animated pose
+    // to the path position, so a model with a path moves even with no clip.
+    if (lens) |l| {
+        if (l.navPath(graph_index)) |p| {
+            if (p.points.len >= 2) return math.Mat4.translation(pathPosition(p, elapsed_seconds)).mul(base);
+        }
+    }
+    return base;
+}
+
+/// The model's local clip pose (before a navigation path places it), blending
+/// its animation clips by their weights and splitting to any clip_range.
+fn basePoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
     if (loaded.animations.len == 0) return math.Mat4.identity;
     const bound = if (lens) |l| l.bindsClipWeights(graph_index) else false;
     // A clip_range splits a longer clip into a looping sub-range the node plays.
@@ -13008,6 +13039,35 @@ test "a morphed rest skins to a different pose than the bind rest" {
     try t.expectApproxEqAbs(@as(f32, 10), out_morphed[1][0], 0.001);
     try t.expectApproxEqAbs(@as(f32, 2), out_morphed[1][1], 0.001);
     try t.expect(out_morphed[1][1] != out_bind[1][1]);
+}
+
+test "pathPosition walks its waypoints over time and loops" {
+    const points = [_][3]f32{ .{ 0, 0, 0 }, .{ 10, 0, 0 }, .{ 10, 10, 0 } };
+    const path: manifest.PathField = .{ .points = &points, .duration = 2.0, .loop = true };
+    // Two segments over two seconds, one second each. Start at the first point.
+    var p = pathPosition(path, 0);
+    try t.expectApproxEqAbs(@as(f32, 0), p[0], 0.001);
+    // Halfway along the first segment: x reaches the midpoint.
+    p = pathPosition(path, 0.5);
+    try t.expectApproxEqAbs(@as(f32, 5), p[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0), p[1], 0.001);
+    // The segment boundary lands exactly on the middle waypoint.
+    p = pathPosition(path, 1.0);
+    try t.expectApproxEqAbs(@as(f32, 10), p[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0), p[1], 0.001);
+    // Halfway along the second segment, moving up in y.
+    p = pathPosition(path, 1.5);
+    try t.expectApproxEqAbs(@as(f32, 10), p[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 5), p[1], 0.001);
+    // A full duration wraps back to the start.
+    p = pathPosition(path, 2.0);
+    try t.expectApproxEqAbs(@as(f32, 0), p[0], 0.001);
+
+    // A single waypoint holds there regardless of time.
+    const one = [_][3]f32{.{ 3, 4, 5 }};
+    const held = pathPosition(.{ .points = &one, .duration = 1, .loop = true }, 7.3);
+    try t.expectApproxEqAbs(@as(f32, 3), held[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 5), held[2], 0.001);
 }
 
 test "buildMorphBlendshapeTable maps ARKit names to blendshape indices" {
