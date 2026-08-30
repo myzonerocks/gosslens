@@ -1,4 +1,4 @@
-abi 0.64
+abi 0.66
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -92,6 +92,11 @@ type abi.CaptureUiIntent size=40 align=4
   field screen_flash_warmth offset=28 size=4
   field reserved0 offset=32 size=4
   field reserved1 offset=36 size=4
+type abi.CaptionSegment size=24 align=8
+  field start_us offset=0 size=8
+  field end_us offset=8 size=8
+  field speaker offset=16 size=4
+  field text_len offset=20 size=4
 fn uint32_t goss_abi_version(void)
 fn void *goss_alloc(size_t size)
 fn void goss_free(void *ptr, size_t size)
@@ -116,6 +121,8 @@ fn goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_sess
 fn goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)
 fn goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)
 fn goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_caption_segment(goss_session *session, uint32_t index, goss_caption_segment *out)
+fn goss_status goss_session_caption_segment_text(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)
 fn goss_status goss_session_set_dubbing(goss_session *session, uint32_t enabled)
 fn goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)
 fn goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)

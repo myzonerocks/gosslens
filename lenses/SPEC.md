@@ -1024,7 +1024,10 @@ subtitle. It may also carry a `"diarize"` block, `{"embed_tensor", "max_speakers
 "threshold", "param"}`, that clusters a speaker-embedding output: each embedding
 is cosine-matched against a bounded set of speaker centroids, matching the nearest
 within `threshold` (and updating it) or allocating a new speaker up to
-`max_speakers`, and the matched speaker index drives `param`.
+`max_speakers`, and the matched speaker index drives `param`. Each decoded
+utterance is also recorded as a caption segment, tagged with the speaker who
+spoke it and the times it spanned, into a ring the host reads back through the
+caption-segment ABI as a speaker-tagged transcript.
 
 For translation the node's model is the encoder and a `"translate"` block,
 `{"decoder", "tokens", "memory_tensor", "max_tokens", "bos", "eos"}`, names a
@@ -1489,6 +1492,8 @@ an audio.enhance node cleans the outgoing microphone, a tone buried under
 per-sample hiss losing its high-frequency step energy while a control holds;
 a voice.transform node pitch-shifts the outgoing microphone by its ratio, a
 300 Hz tone's fundamental scaling by 1.5 while the track keeps its length;
+a diarized caption segment lands in the read-back ring, a decoded utterance
+held with the times it spanned and its speaker, metadata and text read apart;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

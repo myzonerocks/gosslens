@@ -5318,6 +5318,53 @@ fn proveVoiceTransform(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the diarized caption segment read-back: a captioning audio.infer node's
+/// decoded utterance lands in the segment ring, tagged with the times it spanned
+/// and read back through the segment ABI, its metadata and text separate.
+fn proveCaptionSegment(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxCaptionProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/caption-seg/assets");
+    try writeCaptionLens("zig-out/caption-seg", model);
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/caption-seg", "zig-out/caption-seg".len) != .ok) return error.ActivationFailed;
+
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, 0.3);
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var seg: abi.CaptionSegment = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_caption_segment(session, 0, &seg) != .ok) : (polls += 1) {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + polls * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        if (polls > 100000) {
+            std.debug.print("conformance: FAIL the caption never landed in the segment ring\n", .{});
+            return false;
+        }
+    }
+    var buf: [256]u8 = undefined;
+    var out_len: usize = 0;
+    if (abi.goss_session_caption_segment_text(session, 0, &buf, buf.len, &out_len) != .ok) {
+        std.debug.print("conformance: FAIL the caption segment text was not readable\n", .{});
+        return false;
+    }
+    if (!(seg.text_len == 2 and out_len == 2 and std.mem.eql(u8, buf[0..out_len], "hi"))) {
+        std.debug.print("conformance: FAIL the caption segment did not carry the decoded text ('{s}', len {d})\n", .{ buf[0..out_len], seg.text_len });
+        return false;
+    }
+    if (!(seg.end_us > seg.start_us)) {
+        std.debug.print("conformance: FAIL the caption segment did not span a time ({d} -> {d})\n", .{ seg.start_us, seg.end_us });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a diarized caption segment lands in the read-back ring: the decoded utterance 'hi' is held with the times it spanned ({d} -> {d}) and its speaker, its metadata and text read back separately\n", .{ seg.start_us, seg.end_us });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -16758,6 +16805,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("audio enhance");
     if (!try proveVoiceTransform(gpa, engine)) return 1;
     watchHold("voice transform");
+    if (!try proveCaptionSegment(gpa, engine)) return 1;
+    watchHold("caption segment");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

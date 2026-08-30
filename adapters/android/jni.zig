@@ -146,6 +146,26 @@ export fn Java_com_gosslens_Gosslens_nativeCaptionText(env: *JniEnv, cls: jobjec
     return @intFromEnum(status);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeCaptionSegment(env: *JniEnv, cls: jobject, session: i64, index: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var seg: abi.CaptionSegment = undefined;
+    const status = abi.goss_session_caption_segment(sessionFromHandle(session), @intCast(@max(index, 0)), &seg);
+    if (status == .ok) @memcpy(bytes[0..@sizeOf(abi.CaptionSegment)], std.mem.asBytes(&seg));
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeCaptionSegmentText(env: *JniEnv, cls: jobject, session: i64, index: i32, out_buffer: jobject, out_capacity: i64, len_buffer: jobject) i32 {
+    _ = cls;
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_len: *align(1) u64 = @ptrCast(len_bytes);
+    const out: ?[*]u8 = getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_session_caption_segment_text(sessionFromHandle(session), @intCast(@max(index, 0)), out, @intCast(@max(out_capacity, 0)), &written);
+    out_len.* = written;
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSessionCreate(env: *JniEnv, cls: jobject, engine: i64, frame_budget_us: i32) i64 {
     _ = env;
     _ = cls;

@@ -105,6 +105,8 @@ object Gosslens {
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
     internal external fun nativeSubmitOrientation(session: Long, gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Int
     internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
+    internal external fun nativeCaptionSegment(session: Long, index: Int, out: ByteBuffer): Int
+    internal external fun nativeCaptionSegmentText(session: Long, index: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
     internal external fun nativeSetDubbing(session: Long, enabled: Int): Int
     internal external fun nativeSubmitSegmentationImage(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeSetMakeupReference(session: Long, rgba: ByteBuffer, width: Int, height: Int, landmarks: ByteBuffer, count: Int): Int
@@ -1118,6 +1120,34 @@ class GossSession private constructor(
         val result = ByteArray(written)
         out.get(result)
         return String(result, Charsets.UTF_8)
+    }
+
+    /** One diarized caption segment: the times it spanned, the speaker who spoke
+     * it, and its text. */
+    data class CaptionSegment(val startUs: Long, val endUs: Long, val speaker: Int, val text: String)
+
+    /** The recent diarized caption segment at [index] (0 the newest), or null when
+     * the index is past the segments held: a speaker-tagged transcript the app can
+     * draw as diarized subtitles. */
+    fun captionSegment(index: Int): CaptionSegment? {
+        val seg = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeCaptionSegment(handle, index, seg) != 0) return null
+        val startUs = seg.getLong(0)
+        val endUs = seg.getLong(8)
+        val speaker = seg.getInt(16)
+        val textLen = seg.getInt(20)
+        var text = ""
+        if (textLen > 0) {
+            val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+            val out = ByteBuffer.allocateDirect(textLen)
+            if (Gosslens.nativeCaptionSegmentText(handle, index, out, textLen.toLong(), len) == 0) {
+                val written = len.getLong(0).toInt()
+                val bytes = ByteArray(written)
+                out.get(bytes)
+                text = String(bytes, Charsets.UTF_8)
+            }
+        }
+        return CaptionSegment(startUs, endUs, speaker, text)
     }
 
     /** Segments a host-provided still image through the running segmenter:

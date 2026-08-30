@@ -1543,6 +1543,35 @@ export class GossSession {
     return result;
   }
 
+  /// The recent diarized caption segment at index (0 the newest), or null when
+  /// the index is past the segments held: the times it spanned, the speaker who
+  /// spoke it, and its text, a speaker-tagged transcript for diarized subtitles.
+  captionSegment(index: number): { startUs: bigint; endUs: bigint; speaker: number; text: string } | null {
+    const segPtr = this.mod.ccall("goss_alloc", "number", ["number"], [24]) as number;
+    const status = this.mod.ccall("goss_session_caption_segment", "number", ["number", "number", "number"], [this.handle, index, segPtr]) as number;
+    if (status !== 0) {
+      this.mod.ccall("goss_free", null, ["number", "number"], [segPtr, 24]);
+      return null;
+    }
+    const dv = new DataView(this.mod.HEAPU8.buffer, segPtr, 24);
+    const startUs = dv.getBigInt64(0, true);
+    const endUs = dv.getBigInt64(8, true);
+    const speaker = dv.getUint32(16, true);
+    const textLen = dv.getUint32(20, true);
+    this.mod.ccall("goss_free", null, ["number", "number"], [segPtr, 24]);
+    let text = "";
+    if (textLen > 0) {
+      const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [textLen]) as number;
+      const st = this.mod.ccall("goss_session_caption_segment_text", "number", ["number", "number", "number", "number", "number"], [this.handle, index, outPtr, textLen, lenPtr]) as number;
+      const written = new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+      if (st === 0) text = new TextDecoder().decode(this.mod.HEAPU8.slice(outPtr, outPtr + written));
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, textLen]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+    return { startUs, endUs, speaker, text };
+  }
+
   /// Segments a host-provided still image through the running segmenter: rgba
   /// is width by height RGBA8 pixels, row major. The mask reaches the active
   /// lens the way a camera frame's would.

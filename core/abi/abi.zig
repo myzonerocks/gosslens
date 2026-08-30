@@ -104,7 +104,7 @@ pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
 // its body - nothing else.
-pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent };
+pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment };
 
 pub const abi_functions = [_][]const u8{
     "uint32_t goss_abi_version(void)",
@@ -131,6 +131,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)",
     "goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)",
     "goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_caption_segment(goss_session *session, uint32_t index, goss_caption_segment *out)",
+    "goss_status goss_session_caption_segment_text(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
     "goss_status goss_session_set_dubbing(goss_session *session, uint32_t enabled)",
     "goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)",
@@ -666,6 +668,15 @@ pub const Session = struct {
     /// before handing it to the inference core. Allocated when the first audio
     /// worker loads, sized to the ring.
     audio_window: []f32 = &.{},
+    /// The timestamp of the latest submitted audio, so a diarized caption segment
+    /// can carry the times it spanned.
+    audio_timestamp_us: i64 = 0,
+    /// A ring of the most recent diarized caption segments, each a decoded caption
+    /// tagged with the speaker who spoke it and the times it spanned, read back
+    /// through the caption-segment ABI. Newest is (pos - 1).
+    caption_segments: [caption_seg_ring]SegmentEntry = @splat(.{}),
+    caption_seg_pos: usize = 0,
+    caption_seg_count: usize = 0,
     /// Whether the host has enabled on-device dubbing: a dub-bound audio.infer
     /// node then synthesizes its decoded text to speech and plays it into the
     /// lens mixer. Off by default, since a dub speaks over the room.
@@ -5185,6 +5196,7 @@ pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f
     const slice = data[0 .. @as(usize, frame_count) * channels];
     s.audio.feed(slice, channels);
     s.audio_engine_fed = true;
+    s.audio_timestamp_us = timestamp_us;
 
     // Downmix each frame to mono and write it into the microphone ring, so an
     // audio.infer worker reads a window of the latest samples off the frame path.
@@ -8711,6 +8723,34 @@ pub export fn goss_session_caption_text(session: ?*Session, node_id: ?[*]const u
     return .again;
 }
 
+/// Reads one recent diarized caption segment's metadata by index, 0 the newest.
+/// The text is read separately through goss_session_caption_segment_text. Again
+/// when the index is past the segments held.
+pub export fn goss_session_caption_segment(session: ?*Session, index: u32, out: ?*CaptionSegment) Status {
+    const s = session orelse return .invalid_argument;
+    const dst = out orelse return .invalid_argument;
+    if (index >= s.caption_seg_count) return .again;
+    const slot = (s.caption_seg_pos + caption_seg_ring - 1 - index) % caption_seg_ring;
+    const seg = &s.caption_segments[slot];
+    dst.* = .{ .start_us = seg.start_us, .end_us = seg.end_us, .speaker = seg.speaker, .text_len = @intCast(seg.text_len) };
+    return .ok;
+}
+
+/// Reads one recent diarized caption segment's text by index, 0 the newest. Again
+/// when the index is past the segments held.
+pub export fn goss_session_caption_segment_text(session: ?*Session, index: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (index >= s.caption_seg_count) return .again;
+    const slot = (s.caption_seg_pos + caption_seg_ring - 1 - index) % caption_seg_ring;
+    const seg = &s.caption_segments[slot];
+    if (out_len) |ol| ol.* = seg.text_len;
+    if (out) |o| {
+        const m = @min(seg.text_len, capacity);
+        @memcpy(o[0..m], seg.text[0..m]);
+    }
+    return .ok;
+}
+
 /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer node
 /// synthesizes its decoded caption or translation to speech and plays it into the
 /// lens mixer. Off by default; a host turns it on for a translated voice-over.
@@ -10104,6 +10144,32 @@ const audio_ring_len: usize = 48000;
 /// The most bytes a decoded caption holds.
 const caption_max: usize = 512;
 
+/// The count of recent diarized caption segments the ring holds for read-back.
+const caption_seg_ring: usize = 16;
+
+/// One diarized caption segment held on the session: the text a speaker spoke and
+/// the times it spanned, an owned copy so the reader is not racing the worker.
+const SegmentEntry = struct {
+    start_us: i64 = 0,
+    end_us: i64 = 0,
+    speaker: u32 = 0,
+    text: [caption_max]u8 = undefined,
+    text_len: usize = 0,
+};
+
+/// The POD view of a diarized caption segment an SDK reads back. Layout: 24 bytes,
+/// static-asserted below.
+pub const CaptionSegment = extern struct {
+    start_us: i64,
+    end_us: i64,
+    speaker: u32,
+    text_len: u32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(CaptionSegment) == 24);
+}
+
 /// The largest speaker embedding a diarize binding may cluster.
 const max_embed_dim: usize = 512;
 
@@ -10152,6 +10218,13 @@ const AudioWorker = struct {
     dub_char_scratch: []f32 = &.{},
     dub_last_len: usize = 0,
     dub_last_buf: [caption_max]u8 = undefined,
+    /// The last caption this worker pushed as a diarized segment, its speaker, and
+    /// the timestamp the next segment starts from, so a segment is emitted once per
+    /// distinct utterance rather than every tick.
+    seg_last_len: usize = 0,
+    seg_last_buf: [caption_max]u8 = undefined,
+    seg_start_us: i64 = 0,
+    last_speaker: u32 = 0,
 };
 
 const MlWorker = struct {
@@ -10833,7 +10906,8 @@ fn pollAudioInfer(session: *Session) void {
         if (aw.has_diarize) {
             const emb = ml_infer.audioOutputSlice(aw.worker, aw.diarize_tensor);
             if (aw.embed_dim > 0 and emb.len >= aw.embed_dim) {
-                lens.setParam(aw.diarize_param, @floatFromInt(matchSpeaker(aw, emb[0..aw.embed_dim])));
+                aw.last_speaker = matchSpeaker(aw, emb[0..aw.embed_dim]);
+                lens.setParam(aw.diarize_param, @floatFromInt(aw.last_speaker));
             }
         }
         if (aw.has_translate) {
@@ -10842,7 +10916,32 @@ fn pollAudioInfer(session: *Session) void {
         if (aw.has_dub) {
             runDub(session, aw);
         }
+        pushCaptionSegment(session, aw);
     }
+}
+
+/// Records a diarized segment when a captioning or translating worker's decoded
+/// text changes: the utterance, the speaker who spoke it, and the times it
+/// spanned, into the session ring for read-back. Nothing is pushed until the text
+/// changes, so a held caption is one segment, not one per tick.
+fn pushCaptionSegment(session: *Session, aw: *AudioWorker) void {
+    if (!(aw.has_caption or aw.has_translate)) return;
+    if (aw.caption_len == 0) return;
+    const text = aw.caption_buf[0..aw.caption_len];
+    if (aw.seg_last_len == aw.caption_len and std.mem.eql(u8, text, aw.seg_last_buf[0..aw.seg_last_len])) return;
+    var entry: SegmentEntry = .{
+        .start_us = aw.seg_start_us,
+        .end_us = session.audio_timestamp_us,
+        .speaker = if (aw.has_diarize) aw.last_speaker else 0,
+        .text_len = aw.caption_len,
+    };
+    @memcpy(entry.text[0..aw.caption_len], text);
+    session.caption_segments[session.caption_seg_pos] = entry;
+    session.caption_seg_pos = (session.caption_seg_pos + 1) % caption_seg_ring;
+    if (session.caption_seg_count < caption_seg_ring) session.caption_seg_count += 1;
+    @memcpy(aw.seg_last_buf[0..aw.caption_len], text);
+    aw.seg_last_len = aw.caption_len;
+    aw.seg_start_us = session.audio_timestamp_us;
 }
 
 /// Destroys every audio.infer worker, freeing its caption vocab, speaker

@@ -290,6 +290,29 @@ extension GossSession {
         return String(decoding: out[0..<written], as: UTF8.self)
     }
 
+    /// One diarized caption segment: the times it spanned, the speaker who spoke
+    /// it (a diarize binding's clustered id), and its text.
+    public struct CaptionSegment {
+        public let startUs: Int64
+        public let endUs: Int64
+        public let speaker: UInt32
+        public let text: String
+    }
+
+    /// The recent diarized caption segment at `index` (0 the newest), or nil when
+    /// the index is past the segments held. A speaker-tagged transcript the app
+    /// can draw as diarized subtitles.
+    public func captionSegment(_ index: UInt32) -> CaptionSegment? {
+        var seg = goss_caption_segment()
+        guard goss_session_caption_segment(handle, index, &seg) == GOSS_OK else { return nil }
+        var out = [UInt8](repeating: 0, count: Int(seg.text_len))
+        var written: Int = 0
+        if seg.text_len > 0 {
+            guard goss_session_caption_segment_text(handle, index, &out, out.count, &written) == GOSS_OK else { return nil }
+        }
+        return CaptionSegment(startUs: seg.start_us, endUs: seg.end_us, speaker: seg.speaker, text: String(decoding: out[0..<written], as: UTF8.self))
+    }
+
     /// Segments a host-provided still image through the running segmenter:
     /// rgba is width by height RGBA8 pixels, row major. The mask reaches the
     /// active lens the way a camera frame's would. Throws again with no

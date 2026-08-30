@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 64u
+#define GOSS_ABI_MINOR 66u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -906,6 +906,26 @@ goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_
  * into out_len (so a caller can size a buffer). Returns goss_status_again when
  * the named node has no caption binding or has decoded nothing yet. */
 goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* One diarized caption segment: the times it spanned, the speaker who spoke it
+ * (a diarize binding's clustered id), and the byte length of its text (read
+ * through goss_session_caption_segment_text). Layout: 24 bytes. */
+typedef struct goss_caption_segment {
+    int64_t start_us;
+    int64_t end_us;
+    uint32_t speaker;
+    uint32_t text_len;
+} goss_caption_segment;
+
+/* Graph thread. Reads one recent diarized caption segment by index (0 the
+ * newest) into out; the text comes through goss_session_caption_segment_text.
+ * Returns goss_status_again when the index is past the segments held. */
+goss_status goss_session_caption_segment(goss_session *session, uint32_t index, goss_caption_segment *out);
+
+/* Graph thread. Reads one recent diarized caption segment's UTF-8 text by index
+ * (0 the newest), up to capacity bytes into out with the full length in out_len.
+ * Returns goss_status_again when the index is past the segments held. */
+goss_status goss_session_caption_segment_text(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len);
 
 /* Graph thread. Enables (non-zero) or disables on-device dubbing: when on, a
  * dub-bound audio.infer node synthesizes its decoded caption or translation to
