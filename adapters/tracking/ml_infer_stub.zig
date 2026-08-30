@@ -53,6 +53,57 @@ pub fn audioOutputSlice(ai: *const AudioInfer, tensor: u32) []const f32 {
     return &.{};
 }
 
+pub const TemporalCore = struct {};
+pub const TemporalInfer = struct {};
+
+pub fn temporalCreate(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, frames: u32) CreateError!*TemporalInfer {
+    _ = gpa;
+    _ = model_bytes;
+    _ = bounds;
+    _ = threads;
+    _ = frames;
+    return error.Unsupported;
+}
+pub fn temporalDestroy(ti: *TemporalInfer) void {
+    _ = ti;
+}
+pub fn temporalSubmitNv12(ti: *TemporalInfer, width: u32, height: u32, timestamp_us: i64, conversion: math.color.Conversion, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) void {
+    _ = ti;
+    _ = width;
+    _ = height;
+    _ = timestamp_us;
+    _ = conversion;
+    _ = y;
+    _ = y_stride;
+    _ = uv;
+    _ = uv_stride;
+}
+pub fn temporalSetPhase(ti: *TemporalInfer, phase: f32) void {
+    _ = ti;
+    _ = phase;
+}
+pub fn temporalHasPublished(ti: *TemporalInfer) bool {
+    _ = ti;
+    return false;
+}
+pub fn temporalCopyStyle(ti: *TemporalInfer, dst: []f32) bool {
+    _ = ti;
+    _ = dst;
+    return false;
+}
+pub fn temporalStyleLen(ti: *const TemporalInfer) usize {
+    _ = ti;
+    return 0;
+}
+pub fn temporalFilled(ti: *const TemporalInfer) u32 {
+    _ = ti;
+    return 0;
+}
+pub fn temporalLayoutIsNchw(ti: *const TemporalInfer) bool {
+    _ = ti;
+    return false;
+}
+
 pub const GenericModel = struct {};
 
 pub fn genericCreate(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*GenericModel {

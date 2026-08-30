@@ -647,6 +647,10 @@ pub const Session = struct {
     /// each holding its output-to-parameter bindings; built from the bundle at
     /// activation, fed the camera frame, read into params each tick.
     ml_workers: std.ArrayListUnmanaged(MlWorker) = .empty,
+    /// The multi-frame fusion workers an active lens's temporal.fuse nodes drive,
+    /// each holding an N-frame ring; built at activation, fed the camera frame (or
+    /// a submitted bracket), their fused image drawn through a sprite.
+    temporal_workers: std.ArrayListUnmanaged(TemporalWorker) = .empty,
     /// The audio inference workers an active lens's audio.infer nodes drive, each
     /// holding its output-to-parameter bindings; built at activation, fed a
     /// window of the microphone ring, read into params each tick.
@@ -4350,6 +4354,8 @@ pub fn destroySession(session: *Session) void {
     session.scene_worker = null;
     destroyMlWorkers(session);
     session.ml_workers.deinit(session.engine.gpa);
+    destroyTemporalWorkers(session);
+    session.temporal_workers.deinit(session.engine.gpa);
     destroyAudioWorkers(session);
     session.audio_workers.deinit(session.engine.gpa);
     if (session.audio_window.len > 0) session.engine.gpa.free(session.audio_window);
@@ -6573,7 +6579,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.audio_workers.items.len == 0 and s.diffusion_workers.items.len == 0 and s.splat_workers.items.len == 0) return .again;
+    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null and s.scene_worker == null and s.ml_workers.items.len == 0 and s.temporal_workers.items.len == 0 and s.audio_workers.items.len == 0 and s.diffusion_workers.items.len == 0 and s.splat_workers.items.len == 0) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (!validDims(d.width, d.height)) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -6601,6 +6607,12 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     }
     for (s.ml_workers.items) |mw| {
         ml_infer.submitNv12(mw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    for (s.temporal_workers.items) |tw| {
+        // A bracket-source fusion is fed only by the frame-bracket op; the live
+        // camera feeds the rest, one distinct frame per submit into the ring.
+        if (tw.is_bracket) continue;
+        ml_infer.temporalSubmitNv12(tw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     for (s.diffusion_workers.items) |dw| {
         diffusion.submitNv12(dw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
@@ -6755,6 +6767,13 @@ fn applyPlacementParams(s: *Session, node_index: graph.NodeIndex, rect: *[4]f32)
 /// proof can confirm a restyling model's image reached a sprite's texture.
 pub fn styleTextureCount(session: *Session) usize {
     return session.ml_style_textures.count();
+}
+
+/// The count of frames the first temporal.fuse worker has ringed, for the
+/// harness to pace its feed so the fusion ring keeps distinct frames in order.
+pub fn temporalRingFilled(session: *Session) u32 {
+    if (session.temporal_workers.items.len == 0) return 0;
+    return ml_infer.temporalFilled(session.temporal_workers.items[0].worker);
 }
 
 /// The square side of the first style worker's output texture, so a proof can
@@ -8306,6 +8325,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyMeshFaceState(session);
     destroyModelState(session);
     destroyMlWorkers(session);
+    destroyTemporalWorkers(session);
     destroyAudioWorkers(session);
     destroyDiffusionWorkers(session);
     destroySplatWorkers(session);
@@ -10764,6 +10784,7 @@ fn pollMlStyle(session: *Session) void {
         render.Renderer.updateDynamicBgraTexture(mw.style_tex, @intCast(side), @intCast(side), mw.style_bgra);
         session.ml_style_textures.put(session.engine.gpa, target, mw.style_tex) catch {};
     }
+    pollTemporalStyle(session);
 }
 
 fn destroyMlWorkers(session: *Session) void {
@@ -10780,6 +10801,113 @@ fn destroyMlWorkers(session: *Session) void {
     }
     session.ml_workers.clearRetainingCapacity();
     session.ml_style_textures.clearRetainingCapacity();
+}
+
+const TemporalWorker = struct {
+    worker: *ml_infer.TemporalInfer,
+    /// A bracket-source worker is fed only by the frame-bracket op, so the live
+    /// camera feed skips it; a camera-source worker rides the live feed.
+    is_bracket: bool,
+    target: graph.NodeIndex,
+    style_side: u32,
+    style_f32: []f32,
+    style_bgra: []u8,
+    style_tex: render.TextureHandle,
+};
+
+/// Builds a fusion worker for every temporal.fuse node from its bundled model
+/// and the sprite it draws through. Best-effort per node: a missing, malformed,
+/// or oversized model, or a model whose image inputs do not match the declared
+/// frame count, leaves that node inert.
+fn createTemporalLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const io = defaultIo();
+    for (lens.manifest.nodes) |node| {
+        const tf = node.temporal orelse continue;
+        if (session.ml_workers_loaded >= session.ml_worker_budget) {
+            std.log.info("gosslens: temporal.fuse node over the {d}-worker budget left inert", .{session.ml_worker_budget});
+            continue;
+        }
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, tf.model }) catch continue;
+        defer gpa.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        defer gpa.free(bytes);
+        const worker = ml_infer.temporalCreate(gpa, bytes, .{}, 2, tf.frames) catch continue;
+        ml_infer.temporalSetPhase(worker, tf.phase);
+        const target = generativeTargetNodeIndex(lens, gpa, &session.lens_graph, tf.sprite) orelse {
+            ml_infer.temporalDestroy(worker);
+            continue;
+        };
+        const len = ml_infer.temporalStyleLen(worker);
+        const side = isqrt(len / 3);
+        if (!(len > 0 and len % 3 == 0 and side * side == len / 3)) {
+            ml_infer.temporalDestroy(worker);
+            continue;
+        }
+        const style_f32 = gpa.alloc(f32, len) catch {
+            ml_infer.temporalDestroy(worker);
+            continue;
+        };
+        const style_bgra = gpa.alloc(u8, side * side * 4) catch {
+            gpa.free(style_f32);
+            ml_infer.temporalDestroy(worker);
+            continue;
+        };
+        session.temporal_workers.append(gpa, .{
+            .worker = worker,
+            .is_bracket = tf.source == .bracket,
+            .target = target,
+            .style_side = @intCast(side),
+            .style_f32 = style_f32,
+            .style_bgra = style_bgra,
+            .style_tex = .{ .idx = render.invalid_handle },
+        }) catch {
+            gpa.free(style_f32);
+            gpa.free(style_bgra);
+            ml_infer.temporalDestroy(worker);
+            return;
+        };
+        session.ml_workers_loaded += 1;
+    }
+}
+
+/// Uploads each temporal.fuse worker's fused image to the sprite it drives, the
+/// same style-texture rail ml.infer restyle uses. Render-path, like pollMlStyle.
+fn pollTemporalStyle(session: *Session) void {
+    for (session.temporal_workers.items) |*tw| {
+        if (tw.style_f32.len == 0) continue;
+        if (!ml_infer.temporalCopyStyle(tw.worker, tw.style_f32)) continue;
+        const side: usize = tw.style_side;
+        const plane = side * side;
+        const nchw = ml_infer.temporalLayoutIsNchw(tw.worker);
+        for (0..plane) |i| {
+            const rv = if (nchw) tw.style_f32[0 * plane + i] else tw.style_f32[i * 3 + 0];
+            const gv = if (nchw) tw.style_f32[1 * plane + i] else tw.style_f32[i * 3 + 1];
+            const bv = if (nchw) tw.style_f32[2 * plane + i] else tw.style_f32[i * 3 + 2];
+            tw.style_bgra[i * 4 + 0] = floatToU8(bv);
+            tw.style_bgra[i * 4 + 1] = floatToU8(gv);
+            tw.style_bgra[i * 4 + 2] = floatToU8(rv);
+            tw.style_bgra[i * 4 + 3] = 255;
+        }
+        if (tw.style_tex.idx == render.invalid_handle) {
+            tw.style_tex = render.Renderer.createDynamicBgraTexture(@intCast(side), @intCast(side));
+        }
+        render.Renderer.updateDynamicBgraTexture(tw.style_tex, @intCast(side), @intCast(side), tw.style_bgra);
+        session.ml_style_textures.put(session.engine.gpa, tw.target, tw.style_tex) catch {};
+    }
+}
+
+fn destroyTemporalWorkers(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.temporal_workers.items) |tw| {
+        if (tw.style_f32.len > 0) gpa.free(tw.style_f32);
+        if (tw.style_bgra.len > 0) gpa.free(tw.style_bgra);
+        if (tw.style_tex.idx != render.invalid_handle) {
+            if (session.engine.renderer) |*r| r.destroyTexture(tw.style_tex);
+        }
+        ml_infer.temporalDestroy(tw.worker);
+    }
+    session.temporal_workers.clearRetainingCapacity();
 }
 
 const SplatWorker = struct {
@@ -11498,6 +11626,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     // device and overheat; the count resets before this lens's loaders run.
     session.ml_workers_loaded = 0;
     createMlLoaders(session, gpa, bundle_path);
+    createTemporalLoaders(session, gpa, bundle_path);
     createAudioLoaders(session, gpa, bundle_path);
     createDiffusionLoaders(session, gpa, bundle_path);
     createSplatLoaders(session, gpa, bundle_path);

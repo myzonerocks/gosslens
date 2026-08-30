@@ -990,6 +990,19 @@ writes a detected box's coordinates or a keypoint's position into parameters,
 and a sprite's placement parameters (or a shader) read them to follow the
 found object.
 
+A `"temporal.fuse"` node is the multi-frame sibling of `ml.infer`: it runs a
+model with several square-RGB image inputs, fed a ring of the last N frames, and
+draws the model's fused output image through a sprite the way a diffusion restyle
+does. It carries a `"temporal"` block: `"model"` names the net under `assets/`,
+`"frames"` (2..8) how many inputs it fuses, `"sprite"` the sprite it draws
+through, `"mode"` the fusion (`denoise` averages a run to cut noise,
+`interpolate` blends two frames by a `"phase"` 0..1, `hdr` merges an exposure
+bracket), and `"source"` where the frames come from (`camera` the live feed, or
+`bracket` a submitted exposure set). The ring advances once per distinct frame
+timestamp, so a live camera never fills it with copies of the latest frame, and
+it fuses only once the ring holds a full set. Inference runs off the frame thread
+like `ml.infer`, and the model is bounded and finiteness-guarded the same way.
+
 An `"audio.infer"` node is the microphone sibling of `ml.infer`: it runs a
 bundled model whose one input is a window of the latest microphone samples
 (mono, drawn from a ring the engine fills as audio arrives) and binds the model's
@@ -1449,6 +1462,10 @@ a gaze_correct warp reads the eyeLook blendshapes and redirects the pupils, the
 eye region shifting under a measured gaze while a far corner holds;
 an auto_frame warp steers the tracked face to the anchor and target size, an
 off-center small face recentering and growing while it holds without a face;
+a temporal.fuse net averages a ring of the last N frames through its sprite, a
+dark and a bright frame reading their mean, distinct from either;
+a temporal.fuse interpolate net blends two frames by the authored phase, a low
+phase reading toward the first frame and a high phase toward the second;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

@@ -101,6 +101,7 @@ fn isBehaviorNode(type_str: []const u8) bool {
     return std.mem.eql(u8, type_str, "script") or
         std.mem.eql(u8, type_str, "logic.graph") or
         std.mem.eql(u8, type_str, "ml.infer") or
+        std.mem.eql(u8, type_str, "temporal.fuse") or
         std.mem.eql(u8, type_str, "audio.infer") or
         std.mem.eql(u8, type_str, "diffusion");
 }

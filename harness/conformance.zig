@@ -2518,6 +2518,60 @@ fn onnxValueInfo(a: std.mem.Allocator, name: []const u8, dims: []const i64) []co
     return vi.buf.items;
 }
 
+/// A one-element float initializer tensor, the constant a Mul scales its input by.
+fn onnxScalarInit(a: std.mem.Allocator, name: []const u8, value: f32) []const u8 {
+    var t: OnnxPb = .{ .a = a };
+    t.varintField(1, 1); // dims = [1]
+    t.varintField(2, 1); // data_type FLOAT
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, @bitCast(value), .little);
+    t.bytesField(9, &b); // raw_data
+    t.bytesField(8, name); // name
+    return t.buf.items;
+}
+
+/// A net that averages N square-RGB image inputs: it chains Add across f0..f(N-1)
+/// then scales by 1/N, so the output is the per-pixel mean of the fed frames.
+fn onnxMeanModel(a: std.mem.Allocator, n: usize, side: i64) []const u8 {
+    var g: OnnxPb = .{ .a = a };
+    var acc: []const u8 = "f0";
+    var i: usize = 1;
+    while (i < n) : (i += 1) {
+        const in_name = std.fmt.allocPrint(a, "f{d}", .{i}) catch unreachable;
+        const out_name = std.fmt.allocPrint(a, "t{d}", .{i}) catch unreachable;
+        g.bytesField(1, onnxNode(a, "Add", &.{ acc, in_name }, &.{out_name}, &.{}));
+        acc = out_name;
+    }
+    g.bytesField(5, onnxScalarInit(a, "scale", 1.0 / @as(f32, @floatFromInt(n))));
+    g.bytesField(1, onnxNode(a, "Mul", &.{ acc, "scale" }, &.{"y"}, &.{}));
+    for (0..n) |k| {
+        const name = std.fmt.allocPrint(a, "f{d}", .{k}) catch unreachable;
+        g.bytesField(11, onnxValueInfo(a, name, &.{ 1, 3, side, side }));
+    }
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 3, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// A net that interpolates two frames by a scalar phase t: y = f0 + t*(f1 - f0),
+/// so t=0 is the first frame, t=1 the second, and the phase input rides input 2.
+fn onnxLerpModel(a: std.mem.Allocator, side: i64) []const u8 {
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, onnxNode(a, "Sub", &.{ "f1", "f0" }, &.{"d"}, &.{}));
+    g.bytesField(1, onnxNode(a, "Mul", &.{ "d", "t" }, &.{"td"}, &.{}));
+    g.bytesField(1, onnxNode(a, "Add", &.{ "f0", "td" }, &.{"y"}, &.{}));
+    g.bytesField(11, onnxValueInfo(a, "f0", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "f1", &.{ 1, 3, side, side }));
+    g.bytesField(11, onnxValueInfo(a, "t", &.{1}));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, 3, side, side }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
 fn writeOnnxLens(dir: []const u8, model: []const u8) !void {
     const manifest_json =
         \\{"glf":"1.0","id":"goss.reference.ml-infer-onnx","version":"1.0.0","display_name":"BYO ONNX","engine_compat":">=0.5","capabilities":[],
@@ -4723,6 +4777,20 @@ fn proveGazeCorrect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The mean red value over the capture's center block, a stand-in for the fused
+/// gray the sprite draws there.
+fn centerGray(shot: []const u8) u16 {
+    var sum: u64 = 0;
+    var n: u64 = 0;
+    for (120..180) |row| {
+        for (160..240) |col| {
+            sum += shot[(row * 400 + col) * 4];
+            n += 1;
+        }
+    }
+    return @intCast(sum / n);
+}
+
 /// The centroid column and pixel count of the bright marker in a capture, the
 /// pixels whose red passes the threshold; count 0 leaves the column at zero.
 fn brightMarker(shot: []const u8, threshold: u8) struct { cx: f64, count: usize } {
@@ -4815,6 +4883,171 @@ fn proveAutoFrame(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF an auto_frame warp steers the tracked face to the target anchor and size: an off-center small face's marker recenters (column {d:.0} -> {d:.0}) and grows ({d} px -> {d} px), holding the frame through with no face\n", .{ before.cx, after.cx, before.count, after.count });
+    return true;
+}
+
+fn writeTemporalLens(dir: []const u8, model: []const u8, frames: u32, mode: []const u8, phase: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.temporal","version":"1.0.0","display_name":"Temporal","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"fuse","type":"temporal.fuse","params":{{}},"temporal":{{"model":"m.onnx","frames":{d},"mode":"{s}","phase":{d:.3},"sprite":"canvas"}}}},
+        \\  {{"id":"canvas","type":"sprite.2d","inputs":{{"frame":"camera"}},"params":{{}},"sprite":{{"x":0.0,"y":0.0,"w":1.0,"h":1.0}}}}],
+        \\ "triggers":[]}}
+    , .{ frames, mode, phase });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/m.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+fn solidNv12(gpa: std.mem.Allocator, gray: u8) !Nv12Copy {
+    const rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(rgba);
+    var i: usize = 0;
+    while (i + 4 <= rgba.len) : (i += 4) {
+        rgba[i + 0] = gray;
+        rgba[i + 1] = gray;
+        rgba[i + 2] = gray;
+        rgba[i + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = rgba }, .width = width, .height = height };
+    return rgbaToNv12(gpa, frame);
+}
+
+/// Activates a temporal.fuse lens and feeds it a run of distinct solid-gray
+/// frames, each a distinct timestamp so the ring keeps them all, then waits for
+/// the fused image to publish and captures the sprite it draws. Null on timeout.
+fn captureTemporalShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, grays: []const u8) !?[]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (width + 1) / 2;
+    for (grays, 0..) |gray, i| {
+        const planes = try solidNv12(gpa, gray);
+        defer planes.deinit(gpa);
+        const desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 1000) };
+        // track_frame feeds the fusion worker its ring; re-fed until the worker
+        // rings this exact frame (deduped by timestamp), so the frames land in
+        // order before the next distinct one replaces the mailbox.
+        const want: u32 = @intCast(@min(i + 1, grays.len));
+        var spins: usize = 0;
+        while (abi.temporalRingFilled(session) < want) {
+            _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, width, planes.uv.ptr, half_w * 2);
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            std.Thread.yield() catch {};
+            c.glfwPollEvents();
+            spins += 1;
+            if (spins > 20000) return null;
+        }
+    }
+    // Wait for the fused image to publish and upload, then draw the sprite. The
+    // last frame stays current so the sprite composites over it.
+    const last = try solidNv12(gpa, grays[grays.len - 1]);
+    defer last.deinit(gpa);
+    const last_desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast(grays.len * 1000) };
+    var polls: usize = 0;
+    while (abi.styleTextureCount(session) == 0) {
+        _ = abi.goss_session_submit_frame_copy(session, &last_desc, last.y.ptr, width, last.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        std.Thread.yield() catch {};
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 20000) return null;
+    }
+    var shot: []u8 = &.{};
+    for (0..8) |i| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (i == 6) {
+            shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+            errdefer gpa.free(shot);
+            var w: u32 = 0;
+            var h: u32 = 0;
+            if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+        }
+    }
+    return shot;
+}
+
+/// Proves multi-frame fusion: a two-input averaging net fed a dark then a bright
+/// frame draws their per-pixel mean through the sprite, distinct from either, and
+/// a three-frame lens averages three. The ring keeps distinct frames, not copies
+/// of the latest, or the mean would collapse to the last frame.
+fn proveTemporalFuse(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 16;
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-2/assets");
+    try writeTemporalLens("zig-out/temporal-2", onnxMeanModel(a, 2, side), 2, "denoise", 0.5);
+    const shot2 = (try captureTemporalShot(gpa, engine, "zig-out/temporal-2", &.{ 51, 204 })) orelse {
+        std.debug.print("conformance: FAIL temporal.fuse never published a fused image\n", .{});
+        return false;
+    };
+    defer gpa.free(shot2);
+    const mid = centerGray(shot2);
+    // The mean of 0.2 and 0.8 is 0.5, distinct from either fed frame.
+    if (!(mid > 110 and mid < 145)) {
+        std.debug.print("conformance: FAIL temporal.fuse did not average its two frames (center {d})\n", .{mid});
+        return false;
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-3/assets");
+    try writeTemporalLens("zig-out/temporal-3", onnxMeanModel(a, 3, side), 3, "denoise", 0.5);
+    const shot3 = (try captureTemporalShot(gpa, engine, "zig-out/temporal-3", &.{ 30, 128, 226 })) orelse {
+        std.debug.print("conformance: FAIL the three-frame temporal.fuse never published\n", .{});
+        return false;
+    };
+    defer gpa.free(shot3);
+    const mid3 = centerGray(shot3);
+    if (!(mid3 > 110 and mid3 < 145)) {
+        std.debug.print("conformance: FAIL the three-frame temporal.fuse did not average three frames (center {d})\n", .{mid3});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a temporal.fuse node fuses a ring of the last N frames through its sprite: a two-frame average of a dark and a bright frame reads {d} (their mean, distinct from either) and a three-frame average reads {d}\n", .{ mid, mid3 });
+    return true;
+}
+
+/// Proves frame interpolation: a phase-input net blends two frames by the
+/// authored phase, so a phase toward the first frame reads darker and toward the
+/// second reads brighter, the midpoint between them.
+fn proveTemporalInterpolate(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const side: i64 = 16;
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-lerp-lo/assets");
+    try writeTemporalLens("zig-out/temporal-lerp-lo", onnxLerpModel(a, side), 2, "interpolate", 0.25);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/temporal-lerp-hi/assets");
+    try writeTemporalLens("zig-out/temporal-lerp-hi", onnxLerpModel(a, side), 2, "interpolate", 0.75);
+
+    const lo = (try captureTemporalShot(gpa, engine, "zig-out/temporal-lerp-lo", &.{ 40, 220 })) orelse {
+        std.debug.print("conformance: FAIL the interpolate lens never published (low phase)\n", .{});
+        return false;
+    };
+    defer gpa.free(lo);
+    const hi = (try captureTemporalShot(gpa, engine, "zig-out/temporal-lerp-hi", &.{ 40, 220 })) orelse {
+        std.debug.print("conformance: FAIL the interpolate lens never published (high phase)\n", .{});
+        return false;
+    };
+    defer gpa.free(hi);
+    const lo_g = centerGray(lo);
+    const hi_g = centerGray(hi);
+    // Phase 0.25 sits nearer the dark first frame, phase 0.75 nearer the bright
+    // second frame, so the high phase reads clearly brighter.
+    if (!(hi_g > lo_g + 40)) {
+        std.debug.print("conformance: FAIL temporal interpolate did not vary with phase (0.25 -> {d}, 0.75 -> {d})\n", .{ lo_g, hi_g });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a temporal.fuse interpolate net blends two frames by the authored phase: phase 0.25 reads {d} and phase 0.75 reads {d}, tracking from the first frame toward the second\n", .{ lo_g, hi_g });
     return true;
 }
 
@@ -16248,6 +16481,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("gaze_correct warp");
     if (!try proveAutoFrame(gpa, engine)) return 1;
     watchHold("auto_frame warp");
+    if (!try proveTemporalFuse(gpa, engine)) return 1;
+    watchHold("temporal.fuse");
+    if (!try proveTemporalInterpolate(gpa, engine)) return 1;
+    watchHold("temporal interpolate");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

@@ -1001,6 +1001,22 @@ pub const MlField = struct {
     temporal: bool = false,
 };
 
+/// A temporal.fuse node's model slot: a net with `frames` square-RGB image
+/// inputs fed a ring of the last N frames, its fused output drawn through the
+/// named `sprite`. `mode` labels the fusion (interpolate, hdr, denoise) and
+/// `source` where the frames come from (the live camera, or a submitted bracket).
+pub const TemporalField = struct {
+    model: []const u8,
+    frames: u32 = 2,
+    mode: enum { interpolate, hdr, denoise } = .denoise,
+    source: enum { camera, bracket } = .camera,
+    /// The interpolation phase a phase-input model reads (0 the first frame, 1
+    /// the last), for an interpolate fusion. Ignored by a model with no phase
+    /// input.
+    phase: f32 = 0.5,
+    sprite: []const u8,
+};
+
 /// A caption binding on an audio.infer node: an output tensor of [timesteps,
 /// vocab] logits the engine greedy-CTC-decodes into text, using a bundled labels
 /// file (assets/<labels>.txt, one vocab label per line, the blank label first).
@@ -1123,6 +1139,8 @@ pub const Node = struct {
     logic_graph: ?LogicGraphSpec = null,
     /// Set on an ml.infer node: the bring-your-own model slot.
     ml: ?MlField = null,
+    /// Set on a temporal.fuse node: the multi-frame fusion model slot.
+    temporal: ?TemporalField = null,
     /// Set on an audio.infer node: the microphone model slot.
     audio: ?AudioField = null,
     diffusion: ?DiffusionField = null,
@@ -3443,6 +3461,18 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(audio_mark);
         }
+        var temporal_field: ?TemporalField = null;
+        if (getField(object, "temporal")) |tv| {
+            const temporal_mark = path.push("temporal");
+            if (!std.mem.eql(u8, node_type, "temporal.fuse")) {
+                try diags.add(path.slice(), "temporal is a temporal.fuse field, found it on '{s}'", .{node_type});
+            } else if (tv != .object) {
+                try diags.add(path.slice(), "temporal must be an object", .{});
+            } else {
+                temporal_field = try parseTemporalField(diags, path, arena, tv.object);
+            }
+            path.pop(temporal_mark);
+        }
         var diffusion_field: ?DiffusionField = null;
         if (getField(object, "diffusion")) |dv| {
             const diff_mark = path.push("diffusion");
@@ -3511,6 +3541,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .control = model_control,
             .logic_graph = logic_graph_spec,
             .ml = ml_field,
+            .temporal = temporal_field,
             .audio = audio_field,
             .diffusion = diffusion_field,
             .splat = splat_field,
@@ -3825,6 +3856,33 @@ fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         .translate = translate,
         .dub = dub,
     };
+}
+
+fn parseTemporalField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?TemporalField {
+    const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (model.len == 0) {
+        try diags.add(path.slice(), "temporal needs a model file", .{});
+        return null;
+    }
+    const sprite = if (getField(object, "sprite")) |v| (try expectString(diags, path, v) orelse "") else "";
+    if (sprite.len == 0) {
+        try diags.add(path.slice(), "temporal needs a sprite to draw its fused output", .{});
+        return null;
+    }
+    var field: TemporalField = .{ .model = try arena.dupe(u8, model), .sprite = try arena.dupe(u8, sprite) };
+    if (getField(object, "frames")) |v| {
+        if (v == .integer) field.frames = @intCast(std.math.clamp(v.integer, 2, 8));
+    }
+    if (getField(object, "mode")) |v| {
+        const name = try expectString(diags, path, v) orelse "";
+        if (std.meta.stringToEnum(@TypeOf(field.mode), name)) |m| field.mode = m else try diags.add(path.slice(), "temporal mode names an unknown fusion '{s}'", .{name});
+    }
+    if (getField(object, "source")) |v| {
+        const name = try expectString(diags, path, v) orelse "";
+        if (std.meta.stringToEnum(@TypeOf(field.source), name)) |sname| field.source = sname else try diags.add(path.slice(), "temporal source names an unknown source '{s}'", .{name});
+    }
+    if (getField(object, "phase")) |v| field.phase = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.phase)), 0, 1);
+    return field;
 }
 
 fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?MlField {

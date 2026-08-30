@@ -264,3 +264,151 @@ fn workerMain(ml: *MlInfer) void {
         ml.core.publish();
     }
 }
+
+pub const TemporalCore = core_mod.TemporalCore;
+
+/// The threaded wrapper around a TemporalCore: a mailbox holds the newest frame,
+/// the worker feeds it into the fusion ring (deduped by timestamp) and publishes
+/// the fused image once the ring is full. Mirrors MlInfer, off the frame thread.
+pub const TemporalInfer = struct {
+    gpa: std.mem.Allocator,
+    core: *TemporalCore,
+    io_state: std.Io.Threaded,
+    mutex: std.Io.Mutex = .init,
+    frame_ready: std.Io.Condition = .init,
+    pending: PendingFrame = .{},
+    stop: bool = false,
+    out_mutex: std.Io.Mutex = .init,
+    /// The count of frames the worker has ringed, published for a caller pacing
+    /// its feed so the ring keeps distinct frames in order.
+    filled: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    thread: ?std.Thread = null,
+};
+
+pub fn temporalCreate(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, frames: u32) CreateError!*TemporalInfer {
+    const ti = gpa.create(TemporalInfer) catch return error.OutOfMemory;
+    errdefer gpa.destroy(ti);
+    const core = try TemporalCore.init(gpa, model_bytes, bounds, threads, frames);
+    errdefer core.deinit();
+    ti.* = .{ .gpa = gpa, .core = core, .io_state = std.Io.Threaded.init(gpa, .{}) };
+    errdefer ti.io_state.deinit();
+    ti.thread = std.Thread.spawn(.{}, temporalMain, .{ti}) catch return error.OutOfMemory;
+    return ti;
+}
+
+pub fn temporalDestroy(ti: *TemporalInfer) void {
+    const io = ti.io_state.io();
+    {
+        ti.mutex.lockUncancelable(io);
+        defer ti.mutex.unlock(io);
+        ti.stop = true;
+        ti.frame_ready.signal(io);
+    }
+    if (ti.thread) |thread| thread.join();
+    const gpa = ti.gpa;
+    ti.pending.y.deinit(gpa);
+    ti.pending.uv.deinit(gpa);
+    ti.core.deinit();
+    ti.io_state.deinit();
+    gpa.destroy(ti);
+}
+
+/// Copies one NV12 frame into the mailbox, replacing any the worker has not
+/// picked up yet; the fusion ring keeps the newest distinct frames by timestamp.
+pub fn temporalSubmitNv12(ti: *TemporalInfer, width: u32, height: u32, timestamp_us: i64, conversion: math.color.Conversion, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) void {
+    const y_size = @as(usize, width) * height;
+    const half_width = (width + 1) / 2;
+    const half_height = (height + 1) / 2;
+    const uv_size = @as(usize, half_width) * half_height * 2;
+    const io = ti.io_state.io();
+    ti.mutex.lockUncancelable(io);
+    defer ti.mutex.unlock(io);
+    if (ti.stop) return;
+    ti.pending.y.resize(ti.gpa, y_size) catch return;
+    ti.pending.uv.resize(ti.gpa, uv_size) catch return;
+    for (0..height) |row| {
+        @memcpy(ti.pending.y.items[row * width ..][0..width], y[row * y_stride ..][0..width]);
+    }
+    for (0..half_height) |row| {
+        @memcpy(ti.pending.uv.items[row * half_width * 2 ..][0 .. half_width * 2], uv[row * uv_stride ..][0 .. half_width * 2]);
+    }
+    ti.pending.width = width;
+    ti.pending.height = height;
+    ti.pending.timestamp_us = timestamp_us;
+    ti.pending.conversion = conversion;
+    ti.pending.fresh = true;
+    ti.frame_ready.signal(io);
+}
+
+pub fn temporalSetPhase(ti: *TemporalInfer, phase: f32) void {
+    const io = ti.io_state.io();
+    ti.out_mutex.lockUncancelable(io);
+    defer ti.out_mutex.unlock(io);
+    ti.core.setPhase(phase);
+}
+
+pub fn temporalHasPublished(ti: *TemporalInfer) bool {
+    const io = ti.io_state.io();
+    ti.out_mutex.lockUncancelable(io);
+    defer ti.out_mutex.unlock(io);
+    return ti.core.published;
+}
+
+pub fn temporalCopyStyle(ti: *TemporalInfer, dst: []f32) bool {
+    const io = ti.io_state.io();
+    ti.out_mutex.lockUncancelable(io);
+    defer ti.out_mutex.unlock(io);
+    return ti.core.copyStyle(dst);
+}
+
+pub fn temporalStyleLen(ti: *const TemporalInfer) usize {
+    return ti.core.styleLen();
+}
+
+pub fn temporalFilled(ti: *const TemporalInfer) u32 {
+    return ti.filled.load(.acquire);
+}
+
+pub fn temporalLayoutIsNchw(ti: *const TemporalInfer) bool {
+    return ti.core.layoutIsNchw();
+}
+
+fn temporalMain(ti: *TemporalInfer) void {
+    var frame: PendingFrame = .{};
+    defer {
+        frame.y.deinit(ti.gpa);
+        frame.uv.deinit(ti.gpa);
+    }
+    while (true) {
+        {
+            const io = ti.io_state.io();
+            ti.mutex.lockUncancelable(io);
+            defer ti.mutex.unlock(io);
+            while (!ti.pending.fresh and !ti.stop) {
+                ti.frame_ready.waitUncancelable(io, &ti.mutex);
+            }
+            if (ti.stop) return;
+            std.mem.swap(PendingFrame, &frame, &ti.pending);
+            ti.pending.fresh = false;
+        }
+        const image: sampler.Frame = .{
+            .width = frame.width,
+            .height = frame.height,
+            .pixels = .{ .nv12 = .{
+                .y = frame.y.items,
+                .y_stride = frame.width,
+                .uv = frame.uv.items,
+                .uv_stride = ((frame.width + 1) / 2) * 2,
+                .conversion = frame.conversion,
+            } },
+        };
+        _ = ti.core.feed(image, frame.timestamp_us);
+        ti.filled.store(ti.core.filled, .release);
+        if (!ti.core.ready()) continue;
+        if (!ti.core.compute()) continue;
+        const io = ti.io_state.io();
+        ti.out_mutex.lockUncancelable(io);
+        defer ti.out_mutex.unlock(io);
+        ti.core.publish();
+    }
+}

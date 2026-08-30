@@ -538,3 +538,185 @@ pub const GenericCore = struct {
     }
 };
 
+/// A multi-frame fusion core: a model with `frames` square-RGB image inputs and
+/// an optional trailing scalar phase input, fed a ring of the last N sampled
+/// frames so it fuses across time. The ring advances once per distinct frame
+/// timestamp; the fused output publishes into an owned buffer for the sprite.
+pub const TemporalCore = struct {
+    gpa: std.mem.Allocator,
+    model_bytes: []u8,
+    engine: ml_engine.Engine,
+    frames: u32,
+    in_sq: ml_sample.Square,
+    input_side: u32,
+    /// `frames` sampled NHWC planes, indexed as a ring; oldest is (head - filled).
+    ring: [][]f32,
+    nchw_scratch: []f32,
+    head: u32 = 0,
+    filled: u32 = 0,
+    last_ts: i64 = 0,
+    has_ts: bool = false,
+    /// A trailing scalar input the model reads as the interpolation phase, when it
+    /// declares one input past the frame count.
+    has_phase: bool = false,
+    phase: f32 = 0.5,
+    style_out: []f32,
+    published: bool = false,
+
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, frames_req: u32) CreateError!*TemporalCore {
+        if (frames_req < 2 or frames_req > 8) return error.InvalidModel;
+        const core = gpa.create(TemporalCore) catch return error.OutOfMemory;
+        errdefer gpa.destroy(core);
+        if (model_bytes.len > bounds.max_model_bytes) return error.ModelRejected;
+        const owned = gpa.dupe(u8, model_bytes) catch return error.OutOfMemory;
+        errdefer gpa.free(owned);
+        var engine = ml_engine.Engine.init(gpa, owned, threads) catch return error.InvalidModel;
+        errdefer engine.deinit();
+
+        const in_count = engine.inputCount();
+        const out_count = engine.outputCount();
+        if (out_count == 0) return error.InvalidModel;
+        const has_phase = in_count == frames_req + 1;
+        if (in_count != frames_req and !has_phase) return error.InvalidModel;
+
+        var dims_buf: [8]i32 = undefined;
+        const first_dims = engine.inputDims(0, &dims_buf) catch return error.InvalidModel;
+        const in_sq = ml_sample.detectSquareRgb(first_dims) orelse return error.InvalidModel;
+        const input_side: u32 = in_sq.side;
+        // Every image input must be the same square, so the ring feeds them all.
+        for (1..frames_req) |i| {
+            const d = engine.inputDims(i, &dims_buf) catch return error.InvalidModel;
+            const sq = ml_sample.detectSquareRgb(d) orelse return error.InvalidModel;
+            if (sq.side != input_side or sq.layout != in_sq.layout) return error.InvalidModel;
+        }
+
+        const plane = @as(usize, input_side) * input_side * 3;
+        const nchw_scratch = if (in_sq.layout == .nchw)
+            gpa.alloc(f32, plane) catch return error.OutOfMemory
+        else
+            try gpa.alloc(f32, 0);
+        errdefer gpa.free(nchw_scratch);
+
+        var ring = gpa.alloc([]f32, frames_req) catch return error.OutOfMemory;
+        var built: usize = 0;
+        errdefer {
+            for (ring[0..built]) |r| gpa.free(r);
+            gpa.free(ring);
+        }
+        for (0..frames_req) |i| {
+            ring[i] = gpa.alloc(f32, plane) catch return error.OutOfMemory;
+            @memset(ring[i], 0);
+            built += 1;
+        }
+
+        // Warm up over the zeroed ring to discover the output length and validate
+        // every op, and admit the model under the sandbox on the largest tensor.
+        var largest: u64 = @as(u64, plane) * @sizeOf(f32);
+        for (0..frames_req) |i| {
+            ml_sample.writeSampled(&engine, i, in_sq, ring[i], nchw_scratch) catch return error.InvalidModel;
+        }
+        if (has_phase) {
+            const p = [_]f32{0.5};
+            engine.writeInput(frames_req, std.mem.sliceAsBytes(&p)) catch return error.InvalidModel;
+        }
+        engine.invoke() catch return error.InvalidModel;
+        const out0 = engine.outputFloats(0) catch return error.InvalidModel;
+        const out_len = out0.len;
+        largest = @max(largest, out_len * @sizeOf(f32));
+        if (out_len == 0 or out_len % 3 != 0) return error.InvalidModel;
+        if (!bounds.admits(owned.len, in_count + out_count, largest)) return error.ModelRejected;
+
+        const style_out = gpa.alloc(f32, out_len) catch return error.OutOfMemory;
+        errdefer gpa.free(style_out);
+        @memset(style_out, 0);
+
+        core.* = .{
+            .gpa = gpa,
+            .model_bytes = owned,
+            .engine = engine,
+            .frames = frames_req,
+            .in_sq = in_sq,
+            .input_side = input_side,
+            .ring = ring,
+            .nchw_scratch = nchw_scratch,
+            .has_phase = has_phase,
+            .style_out = style_out,
+        };
+        return core;
+    }
+
+    pub fn deinit(core: *TemporalCore) void {
+        const gpa = core.gpa;
+        gpa.free(core.style_out);
+        for (core.ring) |r| gpa.free(r);
+        gpa.free(core.ring);
+        gpa.free(core.nchw_scratch);
+        core.engine.deinit();
+        gpa.free(core.model_bytes);
+        gpa.destroy(core);
+    }
+
+    /// Samples one frame into the ring, advancing it only when the timestamp
+    /// differs from the last frame ringed, so a repeated frame does not fill the
+    /// ring with copies. Returns whether the ring advanced.
+    pub fn feed(core: *TemporalCore, frame: sampler.Frame, timestamp_us: i64) bool {
+        if (core.has_ts and timestamp_us == core.last_ts) return false;
+        sampler.sampleRegion(frame, sampler.frameSquare(frame.width, frame.height), .unit, core.input_side, core.ring[core.head]);
+        core.head = (core.head + 1) % core.frames;
+        if (core.filled < core.frames) core.filled += 1;
+        core.last_ts = timestamp_us;
+        core.has_ts = true;
+        return true;
+    }
+
+    /// Whether the ring holds a full set of frames to fuse.
+    pub fn ready(core: *const TemporalCore) bool {
+        return core.filled >= core.frames;
+    }
+
+    /// Sets the interpolation phase a phase-input model reads, clamped to [0,1].
+    pub fn setPhase(core: *TemporalCore, phase: f32) void {
+        core.phase = std.math.clamp(phase, 0, 1);
+    }
+
+    /// Writes the ring oldest-to-newest into the image inputs, the phase into the
+    /// scalar input when present, and invokes, leaving the fused image in the
+    /// engine for publish. False while the ring is not yet full or on a backend
+    /// error.
+    pub fn compute(core: *TemporalCore) bool {
+        if (!core.ready()) return false;
+        const oldest = (core.head + core.frames - core.filled) % core.frames;
+        for (0..core.frames) |i| {
+            const slot = (oldest + i) % core.frames;
+            ml_sample.writeSampled(&core.engine, i, core.in_sq, core.ring[slot], core.nchw_scratch) catch return false;
+        }
+        if (core.has_phase) {
+            const p = [_]f32{core.phase};
+            core.engine.writeInput(core.frames, std.mem.sliceAsBytes(&p)) catch return false;
+        }
+        core.engine.invoke() catch return false;
+        return true;
+    }
+
+    /// Copies the fused output image into the owned buffer for a concurrent reader.
+    pub fn publish(core: *TemporalCore) void {
+        const src = core.engine.outputFloats(0) catch return;
+        if (src.len == core.style_out.len) @memcpy(core.style_out, src);
+        core.published = true;
+    }
+
+    pub fn copyStyle(core: *const TemporalCore, dst: []f32) bool {
+        if (!core.published or dst.len != core.style_out.len) return false;
+        @memcpy(dst, core.style_out);
+        return true;
+    }
+
+    pub fn styleLen(core: *const TemporalCore) usize {
+        return core.style_out.len;
+    }
+
+    pub fn layoutIsNchw(core: *const TemporalCore) bool {
+        return core.in_sq.layout == .nchw;
+    }
+};
+
