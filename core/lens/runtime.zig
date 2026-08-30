@@ -37,7 +37,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, dehaze_pass, relight_pass, glare_pass, vignette_pass, lowlight_pass, undistort_pass, awb_pass, stabilize_pass, zoom_pass, dereflect_pass, harmonize_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, dehaze_pass, relight_pass, glare_pass, vignette_pass, lowlight_pass, undistort_pass, awb_pass, stabilize_pass, zoom_pass, dereflect_pass, harmonize_pass, inpaint_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -64,6 +64,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "zoom.pass")) return .zoom_pass;
     if (std.mem.eql(u8, type_str, "dereflect.pass")) return .dereflect_pass;
     if (std.mem.eql(u8, type_str, "harmonize.pass")) return .harmonize_pass;
+    if (std.mem.eql(u8, type_str, "inpaint.pass")) return .inpaint_pass;
     if (std.mem.eql(u8, type_str, "bloom.pass")) return .bloom_pass;
     if (std.mem.eql(u8, type_str, "dof.pass")) return .dof_pass;
     if (std.mem.eql(u8, type_str, "fog.pass")) return .fog_pass;
@@ -123,7 +124,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .dehaze_pass, .relight_pass, .glare_pass, .vignette_pass, .lowlight_pass, .undistort_pass, .awb_pass, .stabilize_pass, .zoom_pass, .dereflect_pass, .harmonize_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .dehaze_pass, .relight_pass, .glare_pass, .vignette_pass, .lowlight_pass, .undistort_pass, .awb_pass, .stabilize_pass, .zoom_pass, .dereflect_pass, .harmonize_pass, .inpaint_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
     };
 }
 
@@ -198,6 +199,8 @@ const LensNode = struct {
     dereflect: ?manifest.DereflectField = null,
     /// .harmonize_pass only: the node's fg/bg color transfer.
     harmonize: ?manifest.HarmonizeField = null,
+    /// .inpaint_pass only: the node's removal mask and search radius.
+    inpaint: ?manifest.InpaintField = null,
     /// .bloom_pass only: the node's glow threshold and intensity.
     bloom: ?manifest.BloomField = null,
     /// .dof_pass only: the node's focus plane and blur strength.
@@ -539,6 +542,14 @@ pub const HarmonizePassNode = struct {
     direction: u8,
 };
 
+/// One inpaint.pass node ready for the caller to draw - which mask channel marks
+/// the region to remove, and the search radius that fills it from its boundary.
+pub const InpaintPassNode = struct {
+    graph_index: graph.NodeIndex,
+    mask_channel: u8,
+    radius: f32,
+};
+
 /// One bloom.pass node ready for the caller to draw - which graph node it
 /// is, and its glow packed as (threshold, intensity, 0, 0) for u_bloom.
 pub const BloomPassNode = struct {
@@ -684,7 +695,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, dehaze, relight, glare, vignette, lowlight, undistort, awb, stabilize, zoom, dereflect, harmonize, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
+pub const PassKind = enum { shader, lut, blend, blur, grade, dehaze, relight, glare, vignette, lowlight, undistort, awb, stabilize, zoom, dereflect, harmonize, inpaint, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
 
 /// One matte.hair source node ready for the caller to draw - which graph node
 /// it is, and its guided-filter parameters packed for the refine pass (radius,
@@ -1041,6 +1052,21 @@ pub const Lens = struct {
             if (node.node_type != .harmonize_pass) continue;
             const hm = node.harmonize orelse manifest.HarmonizeField{};
             try out.append(gpa, .{ .graph_index = node.graph_index, .strength = hm.strength, .direction = hm.direction });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every inpaint.pass node this lens spliced, in execution order, each
+    /// carrying its removal channel and radius - mirrors harmonizePassNodes.
+    pub fn inpaintPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]InpaintPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(InpaintPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .inpaint_pass) continue;
+            const ip = node.inpaint orelse manifest.InpaintField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .mask_channel = ip.mask_channel, .radius = ip.radius });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1516,6 +1542,7 @@ pub const Lens = struct {
                 .zoom_pass => .zoom,
                 .dereflect_pass => .dereflect,
                 .harmonize_pass => .harmonize,
+                .inpaint_pass => .inpaint,
                 .bloom_pass => .bloom,
                 .dof_pass => .dof,
                 .fog_pass => .fog,
@@ -1787,6 +1814,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .zoom = if (node_type == .zoom_pass) node.zoom else null,
             .dereflect = if (node_type == .dereflect_pass) node.dereflect else null,
             .harmonize = if (node_type == .harmonize_pass) node.harmonize else null,
+            .inpaint = if (node_type == .inpaint_pass) node.inpaint else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .dof = if (node_type == .dof_pass) node.dof else null,
             .fog = if (node_type == .fog_pass) node.fog else null,

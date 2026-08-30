@@ -357,6 +357,14 @@ pub const HarmonizeField = struct {
     direction: u8 = 0,
 };
 
+pub const InpaintField = struct {
+    /// An inpaint.pass node's content-aware fill. `mask` names the region to
+    /// remove (an object, blemish or passerby) and `radius` (0..0.5 of the frame)
+    /// how far to search outward for the surrounding color that fills it.
+    mask_channel: u8 = head_channel,
+    radius: f32 = 0.08,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1154,6 +1162,8 @@ pub const Node = struct {
     dereflect: ?DereflectField = null,
     /// Set only on a harmonize.pass node: its fg/bg color transfer.
     harmonize: ?HarmonizeField = null,
+    /// Set only on an inpaint.pass node: its removal mask and search radius.
+    inpaint: ?InpaintField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -2196,6 +2206,25 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 harmonize_field = field;
             }
             path.pop(hmark);
+        }
+        var inpaint_field: ?InpaintField = null;
+        if (getField(object, "inpaint")) |iv| {
+            const imark = path.push("inpaint");
+            if (!std.mem.eql(u8, node_type, "inpaint.pass")) {
+                try diags.add(path.slice(), "inpaint is an inpaint.pass field, found it on '{s}'", .{node_type});
+            } else if (iv != .object) {
+                try diags.add(path.slice(), "inpaint must be an object", .{});
+            } else {
+                var field: InpaintField = .{};
+                if (getField(iv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0, 0.5);
+                if (getField(iv.object, "mask")) |v| {
+                    if (v == .string) {
+                        if (maskChannelIndex(v.string)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "inpaint mask names an unknown channel '{s}'", .{v.string});
+                    }
+                }
+                inpaint_field = field;
+            }
+            path.pop(imark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3481,6 +3510,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .zoom = zoom_field,
             .dereflect = dereflect_field,
             .harmonize = harmonize_field,
+            .inpaint = inpaint_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

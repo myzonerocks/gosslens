@@ -1101,6 +1101,9 @@ pub const Session = struct {
     person_mask: []f32 = &.{},
     person_mask_valid: bool = false,
     wants_person_mask: bool = false,
+    /// The removal mask channel and search radius (channel, radius) of each
+    /// spliced inpaint.pass node, resolved once at activation.
+    inpaint_params: std.AutoHashMapUnmanaged(graph.NodeIndex, InpaintParams) = .empty,
     /// A small RGB downsample of the latest copied frame, filled at submit from
     /// the frame bytes (no GPU readback), so an auto-enhance pass can estimate a
     /// scene-adaptive correction from the whole frame's statistics.
@@ -2019,6 +2022,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Harmonize measures its region from the CPU person mask; without a
             // mask filled yet the node holds the frame through unchanged.
             .harmonize => s.harmonize_params.contains(entry.graph_index),
+            // Inpaint needs its removal mask on the named channel; with none the
+            // node holds the frame through, the standard capability degradation.
+            .inpaint => if (s.inpaint_params.get(entry.graph_index)) |ip|
+                (if (ip.channel == 0) s.segmentation_texture != null else s.segmentation_class_textures[ip.channel] != null)
+            else
+                false,
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2469,6 +2478,23 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const strength = if (active) hp[0] else 0;
                 const mask_tex = s.segmentation_texture orelse r.zero_mask_texture;
                 r.submitHarmonizePass(view_id, input_texture, mask_tex, stats.fg_mean, stats.fg_std, stats.bg_mean, stats.bg_std, strength, hp[1]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .inpaint => {
+                const ip = s.inpaint_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const mask_tex = if (ip.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[ip.channel] orelse r.zero_mask_texture;
+                const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                r.submitInpaintPass(view_id, input_texture, mask_tex, ip.radius, aspect);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -4051,6 +4077,7 @@ pub fn destroySession(session: *Session) void {
     session.zoom_params.deinit(session.engine.gpa);
     session.dereflect_params.deinit(session.engine.gpa);
     session.harmonize_params.deinit(session.engine.gpa);
+    session.inpaint_params.deinit(session.engine.gpa);
     if (session.person_mask.len > 0) session.engine.gpa.free(session.person_mask);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
@@ -6807,6 +6834,8 @@ const AwbEstimate = struct { gains: [3]f32, black: f32, white: f32 };
 
 const HarmonizeStats = struct { fg_mean: [3]f32, fg_std: [3]f32, bg_mean: [3]f32, bg_std: [3]f32 };
 
+const InpaintParams = struct { channel: u8, radius: f32 };
+
 /// Per-channel mean and standard deviation of the person (foreground) and the
 /// rest of the frame (background), read from the frame thumb with the CPU person
 /// mask sampled at each thumb pixel. A region with no samples falls back to a
@@ -7845,6 +7874,7 @@ fn destroyBlendState(session: *Session) void {
     session.zoom_params.clearRetainingCapacity();
     session.dereflect_params.clearRetainingCapacity();
     session.harmonize_params.clearRetainingCapacity();
+    session.inpaint_params.clearRetainingCapacity();
     session.wants_person_mask = false;
     session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
@@ -8460,6 +8490,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createZoomParams(s, gpa) catch {};
     createDereflectParams(s, gpa) catch {};
     createHarmonizeParams(s, gpa) catch {};
+    createInpaintParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -8657,6 +8688,17 @@ fn createHarmonizeParams(session: *Session, gpa: std.mem.Allocator) !void {
     session.wants_person_mask = true;
     if (session.person_mask.len != segmentation.mask_len) {
         session.person_mask = gpa.alloc(f32, segmentation.mask_len) catch return;
+    }
+}
+
+/// Resolves every spliced inpaint.pass node's removal channel and radius into
+/// session.inpaint_params once at activation - mirrors createDereflectParams.
+fn createInpaintParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.inpaintPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.inpaint_params.put(gpa, n.graph_index, .{ .channel = n.mask_channel, .radius = n.radius }) catch {};
     }
 }
 
@@ -11249,6 +11291,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createZoomParams(session, gpa);
     try createDereflectParams(session, gpa);
     try createHarmonizeParams(session, gpa);
+    try createInpaintParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);

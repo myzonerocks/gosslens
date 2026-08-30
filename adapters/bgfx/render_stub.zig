@@ -590,6 +590,15 @@ pub const Renderer = struct {
         _ = direction;
     }
 
+    pub fn submitInpaintPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, radius: f32, aspect: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = radius;
+        _ = aspect;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;

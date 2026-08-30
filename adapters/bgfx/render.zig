@@ -202,6 +202,8 @@ pub const Renderer = struct {
     dereflect_params_uniform: c.bgfx_uniform_handle_t,
     harmonize_program: c.bgfx_program_handle_t,
     harmonize_params_uniform: c.bgfx_uniform_handle_t,
+    inpaint_program: c.bgfx_program_handle_t,
+    inpaint_params_uniform: c.bgfx_uniform_handle_t,
     bloom_extract_program: c.bgfx_program_handle_t,
     bloom_composite_program: c.bgfx_program_handle_t,
     composite_program: c.bgfx_program_handle_t,
@@ -490,6 +492,7 @@ pub const Renderer = struct {
         const zoom_program = try loadZoomProgram();
         const dereflect_program = try loadDereflectProgram();
         const harmonize_program = try loadHarmonizeProgram();
+        const inpaint_program = try loadInpaintProgram();
         const bloom_extract_program = try loadBloomExtractProgram();
         const bloom_composite_program = try loadBloomCompositeProgram();
         const composite_program = try loadCompositeProgram();
@@ -623,6 +626,8 @@ pub const Renderer = struct {
             .dereflect_params_uniform = c.bgfx_create_uniform("u_dereflect", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .harmonize_program = harmonize_program,
             .harmonize_params_uniform = c.bgfx_create_uniform("u_harmonize", c.BGFX_UNIFORM_TYPE_VEC4, 4),
+            .inpaint_program = inpaint_program,
+            .inpaint_params_uniform = c.bgfx_create_uniform("u_inpaint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .bloom_extract_program = bloom_extract_program,
             .bloom_composite_program = bloom_composite_program,
             .composite_program = composite_program,
@@ -1101,6 +1106,16 @@ pub const Renderer = struct {
         };
     }
 
+    pub fn loadInpaintProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_inpaint_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_inpaint_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_inpaint_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_inpaint_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// stylize.pass's own fixed program: one artistic filter that branches on
     /// its mode uniform, shared by every stylize.pass node like grade_program.
     pub fn loadStylizeProgram() !c.bgfx_program_handle_t {
@@ -1504,6 +1519,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.dereflect_params_uniform);
         c.bgfx_destroy_program(r.harmonize_program);
         c.bgfx_destroy_uniform(r.harmonize_params_uniform);
+        c.bgfx_destroy_program(r.inpaint_program);
+        c.bgfx_destroy_uniform(r.inpaint_params_uniform);
         c.bgfx_destroy_program(r.composite_program);
         c.bgfx_destroy_program(r.bloom_extract_program);
         c.bgfx_destroy_program(r.bloom_composite_program);
@@ -2411,6 +2428,19 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.harmonize_params_uniform, &params, 4);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.harmonize_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one inpaint.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0, the removal mask on unit 1, and u_inpaint (search radius, frame
+    /// aspect), the one fixed inpaint_program every node shares.
+    pub fn submitInpaintPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, radius: f32, aspect: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        var params = [4]f32{ radius, aspect, 0, 0 };
+        c.bgfx_set_uniform(r.inpaint_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.inpaint_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one lens stylize.pass node as a full-screen pass into view_id:

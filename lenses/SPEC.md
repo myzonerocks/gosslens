@@ -454,6 +454,16 @@ destination mean) inside the chosen region, so an inserted subject takes on the
 color cast of where it now sits. Without a person mask, or at strength 0, it holds
 the frame through, the standard capability degradation. It ships no asset.
 
+A `"inpaint.pass"` node is a content-aware fill. It carries an `"inpaint":
+{"mask", "radius"}` block: `mask` names the channel that marks the region to
+remove (an object, a blemish, a passerby), and `radius` (0..0.5 of the frame,
+default 0.08) how far to search outward for the color that fills it. Each masked
+pixel is replaced by the color of the nearest unmasked boundary, gathered along
+rays cast outward and weighted by inverse distance, so the hole takes on the
+surrounding content while the unmasked pixels hold. With no mask on the named
+channel it holds the frame through, the standard capability degradation. It ships
+no asset.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1396,6 +1406,8 @@ a dereflect.pass attenuates high-frequency detail in the bright regions far more
 than the dark, the bright texture softening to under half while the dark holds;
 a harmonize.pass matches the person's color distribution to the background, the
 subject's red falling and blue rising toward the background while it holds;
+an inpaint.pass fills a masked object from its surrounding boundary, the removed
+region's red falling and blue rising toward the field while the field holds;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

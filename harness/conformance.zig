@@ -4273,6 +4273,121 @@ fn proveHarmonize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeInpaintLens(dir: []const u8, radius: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.inpaint","version":"1.0.0","display_name":"Inpaint","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"i","type":"inpaint.pass","inputs":{{"frame":"camera"}},"params":{{}},"inpaint":{{"mask":"person","radius":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{radius});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Captures an inpaint.pass shot. When a removal mask is passed it is uploaded on
+/// channel 0 so the pass fills that region; with none the readiness gate holds
+/// the frame through, the capability degradation the proof leans on.
+fn captureInpaintShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, mask: ?[]const f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        if (mask) |m| abi.injectMaskChannel(session, 0, @ptrCast(m.ptr));
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Mean rgb of the capture box [col_lo,col_hi) x [row_lo,row_hi), each channel 0..255.
+fn boxMean(shot: []const u8, col_lo: usize, col_hi: usize, row_lo: usize, row_hi: usize) [3]f64 {
+    var sum = [3]f64{ 0, 0, 0 };
+    var n: f64 = 0;
+    for (row_lo..row_hi) |row| {
+        for (col_lo..col_hi) |col| {
+            const idx = (row * 400 + col) * 4;
+            inline for (0..3) |ch| sum[ch] += @floatFromInt(shot[idx + ch]);
+            n += 1;
+        }
+    }
+    return .{ sum[0] / n, sum[1] / n, sum[2] / n };
+}
+
+/// Proves content-aware fill: a red object square on a blue field named as the
+/// removal mask. With no mask the readiness gate holds the frame through so the
+/// square stays red; with the mask uploaded the pass fills the square from the
+/// surrounding blue, so its red falls and blue rises while the field holds.
+fn proveInpaint(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const u = @as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(width));
+        const v = @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(height));
+        const object = u >= 0.45 and u < 0.55 and v >= 0.433 and v < 0.567;
+        f[idx + 0] = if (object) 220 else 40; // red object on a blue field
+        f[idx + 1] = 40;
+        f[idx + 2] = if (object) 40 else 220;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const mask = try gpa.alloc(f32, abi.segmentation_mask_len);
+    defer gpa.free(mask);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        const u = @as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(mask_side));
+        const v = @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(mask_side));
+        mask[row * mask_side + col] = if (u >= 0.45 and u < 0.55 and v >= 0.433 and v < 0.567) 1.0 else 0.0;
+    };
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/inpaint");
+    try writeInpaintLens("zig-out/inpaint", 0.09);
+
+    const shot0 = try captureInpaintShot(gpa, engine, "zig-out/inpaint", planes, null);
+    defer gpa.free(shot0);
+    const shot1 = try captureInpaintShot(gpa, engine, "zig-out/inpaint", planes, mask);
+    defer gpa.free(shot1);
+
+    // The very centre of the object square, and a blue patch off to the side.
+    const obj0 = boxMean(shot0, 190, 210, 140, 160);
+    const obj1 = boxMean(shot1, 190, 210, 140, 160);
+    const field0 = boxMean(shot0, 30, 90, 140, 160);
+    const field1 = boxMean(shot1, 30, 90, 140, 160);
+
+    if (!(obj0[0] > 150 and obj0[2] < 100)) {
+        std.debug.print("conformance: FAIL the inpaint object square did not read red before the fill ({d:.0},{d:.0},{d:.0})\n", .{ obj0[0], obj0[1], obj0[2] });
+        return false;
+    }
+    // The removed region fills toward the surrounding blue: red down, blue up.
+    if (!(obj1[0] < obj0[0] - 60 and obj1[2] > obj0[2] + 60)) {
+        std.debug.print("conformance: FAIL inpaint did not fill the object from its surroundings (obj red {d:.0}->{d:.0}, blue {d:.0}->{d:.0})\n", .{ obj0[0], obj1[0], obj0[2], obj1[2] });
+        return false;
+    }
+    // The surrounding field is untouched (the mask reads zero there).
+    const field_shift = @abs(field1[0] - field0[0]) + @abs(field1[2] - field0[2]);
+    if (!(field_shift < 12)) {
+        std.debug.print("conformance: FAIL inpaint disturbed the surrounding field (shift {d:.1})\n", .{field_shift});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an inpaint.pass fills the masked object from its surrounding boundary: the removed square's red falls and blue rises toward the field ({d:.0},{d:.0},{d:.0} -> {d:.0},{d:.0},{d:.0}) while the field holds\n", .{ obj0[0], obj0[1], obj0[2], obj1[0], obj1[1], obj1[2] });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -15693,6 +15808,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("dereflect pass");
     if (!try proveHarmonize(gpa, engine)) return 1;
     watchHold("harmonize pass");
+    if (!try proveInpaint(gpa, engine)) return 1;
+    watchHold("inpaint pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
