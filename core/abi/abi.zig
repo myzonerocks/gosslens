@@ -12166,8 +12166,18 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             if (session.engine.renderer) |*r| {
                 if (pf.sph) {
                     // A 2D SPH fluid: its own sim, drawn as a shared base mesh
-                    // per particle at that particle's pooled position.
-                    if (sph.Fluid.init(gpa, pf.count, .{ .gravity = pf.gravity })) |fluid| {
+                    // per particle at that particle's pooled position. The
+                    // node's sphere colliders become circle obstacles the fluid
+                    // flows around, their z dropped since the fluid is in z=0.
+                    var circles: [][3]f32 = &.{};
+                    if (pf.colliders.len > 0) {
+                        if (gpa.alloc([3]f32, pf.colliders.len)) |c| {
+                            for (pf.colliders, 0..) |sp, ci| c[ci] = .{ sp[0], sp[1], sp[3] };
+                            circles = c;
+                        } else |_| {}
+                    }
+                    defer if (circles.len > 0) gpa.free(circles);
+                    if (sph.Fluid.init(gpa, pf.count, .{ .gravity = pf.gravity, .colliders = circles })) |fluid| {
                         if (r.createModelMesh(&octahedron_positions, &octahedron_indices)) |base| {
                             session.fluid_sims.put(gpa, model.graph_index, fluid) catch {
                                 var f = fluid;

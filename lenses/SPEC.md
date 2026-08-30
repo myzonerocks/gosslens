@@ -345,7 +345,8 @@ other fields then override, so `{"preset": "fire"}` is a finished flame and
   `"vortex"` (orbital swirl), `"floor"` (a height particles bounce off),
   `"bounce"` (0..1, how much speed a floor or collider bounce keeps),
   `"colliders": [[x, y, z, radius], ...]` (up to sixteen spheres particles
-  bounce off, kept outside each), `"box_colliders": [[x, y, z, hx, hy, hz],
+  bounce off, kept outside each; an `sph` fluid flows around these same
+  spheres as circle obstacles in its plane), `"box_colliders": [[x, y, z, hx, hy, hz],
   ...]` (up to sixteen axis-aligned boxes they bounce off), `"plane_colliders":
   [[nx, ny, nz, d], ...]` (up to sixteen infinite planes - walls, ramps, slides
   - they bounce off), and `"oneshot"` (emit once and die out rather than
