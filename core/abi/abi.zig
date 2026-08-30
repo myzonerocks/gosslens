@@ -13832,6 +13832,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         var hands: hand.Result = undefined;
         if (tracking.hand_worker.readResult(worker, &hands)) {
             const region = s.active_lens.?.manifest.region2d;
+            const gestures = s.active_lens.?.manifest.gestures;
             for (hands.hands[0..@min(hands.hand_count, hand.max_hands)]) |*h| {
                 if (h.gesture != 0 and live_signals.hand_gesture == 0) live_signals.hand_gesture = h.gesture;
                 if (hand.isPinching(&h.landmarks)) live_signals.hand_pinch = true;
@@ -13841,6 +13842,15 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
                 if (region) |reg| {
                     const tip = hand.jointPoint(&h.landmarks, .index_tip);
                     if (reg.contains(tip[0], tip[1])) live_signals.hand_in_region = true;
+                }
+                // The hand's finger poses against each lens-declared custom
+                // gesture: a match lights that gesture's bit for the trigger.
+                if (gestures.len > 0) {
+                    const ext = hand.fingerExtensions(&h.landmarks);
+                    for (gestures, 0..) |gd, gi| {
+                        const cg = hand.CustomGesture{ .mask = gd.mask, .want = gd.want };
+                        if (cg.matches(ext)) live_signals.hand_custom_gestures |= @as(u32, 1) << @intCast(gi);
+                    }
                 }
             }
         }

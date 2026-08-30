@@ -1285,7 +1285,8 @@ small closed grammar, parsed once at load time into a typed expression tree
 - Signal reads: `face.blendshape('name')`, `face.present`, `hands.present`,
   `hands.gesture('name')` (true while a tracked hand shows the named canned
   gesture: None, Closed_Fist, Open_Palm, Pointing_Up, Thumb_Down, Thumb_Up,
-  Victory, ILoveYou; an unknown name is a compile error), `hands.pinch` (true
+  Victory, ILoveYou, or a custom gesture the lens declares in `gestures`, see
+  below; an unknown name is a compile error), `hands.pinch` (true
   while a tracked hand's thumb and index tips are closed together),
   `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
 onset hops), `camera.zoom` (the camera zoom factor, one at rest),
@@ -1338,6 +1339,15 @@ lens; the landmarks never cross the ABI. Any tracked hand inside sets it. With
 no hand tracking or no region declared, the signal reads false. Unlike the
 world `volume`, this is a flat screen zone, so it needs no world tracking or
 metric depth, only the 2D landmarks.
+
+A lens may declare custom hand gestures beyond the canned classes in a
+top-level `"gestures"` array (up to sixteen): each is `{"name": "rock",
+"fingers": [t, i, m, r, p]}`, a name and five finger states in thumb, index,
+middle, ring, pinky order, each `"up"` (extended), `"down"` (curled), or
+`"any"` (unconstrained). The engine reads each tracked hand's finger poses and
+`hands.gesture('rock')` fires while a hand matches the constrained fingers, the
+same grammar the canned gestures use. A finger reads extended when its tip
+sits farther from the wrist than its inner joint, a scale-free test.
 
 ### 6.2 Actions
 

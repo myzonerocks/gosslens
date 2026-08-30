@@ -1445,6 +1445,20 @@ pub const Region2d = struct {
     }
 };
 
+/// A named hand pose a lens declares beyond the canned classifier gestures.
+/// `mask` marks the fingers it constrains (thumb the low bit through pinky the
+/// high bit) and `want` the extension each must hold; a live hand matches when
+/// the constrained fingers agree, so `hand.gesture('name')` fires on it.
+pub const GestureDef = struct {
+    name: []const u8,
+    mask: u5 = 0,
+    want: u5 = 0,
+};
+
+/// The most custom gestures a lens may declare, a bit each in the tick's
+/// matched-gesture mask.
+pub const max_custom_gestures = 16;
+
 /// A directional light a lens declares to shade its model.gltf nodes:
 /// `direction` (world travel), `intensity` (diffuse scale) and `ambient` (a
 /// lift for faces turned away). `sky` and `ground` tint the ambient by the
@@ -1480,6 +1494,7 @@ pub const Manifest = struct {
     triggers: []const Trigger,
     volume: ?Volume = null,
     region2d: ?Region2d = null,
+    gestures: []const GestureDef = &.{},
     /// Opt-in high-dynamic-range compositing: the color chain's intermediate
     /// targets carry half-float precision (16F where the backend renders it,
     /// 8-bit otherwise) and grade passes keep values above 1.0 through the
@@ -1621,6 +1636,49 @@ fn expectArray(diags: *Diagnostics, path: *PathStack, value: ?std.json.Value) er
             break :blk null;
         },
     };
+}
+
+/// Parses one custom-gesture object: a `name` and a five-entry `fingers` array
+/// in thumb, index, middle, ring, pinky order, each `up`, `down`, or `any`. Up
+/// and down constrain that finger's extension; any leaves it free. Returns
+/// error.Invalid with a diagnostic recorded, so the caller drops just this one.
+fn parseGesture(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, value: std.json.Value) error{ OutOfMemory, Invalid }!GestureDef {
+    if (value != .object) {
+        try diags.add(path.slice(), "a gesture must be an object", .{});
+        return error.Invalid;
+    }
+    const obj = value.object;
+    const name = (try expectString(diags, path, getField(obj, "name"))) orelse return error.Invalid;
+    var gd = GestureDef{ .name = try arena.dupe(u8, name) };
+    const fingers = getField(obj, "fingers") orelse {
+        try diags.add(path.slice(), "a gesture needs a five-entry fingers array", .{});
+        return error.Invalid;
+    };
+    if (fingers != .array or fingers.array.items.len != 5) {
+        try diags.add(path.slice(), "fingers is five states: thumb, index, middle, ring, pinky", .{});
+        return error.Invalid;
+    }
+    for (fingers.array.items, 0..) |fv, fi| {
+        if (fv != .string) {
+            try diags.add(path.slice(), "each finger is 'up', 'down', or 'any'", .{});
+            return error.Invalid;
+        }
+        const bit = @as(u5, 1) << @intCast(fi);
+        if (std.mem.eql(u8, fv.string, "up")) {
+            gd.mask |= bit;
+            gd.want |= bit;
+        } else if (std.mem.eql(u8, fv.string, "down")) {
+            gd.mask |= bit;
+        } else if (!std.mem.eql(u8, fv.string, "any")) {
+            try diags.add(path.slice(), "each finger is 'up', 'down', or 'any'", .{});
+            return error.Invalid;
+        }
+    }
+    if (gd.mask == 0) {
+        try diags.add(path.slice(), "a gesture must constrain at least one finger", .{});
+        return error.Invalid;
+    }
+    return gd;
 }
 
 /// A layout.composite arrangement name to its ABI integer (0 custom by default).
@@ -4556,6 +4614,31 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
         path.pop(mark);
     }
 
+    if (getField(root, "gestures")) |gv| {
+        const mark = path.push("gestures");
+        if (gv != .array) {
+            try diags.add(path.slice(), "gestures must be an array", .{});
+        } else if (gv.array.items.len > max_custom_gestures) {
+            try diags.add(path.slice(), "at most {d} custom gestures", .{max_custom_gestures});
+        } else {
+            var list = try arena.alloc(GestureDef, gv.array.items.len);
+            var n: usize = 0;
+            for (gv.array.items, 0..) |item, gi| {
+                const gmark = path.pushIndex(gi);
+                if (parseGesture(diags, &path, arena, item)) |gd| {
+                    list[n] = gd;
+                    n += 1;
+                } else |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Invalid => {},
+                }
+                path.pop(gmark);
+            }
+            manifest.gestures = list[0..n];
+        }
+        path.pop(mark);
+    }
+
     try crossReference(diags, &path, arena, &manifest);
 
     if (diags.list.items.len > diags_before) {
@@ -5748,4 +5831,33 @@ test "a face-anchored model binds to a face index and rejects a bad one" {
     var result = try parseFails(past);
     defer result.deinit();
     try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "face_index must be") != null);
+}
+
+test "a lens declares custom hand gestures and rejects malformed ones" {
+    const good =
+        \\{"glf": "1.0", "id": "g", "version": "1.0.0", "display_name": "Gest",
+        \\ "engine_compat": ">=0.5", "capabilities": ["hands"], "parameters": [],
+        \\ "gestures": [{"name": "rock", "fingers": ["up", "down", "down", "down", "up"]},
+        \\   {"name": "point", "fingers": ["any", "up", "down", "down", "down"]}],
+        \\ "nodes": [], "triggers": []}
+    ;
+    var parsed = try parseOk(good);
+    defer parsed.deinit();
+    try t.expectEqual(@as(usize, 2), parsed.gestures.len);
+    try t.expectEqualStrings("rock", parsed.gestures[0].name);
+    // thumb up + pinky up: bits 0 and 4 set in both mask and want.
+    try t.expectEqual(@as(u5, 0b10001), parsed.gestures[0].want);
+    try t.expectEqual(@as(u5, 0b11111), parsed.gestures[0].mask);
+    // "any" leaves the thumb unconstrained: bit 0 out of the mask.
+    try t.expectEqual(@as(u5, 0b11110), parsed.gestures[1].mask);
+
+    const bad_len =
+        \\{"glf": "1.0", "id": "g", "version": "1.0.0", "display_name": "Gest",
+        \\ "engine_compat": ">=0.5", "capabilities": ["hands"], "parameters": [],
+        \\ "gestures": [{"name": "rock", "fingers": ["up", "down"]}],
+        \\ "nodes": [], "triggers": []}
+    ;
+    var result = try parseFails(bad_len);
+    defer result.deinit();
+    try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "five states") != null);
 }

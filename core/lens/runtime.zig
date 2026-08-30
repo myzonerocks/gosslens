@@ -1874,6 +1874,10 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     defer gpa.free(param_names);
     for (lens_manifest.parameters, 0..) |p, i| param_names[i] = p.name;
 
+    const gesture_names = try gpa.alloc([]const u8, lens_manifest.gestures.len);
+    defer gpa.free(gesture_names);
+    for (lens_manifest.gestures, 0..) |gd, i| gesture_names[i] = gd.name;
+
     const compiled_triggers = try gpa.alloc(trigger.Expression, lens_manifest.triggers.len);
     errdefer gpa.free(compiled_triggers);
     var compiled_count: usize = 0;
@@ -1883,7 +1887,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         var diag_arena = std.heap.ArenaAllocator.init(gpa);
         defer diag_arena.deinit();
         var compile_err: ?trigger.CompileError = null;
-        const expr = trigger.compile(gpa, diag_arena.allocator(), lens_trigger.when_source, param_names, &compile_err) catch |err| switch (err) {
+        const expr = trigger.compile(gpa, diag_arena.allocator(), lens_trigger.when_source, param_names, gesture_names, &compile_err) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
         compiled_triggers[compiled_count] = expr orelse return error.UnknownParameter;
@@ -2139,6 +2143,8 @@ fn resolveLogicRef(specs: []const manifest.LogicNodeSpec, ref: []const u8, befor
 /// resolving node refs to indices, signal leaves through the trigger parser,
 /// and param leaves to parameter indices; all storage lives in arena.
 fn compileLogicGraphs(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, lens_manifest: manifest.Manifest, param_names: []const []const u8) error{OutOfMemory}![]CompiledLogicGraph {
+    const gesture_names = try arena.alloc([]const u8, lens_manifest.gestures.len);
+    for (lens_manifest.gestures, 0..) |gd, i| gesture_names[i] = gd.name;
     var out: std.ArrayList(CompiledLogicGraph) = .empty;
     for (lens_manifest.nodes) |node| {
         const spec = node.logic_graph orelse continue;
@@ -2154,7 +2160,7 @@ fn compileLogicGraphs(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, l
             ln.constant = ns.constant;
             if (ln.op == .signal and ns.signal_source.len > 0) {
                 var err: ?trigger.CompileError = null;
-                if (try trigger.compileSignal(arena, diag_arena, ns.signal_source, param_names, &err)) |sig| ln.signal = sig;
+                if (try trigger.compileSignal(arena, diag_arena, ns.signal_source, param_names, gesture_names, &err)) |sig| ln.signal = sig;
             }
             if (ln.op == .param) {
                 for (param_names, 0..) |pn, pi| {
