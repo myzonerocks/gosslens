@@ -218,7 +218,10 @@ frame the runtime deforms the mesh by the weighted sum of those targets'
 per-vertex deltas, the weights taken from the named parameters' live values,
 so ramping a weight opens a blendshape (a smile, a blink). Each name must be
 a declared parameter, a target past the list contributes nothing, and with
-no `morph_weights` the mesh draws unmorphed.
+no `morph_weights` the mesh draws unmorphed. A skinned mesh morphs too: the
+runtime deforms the rest pose by the morph weights first and then skins that
+morphed rest by the body joints, so a body avatar's blendshapes move under its
+skinning rather than being lost to the bind pose.
 
 A face-anchored `model.gltf` node may add `"retarget": true` to turn the mesh
 into an avatar of the user's face: each morph target whose glTF name matches an

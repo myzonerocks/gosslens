@@ -4216,7 +4216,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             const bp = bodyAnchorPose(lm) orelse break :skinned;
                             const anchor_full = bp.mul(base_model_matrix);
                             buildBodySkinPalette(rig, lm, anchor_full);
-                            skinPositions(rig.rest, rig.skin.vertex_joints, rig.skin.vertex_weights, rig.palette, rig.skinned);
+                            // A skinned mesh that also morphs skins its morphed
+                            // rest (the morph pass above wrote it into
+                            // morph_scratch) instead of the bind rest, so a body
+                            // avatar's blendshapes deform under the skin.
+                            const skin_src = if (loaded.morph_scratch.len == rig.rest.len) loaded.morph_scratch else rig.rest;
+                            skinPositions(skin_src, rig.skin.vertex_joints, rig.skin.vertex_weights, rig.palette, rig.skinned);
                             r.updateSkinnedMesh(rig.mesh, rig.skinned);
                             r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
                             r.drawSkinnedMesh(mesh_view, rig.mesh, pixel_to_world.mul(anchor_full), loaded.base_color, tiledAspect(s, rect_width, rect_height));
@@ -12483,6 +12488,10 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             if (has_morph) {
                 if (gpa.alloc([3]f32, decoded.positions.len)) |scratch| {
                     morph_rest = decoded.positions;
+                    // Seed the scratch with the rest pose so a frame that morphs
+                    // nothing (and the skinned-mesh path, which reads it as its
+                    // skin source) still has valid positions to work from.
+                    @memcpy(scratch, decoded.positions);
                     morph_scratch = scratch;
                 } else |_| {
                     gpa.free(decoded.positions);
@@ -12972,6 +12981,29 @@ test "morphPositions adds weighted target deltas to the rest pose" {
     morphPositions(&out, &rest, &targets, &.{ 0.0, 0.0 });
     try t.expectApproxEqAbs(@as(f32, 1.0), out[1][0], 0.001);
     try t.expectApproxEqAbs(@as(f32, 0.0), out[1][1], 0.001);
+}
+
+test "a morphed rest skins to a different pose than the bind rest" {
+    // Both vertices are fully weighted to joint 0, which translates by +x, so
+    // skinning shifts every vertex by ten in x while preserving its y.
+    const joints = [_][4]u16{ .{ 0, 0, 0, 0 }, .{ 0, 0, 0, 0 } };
+    const weights = [_][4]f32{ .{ 1, 0, 0, 0 }, .{ 1, 0, 0, 0 } };
+    const mats = [_]math.Mat4{math.Mat4.translation(.{ 10, 0, 0 })};
+    const bind_rest = [_][3]f32{ .{ 0, 0, 0 }, .{ 0, 1, 0 } };
+    // The morph pass lifted the second vertex from y=1 to y=2; this is what the
+    // skinned-mesh path now feeds skinPositions instead of the bind rest.
+    const morphed_rest = [_][3]f32{ .{ 0, 0, 0 }, .{ 0, 2, 0 } };
+    var out_bind: [2][3]f32 = undefined;
+    var out_morphed: [2][3]f32 = undefined;
+    skinPositions(&bind_rest, &joints, &weights, &mats, &out_bind);
+    skinPositions(&morphed_rest, &joints, &weights, &mats, &out_morphed);
+    // Both shift +10 in x; the morphed second vertex carries its higher y through
+    // the skin, so the two skinned poses differ - the morph deforms under it.
+    try t.expectApproxEqAbs(@as(f32, 10), out_bind[1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 1), out_bind[1][1], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 10), out_morphed[1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 2), out_morphed[1][1], 0.001);
+    try t.expect(out_morphed[1][1] != out_bind[1][1]);
 }
 
 test "buildMorphBlendshapeTable maps ARKit names to blendshape indices" {
