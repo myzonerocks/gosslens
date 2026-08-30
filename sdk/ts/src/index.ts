@@ -77,6 +77,18 @@ export interface GossSessionConfig {
   frameBudgetUs?: number;
 }
 
+/// A guided-capture scan's progress: covered target viewpoints, whether it is
+/// complete, the views captured and gaussians reconstructed so far, and the yaw
+/// (radians) of the next uncovered target to steer the user toward.
+export interface CaptureGuidance {
+  covered: number;
+  total: number;
+  complete: boolean;
+  viewCount: number;
+  splatCount: number;
+  nextYaw: number;
+}
+
 /// A high-resolution still capture, decoupled from the preview size. width
 /// and height 0 capture at the submitted frame's own resolution; format is
 /// PNG (0), JPEG (1) or HEIC (2); quality is 1..100 for the lossy formats.
@@ -1509,6 +1521,30 @@ export class GossSession {
   /// near-zero vector clears the stream, leaving a rolling.pass inert.
   submitOrientation(gravityX: number, gravityY: number, gravityZ: number, timestampUs: bigint = 0n): void {
     this.mod.ccall("goss_session_submit_orientation", "number", ["number", "number", "number", "number", "number"], [this.handle, gravityX, gravityY, gravityZ, timestampUs]);
+  }
+
+  /// Captures the current viewpoint (the last submitted world pose and depth) into
+  /// a guided scan, back-projecting the depth into a deterministic gaussian
+  /// reconstruction, and returns the scan's coverage so the app can steer the user
+  /// to the next uncovered viewpoint. Reset with resetCapture.
+  captureView(): CaptureGuidance {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [24]) as number;
+    this.mod.ccall("goss_session_capture_view", "number", ["number", "number"], [this.handle, ptr]);
+    const guidance: CaptureGuidance = {
+      covered: this.mod.getValue(ptr, "i32") >>> 0,
+      total: this.mod.getValue(ptr + 4, "i32") >>> 0,
+      complete: this.mod.getValue(ptr + 8, "i32") !== 0,
+      viewCount: this.mod.getValue(ptr + 12, "i32") >>> 0,
+      splatCount: this.mod.getValue(ptr + 16, "i32") >>> 0,
+      nextYaw: this.mod.getValue(ptr + 20, "float"),
+    };
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 24]);
+    return guidance;
+  }
+
+  /// Clears a guided-capture scan: its covered targets, poses, and reconstruction.
+  resetCapture(): void {
+    this.mod.ccall("goss_session_reset_capture", "number", ["number"], [this.handle]);
   }
 
   /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer node

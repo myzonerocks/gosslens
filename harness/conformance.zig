@@ -1080,6 +1080,242 @@ fn proveDepthOcclusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeParallaxLens(dir: []const u8, amount: f32, focus: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.parallax","version":"1.0.0","display_name":"Parallax","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"p","type":"parallax.pass","inputs":{{"frame":"camera"}},"params":{{}},"parallax":{{"amount":{d:.4},"focus":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ amount, focus });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Activates a parallax.pass lens, submits a fixed device tilt, and renders the
+/// frame over a three-band synthetic depth map, returning the capture.
+fn captureParallaxShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, depth: []const f32, dw: u32, dh: u32, tilt: [3]f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    _ = abi.goss_session_submit_orientation(session, tilt[0], tilt[1], tilt[2], 1000);
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    var w: u32 = 0;
+    var h: u32 = 0;
+    try renderWithDepth(engine, session, &desc, planes, depth, dw, dh, 0.0, 1.0, shot, &w, &h);
+    return shot;
+}
+
+/// Proves the 3D-photo parallax warp: a red gradient over three depth bands (a
+/// near, a focus-plane, and a far band) with a submitted device tilt. The near
+/// band shifts by its distance from the focus plane while the focus band holds;
+/// the shift reverses with the tilt; a zero amount is an identity; bit-stable.
+fn proveParallax(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        f[idx + 0] = @intCast(col * 255 / (@as(usize, width) - 1)); // red rides the column
+        f[idx + 1] = 90;
+        f[idx + 2] = 160;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    // Three vertical depth bands: near (0), focus-plane (0.5), far (1).
+    const dw: u32 = 60;
+    const dh: u32 = 45;
+    var depth: [dw * dh]f32 = undefined;
+    for (0..dh) |y| for (0..dw) |x| {
+        depth[y * dw + x] = if (x < dw / 3) 0.0 else if (x < 2 * dw / 3) 0.5 else 1.0;
+    };
+
+    const tilt = [3]f32{ 0.6, -0.8, 0 };
+    const tilt_neg = [3]f32{ -0.6, -0.8, 0 };
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/parallax-0");
+    try writeParallaxLens("zig-out/parallax-0", 0.0, 0.5);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/parallax-1");
+    try writeParallaxLens("zig-out/parallax-1", 0.12, 0.5);
+
+    const raw = try captureParallaxShot(gpa, engine, "zig-out/parallax-0", planes, &depth, dw, dh, tilt);
+    defer gpa.free(raw);
+    const warp = try captureParallaxShot(gpa, engine, "zig-out/parallax-1", planes, &depth, dw, dh, tilt);
+    defer gpa.free(warp);
+    const warp2 = try captureParallaxShot(gpa, engine, "zig-out/parallax-1", planes, &depth, dw, dh, tilt);
+    defer gpa.free(warp2);
+    const warp_neg = try captureParallaxShot(gpa, engine, "zig-out/parallax-1", planes, &depth, dw, dh, tilt_neg);
+    defer gpa.free(warp_neg);
+
+    if (!std.mem.eql(u8, warp, warp2)) {
+        std.debug.print("conformance: FAIL parallax is not bit-stable across runs\n", .{});
+        return false;
+    }
+    // A zero amount is an identity: the warp equals the raw frame.
+    if (countDiff(raw, warp) == 0) {
+        std.debug.print("conformance: FAIL parallax at amount 0.12 did not move the frame\n", .{});
+        return false;
+    }
+    // The near band (left third) shifts; the focus band (middle third) holds.
+    const near_raw = regionMean(raw, 20, 120);
+    const near_warp = regionMean(warp, 20, 120);
+    const focus_raw = regionMean(raw, 150, 250);
+    const focus_warp = regionMean(warp, 150, 250);
+    const near_shift = @abs(near_warp[0] - near_raw[0]);
+    const focus_shift = @abs(focus_warp[0] - focus_raw[0]);
+    if (!(near_shift > focus_shift + 8)) {
+        std.debug.print("conformance: FAIL parallax did not shift the near band more than the focus band (near {d:.1}, focus {d:.1})\n", .{ near_shift, focus_shift });
+        return false;
+    }
+    // The shift direction reverses with the tilt.
+    if (std.mem.eql(u8, warp, warp_neg)) {
+        std.debug.print("conformance: FAIL parallax did not reverse with the tilt direction\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a parallax.pass warps the frame by the submitted depth's distance from the focus plane: the near band shifts (red {d:.0} -> {d:.0}) while the focus band holds ({d:.0} -> {d:.0}), reversing with the tilt and identity at amount 0, bit-stable\n", .{ near_raw[0], near_warp[0], focus_raw[0], focus_warp[0] });
+    return true;
+}
+
+/// Writes a lens whose ml.infer node binds its model output as both a driven
+/// parameter (so a publish is observable) and the scene depth, feeding a
+/// parallax.pass that carries no depth of its own. So the parallax warps only
+/// once the model's estimated depth reaches the rail, with no depth submitted.
+fn writeMonoDepthLens(dir: []const u8, amount: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.mono-depth","version":"1.0.0","display_name":"Mono Depth","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}}],
+        \\ "nodes":[
+        \\   {{"id":"est","type":"ml.infer","params":{{}},"ml":{{"model":"model.tflite","outputs":[{{"tensor":0,"index":32896,"param":"score"}}],"depth":{{"tensor":0}}}}}},
+        \\   {{"id":"p","type":"parallax.pass","inputs":{{"frame":"camera"}},"params":{{}},"parallax":{{"amount":{d:.4},"focus":0.5}}}}
+        \\ ],
+        \\ "triggers":[]}}
+    , .{amount});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Activates a mono-depth lens, feeds it until the model publishes, then renders
+/// the parallax the estimated depth drives under a submitted tilt. No depth is
+/// ever submitted; the depth the parallax reads comes only from the model.
+/// Returns the capture and, through out_score, the parameter the model drove.
+fn captureMonoDepthShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, tilt: [3]f32, out_score: *f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    _ = abi.goss_session_submit_orientation(session, tilt[0], tilt[1], tilt[2], 1000);
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    // Feed the model (track) and watch the sentinel score flip to a real
+    // inference, so the render below runs after the worker has published.
+    var score: f32 = -999.0;
+    var polls: usize = 0;
+    while (score == -999.0) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlTrackFrameFailed;
+        std.Thread.yield() catch {};
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "score", 5, &score);
+        polls += 1;
+        if (polls > 100_000_000) return error.MlInferTimedOut;
+    }
+    out_score.* = score;
+    // The worker has published; render composites so pollMlDepth uploads the
+    // estimated depth and the parallax draws over the fed camera frame.
+    const shot = try gpa.alloc(u8, @as(usize, planes.width) * planes.height * 4);
+    errdefer gpa.free(shot);
+    var w: u32 = 0;
+    var h: u32 = 0;
+    for (0..5) |_| {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlTrackFrameFailed;
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves depth-from-a-single-image: a bundled monocular depth net's output
+/// becomes the session depth with no depth submitted, and that estimated depth
+/// drives the parallax warp. The model runs on the frame (score responds to
+/// pixels), the warp is non-trivial (identity at amount 0, reverses with tilt).
+fn proveMonoDepth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const model = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(32 << 20));
+    defer gpa.free(model);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mono-depth-warp/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mono-depth-still/assets");
+    try writeMonoDepthLens("zig-out/mono-depth-warp", 0.15);
+    try writeMonoDepthLens("zig-out/mono-depth-still", 0.0);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/mono-depth-warp/assets/model.tflite", .data = model });
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/mono-depth-still/assets/model.tflite", .data = model });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    const tilt = [3]f32{ 0.6, -0.8, 0 };
+    const tilt_neg = [3]f32{ -0.6, -0.8, 0 };
+    var score_p: f32 = 0;
+    var score_g: f32 = 0;
+    var scratch: f32 = 0;
+
+    const warp = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-warp", person, tilt, &score_p);
+    defer gpa.free(warp);
+    const warp2 = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-warp", person, tilt, &scratch);
+    defer gpa.free(warp2);
+    const warp_neg = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-warp", person, tilt_neg, &scratch);
+    defer gpa.free(warp_neg);
+    const still = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-still", person, tilt, &scratch);
+    defer gpa.free(still);
+    const gray_warp = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-warp", gray, tilt, &score_g);
+    defer gpa.free(gray_warp);
+
+    // The model published a real inference from the frame: finite, and the
+    // portrait and the flat frame drive its score apart, so it ran on pixels.
+    if (!std.math.isFinite(score_p) or !std.math.isFinite(score_g)) {
+        std.debug.print("conformance: FAIL mono-depth model published a non-finite score\n", .{});
+        return false;
+    }
+    if (@abs(score_p - score_g) < 1e-4) {
+        std.debug.print("conformance: FAIL mono-depth model did not respond to the frame ({d} vs {d})\n", .{ score_p, score_g });
+        return false;
+    }
+    if (!std.mem.eql(u8, warp, warp2)) {
+        std.debug.print("conformance: FAIL mono-depth parallax is not bit-stable across runs\n", .{});
+        return false;
+    }
+    // The estimated depth drives the warp: amount 0 holds the frame, amount 0.15
+    // moves it, and with no depth ever submitted only the model's output can be it.
+    const moved = countDiff(still, warp);
+    if (moved == 0) {
+        std.debug.print("conformance: FAIL estimated depth did not drive the parallax warp\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, warp, warp_neg)) {
+        std.debug.print("conformance: FAIL mono-depth parallax did not reverse with the tilt\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a monocular depth net's output becomes the session depth with no depth submitted and drives the parallax warp: the model runs on the frame (score {d:.3} vs flat {d:.3}), amount 0 holds while 0.15 moves it ({d} px), reversing with the tilt, bit-stable\n", .{ score_p, score_g, moved });
+    return true;
+}
+
 /// Submits one frame with a set of faces, renders it settled, and captures.
 fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, faces: []const abi.FaceResult, shot: []u8, out_w: *u32, out_h: *u32) !void {
     const half_w = (planes.width + 1) / 2;
@@ -5401,6 +5637,54 @@ fn onnxConvModel(a: std.mem.Allocator, in_name: []const u8, cin: i64, cout: i64,
     return model.buf.items;
 }
 
+/// A synthetic ONNX model whose single 1x1 conv has zero weights and a bias equal
+/// to `values`, so its output is exactly `values` for any frame. It hands a
+/// splat.cloud a known gaussian set (xyz, scale, quaternion, opacity, rgb per
+/// splat) so the render can be asserted precisely against fixed splats.
+fn onnxConstModel(a: std.mem.Allocator, values: []const f32) []const u8 {
+    const cout: i64 = @intCast(values.len);
+    const cin: i64 = 3;
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, cout);
+    w.varintField(1, cin);
+    w.varintField(1, 1);
+    w.varintField(1, 1);
+    w.varintField(2, 1);
+    var wraw: std.ArrayList(u8) = .empty;
+    var wi: usize = 0;
+    while (wi < values.len * 3) : (wi += 1) wraw.appendSlice(a, &[4]u8{ 0, 0, 0, 0 }) catch unreachable;
+    w.bytesField(9, wraw.items);
+    w.bytesField(8, "W");
+    var bp: OnnxPb = .{ .a = a };
+    bp.varintField(1, cout);
+    bp.varintField(2, 1);
+    var braw: std.ArrayList(u8) = .empty;
+    for (values) |v| {
+        var b4: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b4, @bitCast(v), .little);
+        braw.appendSlice(a, &b4) catch unreachable;
+    }
+    bp.bytesField(9, braw.items);
+    bp.bytesField(8, "B");
+    const conv = onnxNode(a, "Conv", &.{ "x", "W", "B" }, &.{"y"}, &.{
+        .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+        .{ .name = "strides", .ints = &.{ 1, 1 } },
+        .{ .name = "pads", .ints = &.{ 0, 0, 0, 0 } },
+    });
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, conv);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(5, bp.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, cin, 1, 1 }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ cout, cin, 1, 1 }));
+    g.bytesField(11, onnxValueInfo(a, "B", &.{cout}));
+    g.bytesField(12, onnxValueInfo(a, "y", &.{ 1, cout, 1, 1 }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
 /// The knobs a diffusion reference lens varies. A null encoder starts from pure
 /// noise (text to image); a text_embedding ships a cond asset; a sprite_mask
 /// keys the output; coherence turns on the temporal filter; target_mesh draws
@@ -6192,6 +6476,368 @@ fn runSelfieSplatRgbaOnce(engine: *abi.Engine, dir: []const u8, rgba: []const u8
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
+    return true;
+}
+
+fn writeSplatGaussianLens(dir: []const u8, model: []const u8, placement: []const u8, portal: [4]f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.splat-gaussian","version":"1.0.0","display_name":"Gaussian Splat","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"cloud","type":"splat.cloud","inputs":{{"frame":"camera"}},"params":{{}},
+        \\   "splat":{{"model":"splat.onnx","source":"camera","draw":"gaussian","point":8.0,"placement":"{s}","portal":[{d:.3},{d:.3},{d:.3},{d:.3}]}}}}],
+        \\ "triggers":[]}}
+    , .{ placement, portal[0], portal[1], portal[2], portal[3] });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/splat.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Activates a gaussian splat lens, waits for the cloud to publish, and captures
+/// the composite over a black frame so the splats read as their own coverage. A
+/// non-null mask is injected as the subject channel for a background placement.
+fn runSplatGaussianShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, mask: ?[]const f32, out_w: *u32, out_h: *u32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.SplatActivationFailed;
+    if (mask) |m| abi.injectMaskChannel(session, 0, @ptrCast(m.ptr));
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    var polls: usize = 0;
+    while (abi.splatCloudReadyCount(session) == 0) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return error.SplatNeverReady;
+    }
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    // The capture lands at the renderer's own dimensions, not the fed frame's,
+    // so a generous buffer holds it and the caller reads the real w*h back.
+    const shot = try gpa.alloc(u8, @as(usize, 1024) * 1024 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+const SplatExtents = struct { horiz: usize, vert: usize };
+
+/// The on-screen width and height of a splat centred on the frame: the run of
+/// lit pixels along the centre row and the centre column, so an oriented ellipse
+/// reads as wider-than-tall or taller-than-wide.
+fn splatExtents(shot: []const u8, w: u32, h: u32) SplatExtents {
+    const cx: usize = w / 2;
+    const cy: usize = h / 2;
+    var minx: i64 = -1;
+    var maxx: i64 = -1;
+    for (0..w) |x| {
+        const o = (cy * w + x) * 4;
+        if (@as(u32, shot[o]) + shot[o + 1] + shot[o + 2] > 60) {
+            if (minx < 0) minx = @intCast(x);
+            maxx = @intCast(x);
+        }
+    }
+    var miny: i64 = -1;
+    var maxy: i64 = -1;
+    for (0..h) |y| {
+        const o = (y * w + cx) * 4;
+        if (@as(u32, shot[o]) + shot[o + 1] + shot[o + 2] > 60) {
+            if (miny < 0) miny = @intCast(y);
+            maxy = @intCast(y);
+        }
+    }
+    const he: usize = if (maxx >= 0) @intCast(maxx - minx + 1) else 0;
+    const ve: usize = if (maxy >= 0) @intCast(maxy - miny + 1) else 0;
+    return .{ .horiz = he, .vert = ve };
+}
+
+fn centerRgb(shot: []const u8, w: u32, h: u32) [3]u8 {
+    const o = (@as(usize, h / 2) * w + w / 2) * 4;
+    return .{ shot[o], shot[o + 1], shot[o + 2] };
+}
+
+/// Proves the anisotropic sorted gaussian splat render: fixed const-model splats
+/// draw as oriented ellipses (a covariance elongated along x reads wider than
+/// tall, along y taller than wide) and composite in depth order (a near opaque
+/// splat draws over a far one, swapping when the depths swap), bit-stable.
+fn proveSplatGaussian(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // One white splat, covariance elongated along x, then along y.
+    const model_h = onnxConstModel(a, &.{ 0, 0, 0, 0.15, 0.045, 0.045, 0, 0, 0, 1, 1.0, 1, 1, 1 });
+    const model_v = onnxConstModel(a, &.{ 0, 0, 0, 0.045, 0.15, 0.045, 0, 0, 0, 1, 1.0, 1, 1, 1 });
+    // Two overlapping splats: a far blue and a near red, then the colors swapped
+    // between the depths so the front-most one is the other color.
+    const model_rb = onnxConstModel(a, &.{ 0, 0, -0.5, 0.12, 0.12, 0.12, 0, 0, 0, 1, 1.0, 0, 0, 1, 0, 0, 0.5, 0.12, 0.12, 0.12, 0, 0, 0, 1, 1.0, 1, 0, 0 });
+    const model_br = onnxConstModel(a, &.{ 0, 0, -0.5, 0.12, 0.12, 0.12, 0, 0, 0, 1, 1.0, 1, 0, 0, 0, 0, 0.5, 0.12, 0.12, 0.12, 0, 0, 0, 1, 1.0, 0, 0, 1 });
+
+    inline for (.{ "zig-out/splat-h", "zig-out/splat-v", "zig-out/splat-rb", "zig-out/splat-br" }) |d| {
+        try std.Io.Dir.cwd().createDirPath(harness_io, d ++ "/assets");
+    }
+    try writeSplatGaussianLens("zig-out/splat-h", model_h, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-v", model_v, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-rb", model_rb, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-br", model_br, "overlay", .{ 0, 0, 0, 0 });
+
+    const dim: u32 = 320;
+    const black_rgba = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
+    defer gpa.free(black_rgba);
+    @memset(black_rgba, 0);
+    const black = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = black_rgba }, .width = dim, .height = dim });
+    defer black.deinit(gpa);
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot_h = try runSplatGaussianShot(gpa, engine, "zig-out/splat-h", black, null, &w, &h);
+    defer gpa.free(shot_h);
+    const shot_h2 = try runSplatGaussianShot(gpa, engine, "zig-out/splat-h", black, null, &w, &h);
+    defer gpa.free(shot_h2);
+    const shot_v = try runSplatGaussianShot(gpa, engine, "zig-out/splat-v", black, null, &w, &h);
+    defer gpa.free(shot_v);
+    const shot_rb = try runSplatGaussianShot(gpa, engine, "zig-out/splat-rb", black, null, &w, &h);
+    defer gpa.free(shot_rb);
+    const shot_br = try runSplatGaussianShot(gpa, engine, "zig-out/splat-br", black, null, &w, &h);
+    defer gpa.free(shot_br);
+
+    const n = @as(usize, w) * h * 4;
+    if (!std.mem.eql(u8, shot_h[0..n], shot_h2[0..n])) {
+        std.debug.print("conformance: FAIL gaussian splat render is not bit-stable across runs\n", .{});
+        return false;
+    }
+    const eh = splatExtents(shot_h, w, h);
+    const ev = splatExtents(shot_v, w, h);
+    if (eh.horiz == 0 or ev.vert == 0) {
+        std.debug.print("conformance: FAIL gaussian splat drew nothing (h {d}x{d}, v {d}x{d})\n", .{ eh.horiz, eh.vert, ev.horiz, ev.vert });
+        return false;
+    }
+    if (!(eh.horiz > eh.vert + 8)) {
+        std.debug.print("conformance: FAIL the x-elongated splat did not read wider than tall ({d} vs {d})\n", .{ eh.horiz, eh.vert });
+        return false;
+    }
+    if (!(ev.vert > ev.horiz + 8)) {
+        std.debug.print("conformance: FAIL the y-elongated splat did not read taller than wide ({d} vs {d})\n", .{ ev.vert, ev.horiz });
+        return false;
+    }
+    const crb = centerRgb(shot_rb, w, h);
+    const cbr = centerRgb(shot_br, w, h);
+    if (!(@as(i32, crb[0]) > @as(i32, crb[2]) + 20)) {
+        std.debug.print("conformance: FAIL the near red splat did not draw over the far blue one (r {d}, b {d})\n", .{ crb[0], crb[2] });
+        return false;
+    }
+    if (!(@as(i32, cbr[2]) > @as(i32, cbr[0]) + 20)) {
+        std.debug.print("conformance: FAIL swapping the depths did not swap which splat is on top (r {d}, b {d})\n", .{ cbr[0], cbr[2] });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a gaussian splat.cloud draws anisotropic sorted splats: the x-elongated covariance reads {d}x{d} and the y-elongated {d}x{d}, and a near red splat composites over a far blue one (r {d} > b {d}), swapping with the depth, bit-stable\n", .{ eh.horiz, eh.vert, ev.horiz, ev.vert, crb[0], crb[2] });
+    return true;
+}
+
+fn sum3(rgb: [3]u8) u32 {
+    return @as(u32, rgb[0]) + rgb[1] + rgb[2];
+}
+
+/// A frame pixel's rgb at a normalized (u, v), for asserting a splat's presence
+/// or absence in a region.
+fn pixelAt(shot: []const u8, w: u32, h: u32, u: f32, v: f32) [3]u8 {
+    const x: usize = @intFromFloat(std.math.clamp(u, 0, 0.999) * @as(f32, @floatFromInt(w)));
+    const y: usize = @intFromFloat(std.math.clamp(v, 0, 0.999) * @as(f32, @floatFromInt(h)));
+    const o = (y * w + x) * 4;
+    return .{ shot[o], shot[o + 1], shot[o + 2] };
+}
+
+/// Proves the splat portal placement: a large gaussian cloud that fills the view
+/// in overlay is confined to a rect in portal mode, so a point outside the rect
+/// falls back to the frame while the rect centre still shows the cloud.
+fn proveSplatPortal(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const model = onnxConstModel(a, &.{ 0, 0, 0, 0.6, 0.6, 0.6, 0, 0, 0, 1, 1.0, 1, 1, 1 });
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/splat-overlay/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/splat-portal/assets");
+    const rect = [4]f32{ 0.35, 0.35, 0.3, 0.3 };
+    try writeSplatGaussianLens("zig-out/splat-overlay", model, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-portal", model, "portal", rect);
+
+    const dim: u32 = 320;
+    const black_rgba = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
+    defer gpa.free(black_rgba);
+    @memset(black_rgba, 0);
+    const black = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = black_rgba }, .width = dim, .height = dim });
+    defer black.deinit(gpa);
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const overlay = try runSplatGaussianShot(gpa, engine, "zig-out/splat-overlay", black, null, &w, &h);
+    defer gpa.free(overlay);
+    const portal = try runSplatGaussianShot(gpa, engine, "zig-out/splat-portal", black, null, &w, &h);
+    defer gpa.free(portal);
+
+    const outside_overlay = sum3(pixelAt(overlay, w, h, 0.08, 0.5));
+    const outside_portal = sum3(pixelAt(portal, w, h, 0.08, 0.5));
+    const inside_portal = sum3(pixelAt(portal, w, h, 0.5, 0.5));
+    if (!(outside_overlay > 120)) {
+        std.debug.print("conformance: FAIL the overlay cloud did not reach the point the portal must clip ({d})\n", .{outside_overlay});
+        return false;
+    }
+    if (!(outside_portal < 40)) {
+        std.debug.print("conformance: FAIL the portal did not clip the cloud outside its rect (lum {d})\n", .{outside_portal});
+        return false;
+    }
+    if (!(inside_portal > 120)) {
+        std.debug.print("conformance: FAIL the portal rect did not show the cloud (lum {d})\n", .{inside_portal});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a portal splat cloud is confined to its rect: a point outside reads {d} in overlay but {d} in portal, while the rect centre stays lit at {d}\n", .{ outside_overlay, outside_portal, inside_portal });
+    return true;
+}
+
+/// Proves the splat background placement: a gaussian cloud drawn behind the
+/// segmented subject, so the subject region shows the frame while the background
+/// region shows the cloud, unlike overlay where the cloud covers the subject too.
+fn proveSplatBackground(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const model = onnxConstModel(a, &.{ 0, 0, 0, 0.8, 0.8, 0.8, 0, 0, 0, 1, 1.0, 0, 1, 0 });
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/splat-bg-overlay/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/splat-bg/assets");
+    try writeSplatGaussianLens("zig-out/splat-bg-overlay", model, "overlay", .{ 0, 0, 0, 0 });
+    try writeSplatGaussianLens("zig-out/splat-bg", model, "background", .{ 0, 0, 0, 0 });
+
+    const dim: u32 = 320;
+    const black_rgba = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
+    defer gpa.free(black_rgba);
+    @memset(black_rgba, 0);
+    const black = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = black_rgba }, .width = dim, .height = dim });
+    defer black.deinit(gpa);
+
+    // A vertical band on the left is the subject (mask 1), the right is background
+    // (mask 0); a vertical split so a mask y-flip cannot confound the assertion.
+    const mask = try gpa.alloc(f32, 256 * 256);
+    defer gpa.free(mask);
+    for (0..256) |y| for (0..256) |x| {
+        mask[y * 256 + x] = if (x < 102) 1.0 else 0.0;
+    };
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const overlay = try runSplatGaussianShot(gpa, engine, "zig-out/splat-bg-overlay", black, mask, &w, &h);
+    defer gpa.free(overlay);
+    const bg = try runSplatGaussianShot(gpa, engine, "zig-out/splat-bg", black, mask, &w, &h);
+    defer gpa.free(bg);
+
+    const subject_overlay = pixelAt(overlay, w, h, 0.28, 0.5)[1];
+    const subject_bg = sum3(pixelAt(bg, w, h, 0.28, 0.5));
+    const back_bg = pixelAt(bg, w, h, 0.72, 0.5)[1];
+    if (!(subject_overlay > 100)) {
+        std.debug.print("conformance: FAIL the overlay cloud did not cover the subject region ({d})\n", .{subject_overlay});
+        return false;
+    }
+    if (!(subject_bg < 60)) {
+        std.debug.print("conformance: FAIL the background placement did not keep the subject in front (lum {d})\n", .{subject_bg});
+        return false;
+    }
+    if (!(back_bg > 100)) {
+        std.debug.print("conformance: FAIL the background region did not show the splat cloud (g {d})\n", .{back_bg});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a background splat cloud sits behind the subject: the subject region reads green {d} in overlay but {d} behind the subject in background, while the background region shows the cloud (g {d})\n", .{ subject_overlay, subject_bg, back_bg });
+    return true;
+}
+
+/// A world_from_camera pose rotated `theta` about the Y axis (column-major), so a
+/// guided-capture scan sees a distinct yaw each step.
+fn makeYaw(theta: f32) [16]f32 {
+    const cs = @cos(theta);
+    const sn = @sin(theta);
+    var m = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    m[0] = cs;
+    m[2] = -sn;
+    m[8] = sn;
+    m[10] = cs;
+    return m;
+}
+
+/// Proves guided capture and the deterministic reconstruction: capturing a ring of
+/// eight yaw viewpoints covers the scan, each view's depth back-projects through
+/// the submitted pose and projection into a spread of world-space gaussians landing
+/// where the geometry puts them, and the same poses and depth rebuild the same set.
+fn proveCaptureReconstruct(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const dw: u32 = 16;
+    const dh: u32 = 16;
+    var depth: [dw * dh]f32 = undefined;
+    @memset(&depth, 0.5);
+    const identity_proj = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
+    var guidance: abi.CaptureGuidance = undefined;
+    const scan = struct {
+        fn run(sess: *abi.Session, d: []const f32, w: u32, h: u32, proj: [16]f32, out: *abi.CaptureGuidance) !void {
+            for (0..8) |i| {
+                const theta = @as(f32, @floatFromInt(i)) * (std.math.tau / 8.0);
+                var ws: abi.WorldState = .{ .tracking_state = 1, .world_from_camera = makeYaw(theta), .projection = proj, .timestamp_us = @intCast(i * 1000) };
+                if (abi.goss_session_submit_world(sess, &ws, null, 0, null, 0, null) != .ok) return error.SubmitWorldFailed;
+                if (abi.goss_session_submit_depth(sess, d.ptr, w, h, 1.0, 3.0) != .ok) return error.SubmitDepthFailed;
+                if (abi.goss_session_capture_view(sess, out) != .ok) return error.CaptureViewFailed;
+            }
+        }
+    };
+    try scan.run(session, &depth, dw, dh, identity_proj, &guidance);
+
+    if (guidance.complete != 1 or guidance.covered != 8) {
+        std.debug.print("conformance: FAIL guided capture did not complete coverage ({d}/{d})\n", .{ guidance.covered, guidance.total });
+        return false;
+    }
+    const expect: usize = 8 * 16 * 16;
+    if (abi.reconstructedSplatCount(session) != expect) {
+        std.debug.print("conformance: FAIL reconstruction produced {d} gaussians, expected {d}\n", .{ abi.reconstructedSplatCount(session), expect });
+        return false;
+    }
+    // View 0 is the identity pose; its centre grid sample back-projects a metric
+    // depth of 2 (near 1 + 0.5 * span 2) to world z -2.
+    const centre = abi.reconstructedSplat(session, 8 * 16 + 8);
+    if (!(@abs(centre[2] + 2.0) < 0.01)) {
+        std.debug.print("conformance: FAIL the back-projected depth landed at z {d:.3}, not -2\n", .{centre[2]});
+        return false;
+    }
+    // The grid spreads across the frame: the left and right samples of view 0 land
+    // well apart in world x, so it is a real unprojection, not one point.
+    const left = abi.reconstructedSplat(session, 8 * 16 + 0);
+    const right = abi.reconstructedSplat(session, 8 * 16 + 15);
+    if (!(@abs(left[0] - right[0]) > 1.0)) {
+        std.debug.print("conformance: FAIL the reconstruction did not spread across the frame (dx {d:.3})\n", .{@abs(left[0] - right[0])});
+        return false;
+    }
+
+    // Deterministic: reset and rescan the same poses and depth rebuild the same set.
+    if (abi.goss_session_reset_capture(session) != .ok) return error.ResetFailed;
+    if (abi.reconstructedSplatCount(session) != 0) {
+        std.debug.print("conformance: FAIL reset did not clear the reconstruction\n", .{});
+        return false;
+    }
+    try scan.run(session, &depth, dw, dh, identity_proj, &guidance);
+    const centre2 = abi.reconstructedSplat(session, 8 * 16 + 8);
+    if (abi.reconstructedSplatCount(session) != expect or !std.mem.eql(u8, std.mem.asBytes(&centre), std.mem.asBytes(&centre2))) {
+        std.debug.print("conformance: FAIL the reconstruction is not deterministic across a rescan\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a guided capture covers eight yaw viewpoints and reconstructs {d} gaussians by back-projecting each view's depth through its pose (centre at z {d:.2}, frame spread {d:.2}), deterministically\n", .{ expect, centre[2], @abs(left[0] - right[0]) });
     return true;
 }
 
@@ -16645,6 +17291,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("skinned body mesh");
     if (!try proveDepthOcclusion(gpa, engine)) return 1;
     watchHold("depth occlusion");
+    if (!try proveParallax(gpa, engine)) return 1;
+    watchHold("parallax pass");
+    if (!try proveMonoDepth(gpa, engine)) return 1;
+    watchHold("mono depth");
     if (!try proveFaceRegions(gpa, engine)) return 1;
     watchHold("face regions");
     if (!try proveBodyJoints(gpa, engine)) return 1;
@@ -16817,6 +17467,14 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer splat mesh");
     if (!try proveMlInferSplatColored(gpa, engine)) return 1;
     watchHold("ml infer splat colored");
+    if (!try proveSplatGaussian(gpa, engine)) return 1;
+    watchHold("splat gaussian");
+    if (!try proveSplatPortal(gpa, engine)) return 1;
+    watchHold("splat portal");
+    if (!try proveSplatBackground(gpa, engine)) return 1;
+    watchHold("splat background");
+    if (!try proveCaptureReconstruct(gpa, engine)) return 1;
+    watchHold("capture reconstruct");
     if (!try proveMlInferSelfieAvatar(gpa, engine)) return 1;
     watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;

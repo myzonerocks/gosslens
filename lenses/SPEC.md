@@ -476,6 +476,18 @@ image-plane motion from the orientation stream (submitted through
 readout offset from the centre. With no orientation submitted the motion is zero
 and it holds the frame through. It ships no asset.
 
+A `"parallax.pass"` node is a 3D-photo depth warp. It carries a `"parallax":
+{"amount", "focus", "fill"}` block: `amount` (0..0.25, default 0.02) is the
+largest shift a unit disparity gets, `focus` (0..1 in the submitted depth,
+default 0.5) the plane that stays put, and `fill` the revealed-edge handling (0
+clamp, 1 mirror). Each pixel reads its color from a source shifted by the
+submitted depth's signed distance from the focus plane, so the layers nearer and
+farther than focus sway opposite ways as the device tilts while the subject at
+the focus plane holds, the living-photo look. The shift direction rides the
+orientation stream (submitted through `goss_session_submit_orientation`), so with
+no tilt it is an identity. It reads the depth the host submits; with no depth it
+holds the frame through, the standard capability degradation. It ships no asset.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -882,8 +894,8 @@ deterministic synthetic clip so the node still runs.
 
 A `"splat.cloud"` node draws 3D geometry a bundled model lifts from a frame.
 It carries a `"splat": {"model", "source", "draw", "point", "r", "g", "b",
-"colored"}` block: `model` names the net under `assets/`, whose output is a flat
-list of xyz positions (its length a multiple of three, one point per triple).
+"colored", "placement", "portal"}` block: `model` names the net under `assets/`,
+whose output is a flat list of xyz positions (its length a multiple of three).
 With `"colored"` the model emits rgb after xyz per point (its length a multiple
 of six) and each splat draws in its own color instead of the node `r`, `g`, `b`,
 so a photoreal selfie avatar carries the photo's color per point. `"source"`
@@ -893,8 +905,19 @@ picks the input: `"camera"` (the default) lifts the live frame each tick;
 avatar is generated from one photo and stays put off the live camera. `"draw"`
 picks the form: `"points"` (the default) draws camera-facing billboards, a splat
 cloud, sized by `"point"` (pixels); `"mesh"` reads the output as a square grid and
-draws it as a connected 3D surface, one quad per grid cell. `r`, `g`, `b` are the
-color. The model runs on the inference rail like any author model, off the frame
+draws it as a connected 3D surface, one quad per grid cell; `"gaussian"` reads the
+output at stride fourteen (xyz, a three-axis scale, a rotation quaternion, an
+opacity, and rgb per splat) and draws real anisotropic gaussian splats: each
+splat's covariance is projected to an oriented screen ellipse, the cloud is sorted
+back-to-front, and the ellipses composite with a premultiplied over-blend weighted
+by opacity, so a splat avatar or scene reads as a soft continuous volume rather
+than loose points. `r`, `g`, `b` are the color. For a gaussian cloud, `"placement"`
+picks where it composites: `"overlay"` (the default) over the frame; `"background"`
+behind the segmented subject, so the splats form a 3D backdrop and the subject
+stays in front (it reads the same subject mask the blend and beauty passes do);
+`"portal"` confines the cloud to the `"portal"` rect (`[x, y, w, h]` in normalized
+frame coordinates), a window into the splat world while the frame passes through
+outside it. The model runs on the inference rail like any author model, off the frame
 thread; the engine reads its latest points and draws them in a perspective view,
 so the submitted camera pose orbits the geometry. Until the model produces its
 first points the node holds the frame through, the standard capability
@@ -1067,6 +1090,16 @@ fed to the named mask `"channel"` (the same channel names the beauty and shader
 passes key against), so a lens author's own segmenter drives the identical
 compositing the built-in segmenters do. A model whose bound tensor is not a
 square single-channel plane keeps driving its parameters and feeds no mask.
+
+An `ml.infer` node may also carry a `"depth"` block, `{"tensor", "invert"}`,
+that binds a whole output tensor as the scene depth. The tensor is read as a
+square single-channel plane, min-max normalized so a relative-depth net still
+spans the full range, and fed as the session depth the `parallax.pass`,
+`dof.pass`, `fog.pass`, and `occluder.pass` sample - so a monocular depth net
+drives the same depth rail a device sensor would, lighting up 3D-photo parallax,
+bokeh, fog, and occlusion from a single image with no LiDAR. Set `"invert": true`
+for a net that outputs disparity or inverse depth (nearer reads larger) so the
+rail's nearer-is-smaller convention holds; a metric-depth net leaves it out.
 
 An `ml.infer` node may carry an `"aux": {"reference"}` block for a model that
 takes a second input: a bundled reference image (`assets/<reference>.png`)
@@ -1476,6 +1509,8 @@ an inpaint.pass fills a masked object from its surrounding boundary, the removed
 region's red falling and blue rising toward the field while the field holds;
 a rolling.pass with a submitted camera rotation shifts each scanline by its
 readout offset, a straight edge slanting under motion and holding without it;
+a parallax.pass warps the frame by the submitted depth's distance from the focus
+plane, the near band shifting under a device tilt while the focus band holds;
 a roll_lock warp levels the horizon from the orientation stream, a tilted bar
 coming level under a submitted device roll and holding without one;
 a gaze_correct warp reads the eyeLook blendshapes and redirects the pupils, the

@@ -4795,6 +4795,7 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         .{ .name = "fs_harmonize_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_inpaint_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_rolling_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_parallax_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // layout.composite's per-source blend: opacity, a matte from the
         // source's own alpha, or a chroma-key, drawn over the frame below.
         .{ .name = "fs_composite_source", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
@@ -4842,6 +4843,11 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // corner and life, not the shared texcoord).
         .{ .name = "vs_billboard", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_billboard.def.sc" },
         .{ .name = "fs_billboard", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_billboard.def.sc" },
+        // gaussian splat render: the same faded-billboard vertex contract, with
+        // the corner pre-oriented into the projected covariance ellipse and the
+        // fragment evaluating the anisotropic gaussian for a sorted over-blend.
+        .{ .name = "vs_splat", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_billboard.def.sc" },
+        .{ .name = "fs_splat", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_billboard.def.sc" },
         // draw.board's ribbon: a flat per-vertex color pass, its own varying
         // def since a_position is vec2 in screen space and it carries a
         // vertex color rather than the shared texcoord.

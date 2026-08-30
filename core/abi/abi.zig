@@ -104,7 +104,7 @@ pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
 // its body - nothing else.
-pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment };
+pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance };
 
 pub const abi_functions = [_][]const u8{
     "uint32_t goss_abi_version(void)",
@@ -214,6 +214,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
     "goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)",
     "goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)",
+    "goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance)",
+    "goss_status goss_session_reset_capture(goss_session *session)",
     "goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
     "goss_status goss_session_submit_frame_bracket_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
@@ -698,6 +700,12 @@ pub const Session = struct {
     /// activation, fed the camera frame, uploaded to their sprite each render.
     diffusion_workers: std.ArrayListUnmanaged(DiffusionWorker) = .empty,
     splat_workers: std.ArrayListUnmanaged(SplatWorker) = .empty,
+    /// Guided-capture scan state: the world poses captured so far, a bitset of
+    /// covered target viewpoints, and the deterministic gaussian set reconstructed
+    /// by back-projecting each captured view's depth. Bounded, freed at teardown.
+    capture_poses: std.ArrayListUnmanaged([16]f32) = .empty,
+    capture_covered: u32 = 0,
+    recon_gaussians: std.ArrayListUnmanaged(f32) = .empty,
     /// Monotonic timestamp for still images fed to the segmenter through
     /// goss_session_submit_segmentation_image, so each submit orders after the
     /// last the way successive camera frames do.
@@ -848,6 +856,12 @@ pub const Session = struct {
     occluder_frame_target: ?render.Renderer.OffscreenTarget = null,
     occluder_frame_w: u16 = 0,
     occluder_frame_h: u16 = 0,
+    /// A background gaussian splat cloud draws into this before it is composited
+    /// behind the subject; kept off the chain ping-pong so the composite never
+    /// reads and writes one target at once. Null until a background splat draws.
+    splat_scene_target: ?render.Renderer.OffscreenTarget = null,
+    splat_scene_w: u16 = 0,
+    splat_scene_h: u16 = 0,
     /// cutout.pass nodes by graph index: their background color (rgb) and edge
     /// softness. The face matte keys the frame through, the rest goes flat color.
     cutout_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1175,6 +1189,9 @@ pub const Session = struct {
     /// The correction strength and sensor readout time (strength, readout) of each
     /// spliced rolling.pass node, resolved once at activation.
     rolling_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// The max shift, focus plane and fill mode (amount, focus, fill) of each
+    /// spliced parallax.pass node, resolved once at activation.
+    parallax_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
     /// The smoothed face center and scale an auto_frame warp steers toward its
     /// target each frame, a running mean so the reframing eases instead of
     /// snapping. Invalid until the first face seeds it.
@@ -1513,6 +1530,18 @@ fn ensureOccluderFrame(s: *Session, width: u16, height: u16) !void {
     s.occluder_frame_target = try render.Renderer.createOffscreenTarget(width, height);
     s.occluder_frame_w = width;
     s.occluder_frame_h = height;
+}
+
+/// (Re)creates the session-owned target a background splat cloud draws into
+/// before it composites behind the subject, only on a size change or first use.
+/// Allocated lazily the first time a background splat draws, freed at teardown.
+fn ensureSplatScene(s: *Session, width: u16, height: u16) !void {
+    if (s.splat_scene_w == width and s.splat_scene_h == height and s.splat_scene_target != null) return;
+    if (s.splat_scene_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.splat_scene_target = null;
+    s.splat_scene_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.splat_scene_w = width;
+    s.splat_scene_h = height;
 }
 
 /// (Re)creates the session-owned target a matte.hair source refines the
@@ -2184,6 +2213,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Rolling correction reads the orientation stream; with none the
             // derived motion stays zero and the node holds the frame through.
             .rolling => s.rolling_params.contains(entry.graph_index),
+            // Parallax needs the host's depth like dof; with none submitted it
+            // holds the frame through, the standard capability degradation.
+            .parallax => s.parallax_params.contains(entry.graph_index) and s.depth_texture != null,
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2676,6 +2708,28 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // motion is zero and the pass holds the frame through.
                 const gain = if (s.orientation_set) rp[1] * rp[0] else 0;
                 r.submitRollingPass(view_id, input_texture, s.orientation_omega[0] * gain, s.orientation_omega[1] * gain);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .parallax => {
+                const pp = s.parallax_params.get(entry.graph_index) orelse continue;
+                const depth_tex = s.depth_texture orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The shift direction is the device tilt in the image plane scaled
+                // by the authored amount; with no orientation submitted the shift is
+                // zero and the pass holds the frame through.
+                const amount = pp[0];
+                const sx = if (s.orientation_set) std.math.clamp(s.orientation_prev[0], -1, 1) * amount else 0;
+                const sy = if (s.orientation_set) std.math.clamp(s.orientation_prev[1], -1, 1) * amount else 0;
+                r.submitParallaxPass(view_id, input_texture, depth_tex, sx, sy, pp[1], pp[2]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3284,7 +3338,41 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
                 const base_color: [4]f32 = .{ sw.color[0], sw.color[1], sw.color[2], 1.0 };
-                if (mesh_draw) {
+                if (sw.gaussian) {
+                    // Project each splat's covariance into an oriented screen
+                    // ellipse, sort the cloud back-to-front, and over-blend it.
+                    if (frameStage(s, sw.count * 6 * 12)) |verts| {
+                        writeSplatGaussians(sw, verts);
+                        render.Renderer.updateParticleMeshFaded(mesh, verts);
+                    }
+                    switch (sw.placement) {
+                        .overlay => r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, null),
+                        .portal => {
+                            // Confine the cloud to a rect: the frame the blit laid
+                            // down shows outside, a window into the splat world.
+                            const sc = portalScissor(sw.portal, rect_w, rect_h);
+                            r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, sc);
+                        },
+                        .background => background: {
+                            // Draw the cloud into a dedicated scene target, then
+                            // composite the frame's subject over it by the subject
+                            // mask, so the splats sit behind as a 3D backdrop.
+                            ensureSplatScene(s, @intCast(rect_w), @intCast(rect_h)) catch {};
+                            const scene_target = s.splat_scene_target orelse {
+                                r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, null);
+                                break :background;
+                            };
+                            render.Renderer.setViewTarget(blit_view, scene_target, rect_w, rect_h);
+                            render.Renderer.setViewTarget(mesh_view, scene_target, rect_w, rect_h);
+                            r.submitSplats(blit_view, mesh_view, input_texture, mesh, aspect_ratio, null);
+                            const blend_view = next_view_id;
+                            next_view_id += 1;
+                            if (output) |target| render.Renderer.setViewTarget(blend_view, target, rect_w, rect_h) else render.Renderer.setViewTarget(blend_view, null, output_width, output_height);
+                            const mask_tex = s.segmentation_texture orelse r.default_mask_texture;
+                            r.submitBlendPass(blend_view, input_texture, scene_target.texture, mask_tex, 1.0);
+                        },
+                    }
+                } else if (mesh_draw) {
                     // Connect the grid of points into a surface and draw it as a
                     // solid 3D mesh over the passed-through frame.
                     if (frameStage(s, vertex_count * 3)) |verts| {
@@ -4287,6 +4375,7 @@ pub fn destroySession(session: *Session) void {
     session.harmonize_params.deinit(session.engine.gpa);
     session.inpaint_params.deinit(session.engine.gpa);
     session.rolling_params.deinit(session.engine.gpa);
+    session.parallax_params.deinit(session.engine.gpa);
     if (session.person_mask.len > 0) session.engine.gpa.free(session.person_mask);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
@@ -4318,6 +4407,7 @@ pub fn destroySession(session: *Session) void {
     session.env_params.deinit(session.engine.gpa);
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.occluder_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.splat_scene_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -4391,6 +4481,8 @@ pub fn destroySession(session: *Session) void {
     session.diffusion_workers.deinit(session.engine.gpa);
     destroySplatWorkers(session);
     session.splat_workers.deinit(session.engine.gpa);
+    session.capture_poses.deinit(session.engine.gpa);
+    session.recon_gaussians.deinit(session.engine.gpa);
     session.ml_style_textures.deinit(session.engine.gpa);
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
@@ -4689,6 +4781,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollSegmentationMask(s);
         pollMlMasks(s);
         pollMlStyle(s);
+        pollMlDepth(s);
         pollDiffusion(s);
         pollSceneSegmentation(s);
         pollDepthOcclusion(s);
@@ -4790,6 +4883,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSegmentationMask(s);
     pollMlMasks(s);
     pollMlStyle(s);
+    pollMlDepth(s);
     pollDiffusion(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
@@ -4891,6 +4985,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSegmentationMask(s);
     pollMlMasks(s);
     pollMlStyle(s);
+    pollMlDepth(s);
     pollDiffusion(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
@@ -5108,6 +5203,19 @@ pub const WorldAnchor = extern struct {
 pub const WorldLight = extern struct {
     ambient_intensity: f32,
     color_temperature_kelvin: f32,
+};
+
+/// The guided-capture progress a `goss_session_capture_view` call returns: how
+/// many of the target viewpoints a scan has covered, whether it is complete, the
+/// views captured and gaussians reconstructed so far, and the yaw (radians) of
+/// the next uncovered target so the app can steer the user toward it.
+pub const CaptureGuidance = extern struct {
+    covered: u32,
+    total: u32,
+    complete: u32,
+    view_count: u32,
+    splat_count: u32,
+    next_yaw: f32,
 };
 
 pub const max_world_planes = 32;
@@ -7025,6 +7133,119 @@ pub export fn goss_session_submit_orientation(session: ?*Session, gravity_x: f32
     return .ok;
 }
 
+const capture_target_count: u32 = 8;
+const capture_max_views: usize = 32;
+const capture_grid: usize = 16;
+const capture_max_gaussians: usize = capture_max_views * capture_grid * capture_grid;
+
+/// Captures the current viewpoint into a guided scan: marks the yaw target the
+/// pose covers, back-projects the submitted depth into world-space gaussians, and
+/// returns the scan's coverage so the app can steer the user to the next gap. The
+/// reconstruction is deterministic; goss_session_reset_capture clears the scan.
+pub export fn goss_session_capture_view(session: ?*Session, out_guidance: ?*CaptureGuidance) Status {
+    const s = session orelse return .invalid_argument;
+    const gpa = s.engine.gpa;
+    const cam_pose = s.world.state.world_from_camera;
+    const proj = s.world.state.projection;
+    // Camera forward (0,0,-1) rotated into world by the pose, its yaw snapped to
+    // the nearest evenly spaced target, which the scan then marks covered.
+    const fwd_x = -cam_pose[8];
+    const fwd_z = -cam_pose[10];
+    const yaw = std.math.atan2(fwd_x, fwd_z);
+    const norm_yaw = yaw - std.math.tau * @floor(yaw / std.math.tau);
+    const step = std.math.tau / @as(f32, @floatFromInt(capture_target_count));
+    const target: u32 = @as(u32, @intFromFloat(@round(norm_yaw / step))) % capture_target_count;
+    s.capture_covered |= (@as(u32, 1) << @intCast(target));
+
+    if (s.capture_poses.items.len < capture_max_views) {
+        s.capture_poses.append(gpa, cam_pose) catch {};
+        reconstructView(s, gpa, cam_pose, proj);
+    }
+
+    if (out_guidance) |g| {
+        var covered: u32 = 0;
+        var next_yaw: f32 = 0;
+        var found_next = false;
+        for (0..capture_target_count) |ti| {
+            if (s.capture_covered & (@as(u32, 1) << @intCast(ti)) != 0) {
+                covered += 1;
+            } else if (!found_next) {
+                next_yaw = @as(f32, @floatFromInt(ti)) * step;
+                found_next = true;
+            }
+        }
+        g.* = .{
+            .covered = covered,
+            .total = capture_target_count,
+            .complete = if (covered == capture_target_count) 1 else 0,
+            .view_count = @intCast(s.capture_poses.items.len),
+            .splat_count = @intCast(s.recon_gaussians.items.len / 14),
+            .next_yaw = next_yaw,
+        };
+    }
+    return .ok;
+}
+
+/// Clears a guided-capture scan: drops the covered targets, the captured poses,
+/// and the reconstructed gaussians, so a fresh scan starts from nothing.
+pub export fn goss_session_reset_capture(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.capture_covered = 0;
+    s.capture_poses.clearRetainingCapacity();
+    s.recon_gaussians.clearRetainingCapacity();
+    return .ok;
+}
+
+/// Back-projects a captured view's depth grid into world-space gaussians and
+/// appends them to the reconstruction, unprojecting each grid sample through the
+/// submitted projection and pose. A missing depth or projection adds nothing.
+fn reconstructView(s: *Session, gpa: std.mem.Allocator, cam_pose: [16]f32, proj: [16]f32) void {
+    if (s.depth_data.len == 0 or s.depth_width == 0 or s.depth_height == 0) return;
+    if (proj[0] == 0 or proj[5] == 0) return;
+    const span = if (s.depth_far > s.depth_near) s.depth_far - s.depth_near else 1.0;
+    const dw = s.depth_width;
+    const dh = s.depth_height;
+    const gridf: f32 = @floatFromInt(capture_grid);
+    var gy: usize = 0;
+    while (gy < capture_grid) : (gy += 1) {
+        var gx: usize = 0;
+        while (gx < capture_grid) : (gx += 1) {
+            if (s.recon_gaussians.items.len / 14 >= capture_max_gaussians) return;
+            const u = (@as(f32, @floatFromInt(gx)) + 0.5) / gridf;
+            const v = (@as(f32, @floatFromInt(gy)) + 0.5) / gridf;
+            const px: usize = @intFromFloat(u * @as(f32, @floatFromInt(dw - 1)));
+            const py: usize = @intFromFloat(v * @as(f32, @floatFromInt(dh - 1)));
+            const d_norm = std.math.clamp(s.depth_data[py * dw + px], 0, 1);
+            const depth_m = s.depth_near + d_norm * span;
+            if (!(depth_m > 0)) continue;
+            // Unproject the pixel to a camera-space point, then pose it to world.
+            const ndc_x = u * 2 - 1;
+            const ndc_y = 1 - v * 2;
+            const cam_x = ndc_x * depth_m / proj[0];
+            const cam_y = ndc_y * depth_m / proj[5];
+            const cam_z = -depth_m;
+            const wx = cam_pose[0] * cam_x + cam_pose[4] * cam_y + cam_pose[8] * cam_z + cam_pose[12];
+            const wy = cam_pose[1] * cam_x + cam_pose[5] * cam_y + cam_pose[9] * cam_z + cam_pose[13];
+            const wz = cam_pose[2] * cam_x + cam_pose[6] * cam_y + cam_pose[10] * cam_z + cam_pose[14];
+            // A small isotropic gaussian per sample, shaded by its depth so the
+            // reconstructed cloud is inspectable; identity rotation, full opacity.
+            s.recon_gaussians.appendSlice(gpa, &[14]f32{ wx, wy, wz, 0.03, 0.03, 0.03, 0, 0, 0, 1, 1.0, d_norm, d_norm, d_norm }) catch return;
+        }
+    }
+}
+
+/// The gaussians a guided-capture scan has reconstructed so far, for a proof to
+/// assert the back-projection landed the cloud where the poses and depth put it.
+pub fn reconstructedSplatCount(session: *Session) usize {
+    return session.recon_gaussians.items.len / 14;
+}
+
+pub fn reconstructedSplat(session: *Session, i: usize) [14]f32 {
+    var out: [14]f32 = undefined;
+    @memcpy(&out, session.recon_gaussians.items[i * 14 ..][0..14]);
+    return out;
+}
+
 /// Feeds one NV12 exposure into every bracket-source temporal.fuse ring, each
 /// distinct exposure a distinct timestamp so the ring keeps them all. The fusion
 /// publishes once the ring holds a full bracket.
@@ -8195,6 +8416,7 @@ fn destroyBlendState(session: *Session) void {
     session.harmonize_params.clearRetainingCapacity();
     session.inpaint_params.clearRetainingCapacity();
     session.rolling_params.clearRetainingCapacity();
+    session.parallax_params.clearRetainingCapacity();
     session.auto_frame_valid = false;
     session.audio_enhance_strength = 0;
     session.voice_pitch = 1;
@@ -8857,6 +9079,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createHarmonizeParams(s, gpa) catch {};
     createInpaintParams(s, gpa) catch {};
     createRollingParams(s, gpa) catch {};
+    createParallaxParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -9076,6 +9299,17 @@ fn createRollingParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(nodes);
     for (nodes) |n| {
         session.rolling_params.put(gpa, n.graph_index, .{ n.strength, n.readout }) catch {};
+    }
+}
+
+/// Resolves every spliced parallax.pass node's amount, focus and fill into
+/// session.parallax_params once at activation - mirrors createRollingParams.
+fn createParallaxParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.parallaxPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.parallax_params.put(gpa, n.graph_index, .{ n.amount, n.focus, @floatFromInt(n.fill) }) catch {};
     }
 }
 
@@ -10247,6 +10481,12 @@ const MlWorker = struct {
     style_f32: []f32,
     style_bgra: []u8,
     style_tex: render.TextureHandle,
+    /// A depth binding routes a single-channel output tensor to the session
+    /// depth texture, so a monocular depth net feeds the rail a sensor would.
+    /// depth_side is the model's square side and depth_src the raw copy target.
+    depth: ?manifest.MlDepth,
+    depth_side: u32,
+    depth_src: []f32,
 };
 
 /// Builds an inference worker for every ml.infer node from its bundled model,
@@ -10309,6 +10549,23 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             }
         }
 
+        // A depth binding needs the bound tensor to be a square single-channel
+        // plane; anything else leaves the node driving only its parameters.
+        var depth: ?manifest.MlDepth = null;
+        var depth_side: u32 = 0;
+        var depth_src: []f32 = &.{};
+        if (ml.depth) |db| {
+            const len = ml_infer.outputLen(worker, db.tensor);
+            const side = isqrt(len);
+            if (len > 0 and side * side == len) {
+                if (gpa.alloc(f32, len)) |src| {
+                    depth = db;
+                    depth_side = @intCast(side);
+                    depth_src = src;
+                } else |_| {}
+            }
+        }
+
         // A style binding needs the bound tensor to be a square three-channel
         // image and a sprite to draw it; otherwise the node only drives its
         // parameters and mask.
@@ -10350,11 +10607,15 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             .style_f32 = style_f32,
             .style_bgra = style_bgra,
             .style_tex = .{ .idx = render.invalid_handle },
+            .depth = depth,
+            .depth_side = depth_side,
+            .depth_src = depth_src,
         }) catch {
             if (mask_src.len > 0) gpa.free(mask_src);
             if (mask_dst.len > 0) gpa.free(mask_dst);
             if (style_f32.len > 0) gpa.free(style_f32);
             if (style_bgra.len > 0) gpa.free(style_bgra);
+            if (depth_src.len > 0) gpa.free(depth_src);
             ml_infer.destroy(worker);
             return;
         };
@@ -10977,6 +11238,48 @@ fn pollMlMasks(session: *Session) void {
     }
 }
 
+/// Feeds each ml.infer depth binding's output into the session depth texture,
+/// min-max normalized so a relative-depth net spans the full range, uploaded as
+/// the R8 depth the parallax, bokeh, fog, and occlusion passes already sample.
+/// So a monocular depth net drives the depth rail with no sensor. Render-path.
+fn pollMlDepth(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.ml_workers.items) |mw| {
+        const depth = mw.depth orelse continue;
+        if (mw.depth_src.len == 0) continue;
+        if (!ml_infer.copyOutput(mw.worker, depth.tensor, mw.depth_src)) continue;
+        const side = mw.depth_side;
+        const count = @as(usize, side) * side;
+        var lo: f32 = std.math.floatMax(f32);
+        var hi: f32 = -std.math.floatMax(f32);
+        for (mw.depth_src[0..count]) |v| {
+            if (!std.math.isFinite(v)) continue;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        if (!(hi > lo)) continue;
+        if (session.depth_data.len != count) {
+            if (session.depth_data.len != 0) gpa.free(session.depth_data);
+            session.depth_data = gpa.alloc(f32, count) catch {
+                session.depth_data = &.{};
+                continue;
+            };
+            if (session.depth_scratch.len != 0) gpa.free(session.depth_scratch);
+            session.depth_scratch = gpa.alloc(u8, count) catch &.{};
+        }
+        const span = hi - lo;
+        for (mw.depth_src[0..count], session.depth_data) |v, *d| {
+            const f = if (std.math.isFinite(v)) std.math.clamp((v - lo) / span, 0, 1) else 0;
+            d.* = if (depth.invert) 1 - f else f;
+        }
+        session.depth_width = side;
+        session.depth_height = side;
+        session.depth_near = 0;
+        session.depth_far = 1;
+        updateDepthTexture(session, gpa);
+    }
+}
+
 /// Bilinearly resamples a square single-channel mask to the mask resolution, so
 /// any model output size feeds the fixed-size mask texture.
 fn resampleMask(src: []const f32, side: u32, dst: []f32) void {
@@ -11070,6 +11373,7 @@ fn destroyMlWorkers(session: *Session) void {
         if (mw.mask_dst.len > 0) gpa.free(mw.mask_dst);
         if (mw.style_f32.len > 0) gpa.free(mw.style_f32);
         if (mw.style_bgra.len > 0) gpa.free(mw.style_bgra);
+        if (mw.depth_src.len > 0) gpa.free(mw.depth_src);
         if (mw.style_tex.idx != render.invalid_handle) {
             if (session.engine.renderer) |*r| r.destroyTexture(mw.style_tex);
         }
@@ -11199,7 +11503,18 @@ const SplatWorker = struct {
     // True when the model emits rgb after xyz per point (stride six), so each
     // splat draws in its own color rather than the node color.
     colored: bool,
+    // True draws anisotropic sorted gaussians: the model emits xyz, scale, a
+    // rotation quaternion, opacity, and rgb per splat (stride fourteen), each
+    // projected to an oriented screen ellipse and composited back-to-front.
+    gaussian: bool,
+    // Where a gaussian cloud composites (over the frame, behind the subject, or
+    // inside the portal rect) and, for portal, the rect in normalized coords.
+    placement: manifest.SplatPlacement,
+    portal: [4]f32,
     positions: []f32,
+    // Per-frame back-to-front draw order for the gaussian path, allocated once
+    // at load and re-sorted each frame; empty for the point and mesh paths.
+    order: []u32,
     // The billboard mesh is created lazily on the first draw, since it needs the
     // renderer; null marks it not yet built.
     mesh: ?render.Renderer.ParticleMesh = null,
@@ -11221,9 +11536,10 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         defer gpa.free(bytes);
         const worker = ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch continue;
         const len = ml_infer.outputLen(worker, 0);
-        // A colored cloud's model emits xyz then rgb per point, so its output is
-        // a multiple of six; a plain one emits xyz only, a multiple of three.
-        const stride: usize = if (node.colored) 6 else 3;
+        // A gaussian cloud's model emits xyz, scale, quaternion, opacity, and rgb
+        // per splat (stride fourteen); a colored point cloud emits xyz then rgb
+        // (stride six); a plain one emits xyz only (stride three).
+        const stride: usize = if (node.gaussian) 14 else if (node.colored) 6 else 3;
         if (len == 0 or len % stride != 0) {
             ml_infer.destroy(worker);
             continue;
@@ -11233,6 +11549,13 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             ml_infer.destroy(worker);
             continue;
         };
+        // The gaussian path re-sorts a per-splat index list each frame; the point
+        // and mesh paths draw in emit order and keep it empty.
+        const order: []u32 = if (node.gaussian) (gpa.alloc(u32, count) catch {
+            gpa.free(positions);
+            ml_infer.destroy(worker);
+            continue;
+        }) else &.{};
         session.splat_workers.append(gpa, .{
             .worker = worker,
             .target = node.graph_index,
@@ -11242,9 +11565,14 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .mesh_draw = node.mesh,
             .selfie = node.selfie,
             .colored = node.colored,
+            .gaussian = node.gaussian,
+            .placement = node.placement,
+            .portal = node.portal,
             .positions = positions,
+            .order = order,
         }) catch {
             gpa.free(positions);
+            if (order.len > 0) gpa.free(order);
             ml_infer.destroy(worker);
             continue;
         };
@@ -11260,6 +11588,7 @@ fn destroySplatWorkers(session: *Session) void {
     for (session.splat_workers.items) |sw| {
         if (sw.mesh) |m| render.Renderer.destroyParticleMesh(m);
         gpa.free(sw.positions);
+        if (sw.order.len > 0) gpa.free(sw.order);
         ml_infer.destroy(sw.worker);
     }
     session.splat_workers.clearRetainingCapacity();
@@ -11329,6 +11658,142 @@ fn writeSplatMesh(positions: []const f32, side: usize, colored: bool, out: []f32
                 out[v * 3 + 2] = positions[p + 2];
                 v += 1;
             }
+        }
+    }
+}
+
+/// A model value with any non-finite one (NaN, inf) replaced by a fallback, so a
+/// hostile or broken model can never poison a splat's geometry or color.
+fn finiteOr(v: f32, fallback: f32) f32 {
+    return if (std.math.isFinite(v)) v else fallback;
+}
+
+/// Converts a portal's normalized rect (x, y, w, h) into a bgfx scissor in
+/// framebuffer pixels (top-left origin), clamped to the target so the window
+/// stays on screen. Used to confine a portal splat cloud to its rect.
+fn portalScissor(rect: [4]f32, w: u32, h: u32) [4]u16 {
+    const fw: f32 = @floatFromInt(w);
+    const fh: f32 = @floatFromInt(h);
+    const x = std.math.clamp(rect[0], 0, 1) * fw;
+    const y = std.math.clamp(rect[1], 0, 1) * fh;
+    const pw = std.math.clamp(rect[2], 0, 1 - std.math.clamp(rect[0], 0, 1)) * fw;
+    const ph = std.math.clamp(rect[3], 0, 1 - std.math.clamp(rect[1], 0, 1)) * fh;
+    return .{ @intFromFloat(x), @intFromFloat(y), @intFromFloat(pw), @intFromFloat(ph) };
+}
+
+/// Expands each gaussian splat into a camera-facing quad shaped by its projected
+/// 3D covariance (the model emits xyz, scale, quaternion, opacity, rgb per splat).
+/// R S Sᵀ Rᵀ is eigen-decomposed into an oriented screen ellipse the six vertices
+/// carry, and the cloud is sorted back-to-front for the premultiplied over-blend.
+fn writeSplatGaussians(sw: *SplatWorker, out: []f32) void {
+    const count = sw.count;
+    const pos = sw.positions;
+    // The three-sigma extent the quad spans, so the gaussian tail is negligible
+    // at the corners and the fragment discard trims the rest.
+    const k: f32 = 3.0;
+    for (0..count) |i| sw.order[i] = @intCast(i);
+    const Ctx = struct {
+        p: []const f32,
+        // The camera looks toward -z from z = 2, so a smaller z is farther and is
+        // drawn first; the index tie-break makes the order total and deterministic.
+        fn less(c: @This(), a: u32, b: u32) bool {
+            const za = c.p[@as(usize, a) * 14 + 2];
+            const zb = c.p[@as(usize, b) * 14 + 2];
+            if (za != zb) return za < zb;
+            return a < b;
+        }
+    };
+    std.sort.pdq(u32, sw.order[0..count], Ctx{ .p = pos }, Ctx.less);
+
+    const corners = [6][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ -1, -1 }, .{ 1, 1 }, .{ -1, 1 } };
+    for (sw.order[0..count], 0..) |splat, draw_i| {
+        const b = @as(usize, splat) * 14;
+        const px = finiteOr(pos[b + 0], 0);
+        const py = finiteOr(pos[b + 1], 0);
+        const pz = finiteOr(pos[b + 2], 0);
+        const sx = std.math.clamp(finiteOr(pos[b + 3], 0), 0, 4);
+        const sy = std.math.clamp(finiteOr(pos[b + 4], 0), 0, 4);
+        const sz = std.math.clamp(finiteOr(pos[b + 5], 0), 0, 4);
+        var qx = finiteOr(pos[b + 6], 0);
+        var qy = finiteOr(pos[b + 7], 0);
+        var qz = finiteOr(pos[b + 8], 0);
+        var qw = finiteOr(pos[b + 9], 1);
+        const qn = @sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+        if (qn > 1e-8) {
+            qx /= qn;
+            qy /= qn;
+            qz /= qn;
+            qw /= qn;
+        } else {
+            qx = 0;
+            qy = 0;
+            qz = 0;
+            qw = 1;
+        }
+        // Rows 0 and 1 of the rotation matrix (the splat's world x and y axes),
+        // the only rows the camera-facing 2x2 covariance block needs.
+        const r00 = 1 - 2 * (qy * qy + qz * qz);
+        const r01 = 2 * (qx * qy - qz * qw);
+        const r02 = 2 * (qx * qz + qy * qw);
+        const r10 = 2 * (qx * qy + qz * qw);
+        const r11 = 1 - 2 * (qx * qx + qz * qz);
+        const r12 = 2 * (qy * qz - qx * qw);
+        const vx = sx * sx;
+        const vy = sy * sy;
+        const vz = sz * sz;
+        const ca = r00 * r00 * vx + r01 * r01 * vy + r02 * r02 * vz;
+        const cov_b = r00 * r10 * vx + r01 * r11 * vy + r02 * r12 * vz;
+        const cc = r10 * r10 * vx + r11 * r11 * vy + r12 * r12 * vz;
+        // Eigen-decompose the symmetric 2x2 covariance into oriented axes.
+        const mid = 0.5 * (ca + cc);
+        const halfd = 0.5 * (ca - cc);
+        const disc = @sqrt(halfd * halfd + cov_b * cov_b);
+        const l1 = @max(mid + disc, 0);
+        const l2 = @max(mid - disc, 0);
+        var e1x: f32 = 1;
+        var e1y: f32 = 0;
+        if (@abs(cov_b) > 1e-8) {
+            e1x = l1 - cc;
+            e1y = cov_b;
+            const en = @sqrt(e1x * e1x + e1y * e1y);
+            if (en > 1e-8) {
+                e1x /= en;
+                e1y /= en;
+            } else {
+                e1x = 1;
+                e1y = 0;
+            }
+        } else if (cc > ca) {
+            e1x = 0;
+            e1y = 1;
+        }
+        const a1 = k * @sqrt(l1);
+        const a2 = k * @sqrt(l2);
+        // Axis 1 along the major eigenvector, axis 2 perpendicular.
+        const ax1x = e1x * a1;
+        const ax1y = e1y * a1;
+        const ax2x = -e1y * a2;
+        const ax2y = e1x * a2;
+        const op = std.math.clamp(finiteOr(pos[b + 10], 1), 0, 1);
+        const cr = std.math.clamp(finiteOr(pos[b + 11], 1), 0, 1);
+        const cg = std.math.clamp(finiteOr(pos[b + 12], 1), 0, 1);
+        const cbl = std.math.clamp(finiteOr(pos[b + 13], 1), 0, 1);
+        for (corners, 0..) |corner, ci| {
+            const u = corner[0];
+            const v = corner[1];
+            const o = (draw_i * 6 + ci) * 12;
+            out[o + 0] = px;
+            out[o + 1] = py;
+            out[o + 2] = pz;
+            out[o + 3] = u * ax1x + v * ax2x;
+            out[o + 4] = u * ax1y + v * ax2y;
+            out[o + 5] = 0;
+            out[o + 6] = u * k;
+            out[o + 7] = v * k;
+            out[o + 8] = cr;
+            out[o + 9] = cg;
+            out[o + 10] = cbl;
+            out[o + 11] = op;
         }
     }
 }
@@ -11921,6 +12386,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createHarmonizeParams(session, gpa);
     try createInpaintParams(session, gpa);
     try createRollingParams(session, gpa);
+    try createParallaxParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);

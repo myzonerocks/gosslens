@@ -607,6 +607,17 @@ pub const Renderer = struct {
         _ = skew_y;
     }
 
+    pub fn submitParallaxPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, depth_texture: TextureHandle, shift_x: f32, shift_y: f32, focus: f32, fill: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = depth_texture;
+        _ = shift_x;
+        _ = shift_y;
+        _ = focus;
+        _ = fill;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
@@ -1004,6 +1015,16 @@ pub const Renderer = struct {
         _ = mesh;
         _ = base_color;
         _ = aspect_ratio;
+    }
+
+    pub fn submitSplats(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, aspect_ratio: f32, scissor: ?[4]u16) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = aspect_ratio;
+        _ = scissor;
     }
 
     pub const HairMesh = struct {

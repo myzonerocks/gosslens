@@ -206,6 +206,8 @@ pub const Renderer = struct {
     inpaint_params_uniform: c.bgfx_uniform_handle_t,
     rolling_program: c.bgfx_program_handle_t,
     rolling_params_uniform: c.bgfx_uniform_handle_t,
+    parallax_program: c.bgfx_program_handle_t,
+    parallax_params_uniform: c.bgfx_uniform_handle_t,
     bloom_extract_program: c.bgfx_program_handle_t,
     bloom_composite_program: c.bgfx_program_handle_t,
     composite_program: c.bgfx_program_handle_t,
@@ -219,6 +221,7 @@ pub const Renderer = struct {
     model_program: c.bgfx_program_handle_t,
     model_instanced_program: c.bgfx_program_handle_t,
     billboard_program: c.bgfx_program_handle_t,
+    splat_program: c.bgfx_program_handle_t,
     /// The particle-sim compute program, null on backends it is not built for
     /// (then the CPU sim runs). Its two params uniforms feed each dispatch.
     particle_compute_program: ?c.bgfx_program_handle_t,
@@ -496,6 +499,7 @@ pub const Renderer = struct {
         const harmonize_program = try loadHarmonizeProgram();
         const inpaint_program = try loadInpaintProgram();
         const rolling_program = try loadRollingProgram();
+        const parallax_program = try loadParallaxProgram();
         const bloom_extract_program = try loadBloomExtractProgram();
         const bloom_composite_program = try loadBloomCompositeProgram();
         const composite_program = try loadCompositeProgram();
@@ -509,6 +513,7 @@ pub const Renderer = struct {
         const model_program = try loadModelProgram();
         const model_instanced_program = try loadModelInstancedProgram();
         const billboard_program = try loadBillboardProgram();
+        const splat_program = try loadSplatProgram();
         const particle_compute_program = loadParticleComputeProgram() catch null;
         const brush_program = try loadBrushProgram();
 
@@ -633,6 +638,8 @@ pub const Renderer = struct {
             .inpaint_params_uniform = c.bgfx_create_uniform("u_inpaint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .rolling_program = rolling_program,
             .rolling_params_uniform = c.bgfx_create_uniform("u_rolling", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .parallax_program = parallax_program,
+            .parallax_params_uniform = c.bgfx_create_uniform("u_parallax", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .bloom_extract_program = bloom_extract_program,
             .bloom_composite_program = bloom_composite_program,
             .composite_program = composite_program,
@@ -646,6 +653,7 @@ pub const Renderer = struct {
             .model_program = model_program,
             .model_instanced_program = model_instanced_program,
             .billboard_program = billboard_program,
+            .splat_program = splat_program,
             .particle_compute_program = particle_compute_program,
             .sim_params_uniform = c.bgfx_create_uniform("u_simParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .sim_params2_uniform = c.bgfx_create_uniform("u_simParams2", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -1131,6 +1139,16 @@ pub const Renderer = struct {
         };
     }
 
+    pub fn loadParallaxProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_parallax_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_parallax_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_parallax_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_parallax_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// stylize.pass's own fixed program: one artistic filter that branches on
     /// its mode uniform, shared by every stylize.pass node like grade_program.
     pub fn loadStylizeProgram() !c.bgfx_program_handle_t {
@@ -1357,6 +1375,16 @@ pub const Renderer = struct {
         };
     }
 
+    pub fn loadSplatProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_splat_metal, blobs.fs_splat_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_splat_spirv, blobs.fs_splat_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_splat_essl, blobs.fs_splat_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_splat_wgsl, blobs.fs_splat_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     fn loadCompute(cs_blob: []const u8) !c.bgfx_program_handle_t {
         const csh = c.bgfx_create_shader(c.bgfx_copy(cs_blob.ptr, @intCast(cs_blob.len)));
         const program = c.bgfx_create_compute_program(csh, true);
@@ -1538,6 +1566,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.inpaint_params_uniform);
         c.bgfx_destroy_program(r.rolling_program);
         c.bgfx_destroy_uniform(r.rolling_params_uniform);
+        c.bgfx_destroy_program(r.parallax_program);
+        c.bgfx_destroy_uniform(r.parallax_params_uniform);
         c.bgfx_destroy_program(r.composite_program);
         c.bgfx_destroy_program(r.bloom_extract_program);
         c.bgfx_destroy_program(r.bloom_composite_program);
@@ -1551,6 +1581,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.model_program);
         c.bgfx_destroy_program(r.model_instanced_program);
         c.bgfx_destroy_program(r.billboard_program);
+        c.bgfx_destroy_program(r.splat_program);
         c.bgfx_destroy_index_buffer(r.makeup_index_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.makeup_position_buffer);
         c.bgfx_destroy_vertex_buffer(r.makeup_lipstick_uv_buffer);
@@ -2472,6 +2503,20 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.rolling_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Draws one parallax.pass node as a full-screen pass into view_id: the frame
+    /// on unit 0, the submitted depth on unit 1, and u_parallax (the per-frame
+    /// shift the engine derived from the orientation tilt, the focus plane, and
+    /// the fill mode), the one fixed parallax_program every node shares.
+    pub fn submitParallaxPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, depth_texture: c.bgfx_texture_handle_t, shift_x: f32, shift_y: f32, focus: f32, fill: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_depth, depth_texture, std.math.maxInt(u32));
+        var params = [4]f32{ shift_x, shift_y, focus, fill };
+        c.bgfx_set_uniform(r.parallax_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.parallax_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Draws one lens stylize.pass node as a full-screen pass into view_id:
     /// the frame on unit 0 and its filter in u_stylize (mode, strength,
     /// threshold, levels), the one fixed stylize_program every node shares.
@@ -3128,6 +3173,28 @@ pub const Renderer = struct {
             c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_PT_POINTS, 0);
             c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
         }
+    }
+
+    /// Draws a sorted anisotropic gaussian splat cloud: blits the frame, then
+    /// draws the pre-oriented gaussian quads (already covariance-shaped and
+    /// back-to-front sorted in `mesh`) with a premultiplied over-blend, so the
+    /// sorted splats composite into a soft volume over the passed-through frame.
+    pub fn submitSplats(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, aspect_ratio: f32, scissor: ?[4]u16) void {
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+        const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
+        const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
+        const model = math.Mat4.identity;
+        _ = c.bgfx_set_transform(&model.cols, 1);
+        c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
+        // A portal confines the splats to a rect; the frame the blit laid down
+        // shows outside it, so the cloud reads as a window into the splat world.
+        if (scissor) |s| _ = c.bgfx_set_scissor(s[0], s[1], s[2], s[3]);
+        // Premultiplied over: the fragment already folds opacity and the gaussian
+        // tail into rgb, so a back-to-front pass composites the sorted splats.
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_BLEND_FUNC(c.BGFX_STATE_BLEND_ONE, c.BGFX_STATE_BLEND_INV_SRC_ALPHA), 0);
+        c.bgfx_submit(mesh_view, r.splat_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws particle ribbons: blits the frame once, then draws the baked

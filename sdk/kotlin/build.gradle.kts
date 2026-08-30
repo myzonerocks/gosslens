@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.myzonerocks"
-version = "0.1.0"
+version = "0.7.0"
 
 android {
     namespace = "com.gosslens"

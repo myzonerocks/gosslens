@@ -37,7 +37,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, dehaze_pass, relight_pass, glare_pass, vignette_pass, lowlight_pass, undistort_pass, awb_pass, stabilize_pass, zoom_pass, dereflect_pass, harmonize_pass, inpaint_pass, rolling_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, dehaze_pass, relight_pass, glare_pass, vignette_pass, lowlight_pass, undistort_pass, awb_pass, stabilize_pass, zoom_pass, dereflect_pass, harmonize_pass, inpaint_pass, rolling_pass, parallax_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -66,6 +66,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "harmonize.pass")) return .harmonize_pass;
     if (std.mem.eql(u8, type_str, "inpaint.pass")) return .inpaint_pass;
     if (std.mem.eql(u8, type_str, "rolling.pass")) return .rolling_pass;
+    if (std.mem.eql(u8, type_str, "parallax.pass")) return .parallax_pass;
     if (std.mem.eql(u8, type_str, "bloom.pass")) return .bloom_pass;
     if (std.mem.eql(u8, type_str, "dof.pass")) return .dof_pass;
     if (std.mem.eql(u8, type_str, "fog.pass")) return .fog_pass;
@@ -128,7 +129,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .dehaze_pass, .relight_pass, .glare_pass, .vignette_pass, .lowlight_pass, .undistort_pass, .awb_pass, .stabilize_pass, .zoom_pass, .dereflect_pass, .harmonize_pass, .inpaint_pass, .rolling_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .dehaze_pass, .relight_pass, .glare_pass, .vignette_pass, .lowlight_pass, .undistort_pass, .awb_pass, .stabilize_pass, .zoom_pass, .dereflect_pass, .harmonize_pass, .inpaint_pass, .rolling_pass, .parallax_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
     };
 }
 
@@ -207,6 +208,8 @@ const LensNode = struct {
     inpaint: ?manifest.InpaintField = null,
     /// .rolling_pass only: the node's correction strength and readout time.
     rolling: ?manifest.RollingShutterField = null,
+    /// .parallax_pass only: the node's 3D-photo depth warp.
+    parallax: ?manifest.ParallaxField = null,
     /// .bloom_pass only: the node's glow threshold and intensity.
     bloom: ?manifest.BloomField = null,
     /// .dof_pass only: the node's focus plane and blur strength.
@@ -413,6 +416,15 @@ pub const SplatNode = struct {
     /// True draws the model's output as a connected grid mesh; false draws it as
     /// a billboard point cloud.
     mesh: bool,
+    /// True draws the model's output as anisotropic sorted gaussian splats: each
+    /// splat carries a 3D covariance and opacity, projected to an oriented screen
+    /// ellipse and composited back-to-front. Takes precedence over mesh.
+    gaussian: bool,
+    /// Where a gaussian cloud composites: over the frame, behind the segmented
+    /// subject, or inside the portal rect.
+    placement: manifest.SplatPlacement,
+    /// The portal rect (x, y, w, h) in normalized frame coordinates.
+    portal: [4]f32,
     /// True runs the model once on a submitted selfie (an avatar) rather than the
     /// live camera each tick.
     selfie: bool,
@@ -565,6 +577,16 @@ pub const RollingPassNode = struct {
     readout: f32,
 };
 
+/// One parallax.pass node ready for the caller to draw - the max shift, the focus
+/// plane that stays put, and the revealed-edge fill mode; the shift direction is
+/// read from the orientation stream at draw.
+pub const ParallaxPassNode = struct {
+    graph_index: graph.NodeIndex,
+    amount: f32,
+    focus: f32,
+    fill: u8,
+};
+
 /// One bloom.pass node ready for the caller to draw - which graph node it
 /// is, and its glow packed as (threshold, intensity, 0, 0) for u_bloom.
 pub const BloomPassNode = struct {
@@ -710,7 +732,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, dehaze, relight, glare, vignette, lowlight, undistort, awb, stabilize, zoom, dereflect, harmonize, inpaint, rolling, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
+pub const PassKind = enum { shader, lut, blend, blur, grade, dehaze, relight, glare, vignette, lowlight, undistort, awb, stabilize, zoom, dereflect, harmonize, inpaint, rolling, parallax, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
 
 /// One matte.hair source node ready for the caller to draw - which graph node
 /// it is, and its guided-filter parameters packed for the refine pass (radius,
@@ -1097,6 +1119,21 @@ pub const Lens = struct {
             if (node.node_type != .rolling_pass) continue;
             const rs = node.rolling orelse manifest.RollingShutterField{};
             try out.append(gpa, .{ .graph_index = node.graph_index, .strength = rs.strength, .readout = rs.readout });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every parallax.pass node this lens spliced, in execution order, each
+    /// carrying its amount, focus and fill - mirrors rollingPassNodes.
+    pub fn parallaxPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]ParallaxPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(ParallaxPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .parallax_pass) continue;
+            const p = node.parallax orelse manifest.ParallaxField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .amount = p.amount, .focus = p.focus, .fill = p.fill });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1510,7 +1547,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .splat_cloud) continue;
             const sf = node.splat orelse continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .selfie = sf.source == .selfie, .colored = sf.colored });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .gaussian = sf.draw == .gaussian, .placement = sf.placement, .portal = sf.portal, .selfie = sf.source == .selfie, .colored = sf.colored });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1574,6 +1611,7 @@ pub const Lens = struct {
                 .harmonize_pass => .harmonize,
                 .inpaint_pass => .inpaint,
                 .rolling_pass => .rolling,
+                .parallax_pass => .parallax,
                 .bloom_pass => .bloom,
                 .dof_pass => .dof,
                 .fog_pass => .fog,
@@ -1847,6 +1885,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .harmonize = if (node_type == .harmonize_pass) node.harmonize else null,
             .inpaint = if (node_type == .inpaint_pass) node.inpaint else null,
             .rolling = if (node_type == .rolling_pass) node.rolling else null,
+            .parallax = if (node_type == .parallax_pass) node.parallax else null,
             .bloom = if (node_type == .bloom_pass) node.bloom else null,
             .dof = if (node_type == .dof_pass) node.dof else null,
             .fog = if (node_type == .fog_pass) node.fog else null,
