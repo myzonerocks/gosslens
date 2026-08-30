@@ -1004,6 +1004,18 @@ pub const MlStyle = struct {
     sprite: []const u8,
 };
 
+/// Binds a single-channel output tensor of an ml.infer node as the scene depth:
+/// the engine normalizes the plane and feeds it as the session depth, so a
+/// monocular depth net drives the same depth rail a sensor would, lighting up
+/// parallax, bokeh, fog, and occlusion from a single image with no LiDAR.
+pub const MlDepth = struct {
+    tensor: u32 = 0,
+    /// A net that outputs disparity or inverse depth (nearer reads larger) sets
+    /// invert so the rail's nearer-is-smaller convention holds; a metric-depth
+    /// net leaves it false.
+    invert: bool = false,
+};
+
 /// An ml.infer node's model slot: the bundle-relative model file, the input
 /// size the camera frame is resized to (zero keeps the model's own), the
 /// output-to-parameter bindings a lens reads, and optional output-to-mask and
@@ -1015,6 +1027,7 @@ pub const MlField = struct {
     outputs: []const MlOutput,
     mask: ?MlMask = null,
     style: ?MlStyle = null,
+    depth: ?MlDepth = null,
     /// A bundled reference image (assets/<stem>.png) sampled into the model's
     /// second input, for a net conditioned on a reference (makeup, style, or
     /// identity transfer). Empty for a one-input model.
@@ -4037,6 +4050,23 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         }
         path.pop(style_mark);
     }
+    var depth: ?MlDepth = null;
+    if (getField(object, "depth")) |dv| {
+        const depth_mark = path.push("depth");
+        if (dv != .object) {
+            try diags.add(path.slice(), "ml depth must be an object", .{});
+        } else {
+            var dd: MlDepth = .{};
+            if (getField(dv.object, "tensor")) |v| {
+                if (v == .integer and v.integer >= 0) dd.tensor = @intCast(v.integer);
+            }
+            if (getField(dv.object, "invert")) |v| {
+                dd.invert = v == .bool and v.bool;
+            }
+            depth = dd;
+        }
+        path.pop(depth_mark);
+    }
     var aux_reference: []const u8 = "";
     var temporal = false;
     if (getField(object, "aux")) |av| {
@@ -4064,6 +4094,7 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         .outputs = outputs_slice,
         .mask = mask,
         .style = style,
+        .depth = depth,
         .aux_reference = try arena.dupe(u8, aux_reference),
         .temporal = temporal,
     };

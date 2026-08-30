@@ -1080,6 +1080,16 @@ passes key against), so a lens author's own segmenter drives the identical
 compositing the built-in segmenters do. A model whose bound tensor is not a
 square single-channel plane keeps driving its parameters and feeds no mask.
 
+An `ml.infer` node may also carry a `"depth"` block, `{"tensor", "invert"}`,
+that binds a whole output tensor as the scene depth. The tensor is read as a
+square single-channel plane, min-max normalized so a relative-depth net still
+spans the full range, and fed as the session depth the `parallax.pass`,
+`dof.pass`, `fog.pass`, and `occluder.pass` sample - so a monocular depth net
+drives the same depth rail a device sensor would, lighting up 3D-photo parallax,
+bokeh, fog, and occlusion from a single image with no LiDAR. Set `"invert": true`
+for a net that outputs disparity or inverse depth (nearer reads larger) so the
+rail's nearer-is-smaller convention holds; a metric-depth net leaves it out.
+
 An `ml.infer` node may carry an `"aux": {"reference"}` block for a model that
 takes a second input: a bundled reference image (`assets/<reference>.png`)
 sampled into the model's second square-RGB input every inference, so a net is

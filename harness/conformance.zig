@@ -1183,6 +1183,139 @@ fn proveParallax(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a lens whose ml.infer node binds its model output as both a driven
+/// parameter (so a publish is observable) and the scene depth, feeding a
+/// parallax.pass that carries no depth of its own. So the parallax warps only
+/// once the model's estimated depth reaches the rail, with no depth submitted.
+fn writeMonoDepthLens(dir: []const u8, amount: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.mono-depth","version":"1.0.0","display_name":"Mono Depth","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}}],
+        \\ "nodes":[
+        \\   {{"id":"est","type":"ml.infer","params":{{}},"ml":{{"model":"model.tflite","outputs":[{{"tensor":0,"index":32896,"param":"score"}}],"depth":{{"tensor":0}}}}}},
+        \\   {{"id":"p","type":"parallax.pass","inputs":{{"frame":"camera"}},"params":{{}},"parallax":{{"amount":{d:.4},"focus":0.5}}}}
+        \\ ],
+        \\ "triggers":[]}}
+    , .{amount});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Activates a mono-depth lens, feeds it until the model publishes, then renders
+/// the parallax the estimated depth drives under a submitted tilt. No depth is
+/// ever submitted; the depth the parallax reads comes only from the model.
+/// Returns the capture and, through out_score, the parameter the model drove.
+fn captureMonoDepthShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, tilt: [3]f32, out_score: *f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    _ = abi.goss_session_submit_orientation(session, tilt[0], tilt[1], tilt[2], 1000);
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    // Feed the model (track) and watch the sentinel score flip to a real
+    // inference, so the render below runs after the worker has published.
+    var score: f32 = -999.0;
+    var polls: usize = 0;
+    while (score == -999.0) {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlTrackFrameFailed;
+        std.Thread.yield() catch {};
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "score", 5, &score);
+        polls += 1;
+        if (polls > 100_000_000) return error.MlInferTimedOut;
+    }
+    out_score.* = score;
+    // The worker has published; render composites so pollMlDepth uploads the
+    // estimated depth and the parallax draws over the fed camera frame.
+    const shot = try gpa.alloc(u8, @as(usize, planes.width) * planes.height * 4);
+    errdefer gpa.free(shot);
+    var w: u32 = 0;
+    var h: u32 = 0;
+    for (0..5) |_| {
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlTrackFrameFailed;
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves depth-from-a-single-image: a bundled monocular depth net's output
+/// becomes the session depth with no depth submitted, and that estimated depth
+/// drives the parallax warp. The model runs on the frame (score responds to
+/// pixels), the warp is non-trivial (identity at amount 0, reverses with tilt).
+fn proveMonoDepth(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const model = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(32 << 20));
+    defer gpa.free(model);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mono-depth-warp/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/mono-depth-still/assets");
+    try writeMonoDepthLens("zig-out/mono-depth-warp", 0.15);
+    try writeMonoDepthLens("zig-out/mono-depth-still", 0.0);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/mono-depth-warp/assets/model.tflite", .data = model });
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/mono-depth-still/assets/model.tflite", .data = model });
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+    const gray_rgba = try gpa.alloc(u8, @as(usize, corpus.frame.width) * corpus.frame.height * 4);
+    defer gpa.free(gray_rgba);
+    @memset(gray_rgba, 128);
+    const gray = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = gray_rgba }, .width = corpus.frame.width, .height = corpus.frame.height });
+    defer gray.deinit(gpa);
+
+    const tilt = [3]f32{ 0.6, -0.8, 0 };
+    const tilt_neg = [3]f32{ -0.6, -0.8, 0 };
+    var score_p: f32 = 0;
+    var score_g: f32 = 0;
+    var scratch: f32 = 0;
+
+    const warp = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-warp", person, tilt, &score_p);
+    defer gpa.free(warp);
+    const warp2 = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-warp", person, tilt, &scratch);
+    defer gpa.free(warp2);
+    const warp_neg = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-warp", person, tilt_neg, &scratch);
+    defer gpa.free(warp_neg);
+    const still = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-still", person, tilt, &scratch);
+    defer gpa.free(still);
+    const gray_warp = try captureMonoDepthShot(gpa, engine, "zig-out/mono-depth-warp", gray, tilt, &score_g);
+    defer gpa.free(gray_warp);
+
+    // The model published a real inference from the frame: finite, and the
+    // portrait and the flat frame drive its score apart, so it ran on pixels.
+    if (!std.math.isFinite(score_p) or !std.math.isFinite(score_g)) {
+        std.debug.print("conformance: FAIL mono-depth model published a non-finite score\n", .{});
+        return false;
+    }
+    if (@abs(score_p - score_g) < 1e-4) {
+        std.debug.print("conformance: FAIL mono-depth model did not respond to the frame ({d} vs {d})\n", .{ score_p, score_g });
+        return false;
+    }
+    if (!std.mem.eql(u8, warp, warp2)) {
+        std.debug.print("conformance: FAIL mono-depth parallax is not bit-stable across runs\n", .{});
+        return false;
+    }
+    // The estimated depth drives the warp: amount 0 holds the frame, amount 0.15
+    // moves it, and with no depth ever submitted only the model's output can be it.
+    const moved = countDiff(still, warp);
+    if (moved == 0) {
+        std.debug.print("conformance: FAIL estimated depth did not drive the parallax warp\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, warp, warp_neg)) {
+        std.debug.print("conformance: FAIL mono-depth parallax did not reverse with the tilt\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a monocular depth net's output becomes the session depth with no depth submitted and drives the parallax warp: the model runs on the frame (score {d:.3} vs flat {d:.3}), amount 0 holds while 0.15 moves it ({d} px), reversing with the tilt, bit-stable\n", .{ score_p, score_g, moved });
+    return true;
+}
+
 /// Submits one frame with a set of faces, renders it settled, and captures.
 fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, faces: []const abi.FaceResult, shot: []u8, out_w: *u32, out_h: *u32) !void {
     const half_w = (planes.width + 1) / 2;
@@ -16750,6 +16883,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("depth occlusion");
     if (!try proveParallax(gpa, engine)) return 1;
     watchHold("parallax pass");
+    if (!try proveMonoDepth(gpa, engine)) return 1;
+    watchHold("mono depth");
     if (!try proveFaceRegions(gpa, engine)) return 1;
     watchHold("face regions");
     if (!try proveBodyJoints(gpa, engine)) return 1;

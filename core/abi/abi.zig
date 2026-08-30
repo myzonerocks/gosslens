@@ -4718,6 +4718,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollSegmentationMask(s);
         pollMlMasks(s);
         pollMlStyle(s);
+        pollMlDepth(s);
         pollDiffusion(s);
         pollSceneSegmentation(s);
         pollDepthOcclusion(s);
@@ -4819,6 +4820,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSegmentationMask(s);
     pollMlMasks(s);
     pollMlStyle(s);
+    pollMlDepth(s);
     pollDiffusion(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
@@ -4920,6 +4922,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSegmentationMask(s);
     pollMlMasks(s);
     pollMlStyle(s);
+    pollMlDepth(s);
     pollDiffusion(s);
     pollSceneSegmentation(s);
     pollDepthOcclusion(s);
@@ -10289,6 +10292,12 @@ const MlWorker = struct {
     style_f32: []f32,
     style_bgra: []u8,
     style_tex: render.TextureHandle,
+    /// A depth binding routes a single-channel output tensor to the session
+    /// depth texture, so a monocular depth net feeds the rail a sensor would.
+    /// depth_side is the model's square side and depth_src the raw copy target.
+    depth: ?manifest.MlDepth,
+    depth_side: u32,
+    depth_src: []f32,
 };
 
 /// Builds an inference worker for every ml.infer node from its bundled model,
@@ -10351,6 +10360,23 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             }
         }
 
+        // A depth binding needs the bound tensor to be a square single-channel
+        // plane; anything else leaves the node driving only its parameters.
+        var depth: ?manifest.MlDepth = null;
+        var depth_side: u32 = 0;
+        var depth_src: []f32 = &.{};
+        if (ml.depth) |db| {
+            const len = ml_infer.outputLen(worker, db.tensor);
+            const side = isqrt(len);
+            if (len > 0 and side * side == len) {
+                if (gpa.alloc(f32, len)) |src| {
+                    depth = db;
+                    depth_side = @intCast(side);
+                    depth_src = src;
+                } else |_| {}
+            }
+        }
+
         // A style binding needs the bound tensor to be a square three-channel
         // image and a sprite to draw it; otherwise the node only drives its
         // parameters and mask.
@@ -10392,11 +10418,15 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             .style_f32 = style_f32,
             .style_bgra = style_bgra,
             .style_tex = .{ .idx = render.invalid_handle },
+            .depth = depth,
+            .depth_side = depth_side,
+            .depth_src = depth_src,
         }) catch {
             if (mask_src.len > 0) gpa.free(mask_src);
             if (mask_dst.len > 0) gpa.free(mask_dst);
             if (style_f32.len > 0) gpa.free(style_f32);
             if (style_bgra.len > 0) gpa.free(style_bgra);
+            if (depth_src.len > 0) gpa.free(depth_src);
             ml_infer.destroy(worker);
             return;
         };
@@ -11019,6 +11049,48 @@ fn pollMlMasks(session: *Session) void {
     }
 }
 
+/// Feeds each ml.infer depth binding's output into the session depth texture,
+/// min-max normalized so a relative-depth net spans the full range, uploaded as
+/// the R8 depth the parallax, bokeh, fog, and occlusion passes already sample.
+/// So a monocular depth net drives the depth rail with no sensor. Render-path.
+fn pollMlDepth(session: *Session) void {
+    const gpa = session.engine.gpa;
+    for (session.ml_workers.items) |mw| {
+        const depth = mw.depth orelse continue;
+        if (mw.depth_src.len == 0) continue;
+        if (!ml_infer.copyOutput(mw.worker, depth.tensor, mw.depth_src)) continue;
+        const side = mw.depth_side;
+        const count = @as(usize, side) * side;
+        var lo: f32 = std.math.floatMax(f32);
+        var hi: f32 = -std.math.floatMax(f32);
+        for (mw.depth_src[0..count]) |v| {
+            if (!std.math.isFinite(v)) continue;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        if (!(hi > lo)) continue;
+        if (session.depth_data.len != count) {
+            if (session.depth_data.len != 0) gpa.free(session.depth_data);
+            session.depth_data = gpa.alloc(f32, count) catch {
+                session.depth_data = &.{};
+                continue;
+            };
+            if (session.depth_scratch.len != 0) gpa.free(session.depth_scratch);
+            session.depth_scratch = gpa.alloc(u8, count) catch &.{};
+        }
+        const span = hi - lo;
+        for (mw.depth_src[0..count], session.depth_data) |v, *d| {
+            const f = if (std.math.isFinite(v)) std.math.clamp((v - lo) / span, 0, 1) else 0;
+            d.* = if (depth.invert) 1 - f else f;
+        }
+        session.depth_width = side;
+        session.depth_height = side;
+        session.depth_near = 0;
+        session.depth_far = 1;
+        updateDepthTexture(session, gpa);
+    }
+}
+
 /// Bilinearly resamples a square single-channel mask to the mask resolution, so
 /// any model output size feeds the fixed-size mask texture.
 fn resampleMask(src: []const f32, side: u32, dst: []f32) void {
@@ -11112,6 +11184,7 @@ fn destroyMlWorkers(session: *Session) void {
         if (mw.mask_dst.len > 0) gpa.free(mw.mask_dst);
         if (mw.style_f32.len > 0) gpa.free(mw.style_f32);
         if (mw.style_bgra.len > 0) gpa.free(mw.style_bgra);
+        if (mw.depth_src.len > 0) gpa.free(mw.depth_src);
         if (mw.style_tex.idx != render.invalid_handle) {
             if (session.engine.renderer) |*r| r.destroyTexture(mw.style_tex);
         }
