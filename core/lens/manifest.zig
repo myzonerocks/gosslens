@@ -279,10 +279,24 @@ pub const DehazeField = struct {
 pub const RelightField = struct {
     /// A relight.pass node's directional key light: `strength` (0..1) how far it
     /// brightens the light side and shades the far side, `angle` the light
-    /// direction in degrees (0 lights from the right).
+    /// direction in degrees (0 lights from the right). A named `preset` seeds
+    /// both to a studio look; an explicit angle or strength overrides it.
     strength: f32 = 1,
     angle: f32 = 0,
 };
+
+/// The angle and strength a named studio-lighting preset seeds a relight.pass
+/// with, or null for an unknown name. Angles follow the field convention, 0 from
+/// the right and rising counter-clockwise, so 90 is from above and 180 the left.
+pub fn relightPreset(name: []const u8) ?[2]f32 {
+    if (std.mem.eql(u8, name, "rembrandt")) return .{ 135, 0.85 };
+    if (std.mem.eql(u8, name, "butterfly")) return .{ 90, 0.7 };
+    if (std.mem.eql(u8, name, "clamshell")) return .{ 90, 0.45 };
+    if (std.mem.eql(u8, name, "loop")) return .{ 110, 0.6 };
+    if (std.mem.eql(u8, name, "split")) return .{ 180, 1.0 };
+    if (std.mem.eql(u8, name, "rim")) return .{ 200, 0.9 };
+    return null;
+}
 
 pub const GlareField = struct {
     /// A glare.pass node's specular rolloff: `strength` (0..1) how far a pixel
@@ -2096,6 +2110,18 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 try diags.add(path.slice(), "relight must be an object", .{});
             } else {
                 var field: RelightField = .{};
+                // A named studio-lighting preset seeds the angle and strength; an
+                // explicit angle or strength below overrides it, so a lens can
+                // start from a look and nudge it.
+                if (getField(rv.object, "preset")) |v| {
+                    const name = try expectString(diags, path, v) orelse "";
+                    if (relightPreset(name)) |p| {
+                        field.angle = p[0];
+                        field.strength = p[1];
+                    } else if (name.len > 0) {
+                        try diags.add(path.slice(), "relight preset names an unknown light '{s}'", .{name});
+                    }
+                }
                 if (getField(rv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
                 if (getField(rv.object, "angle")) |v| field.angle = @floatCast(numberOf(v) orelse field.angle);
                 relight_field = field;
@@ -4467,6 +4493,34 @@ test "a node input naming an unknown node id fails cross reference" {
         if (std.mem.indexOf(u8, d.message, "unknown node id") != null) found = true;
     }
     try t.expect(found);
+}
+
+test "a relight preset seeds the light, an explicit value overrides it" {
+    const seeded =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "l", "type": "relight.pass", "inputs": {"frame": "camera"}, "params": {},
+        \\    "relight": {"preset": "rembrandt"}}
+        \\ ], "triggers": []}
+    ;
+    var m1 = try parseOk(seeded);
+    defer m1.deinit();
+    const r1 = m1.nodes[0].relight.?;
+    try t.expectEqual(@as(f32, 135), r1.angle);
+    try t.expectEqual(@as(f32, 0.85), r1.strength);
+
+    const overridden =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "l", "type": "relight.pass", "inputs": {"frame": "camera"}, "params": {},
+        \\    "relight": {"preset": "split", "angle": 45}}
+        \\ ], "triggers": []}
+    ;
+    var m2 = try parseOk(overridden);
+    defer m2.deinit();
+    const r2 = m2.nodes[0].relight.?;
+    try t.expectEqual(@as(f32, 45), r2.angle);
+    try t.expectEqual(@as(f32, 1.0), r2.strength);
 }
 
 test "a cloth field parses on a model node" {

@@ -375,11 +375,13 @@ its washed highlights come down. Strength 0 leaves the frame untouched. Like
 `grade.pass` it ships no asset and is always ready.
 
 A `"relight.pass"` node is a parametric directional relight post-effect. It
-carries a `"relight": {"strength", "angle"}` block: a soft key light from
-`angle` (degrees, 0 lights from the right) brightens the frame on the light side
-and shades the far side, scaled by `strength` (0..1, default 1). Strength 0
-leaves the frame untouched. Like `grade.pass` it ships no asset and is always
-ready.
+carries a `"relight": {"preset", "strength", "angle"}` block: a soft key light
+from `angle` (degrees, 0 lights from the right) brightens the frame on the light
+side and shades the far side, scaled by `strength` (0..1, default 1). A named
+`preset` (`rembrandt`, `butterfly`, `clamshell`, `loop`, `split`, `rim`) seeds
+the angle and strength to a studio look, and an explicit `angle` or `strength`
+overrides it. Strength 0 leaves the frame untouched. Like `grade.pass` it ships
+no asset and is always ready.
 
 A `"glare.pass"` node is a specular-highlight rolloff post-effect. It carries a
 `"glare": {"strength", "threshold"}` block: a pixel whose luma sits above
