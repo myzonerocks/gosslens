@@ -204,6 +204,14 @@ controller: a `logic.graph` (or a script) smoothsteps a speed signal into a
 normalized idle-walk-run crossfade, and the model blends the clips by it, so a
 1D blend space is a matter of how the weights are wired, not a separate node.
 
+A `model.gltf` node may add `"clip_range": [start, end]` (seconds) to split a
+longer clip into a sub-range it plays and loops instead of the whole timeline,
+the "animation clip" a lens carves out of an authored animation. The node's
+playback time maps into the range (`start + (elapsed mod (end - start))`), so
+the mesh cycles only that segment; with no `clip_range` it plays the full clip,
+and a reversed or empty range is ignored. It applies to every clip the node
+blends, so a split composes with `clip_weights`.
+
 A `model.gltf` node may add `"morph_weights"`: an array of parameter names,
 one per morph target (blendshape) in the order the glTF declares them. Each
 frame the runtime deforms the mesh by the weighted sum of those targets'

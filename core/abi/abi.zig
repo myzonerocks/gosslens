@@ -1415,12 +1415,17 @@ fn materialParams(loaded: LoadedModel) [8]f32 {
 fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
     if (loaded.animations.len == 0) return math.Mat4.identity;
     const bound = if (lens) |l| l.bindsClipWeights(graph_index) else false;
-    if (!bound and loaded.animations.len == 1) return loaded.animations[0].sample(elapsed_seconds);
+    // A clip_range splits a longer clip into a looping sub-range the node plays.
+    const range: ?[2]f32 = if (lens) |l| l.clipRange(graph_index) else null;
+    if (!bound and loaded.animations.len == 1) {
+        if (range) |r| return loaded.animations[0].sampleRangeComponents(elapsed_seconds, r[0], r[1]).toMatrix();
+        return loaded.animations[0].sample(elapsed_seconds);
+    }
     var poses: [max_blend_clips]gltf.Components = undefined;
     var weights: [max_blend_clips]f32 = undefined;
     const n = @min(loaded.animations.len, max_blend_clips);
     for (0..n) |ci| {
-        poses[ci] = loaded.animations[ci].sampleComponents(elapsed_seconds);
+        poses[ci] = if (range) |r| loaded.animations[ci].sampleRangeComponents(elapsed_seconds, r[0], r[1]) else loaded.animations[ci].sampleComponents(elapsed_seconds);
         weights[ci] = if (bound) (lens.?.clipWeight(graph_index, ci) orelse 0) else (if (ci == 0) @as(f32, 1.0) else 0.0);
     }
     return gltf.blendComponents(poses[0..n], weights[0..n]).toMatrix();

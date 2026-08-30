@@ -1232,6 +1232,10 @@ pub const Node = struct {
     /// order, whose live value is that target's blend weight. Empty leaves
     /// the mesh unmorphed. A target past this list contributes nothing.
     morph_weights: []const []const u8 = &.{},
+    /// model.gltf only: a start and end time in seconds that splits a longer
+    /// clip into a sub-range the node plays and loops instead of the whole
+    /// timeline. Null plays the full clip; an empty or reversed range is ignored.
+    clip_range: ?[2]f32 = null,
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
     /// Set only on a dehaze.pass node: its dark-channel dehaze strength.
@@ -3645,6 +3649,22 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
         const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
 
+        var clip_range: ?[2]f32 = null;
+        if (getField(object, "clip_range")) |cr| {
+            const cr_mark = path.push("clip_range");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "clip_range is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (cr == .array and cr.array.items.len == 2) {
+                clip_range = .{
+                    @floatCast(numberOf(cr.array.items[0]) orelse 0),
+                    @floatCast(numberOf(cr.array.items[1]) orelse 0),
+                };
+            } else {
+                try diags.add(path.slice(), "clip_range must be two numbers [start, end]", .{});
+            }
+            path.pop(cr_mark);
+        }
+
         var mask_channel: ?u8 = null;
         if (getField(object, "mask")) |mask_value| {
             const mask_mark = path.push("mask");
@@ -3705,6 +3725,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .hair = hair_field,
             .particles = particle_field,
             .clip_weights = clip_weights,
+            .clip_range = clip_range,
             .morph_weights = morph_weights,
             .grade = grade_field,
             .dehaze = dehaze_field,

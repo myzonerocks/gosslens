@@ -179,6 +179,9 @@ const LensNode = struct {
     /// value is that clip's blend weight; empty plays the first clip.
     /// Slices into the retained manifest arena, not separately owned.
     clip_weights: []const []const u8 = &.{},
+    /// .model_gltf only: a [start, end] sub-range in seconds the node splits
+    /// its clip into, looping within it; null plays the whole clip.
+    clip_range: ?[2]f32 = null,
     /// .model_gltf only: a parameter name per morph target whose live
     /// value is that target's blend weight; empty leaves the mesh
     /// unmorphed. Slices into the retained manifest arena.
@@ -1701,6 +1704,13 @@ pub const Lens = struct {
         return node.clip_weights.len > 0;
     }
 
+    /// The [start, end] sub-range a model.gltf node splits its clip into, or
+    /// null to play the whole timeline.
+    pub fn clipRange(self: *const Lens, graph_index: graph.NodeIndex) ?[2]f32 {
+        const node = self.findNode(graph_index) orelse return null;
+        return node.clip_range;
+    }
+
     /// The blend weight the model.gltf node at graph_index binds to its
     /// morph target at target_index: the bound parameter's live value, 0
     /// for a target past the bound list or when the node binds none.
@@ -1921,6 +1931,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .particles = if (node_type == .model_gltf) node.particles else null,
             .control = if (node_type == .model_gltf) node.control else null,
             .clip_weights = if (node_type == .model_gltf) node.clip_weights else &.{},
+            .clip_range = if (node_type == .model_gltf) node.clip_range else null,
             .morph_weights = if (node_type == .model_gltf) node.morph_weights else &.{},
             .sprite = if (node_type == .sprite_2d) node.sprite else null,
             .text = if (node_type == .text_2d) node.text else null,

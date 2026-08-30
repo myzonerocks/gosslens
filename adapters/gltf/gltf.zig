@@ -507,6 +507,15 @@ pub const DecodedAnimation = struct {
     pub fn sample(anim: *const DecodedAnimation, elapsed_seconds: f32) math.Mat4 {
         return anim.sampleComponents(elapsed_seconds).toMatrix();
     }
+
+    /// Samples only the [start, end] sub-range of the clip, looping within it -
+    /// the "animation split" that plays a named segment of a longer timeline.
+    /// A reversed or empty range falls back to holding the start pose.
+    pub fn sampleRangeComponents(anim: *const DecodedAnimation, elapsed_seconds: f32, start: f32, end: f32) Components {
+        const span = end - start;
+        if (span <= 0) return anim.sampleComponents(start);
+        return anim.sampleComponents(start + @mod(elapsed_seconds, span));
+    }
 };
 
 /// Finds the keyframe pair bracketing t and the interpolation factor
@@ -1127,6 +1136,34 @@ test "decodes a material's metallic, roughness and emissive factors" {
     try t.expectApproxEqAbs(@as(f32, 0.5), decoded.emissive[0], 1e-6);
     try t.expectApproxEqAbs(@as(f32, 0.1), decoded.emissive[1], 1e-6);
     try t.expectApproxEqAbs(@as(f32, 0.0), decoded.emissive[2], 1e-6);
+}
+
+test "animation splitting samples a looping sub-range of a clip" {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, "lenses/reference/trigger-anim/assets/clip.glb", t.allocator, .limited(1 << 20));
+    defer t.allocator.free(bytes);
+    const decoded = try decodeModel(t.allocator, bytes);
+    defer freeDecodedModel(t.allocator, decoded);
+    try t.expect(decoded.animations.len >= 1);
+    const anim = &decoded.animations[0];
+    try t.expect(anim.duration_seconds > 0);
+    const start = anim.duration_seconds * 0.25;
+    const end = anim.duration_seconds * 0.75;
+
+    // The range's origin holds the clip's pose at `start`, not the pose at 0.
+    const range_origin = anim.sampleRangeComponents(0, start, end);
+    const clip_at_start = anim.sampleComponents(start);
+    const clip_at_zero = anim.sampleComponents(0);
+    inline for (0..4) |k| try t.expectApproxEqAbs(clip_at_start.rotation.v[k], range_origin.rotation.v[k], 1e-6);
+
+    // And it is genuinely a sub-range: the clip's pose at `start` differs from
+    // its pose at time zero, so the split is not the whole timeline.
+    var diff: f32 = 0;
+    inline for (0..4) |k| diff += @abs(clip_at_start.rotation.v[k] - clip_at_zero.rotation.v[k]);
+    try t.expect(diff > 1e-3);
+
+    // The sub-range loops: an elapsed of the full span wraps back to the origin.
+    const wrapped = anim.sampleRangeComponents(end - start, start, end);
+    inline for (0..4) |k| try t.expectApproxEqAbs(range_origin.rotation.v[k], wrapped.rotation.v[k], 1e-6);
 }
 
 test "no animations is the common, valid case" {
