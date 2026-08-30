@@ -3444,6 +3444,124 @@ fn proveInferenceBudget(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The total absolute byte difference between two captures, a magnitude-sensitive
+/// stand-in for how much the frame moved (unlike a pixel count, which saturates
+/// on a smooth gradient at any shift).
+fn sumAbsDiff(a: []const u8, b: []const u8) u64 {
+    var total: u64 = 0;
+    var i: usize = 0;
+    while (i + 4 <= a.len) : (i += 4) {
+        inline for (0..3) |ch| {
+            const d: i32 = @as(i32, a[i + ch]) - @as(i32, b[i + ch]);
+            total += @abs(d);
+        }
+    }
+    return total;
+}
+
+/// Writes a stabilize.pass lens (no asset).
+fn writeStabilizeLens(dir: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.stabilize","version":"1.0.0","display_name":"Stabilize","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"s","type":"stabilize.pass","inputs":{"frame":"camera"},"params":{},"stabilize":{"strength":1.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// A low-frequency textured pattern shifted horizontally by `shift` pixels: coarse
+/// enough to survive the thumb downsample so the global-motion solve recovers the
+/// shift, and the stabilizer can counter it.
+fn buildJitteredFrame(gpa: std.mem.Allocator, shift: f32) ![]u8 {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const xf = @as(f32, @floatFromInt(col)) - shift;
+        const yf: f32 = @floatFromInt(row);
+        const val = std.math.clamp(128.0 + 85.0 * @sin(xf * 0.03) + 55.0 * @sin(yf * 0.035), 0.0, 255.0);
+        const v: u8 = @intFromFloat(val);
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    return f;
+}
+
+/// Runs a jittering sequence through the stabilize lens under a recording-policy
+/// stabilization level and reports the total inter-frame motion of the composited
+/// output over the settled tail. A lower sum means a steadier result.
+fn captureStabilizeSequence(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, level: u32) !u64 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    var policy: abi.RecordingPolicy = .{};
+    policy.stabilization = level;
+    _ = abi.goss_session_set_recording_policy(session, &policy);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+
+    const count = 16;
+    var prev_shot: ?[]u8 = null;
+    defer if (prev_shot) |p| gpa.free(p);
+    var total: u64 = 0;
+    for (0..count) |k| {
+        // A horizontal jitter around a still camera: large enough to register on
+        // the downsampled thumb, slow enough that the per-frame motion stays
+        // inside the single-level solve's small-motion range.
+        const shift = 22.0 * @sin(@as(f32, @floatFromInt(k)) * 0.6);
+        const frame = try buildJitteredFrame(gpa, shift);
+        defer gpa.free(frame);
+        const src: sampler.Frame = .{ .pixels = .{ .rgba8 = frame }, .width = width, .height = height };
+        const planes = try rgbaToNv12(gpa, src);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+        const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast(1000 + k * 33000) };
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        var w: u32 = 0;
+        var h: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+            gpa.free(shot);
+            return error.CaptureFailed;
+        }
+        // Sum inter-frame motion only over the settled tail, past the warm-up.
+        if (k >= 6) {
+            if (prev_shot) |p| total += sumAbsDiff(p, shot);
+        }
+        if (prev_shot) |p| gpa.free(p);
+        prev_shot = shot;
+    }
+    return total;
+}
+
+/// Proves the electronic stabilizer wired to the recording policy: a jittering
+/// camera run through a stabilize.pass holds far steadier than the same lens with
+/// stabilization off. The engine estimates the global motion per frame, smooths
+/// the camera path, and shifts each frame onto it.
+fn proveStabilize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/stabilize");
+    try writeStabilizeLens("zig-out/stabilize");
+
+    const raw = try captureStabilizeSequence(gpa, engine, "zig-out/stabilize", 0);
+    const stabilized = try captureStabilizeSequence(gpa, engine, "zig-out/stabilize", 1);
+    if (raw == 0) {
+        std.debug.print("conformance: FAIL the jittering sequence produced no motion to stabilize\n", .{});
+        return false;
+    }
+    if (stabilized * 2 >= raw) {
+        std.debug.print("conformance: FAIL stabilization did not steady the jitter (raw {d}, stabilized {d})\n", .{ raw, stabilized });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a stabilize.pass steadies a jittering camera: with the recording policy's stabilization on the settled inter-frame motion falls to under half of the same lens with it off ({d} -> {d})\n", .{ raw, stabilized });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -14846,6 +14964,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("awb pass");
     if (!try proveInferenceBudget(gpa, engine)) return 1;
     watchHold("inference budget");
+    if (!try proveStabilize(gpa, engine)) return 1;
+    watchHold("stabilize pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

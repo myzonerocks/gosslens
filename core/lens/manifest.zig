@@ -323,6 +323,14 @@ pub const AwbField = struct {
     strength: f32 = 1,
 };
 
+pub const StabilizeField = struct {
+    /// A stabilize.pass node's `strength` (0..1) blends in electronic image
+    /// stabilization: the frame is cropped and shifted to hold on a smoothed
+    /// camera path. The smoothing rides the recording policy's stabilization knob
+    /// (off leaves it inert); strength 0 leaves the frame untouched.
+    strength: f32 = 1,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1056,6 +1064,8 @@ pub const Node = struct {
     undistort: ?UndistortField = null,
     /// Set only on an awb.pass node: its auto-enhance blend strength.
     awb: ?AwbField = null,
+    /// Set only on a stabilize.pass node: its stabilization blend strength.
+    stabilize: ?StabilizeField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -2036,6 +2046,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 awb_field = field;
             }
             path.pop(amark);
+        }
+        var stabilize_field: ?StabilizeField = null;
+        if (getField(object, "stabilize")) |sv| {
+            const smark = path.push("stabilize");
+            if (!std.mem.eql(u8, node_type, "stabilize.pass")) {
+                try diags.add(path.slice(), "stabilize is a stabilize.pass field, found it on '{s}'", .{node_type});
+            } else if (sv != .object) {
+                try diags.add(path.slice(), "stabilize must be an object", .{});
+            } else {
+                var field: StabilizeField = .{};
+                if (getField(sv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                stabilize_field = field;
+            }
+            path.pop(smark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3305,6 +3329,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .lowlight = lowlight_field,
             .undistort = undistort_field,
             .awb = awb_field,
+            .stabilize = stabilize_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

@@ -420,6 +420,15 @@ the luma black and white points to the full range. Nothing is authored; the
 estimate adapts to the scene. Strength 0 leaves the frame untouched. It ships no
 asset and is always ready.
 
+A `"stabilize.pass"` node is an electronic image stabilization post-effect. It
+carries a `"stabilize": {"strength"}` block (0..1, default 1) that blends in the
+correction. Each frame the engine estimates the global motion since the previous
+one, integrates it into the camera path, low-passes that into a smoothed path,
+and crops and shifts the frame to hold on the smoothed path instead of the raw
+jittery one. The smoothing level rides the recording policy's stabilization knob
+(off, standard, cinematic); with it off the node is inert. It ships no asset and
+is always ready.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1306,6 +1315,8 @@ an awb.pass estimates a gray-world balance from the frame thumb and neutralizes 
 color cast, pulling the channel spread to under half where strength 0 is untouched;
 a per-session inference budget caps the heavy workers, four ml.infer nets all
 loading under a budget of eight but only two under a budget of two;
+a stabilize.pass steadies a jittering camera, the settled inter-frame motion
+falling to under half of the same lens with stabilization off;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

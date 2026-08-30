@@ -550,6 +550,15 @@ pub const Renderer = struct {
         _ = white;
     }
 
+    pub fn submitStabilizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, shift: [2]f32, inset: f32, strength: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = shift;
+        _ = inset;
+        _ = strength;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
@@ -1076,6 +1085,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadAwbProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadStabilizeProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

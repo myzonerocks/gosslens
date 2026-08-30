@@ -1063,6 +1063,9 @@ pub const Session = struct {
     /// The blend strength of each spliced awb.pass node, resolved once at
     /// activation; the correction itself is estimated per frame from the thumb.
     awb_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The blend strength of each spliced stabilize.pass node, resolved once at
+    /// activation; the shift and crop are estimated per frame by the stabilizer.
+    stabilize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
     /// A small RGB downsample of the latest copied frame, filled at submit from
     /// the frame bytes (no GPU readback), so an auto-enhance pass can estimate a
     /// scene-adaptive correction from the whole frame's statistics.
@@ -1074,6 +1077,15 @@ pub const Session = struct {
     /// the device, honoring the no-overheat mandate for a stacked enhance chain.
     ml_worker_budget: u32 = default_ml_worker_budget,
     ml_workers_loaded: u32 = 0,
+    /// Electronic image stabilization state, updated per submitted frame when the
+    /// recording policy asks for it: the previous frame's gray thumb, the
+    /// cumulative and low-pass-smoothed camera path, and the residual UV shift a
+    /// stabilize.pass applies to hold the frame on the smoothed path.
+    stab_prev_gray: [thumb_side * thumb_side]f32 = @splat(0),
+    stab_have_prev: bool = false,
+    stab_cum: [2]f32 = .{ 0, 0 },
+    stab_smooth: [2]f32 = .{ 0, 0 },
+    stab_shift: [2]f32 = .{ 0, 0 },
     /// The camera intrinsics an undistort.pass corrects for: the two radial
     /// coefficients, the principal point in pixels of the submitted frame
     /// (normalized against the working size at draw), the pixel aspect (fx/fy),
@@ -1966,6 +1978,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .lowlight => s.lowlight_params.contains(entry.graph_index),
             .undistort => s.undistort_params.contains(entry.graph_index),
             .awb => s.awb_params.contains(entry.graph_index),
+            .stabilize => s.stabilize_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2342,6 +2355,25 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // gives identity gains and levels so the pass is a no-op.
                 const est = if (s.thumb_valid) estimateAwb(&s.frame_thumb) else AwbEstimate{ .gains = .{ 1, 1, 1 }, .black = 0, .white = 1 };
                 r.submitAwbPass(view_id, input_texture, est.gains, strength, est.black, est.white);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .stabilize => {
+                const strength = s.stabilize_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The shift and crop ride the recording policy; with stabilization
+                // off the inset is zero and the shift stays at rest, so the pass is
+                // a no-op regardless of strength.
+                const inset = if (stabTuning(s.recording_policy.stabilization)) |tune| tune.margin else 0;
+                r.submitStabilizePass(view_id, input_texture, s.stab_shift, inset, strength);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3920,6 +3952,7 @@ pub fn destroySession(session: *Session) void {
     session.lowlight_params.deinit(session.engine.gpa);
     session.undistort_params.deinit(session.engine.gpa);
     session.awb_params.deinit(session.engine.gpa);
+    session.stabilize_params.deinit(session.engine.gpa);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
@@ -6013,6 +6046,7 @@ pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const F
         .conversion = math.color.yuvToRgb(standard, range),
     } } };
     fillFrameThumbNv12(s, y_ptr, y_stride, uv_ptr, uv_stride, d.width, d.height, math.color.yuvToRgb(standard, range));
+    updateStabilization(s);
     s.copied_frames += 1;
     return .ok;
 }
@@ -6676,6 +6710,88 @@ fn estimateAwb(thumb: []const f32) AwbEstimate {
         }
     }.f;
     return .{ .gains = .{ gain(mr, gray), gain(mg, gray), gain(mb, gray) }, .black = lmin, .white = lmax };
+}
+
+/// Estimates the global translation between two grayscale thumbs by one
+/// Lucas-Kanade solve over the whole frame: the (u, v) that best explains the
+/// intensity change, in thumb pixels. This is the backward flow, pointing
+/// opposite the content motion. Zero when the frame is too flat to solve.
+fn globalTranslation(prev: []const f32, curr: []const f32, side: usize) [2]f32 {
+    var a11: f32 = 0;
+    var a12: f32 = 0;
+    var a22: f32 = 0;
+    var b1: f32 = 0;
+    var b2: f32 = 0;
+    const last = side - 1;
+    for (1..last) |y| {
+        for (1..last) |x| {
+            const i = y * side + x;
+            const ix = (curr[i + 1] - curr[i - 1]) * 0.5;
+            const iy = (curr[i + side] - curr[i - side]) * 0.5;
+            const it = curr[i] - prev[i];
+            a11 += ix * ix;
+            a12 += ix * iy;
+            a22 += iy * iy;
+            b1 += ix * it;
+            b2 += iy * it;
+        }
+    }
+    const det = a11 * a22 - a12 * a12;
+    if (!(det > 1e-3)) return .{ 0, 0 };
+    const u = (a22 * b1 - a12 * b2) / det;
+    const v = (a11 * b2 - a12 * b1) / det;
+    if (!(u == u) or !(v == v)) return .{ 0, 0 };
+    const cap: f32 = @floatFromInt(side / 4);
+    return .{ std.math.clamp(u, -cap, cap), std.math.clamp(v, -cap, cap) };
+}
+
+/// The smoothing a stabilization level applies: the low-pass factor toward the
+/// raw camera path (smaller is smoother) and the crop margin the correction
+/// stays within, so a stabilized frame never samples past its own edge.
+const StabTuning = struct { alpha: f32, margin: f32 };
+
+fn stabTuning(level: u32) ?StabTuning {
+    return switch (level) {
+        1 => .{ .alpha = 0.08, .margin = 0.10 },
+        2 => .{ .alpha = 0.03, .margin = 0.16 },
+        else => null,
+    };
+}
+
+/// Advances the electronic stabilizer one frame from the frame thumb: estimates
+/// the global motion by Lucas-Kanade, integrates it into the camera path,
+/// low-passes that into a smoothed path, and stores the residual UV shift a
+/// stabilize.pass applies. Inert until the recording policy asks for it.
+fn updateStabilization(s: *Session) void {
+    const tuning = stabTuning(s.recording_policy.stabilization) orelse {
+        s.stab_have_prev = false;
+        s.stab_shift = .{ 0, 0 };
+        return;
+    };
+    var curr_gray: [thumb_side * thumb_side]f32 = undefined;
+    for (0..thumb_side * thumb_side) |i| {
+        const o = i * 3;
+        curr_gray[i] = 0.299 * s.frame_thumb[o] + 0.587 * s.frame_thumb[o + 1] + 0.114 * s.frame_thumb[o + 2];
+    }
+    if (!s.stab_have_prev) {
+        @memcpy(&s.stab_prev_gray, &curr_gray);
+        s.stab_have_prev = true;
+        s.stab_shift = .{ 0, 0 };
+        return;
+    }
+    const bf = globalTranslation(&s.stab_prev_gray, &curr_gray, thumb_side);
+    // The backward flow points opposite the content motion; negate it for the
+    // frame-to-frame camera motion in thumb pixels, then integrate and smooth.
+    s.stab_cum[0] += -bf[0];
+    s.stab_cum[1] += -bf[1];
+    s.stab_smooth[0] += (s.stab_cum[0] - s.stab_smooth[0]) * tuning.alpha;
+    s.stab_smooth[1] += (s.stab_cum[1] - s.stab_smooth[1]) * tuning.alpha;
+    const side_f: f32 = @floatFromInt(thumb_side);
+    s.stab_shift = .{
+        std.math.clamp((s.stab_smooth[0] - s.stab_cum[0]) / side_f, -tuning.margin, tuning.margin),
+        std.math.clamp((s.stab_smooth[1] - s.stab_cum[1]) / side_f, -tuning.margin, tuning.margin),
+    };
+    @memcpy(&s.stab_prev_gray, &curr_gray);
 }
 
 fn averageLoopColor(rgba: []const u8, width: u32, height: u32, lm: [*]const f32, loop: []const u16) [3]f32 {
@@ -7540,6 +7656,7 @@ fn destroyBlendState(session: *Session) void {
     session.lowlight_params.clearRetainingCapacity();
     session.undistort_params.clearRetainingCapacity();
     session.awb_params.clearRetainingCapacity();
+    session.stabilize_params.clearRetainingCapacity();
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
@@ -8118,6 +8235,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createLowLightParams(s, gpa) catch {};
     createUndistortParams(s, gpa) catch {};
     createAwbParams(s, gpa) catch {};
+    createStabilizeParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -8264,6 +8382,17 @@ fn createAwbParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(nodes);
     for (nodes) |n| {
         session.awb_params.put(gpa, n.graph_index, n.strength) catch {};
+    }
+}
+
+/// Resolves every spliced stabilize.pass node's blend strength into
+/// session.stabilize_params once at activation - mirrors createAwbParams.
+fn createStabilizeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.stabilizePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.stabilize_params.put(gpa, n.graph_index, n.strength) catch {};
     }
 }
 
@@ -10341,6 +10470,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createLowLightParams(session, gpa);
     try createUndistortParams(session, gpa);
     try createAwbParams(session, gpa);
+    try createStabilizeParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);
