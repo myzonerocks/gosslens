@@ -7429,6 +7429,132 @@ fn proveHdrComposite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Activates a model.gltf sphere over a black frame in one of three variants -
+/// flat (no light), or lit from the front or the back - and captures the
+/// composited RGBA. The same sphere covers the same pixels in every variant, so
+/// only the shading differs. Caller owns the returned buffer.
+fn captureLitModel(gpa: std.mem.Allocator, engine: *abi.Engine, variant: []const u8, planes: Nv12Copy, ball_glb: []const u8) ![]u8 {
+    const dir = "zig-out/light-model";
+    const page = std.heap.page_allocator;
+    const manifest_json = if (std.mem.eql(u8, variant, "front"))
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "light":{"direction":[0.0,0.0,-1.0],"color":[1.0,1.0,1.0],"intensity":1.0,"ambient":0.1},
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
+    else if (std.mem.eql(u8, variant, "back"))
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "light":{"direction":[0.0,0.0,1.0],"color":[1.0,1.0,1.0],"intensity":1.0,"ambient":0.1},
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
+    else
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/light-model/assets");
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/ball.glb", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = ball_glb });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    // The glb decodes off-thread; render until the mesh lands, then settle.
+    var polls: usize = 0;
+    while (session.model_meshes.count() == 0) {
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return error.ModelNeverLanded;
+    }
+    const shot = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    errdefer gpa.free(shot);
+    var w: u32 = 0;
+    var h: u32 = 0;
+    try renderCapture(engine, session, &desc, planes, half_w, shot, &w, &h);
+    return shot;
+}
+
+/// Proves opt-in directional lighting on a model.gltf: a sphere lit from the
+/// front shades differently than the same sphere lit from the back (the light
+/// direction genuinely drives the shading, not just a flat dim), and both
+/// differ from the unlit sphere. Deterministic across runs.
+fn proveDirectionalLight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const ball_glb = std.Io.Dir.cwd().readFileAlloc(harness_io, "lenses/reference/box-block/assets/ball.glb", gpa, .limited(4 << 20)) catch {
+        std.debug.print("conformance: FAIL could not read the reference sphere glb\n", .{});
+        return false;
+    };
+    defer gpa.free(ball_glb);
+
+    // A black frame, so the sphere is the only thing drawn and the background
+    // contributes nothing to the comparison.
+    const black = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    for (0..black.len / 4) |i| black[i * 4 + 3] = 255;
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = black }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const front = try captureLitModel(gpa, engine, "front", planes, ball_glb);
+    defer gpa.free(front);
+    const back = try captureLitModel(gpa, engine, "back", planes, ball_glb);
+    defer gpa.free(back);
+    const flat = try captureLitModel(gpa, engine, "flat", planes, ball_glb);
+    defer gpa.free(flat);
+    const front_again = try captureLitModel(gpa, engine, "front", planes, ball_glb);
+    defer gpa.free(front_again);
+
+    if (!std.mem.eql(u8, front, front_again)) {
+        std.debug.print("conformance: FAIL directional light is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, front, flat) or std.mem.eql(u8, back, flat)) {
+        std.debug.print("conformance: FAIL a lit sphere renders identical to the unlit sphere\n", .{});
+        return false;
+    }
+
+    // Over the pixels the flat sphere covers, count how many shade differently
+    // between the front and back light: a real directional light lights the two
+    // hemispheres oppositely, so many covered pixels must diverge.
+    var diverged: u64 = 0;
+    var covered: u64 = 0;
+    var front_sum: u64 = 0;
+    var back_sum: u64 = 0;
+    var p: usize = 0;
+    while (p + 4 <= flat.len) : (p += 4) {
+        if (flat[p + 1] > 16) {
+            covered += 1;
+            front_sum += front[p + 1];
+            back_sum += back[p + 1];
+            const d = @as(i32, front[p + 1]) - @as(i32, back[p + 1]);
+            if (@abs(d) > 16) diverged += 1;
+        }
+    }
+    if (covered < 200) {
+        std.debug.print("conformance: FAIL the model covered too few pixels ({d}) to judge lighting\n", .{covered});
+        return false;
+    }
+    if (diverged * 4 < covered) {
+        std.debug.print("conformance: FAIL front and back light barely differ ({d}/{d} px diverged)\n", .{ diverged, covered });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a directional light shades a model.gltf by its direction: {d} of {d} covered pixels diverge front-vs-back (front avg {d}, back avg {d}), deterministically\n", .{ diverged, covered, front_sum / covered, back_sum / covered });
+    return true;
+}
+
 /// Proves lens audio: a play_sound trigger starts a voice that the mixer
 /// pulls out as PCM, silent before the trigger, non-silent after, and
 /// bit-identical across two runs of the same sequence.
@@ -18053,6 +18179,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("locomotion");
     if (!try proveHdrComposite(gpa, engine)) return 1;
     watchHold("hdr-composite");
+    if (!try proveDirectionalLight(gpa, engine)) return 1;
+    watchHold("directional-light");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;

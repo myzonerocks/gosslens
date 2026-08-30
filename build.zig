@@ -4732,6 +4732,7 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // directory, since that's the contract lens authors read.
         .{ .name = "vs_lens_pass", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "vs_lens_pass_instanced", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_instanced.def.sc" },
+        .{ .name = "vs_model_lit", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_model_lit.def.sc" },
         // lut.pass's own fixed fragment shader - kit-authored like the
         // vertex contract above, not per-lens, so it compiles here once
         // rather than through the validator's per-lens shader stage.
@@ -4838,6 +4839,7 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // fill, same reasoning as fs_lut_pass above - pairs with the
         // shared vs_lens_pass.sc vertex contract, not its own stage.
         .{ .name = "fs_model", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_model_lit", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_model_lit.def.sc" },
         // A camera-facing particle sprite: its own vertex stage expands each
         // centre into a quad corner, so it carries its own varying def (a
         // corner and life, not the shared texcoord).

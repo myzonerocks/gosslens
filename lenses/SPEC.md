@@ -172,6 +172,15 @@ projection; while tracking is anything but full, the node draws
 nothing. `anchor` is rejected on every other node type, and `"face"`,
 `"body"`, `"skeleton"`, and `"world"` are the only anchors GLF 1.0 defines.
 
+A lens may declare a top-level `"light"` to shade its `model.gltf` nodes with a
+single directional light: `{"direction": [x, y, z], "color": [r, g, b],
+"intensity": n, "ambient": a}`. `direction` is the world direction the light
+travels, `intensity` scales the diffuse term, and `ambient` lifts the faces
+turned away from the light off pure black. With a light set, a static model
+draws through the lit program (its per-vertex normals shade a Lambert diffuse
+against the light); with none it stays flat unlit exactly as before, so lighting
+is opt-in. Morph and skinned meshes deform per frame and stay flat for now.
+
 A `model.gltf` node may add `"clip_weights"`: an array of parameter names,
 one per animation clip in the order the glTF declares them. Each frame the
 runtime samples every clip at the node's playback time and blends their

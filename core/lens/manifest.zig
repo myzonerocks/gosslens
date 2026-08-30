@@ -1409,6 +1409,16 @@ pub const Volume = struct {
     half: [3]f32 = .{ 0, 0, 0 },
 };
 
+/// A single directional light a lens declares to shade its model.gltf nodes.
+/// `direction` is the world direction the light travels; `intensity` scales
+/// the diffuse term and `ambient` lifts surfaces facing away off pure black.
+pub const Light = struct {
+    direction: [3]f32 = .{ 0, 0, -1 },
+    color: [3]f32 = .{ 1, 1, 1 },
+    intensity: f32 = 1,
+    ambient: f32 = 0.1,
+};
+
 pub const Manifest = struct {
     arena: std.heap.ArenaAllocator,
     glf_minor: u16,
@@ -1426,6 +1436,9 @@ pub const Manifest = struct {
     /// 8-bit otherwise) and grade passes keep values above 1.0 through the
     /// chain, clamped only at the final present. Off by default.
     hdr: bool = false,
+    /// An optional directional light. With one set, model.gltf nodes render
+    /// through the lit program; with none they stay flat unlit as before.
+    light: ?Light = null,
 
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
@@ -4359,6 +4372,24 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
             try diags.add(path.slice(), "hdr must be a boolean", .{});
             path.pop(mark);
         }
+    }
+    if (getField(root, "light")) |lv| {
+        const mark = path.push("light");
+        if (lv != .object) {
+            try diags.add(path.slice(), "light must be an object", .{});
+        } else {
+            var light: Light = .{};
+            if (getField(lv.object, "direction")) |d| {
+                if (!readVec3(d, &light.direction)) try diags.add(path.slice(), "light direction must be three numbers", .{});
+            }
+            if (getField(lv.object, "color")) |col| {
+                if (!readVec3(col, &light.color)) try diags.add(path.slice(), "light color must be three numbers", .{});
+            }
+            if (getField(lv.object, "intensity")) |v| light.intensity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse light.intensity)), 0.0, 64.0);
+            if (getField(lv.object, "ambient")) |v| light.ambient = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse light.ambient)), 0.0, 1.0);
+            manifest.light = light;
+        }
+        path.pop(mark);
     }
     if (getField(root, "volume")) |vv| {
         const mark = path.push("volume");

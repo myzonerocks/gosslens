@@ -1352,6 +1352,9 @@ const LoadedModel = struct {
     /// When set, the jaw-open morph is driven by the audio envelope (a talking
     /// avatar), overriding its tracked or bound value.
     audio_talk: bool = false,
+    /// When set, the mesh carries per-vertex normals and draws through the lit
+    /// program against the lens's directional light; else it draws flat unlit.
+    lit: bool = false,
 };
 
 /// Maps each morph target name to the face blendshape index it drives (or -1
@@ -1385,6 +1388,12 @@ fn morphPositions(out: [][3]f32, rest: []const [3]f32, targets: []const []const 
 /// blended by their bound weights (clip_weights). With none bound the
 /// first clip carries full weight, so a single-clip model is unchanged;
 /// a model with no clips draws on its rest transform.
+/// Packs a lens's directional light into the two vec4s the lit model shader
+/// reads: the world direction and intensity, then the color and ambient term.
+fn lightParams(light: manifest.Light) [8]f32 {
+    return .{ light.direction[0], light.direction[1], light.direction[2], light.intensity, light.color[0], light.color[1], light.color[2], light.ambient };
+}
+
 fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
     if (loaded.animations.len == 0) return math.Mat4.identity;
     const bound = if (lens) |l| l.bindsClipWeights(graph_index) else false;
@@ -4284,6 +4293,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // The anchor's capability degradation: the frame
                     // still passes through, the mesh alone stays off.
                     r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                } else if (loaded.lit) {
+                    const light = if (active_lens) |l| l.manifest.light orelse manifest.Light{} else manifest.Light{};
+                    r.submitLitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, lightParams(light), aspect_ratio);
                 } else {
                     r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, aspect_ratio);
                 }
@@ -12341,6 +12353,48 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     }
 }
 
+/// Area-weighted per-vertex normals for a lit model: each triangle's geometric
+/// normal (its edge cross product, whose length is twice the area) is added to
+/// its three vertices, then each vertex normal is normalized. A degenerate
+/// vertex falls back to +Z. Deterministic, so a lit lens stays conformance-stable.
+fn computeVertexNormals(gpa: std.mem.Allocator, positions: []const [3]f32, indices: []const u32) ![][3]f32 {
+    const normals = try gpa.alloc([3]f32, positions.len);
+    @memset(normals, .{ 0, 0, 0 });
+    var i: usize = 0;
+    while (i + 3 <= indices.len) : (i += 3) {
+        const ia = indices[i];
+        const ib = indices[i + 1];
+        const ic = indices[i + 2];
+        if (ia >= positions.len or ib >= positions.len or ic >= positions.len) continue;
+        const pa = positions[ia];
+        const pb = positions[ib];
+        const pc = positions[ic];
+        const e1 = [3]f32{ pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2] };
+        const e2 = [3]f32{ pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2] };
+        const fn_ = [3]f32{
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        };
+        for ([_]u32{ ia, ib, ic }) |vi| {
+            normals[vi][0] += fn_[0];
+            normals[vi][1] += fn_[1];
+            normals[vi][2] += fn_[2];
+        }
+    }
+    for (normals) |*n| {
+        const len = @sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (len > 1e-8) {
+            n[0] /= len;
+            n[1] /= len;
+            n[2] /= len;
+        } else {
+            n.* = .{ 0, 0, 1 };
+        }
+    }
+    return normals;
+}
+
 /// Turns every .glb load that finished (or failed) since the last
 /// frame into a real gpu mesh (or drops it) - mirrors pollLutLoaders/
 /// pollBlendLoaders, except the decoded geometry is freed right after
@@ -12369,8 +12423,19 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             // A morphable mesh draws from a dynamic buffer the morph pass
             // re-uploads each frame; a plain mesh uploads once and stays static.
             const has_morph = decoded.morph_targets.len > 0;
+            // A lens with a directional light lights its static meshes: compute
+            // per-vertex normals and upload the lit layout. Morph and skinned
+            // meshes deform per frame, so they stay flat for now; a
+            // normal-compute failure also falls back to flat.
+            const light_present = if (session.active_lens) |*l| l.manifest.light != null else false;
+            const want_lit = light_present and !has_morph and decoded.skin == null;
+            const normals: ?[][3]f32 = if (want_lit) (computeVertexNormals(gpa, decoded.positions, decoded.indices) catch null) else null;
+            defer if (normals) |n| gpa.free(n);
+            const is_lit = normals != null;
             const mesh = (if (has_morph)
                 r.createDynamicModelMesh(decoded.positions, decoded.indices)
+            else if (normals) |n|
+                r.createLitModelMesh(decoded.positions, n, decoded.indices)
             else
                 r.createModelMesh(decoded.positions, decoded.indices)) catch {
                 gpa.free(decoded.positions);
@@ -12419,6 +12484,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 .morph_to_blendshape = morph_to_blendshape,
                 .auto_bind_blendshapes = session.model_retargets.contains(entry.key_ptr.*),
                 .audio_talk = session.model_talks.contains(entry.key_ptr.*),
+                .lit = is_lit,
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
                 if (rig) |rg| {
