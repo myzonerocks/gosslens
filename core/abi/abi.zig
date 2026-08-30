@@ -104,7 +104,7 @@ pub const abi_major: u16 = 0;
 // The frozen ABI surface lives here so the version and the dump tool read
 // one list. A new export adds a line to abi_functions, its header decl, and
 // its body - nothing else.
-pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment };
+pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConfig, RendererDesc, FramePlanes, FaceResult, HandResult, PoseResult, LensSignals, CameraControls, RecordingPolicy, CaptureUiIntent, CaptionSegment, CaptureGuidance };
 
 pub const abi_functions = [_][]const u8{
     "uint32_t goss_abi_version(void)",
@@ -214,6 +214,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
     "goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)",
     "goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)",
+    "goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance)",
+    "goss_status goss_session_reset_capture(goss_session *session)",
     "goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
     "goss_status goss_session_submit_frame_bracket_rgba(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
@@ -698,6 +700,12 @@ pub const Session = struct {
     /// activation, fed the camera frame, uploaded to their sprite each render.
     diffusion_workers: std.ArrayListUnmanaged(DiffusionWorker) = .empty,
     splat_workers: std.ArrayListUnmanaged(SplatWorker) = .empty,
+    /// Guided-capture scan state: the world poses captured so far, a bitset of
+    /// covered target viewpoints, and the deterministic gaussian set reconstructed
+    /// by back-projecting each captured view's depth. Bounded, freed at teardown.
+    capture_poses: std.ArrayListUnmanaged([16]f32) = .empty,
+    capture_covered: u32 = 0,
+    recon_gaussians: std.ArrayListUnmanaged(f32) = .empty,
     /// Monotonic timestamp for still images fed to the segmenter through
     /// goss_session_submit_segmentation_image, so each submit orders after the
     /// last the way successive camera frames do.
@@ -4473,6 +4481,8 @@ pub fn destroySession(session: *Session) void {
     session.diffusion_workers.deinit(session.engine.gpa);
     destroySplatWorkers(session);
     session.splat_workers.deinit(session.engine.gpa);
+    session.capture_poses.deinit(session.engine.gpa);
+    session.recon_gaussians.deinit(session.engine.gpa);
     session.ml_style_textures.deinit(session.engine.gpa);
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
@@ -5193,6 +5203,19 @@ pub const WorldAnchor = extern struct {
 pub const WorldLight = extern struct {
     ambient_intensity: f32,
     color_temperature_kelvin: f32,
+};
+
+/// The guided-capture progress a `goss_session_capture_view` call returns: how
+/// many of the target viewpoints a scan has covered, whether it is complete, the
+/// views captured and gaussians reconstructed so far, and the yaw (radians) of
+/// the next uncovered target so the app can steer the user toward it.
+pub const CaptureGuidance = extern struct {
+    covered: u32,
+    total: u32,
+    complete: u32,
+    view_count: u32,
+    splat_count: u32,
+    next_yaw: f32,
 };
 
 pub const max_world_planes = 32;
@@ -7108,6 +7131,119 @@ pub export fn goss_session_submit_orientation(session: ?*Session, gravity_x: f32
     s.orientation_prev_ts = timestamp_us;
     s.orientation_have_prev = true;
     return .ok;
+}
+
+const capture_target_count: u32 = 8;
+const capture_max_views: usize = 32;
+const capture_grid: usize = 16;
+const capture_max_gaussians: usize = capture_max_views * capture_grid * capture_grid;
+
+/// Captures the current viewpoint into a guided scan: marks the yaw target the
+/// pose covers, back-projects the submitted depth into world-space gaussians, and
+/// returns the scan's coverage so the app can steer the user to the next gap. The
+/// reconstruction is deterministic; goss_session_reset_capture clears the scan.
+pub export fn goss_session_capture_view(session: ?*Session, out_guidance: ?*CaptureGuidance) Status {
+    const s = session orelse return .invalid_argument;
+    const gpa = s.engine.gpa;
+    const cam_pose = s.world.state.world_from_camera;
+    const proj = s.world.state.projection;
+    // Camera forward (0,0,-1) rotated into world by the pose, its yaw snapped to
+    // the nearest evenly spaced target, which the scan then marks covered.
+    const fwd_x = -cam_pose[8];
+    const fwd_z = -cam_pose[10];
+    const yaw = std.math.atan2(fwd_x, fwd_z);
+    const norm_yaw = yaw - std.math.tau * @floor(yaw / std.math.tau);
+    const step = std.math.tau / @as(f32, @floatFromInt(capture_target_count));
+    const target: u32 = @as(u32, @intFromFloat(@round(norm_yaw / step))) % capture_target_count;
+    s.capture_covered |= (@as(u32, 1) << @intCast(target));
+
+    if (s.capture_poses.items.len < capture_max_views) {
+        s.capture_poses.append(gpa, cam_pose) catch {};
+        reconstructView(s, gpa, cam_pose, proj);
+    }
+
+    if (out_guidance) |g| {
+        var covered: u32 = 0;
+        var next_yaw: f32 = 0;
+        var found_next = false;
+        for (0..capture_target_count) |ti| {
+            if (s.capture_covered & (@as(u32, 1) << @intCast(ti)) != 0) {
+                covered += 1;
+            } else if (!found_next) {
+                next_yaw = @as(f32, @floatFromInt(ti)) * step;
+                found_next = true;
+            }
+        }
+        g.* = .{
+            .covered = covered,
+            .total = capture_target_count,
+            .complete = if (covered == capture_target_count) 1 else 0,
+            .view_count = @intCast(s.capture_poses.items.len),
+            .splat_count = @intCast(s.recon_gaussians.items.len / 14),
+            .next_yaw = next_yaw,
+        };
+    }
+    return .ok;
+}
+
+/// Clears a guided-capture scan: drops the covered targets, the captured poses,
+/// and the reconstructed gaussians, so a fresh scan starts from nothing.
+pub export fn goss_session_reset_capture(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.capture_covered = 0;
+    s.capture_poses.clearRetainingCapacity();
+    s.recon_gaussians.clearRetainingCapacity();
+    return .ok;
+}
+
+/// Back-projects a captured view's depth grid into world-space gaussians and
+/// appends them to the reconstruction, unprojecting each grid sample through the
+/// submitted projection and pose. A missing depth or projection adds nothing.
+fn reconstructView(s: *Session, gpa: std.mem.Allocator, cam_pose: [16]f32, proj: [16]f32) void {
+    if (s.depth_data.len == 0 or s.depth_width == 0 or s.depth_height == 0) return;
+    if (proj[0] == 0 or proj[5] == 0) return;
+    const span = if (s.depth_far > s.depth_near) s.depth_far - s.depth_near else 1.0;
+    const dw = s.depth_width;
+    const dh = s.depth_height;
+    const gridf: f32 = @floatFromInt(capture_grid);
+    var gy: usize = 0;
+    while (gy < capture_grid) : (gy += 1) {
+        var gx: usize = 0;
+        while (gx < capture_grid) : (gx += 1) {
+            if (s.recon_gaussians.items.len / 14 >= capture_max_gaussians) return;
+            const u = (@as(f32, @floatFromInt(gx)) + 0.5) / gridf;
+            const v = (@as(f32, @floatFromInt(gy)) + 0.5) / gridf;
+            const px: usize = @intFromFloat(u * @as(f32, @floatFromInt(dw - 1)));
+            const py: usize = @intFromFloat(v * @as(f32, @floatFromInt(dh - 1)));
+            const d_norm = std.math.clamp(s.depth_data[py * dw + px], 0, 1);
+            const depth_m = s.depth_near + d_norm * span;
+            if (!(depth_m > 0)) continue;
+            // Unproject the pixel to a camera-space point, then pose it to world.
+            const ndc_x = u * 2 - 1;
+            const ndc_y = 1 - v * 2;
+            const cam_x = ndc_x * depth_m / proj[0];
+            const cam_y = ndc_y * depth_m / proj[5];
+            const cam_z = -depth_m;
+            const wx = cam_pose[0] * cam_x + cam_pose[4] * cam_y + cam_pose[8] * cam_z + cam_pose[12];
+            const wy = cam_pose[1] * cam_x + cam_pose[5] * cam_y + cam_pose[9] * cam_z + cam_pose[13];
+            const wz = cam_pose[2] * cam_x + cam_pose[6] * cam_y + cam_pose[10] * cam_z + cam_pose[14];
+            // A small isotropic gaussian per sample, shaded by its depth so the
+            // reconstructed cloud is inspectable; identity rotation, full opacity.
+            s.recon_gaussians.appendSlice(gpa, &[14]f32{ wx, wy, wz, 0.03, 0.03, 0.03, 0, 0, 0, 1, 1.0, d_norm, d_norm, d_norm }) catch return;
+        }
+    }
+}
+
+/// The gaussians a guided-capture scan has reconstructed so far, for a proof to
+/// assert the back-projection landed the cloud where the poses and depth put it.
+pub fn reconstructedSplatCount(session: *Session) usize {
+    return session.recon_gaussians.items.len / 14;
+}
+
+pub fn reconstructedSplat(session: *Session, i: usize) [14]f32 {
+    var out: [14]f32 = undefined;
+    @memcpy(&out, session.recon_gaussians.items[i * 14 ..][0..14]);
+    return out;
 }
 
 /// Feeds one NV12 exposure into every bracket-source temporal.fuse ring, each

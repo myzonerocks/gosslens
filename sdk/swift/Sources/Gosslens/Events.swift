@@ -270,6 +270,21 @@ extension GossSession {
         try checked(goss_session_submit_orientation(handle, gravityX, gravityY, gravityZ, timestampUs))
     }
 
+    /// Captures the current viewpoint (the last submitted world pose and depth)
+    /// into a guided scan, back-projecting the depth into a deterministic gaussian
+    /// reconstruction, and returns the scan's coverage so the app can steer the
+    /// user to the next uncovered viewpoint. Reset with resetCapture.
+    public func captureView() throws -> CaptureGuidance {
+        var g = goss_capture_guidance()
+        try checked(goss_session_capture_view(handle, &g))
+        return CaptureGuidance(covered: g.covered, total: g.total, complete: g.complete != 0, viewCount: g.view_count, splatCount: g.splat_count, nextYaw: g.next_yaw)
+    }
+
+    /// Clears a guided-capture scan: its covered targets, poses, and reconstruction.
+    public func resetCapture() throws {
+        try checked(goss_session_reset_capture(handle))
+    }
+
     /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer
     /// node synthesizes its decoded caption or translation to speech and plays it
     /// into the lens mixer. Off by default; a host turns it on for a voice-over.
@@ -451,4 +466,16 @@ extension GossSession {
     public func degradeLevel() -> GossDegradeLevel {
         GossDegradeLevel(rawValue: goss_session_degrade_level(handle).rawValue) ?? .passthrough
     }
+}
+
+/// A guided-capture scan's progress: how many target viewpoints it has covered,
+/// whether it is complete, the views captured and gaussians reconstructed so far,
+/// and the yaw (radians) of the next uncovered target to steer the user toward.
+public struct CaptureGuidance {
+    public let covered: UInt32
+    public let total: UInt32
+    public let complete: Bool
+    public let viewCount: UInt32
+    public let splatCount: UInt32
+    public let nextYaw: Float
 }

@@ -26,6 +26,8 @@ object Gosslens {
     internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
     internal external fun nativeSubmitWorld(session: Long, stateBuffer: ByteBuffer, planesBuffer: ByteBuffer, planeCount: Int, anchorsBuffer: ByteBuffer, anchorCount: Int, lightBuffer: ByteBuffer): Int
+    internal external fun nativeCaptureView(session: Long, guidanceBuffer: ByteBuffer): Int
+    internal external fun nativeResetCapture(session: Long): Int
     internal external fun nativeSubmitAudio(session: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Int
     internal external fun nativeRenderFrame(engine: Long, session: Long): Int
     internal external fun nativeCompilePrompt(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
@@ -344,6 +346,17 @@ data class GossCaptureUi(
     val screenFlashMode: Int = 0,
     val screenFlashIntensity: Float = 1f,
     val screenFlashWarmth: Float = 0.5f,
+)
+
+/** A guided-capture scan's progress: covered targets, whether it is complete, the
+ * views captured and gaussians reconstructed so far, and the next uncovered yaw. */
+data class GossCaptureGuidance(
+    val covered: Int,
+    val total: Int,
+    val complete: Boolean,
+    val viewCount: Int,
+    val splatCount: Int,
+    val nextYaw: Float,
 )
 
 /** One daemon-backed cleaner for the whole SDK. The cleaning action holds
@@ -1094,6 +1107,25 @@ class GossSession private constructor(
      * near-zero vector clears the stream, leaving a rolling.pass inert. */
     fun submitOrientation(gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Boolean =
         Gosslens.nativeSubmitOrientation(handle, gravityX, gravityY, gravityZ, timestampUs) == 0
+
+    /** Captures the current viewpoint (the last submitted world pose and depth)
+     * into a guided scan, back-projecting the depth into a deterministic gaussian
+     * reconstruction, and returns the scan's coverage. Null on failure. */
+    fun captureView(): GossCaptureGuidance? {
+        val buf = ByteBuffer.allocateDirect(24).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeCaptureView(handle, buf) != 0) return null
+        return GossCaptureGuidance(
+            covered = buf.getInt(0),
+            total = buf.getInt(4),
+            complete = buf.getInt(8) != 0,
+            viewCount = buf.getInt(12),
+            splatCount = buf.getInt(16),
+            nextYaw = buf.getFloat(20),
+        )
+    }
+
+    /** Clears a guided-capture scan: its covered targets, poses, and reconstruction. */
+    fun resetCapture(): Boolean = Gosslens.nativeResetCapture(handle) == 0
 
     /** Enables or disables on-device dubbing: when on, a dub-bound audio.infer
      * node synthesizes its decoded caption or translation to speech and plays it

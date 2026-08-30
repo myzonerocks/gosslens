@@ -6757,6 +6757,90 @@ fn proveSplatBackground(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A world_from_camera pose rotated `theta` about the Y axis (column-major), so a
+/// guided-capture scan sees a distinct yaw each step.
+fn makeYaw(theta: f32) [16]f32 {
+    const cs = @cos(theta);
+    const sn = @sin(theta);
+    var m = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    m[0] = cs;
+    m[2] = -sn;
+    m[8] = sn;
+    m[10] = cs;
+    return m;
+}
+
+/// Proves guided capture and the deterministic reconstruction: capturing a ring of
+/// eight yaw viewpoints covers the scan, each view's depth back-projects through
+/// the submitted pose and projection into a spread of world-space gaussians landing
+/// where the geometry puts them, and the same poses and depth rebuild the same set.
+fn proveCaptureReconstruct(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const dw: u32 = 16;
+    const dh: u32 = 16;
+    var depth: [dw * dh]f32 = undefined;
+    @memset(&depth, 0.5);
+    const identity_proj = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
+    var guidance: abi.CaptureGuidance = undefined;
+    const scan = struct {
+        fn run(sess: *abi.Session, d: []const f32, w: u32, h: u32, proj: [16]f32, out: *abi.CaptureGuidance) !void {
+            for (0..8) |i| {
+                const theta = @as(f32, @floatFromInt(i)) * (std.math.tau / 8.0);
+                var ws: abi.WorldState = .{ .tracking_state = 1, .world_from_camera = makeYaw(theta), .projection = proj, .timestamp_us = @intCast(i * 1000) };
+                if (abi.goss_session_submit_world(sess, &ws, null, 0, null, 0, null) != .ok) return error.SubmitWorldFailed;
+                if (abi.goss_session_submit_depth(sess, d.ptr, w, h, 1.0, 3.0) != .ok) return error.SubmitDepthFailed;
+                if (abi.goss_session_capture_view(sess, out) != .ok) return error.CaptureViewFailed;
+            }
+        }
+    };
+    try scan.run(session, &depth, dw, dh, identity_proj, &guidance);
+
+    if (guidance.complete != 1 or guidance.covered != 8) {
+        std.debug.print("conformance: FAIL guided capture did not complete coverage ({d}/{d})\n", .{ guidance.covered, guidance.total });
+        return false;
+    }
+    const expect: usize = 8 * 16 * 16;
+    if (abi.reconstructedSplatCount(session) != expect) {
+        std.debug.print("conformance: FAIL reconstruction produced {d} gaussians, expected {d}\n", .{ abi.reconstructedSplatCount(session), expect });
+        return false;
+    }
+    // View 0 is the identity pose; its centre grid sample back-projects a metric
+    // depth of 2 (near 1 + 0.5 * span 2) to world z -2.
+    const centre = abi.reconstructedSplat(session, 8 * 16 + 8);
+    if (!(@abs(centre[2] + 2.0) < 0.01)) {
+        std.debug.print("conformance: FAIL the back-projected depth landed at z {d:.3}, not -2\n", .{centre[2]});
+        return false;
+    }
+    // The grid spreads across the frame: the left and right samples of view 0 land
+    // well apart in world x, so it is a real unprojection, not one point.
+    const left = abi.reconstructedSplat(session, 8 * 16 + 0);
+    const right = abi.reconstructedSplat(session, 8 * 16 + 15);
+    if (!(@abs(left[0] - right[0]) > 1.0)) {
+        std.debug.print("conformance: FAIL the reconstruction did not spread across the frame (dx {d:.3})\n", .{@abs(left[0] - right[0])});
+        return false;
+    }
+
+    // Deterministic: reset and rescan the same poses and depth rebuild the same set.
+    if (abi.goss_session_reset_capture(session) != .ok) return error.ResetFailed;
+    if (abi.reconstructedSplatCount(session) != 0) {
+        std.debug.print("conformance: FAIL reset did not clear the reconstruction\n", .{});
+        return false;
+    }
+    try scan.run(session, &depth, dw, dh, identity_proj, &guidance);
+    const centre2 = abi.reconstructedSplat(session, 8 * 16 + 8);
+    if (abi.reconstructedSplatCount(session) != expect or !std.mem.eql(u8, std.mem.asBytes(&centre), std.mem.asBytes(&centre2))) {
+        std.debug.print("conformance: FAIL the reconstruction is not deterministic across a rescan\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a guided capture covers eight yaw viewpoints and reconstructs {d} gaussians by back-projecting each view's depth through its pose (centre at z {d:.2}, frame spread {d:.2}), deterministically\n", .{ expect, centre[2], @abs(left[0] - right[0]) });
+    return true;
+}
+
 /// Proves the photoreal selfie avatar: a splat.cloud with source:selfie runs its
 /// model once over a still submitted through goss_session_submit_avatar_source
 /// (not the live camera) and draws the generated cloud, so an avatar is built
@@ -17389,6 +17473,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("splat portal");
     if (!try proveSplatBackground(gpa, engine)) return 1;
     watchHold("splat background");
+    if (!try proveCaptureReconstruct(gpa, engine)) return 1;
+    watchHold("capture reconstruct");
     if (!try proveMlInferSelfieAvatar(gpa, engine)) return 1;
     watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;

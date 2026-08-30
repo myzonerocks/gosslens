@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 66u
+#define GOSS_ABI_MINOR 68u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -357,6 +357,17 @@ typedef struct goss_world_light {
     float color_temperature_kelvin;
 } goss_world_light;
 
+/* Guided-capture progress returned by goss_session_capture_view. Layout: 24
+ * bytes. */
+typedef struct goss_capture_guidance {
+    uint32_t covered;     /* target viewpoints covered so far */
+    uint32_t total;       /* total target viewpoints in the scan */
+    uint32_t complete;    /* 1 when every target is covered */
+    uint32_t view_count;  /* views captured so far */
+    uint32_t splat_count; /* gaussians reconstructed so far */
+    float next_yaw;       /* yaw (radians) of the next uncovered target */
+} goss_capture_guidance;
+
 /* Feeds the platform's world understanding into the session: camera
  * pose and projection, tracked planes, anchors, and the light
  * estimate, once per platform frame. Drives the world.tracking_state
@@ -587,6 +598,13 @@ goss_status goss_session_submit_camera_intrinsics(goss_session *session, float f
  * velocity derived from consecutive samples to correct rolling-shutter skew; the
  * host submits one per frame from the IMU. A near-zero vector clears the stream. */
 goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us);
+
+/* Captures the current viewpoint (the last submitted world pose and depth) into a
+ * guided scan: marks the yaw target it covers, back-projects the depth into
+ * world-space gaussians, and fills out_guidance with the scan's coverage. The
+ * reconstruction is deterministic. goss_session_reset_capture clears the scan. */
+goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance);
+goss_status goss_session_reset_capture(goss_session *session);
 
 /* Submits one exposure of an HDR bracket, fed only to bracket-source
  * temporal.fuse nodes (the live camera feeds the rest); the fusion publishes
