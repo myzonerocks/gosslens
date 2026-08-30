@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 59u
+#define GOSS_ABI_MINOR 60u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -886,6 +886,12 @@ goss_status goss_session_parameter_value(goss_session *session, const uint8_t *n
  * interleaved s16) that play_sound triggers produced, for the SDK to hand to
  * the platform audio output. Writes silence when no lens sound is active. */
 goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames);
+
+/* Graph thread. Reads the latest caption an audio.infer node CTC-decoded, by the
+ * node's id. Writes up to capacity bytes of UTF-8 into out and the full length
+ * into out_len (so a caller can size a buffer). Returns goss_status_again when
+ * the named node has no caption binding or has decoded nothing yet. */
+goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len);
 
 /* Graph thread. Folds the active lens sound into the caller's outgoing
  * call/live track: mic (interleaved f32 at sample_rate/channels, or NULL for

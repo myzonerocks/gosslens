@@ -327,6 +327,12 @@ so there is nothing to hand-mix (pass a null mic buffer for lens sound over
 silence). `pullAudio` still pulls the lens sound alone for local playback with
 no call; in a call, `mixOutputAudio` replaces it.
 
+When the lens carries an `audio.infer` node with a caption binding, the engine
+runs on-device ASR over the mic and `captionText` reads the decoded text by the
+node's id, for the app to draw as a live subtitle:
+
+    session.captionText("caption")?.let { subtitle.text = it }
+
 ## Method names
 
 The operation names match the other SDKs: `GossEngine.create(config)`,

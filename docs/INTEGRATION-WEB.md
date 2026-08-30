@@ -353,6 +353,13 @@ nothing to hand-mix (pass `null` for the mic to send the lens sound over
 silence). `pullAudio` still pulls the lens sound alone for local WebAudio
 playback with no call in progress.
 
+When the lens carries an `audio.infer` node with a caption binding, the engine
+runs on-device ASR over the mic and `captionText` reads the decoded text by the
+node's id, for the page to draw as a live subtitle:
+
+    const line = session.captionText("caption");
+    if (line) subtitleEl.textContent = line;
+
 ## Method names
 
 The operation names match the other SDKs: `GossEngine.create(gosslens)`,

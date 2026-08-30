@@ -90,6 +90,7 @@ object Gosslens {
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
+    internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
     internal external fun nativeSubmitSegmentationImage(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeSetMakeupReference(session: Long, rgba: ByteBuffer, width: Int, height: Int, landmarks: ByteBuffer, count: Int): Int
     internal external fun nativeBodyCount(session: Long): Int
@@ -1068,6 +1069,27 @@ class GossSession private constructor(
         buf.asFloatBuffer().put(distortion)
         buf.rewind()
         return Gosslens.nativeSubmitCameraIntrinsics(handle, fx, fy, cx, cy, buf, distortion.size) == 0
+    }
+
+    /** The latest caption an audio.infer node decoded, by the node's id, or null
+     * when that node has no caption binding or nothing decoded yet. On-device ASR
+     * the app can draw as a live subtitle. A length probe sizes the buffer. */
+    fun captionText(nodeId: String): String? {
+        val idBytes = nodeId.toByteArray(Charsets.UTF_8)
+        val idBuf = ByteBuffer.allocateDirect(maxOf(idBytes.size, 1))
+        idBuf.put(idBytes)
+        idBuf.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeCaptionText(handle, idBuf, idBytes.size, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        if (needed <= 0) return null
+        val out = ByteBuffer.allocateDirect(needed)
+        if (Gosslens.nativeCaptionText(handle, idBuf, idBytes.size, out, needed.toLong(), len) != 0) return null
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return String(result, Charsets.UTF_8)
     }
 
     /** Segments a host-provided still image through the running segmenter:

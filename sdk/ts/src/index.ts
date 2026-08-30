@@ -1503,6 +1503,31 @@ export class GossSession {
     this.mod.ccall("goss_session_submit_camera_intrinsics", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, fx, fy, cx, cy, ptr, distortion.length]);
   }
 
+  /// The latest caption an audio.infer node decoded, by the node's id, or null
+  /// when that node has no caption binding or nothing decoded yet. On-device ASR
+  /// the app can draw as a live subtitle. A length probe sizes the buffer.
+  captionText(nodeId: string): string | null {
+    const id = new TextEncoder().encode(nodeId);
+    const idPtr = this.mod.ccall("goss_alloc", "number", ["number"], [id.length || 1]) as number;
+    this.mod.HEAPU8.set(id, idPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const readLen = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number"];
+    const probe = this.mod.ccall("goss_session_caption_text", "number", args, [this.handle, idPtr, id.length, 0, 0, lenPtr]) as number;
+    const needed = readLen();
+    let result: string | null = null;
+    if (probe === 0 && needed > 0) {
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      const status = this.mod.ccall("goss_session_caption_text", "number", args, [this.handle, idPtr, id.length, outPtr, needed, lenPtr]) as number;
+      const written = readLen();
+      if (status === 0) result = new TextDecoder().decode(this.mod.HEAPU8.slice(outPtr, outPtr + written));
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [idPtr, id.length || 1]);
+    return result;
+  }
+
   /// Segments a host-provided still image through the running segmenter: rgba
   /// is width by height RGBA8 pixels, row major. The mask reaches the active
   /// lens the way a camera frame's would.

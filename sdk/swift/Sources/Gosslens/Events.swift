@@ -262,6 +262,19 @@ extension GossSession {
         }
     }
 
+    /// The latest caption an audio.infer node decoded, by the node's id, or nil
+    /// when that node has no caption binding or nothing decoded yet. On-device ASR
+    /// the app can draw as a live subtitle. A length probe sizes the buffer.
+    public func captionText(_ nodeId: String) -> String? {
+        let id = Array(nodeId.utf8)
+        var needed: Int = 0
+        guard goss_session_caption_text(handle, id, id.count, nil, 0, &needed) == GOSS_OK, needed > 0 else { return nil }
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        guard goss_session_caption_text(handle, id, id.count, &out, out.count, &written) == GOSS_OK else { return nil }
+        return String(decoding: out[0..<written], as: UTF8.self)
+    }
+
     /// Segments a host-provided still image through the running segmenter:
     /// rgba is width by height RGBA8 pixels, row major. The mask reaches the
     /// active lens the way a camera frame's would. Throws again with no

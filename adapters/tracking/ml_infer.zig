@@ -36,6 +36,9 @@ pub fn audioArgmax(ai: *const AudioInfer, tensor: u32) u32 {
 pub fn audioOutputLen(ai: *const AudioInfer, tensor: u32) usize {
     return ai.outputLen(tensor);
 }
+pub fn audioOutputSlice(ai: *const AudioInfer, tensor: u32) []const f32 {
+    return ai.outputSlice(tensor);
+}
 pub fn audioHasPublished(ai: *const AudioInfer) bool {
     return ai.hasPublished();
 }

@@ -2061,6 +2061,105 @@ fn proveAudioInfer(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A synthetic caption net: MatMul(window[1,8], W[8,9]) yields [1,9] logits read
+/// as three timesteps of three classes. W is built so a positive constant window
+/// argmaxes each timestep to h, blank, i, which greedy-CTC-decodes to "hi".
+fn buildOnnxCaptionProbe(a: std.mem.Allocator) []const u8 {
+    const n = 8;
+    const m = 9; // 3 timesteps * 3 classes
+    // Per output column the target logit weight; classes are blank(0), h(1), i(2).
+    const desired = [_]f32{ 0, 1, 0, 1, 0, 0, 0, 0, 1 };
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, n);
+    w.varintField(1, m);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (0..n) |_| for (0..m) |j| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(desired[j] / @as(f32, n)), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    };
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const mm = onnxNode(a, "MatMul", &.{ "x", "W" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, mm);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, n }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ n, m }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, m }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a caption lens: an audio.infer node with a caption binding, plus the
+/// model and a three-line labels file (blank, h, i).
+fn writeCaptionLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.caption","version":"1.0.0","display_name":"Caption","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"caption":{"tensor":0,"labels":"labels"}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+    const labels_path = try std.fmt.allocPrint(page, "{s}/assets/labels.txt", .{dir});
+    defer page.free(labels_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = labels_path, .data = "_\nh\ni" });
+}
+
+/// Activates the caption lens, submits audio while ticking, and reads the decoded
+/// caption by the node id once it lands. Caller owns the returned text.
+fn runCaption(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, node_id: []const u8) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, 0.3);
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var buf: [256]u8 = undefined;
+    var polls: usize = 0;
+    while (true) : (polls += 1) {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + polls * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        var out_len: usize = 0;
+        const st = abi.goss_session_caption_text(session, node_id.ptr, node_id.len, &buf, buf.len, &out_len);
+        if (st == .ok and out_len > 0) return gpa.dupe(u8, buf[0..out_len]);
+        if (polls > 100000) return error.CaptionTimedOut;
+    }
+}
+
+/// Proves on-device ASR captions: an audio.infer node CTC-decodes a logits tensor
+/// into text read back by node id. The synthetic net's fixed logits decode to the
+/// known word "hi", so the whole path - window, model, greedy CTC, labels, and the
+/// caption ABI - is exercised end to end.
+fn proveCaption(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxCaptionProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/caption/assets");
+    try writeCaptionLens("zig-out/caption", model);
+
+    const text = try runCaption(gpa, engine, "zig-out/caption", "aud");
+    defer gpa.free(text);
+    if (!std.mem.eql(u8, text, "hi")) {
+        std.debug.print("conformance: FAIL caption decoded '{s}', wanted 'hi'\n", .{text});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.infer caption binding greedy-CTC-decodes a logits tensor into text read by node id: the synthetic net's fixed logits decode to 'hi'\n", .{});
+    return true;
+}
+
 /// Emits an ONNX net that sums the three input channels (a 1x1 conv with unit
 /// weights) then averages the plane, so its one output is the frame's mean
 /// brightness. NCHW input [1,3,8,8] exercises the core's channel transpose.
@@ -15061,6 +15160,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer");
     if (!try proveAudioInfer(gpa, engine)) return 1;
     watchHold("audio infer");
+    if (!try proveCaption(gpa, engine)) return 1;
+    watchHold("audio caption");
     if (!try proveMlInferOnnx(gpa, engine)) return 1;
     watchHold("ml infer onnx");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;

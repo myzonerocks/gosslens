@@ -130,6 +130,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_session *session, uint64_t native_handle, uint32_t width, uint32_t height)",
     "goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)",
     "goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)",
+    "goss_status goss_session_caption_text(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint8_t *out, size_t capacity, size_t *out_len)",
     "goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)",
     "goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)",
@@ -8208,6 +8209,27 @@ pub export fn goss_compile_prompt(engine: ?*Engine, prompt: ?[*]const u8, prompt
     return .ok;
 }
 
+/// Reads the latest caption an audio.infer node decoded, by the node's id. Writes
+/// up to capacity bytes of UTF-8 into out and the full length into out_len (so a
+/// caller can size a buffer), and returns again when the named node has no
+/// caption binding or no caption yet.
+pub export fn goss_session_caption_text(session: ?*Session, node_id: ?[*]const u8, node_id_len: usize, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const id_ptr = node_id orelse return .invalid_argument;
+    const id = id_ptr[0..node_id_len];
+    for (s.audio_workers.items) |aw| {
+        if (!aw.has_caption or !std.mem.eql(u8, aw.node_id, id)) continue;
+        const n = aw.caption_len;
+        if (out_len) |ol| ol.* = n;
+        if (out) |o| {
+            const m = @min(n, capacity);
+            @memcpy(o[0..m], aw.caption_buf[0..m]);
+        }
+        return .ok;
+    }
+    return .again;
+}
+
 /// Pulls the next block of mixed lens audio (frames * channels, s16) for the
 /// SDK to play. Silence when no lens sound is active.
 pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: u32) Status {
@@ -9523,11 +9545,23 @@ fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []
 /// may read from the ring.
 const audio_ring_len: usize = 48000;
 
-/// One audio.infer worker ready to run: its synchronous inference core and the
-/// output-to-parameter bindings it drives each tick.
+/// The most bytes a decoded caption holds.
+const caption_max: usize = 512;
+
+/// One audio.infer worker ready to run: its synchronous inference core, the
+/// output-to-parameter bindings it drives each tick, and an optional caption
+/// binding that CTC-decodes a logits tensor into recognized text.
 const AudioWorker = struct {
     worker: *ml_infer.AudioInfer,
     outputs: []const manifest.MlOutput,
+    /// An owned copy of the node's id, so a caption reader finds this worker.
+    node_id: []u8,
+    has_caption: bool = false,
+    caption_tensor: u32 = 0,
+    /// The owned vocab labels, one per CTC class; index 0 is the blank.
+    labels: [][]u8 = &.{},
+    caption_buf: [caption_max]u8 = undefined,
+    caption_len: usize = 0,
 };
 
 const MlWorker = struct {
@@ -9723,7 +9757,32 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
         defer gpa.free(bytes);
         const worker = ml_infer.audioCreate(gpa, bytes, .{}, 2) catch continue;
-        session.audio_workers.append(gpa, .{ .worker = worker, .outputs = audio.outputs }) catch {
+        const node_id = gpa.dupe(u8, node.id) catch {
+            ml_infer.audioDestroy(worker);
+            continue;
+        };
+        // A caption binding loads its vocab labels; a missing labels file leaves
+        // the node driving only its parameters, not captions.
+        var labels: [][]u8 = &.{};
+        var has_caption = false;
+        var caption_tensor: u32 = 0;
+        if (audio.caption) |cap| {
+            if (loadCaptionLabels(gpa, io, bundle_path, cap.labels)) |ls| {
+                labels = ls;
+                has_caption = true;
+                caption_tensor = cap.tensor;
+            }
+        }
+        session.audio_workers.append(gpa, .{
+            .worker = worker,
+            .outputs = audio.outputs,
+            .node_id = node_id,
+            .has_caption = has_caption,
+            .caption_tensor = caption_tensor,
+            .labels = labels,
+        }) catch {
+            freeCaptionLabels(gpa, labels);
+            gpa.free(node_id);
             ml_infer.audioDestroy(worker);
             continue;
         };
@@ -9733,6 +9792,74 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             session.audio_window = gpa.alloc(f32, audio_ring_len) catch &.{};
         }
     }
+}
+
+/// Loads a caption node's vocab: assets/<stem>.txt, one label per line, the CTC
+/// blank first. Returns owned lines, or null when the file is missing or empty.
+fn loadCaptionLabels(gpa: std.mem.Allocator, io: std.Io, bundle_path: []const u8, stem: []const u8) ?[][]u8 {
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.txt", .{ bundle_path, stem }) catch return null;
+    defer gpa.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024)) catch return null;
+    defer gpa.free(bytes);
+    var lines: std.ArrayListUnmanaged([]u8) = .empty;
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |raw| {
+        const line = if (raw.len > 0 and raw[raw.len - 1] == '\r') raw[0 .. raw.len - 1] else raw;
+        const owned = gpa.dupe(u8, line) catch break;
+        lines.append(gpa, owned) catch {
+            gpa.free(owned);
+            break;
+        };
+    }
+    if (lines.items.len == 0) {
+        lines.deinit(gpa);
+        return null;
+    }
+    return lines.toOwnedSlice(gpa) catch {
+        for (lines.items) |l| gpa.free(l);
+        lines.deinit(gpa);
+        return null;
+    };
+}
+
+fn freeCaptionLabels(gpa: std.mem.Allocator, labels: [][]u8) void {
+    for (labels) |l| gpa.free(l);
+    if (labels.len > 0) gpa.free(labels);
+}
+
+/// Greedy CTC decode of a caption worker's [timesteps, vocab] logits into text:
+/// per timestep take the argmax class, drop the blank (index 0), and collapse
+/// consecutive repeats, mapping the surviving classes to their labels.
+fn decodeCaption(aw: *AudioWorker, logits: []const f32) void {
+    const vocab = aw.labels.len;
+    if (vocab == 0 or logits.len < vocab) {
+        aw.caption_len = 0;
+        return;
+    }
+    const timesteps = logits.len / vocab;
+    var out_len: usize = 0;
+    var prev: usize = std.math.maxInt(usize);
+    var ts: usize = 0;
+    while (ts < timesteps) : (ts += 1) {
+        const base = ts * vocab;
+        var best: usize = 0;
+        var best_v: f32 = logits[base];
+        for (1..vocab) |v| {
+            if (logits[base + v] > best_v) {
+                best_v = logits[base + v];
+                best = v;
+            }
+        }
+        if (best != 0 and best != prev) {
+            const label = aw.labels[best];
+            if (out_len + label.len <= aw.caption_buf.len) {
+                @memcpy(aw.caption_buf[out_len..][0..label.len], label);
+                out_len += label.len;
+            }
+        }
+        prev = best;
+    }
+    aw.caption_len = out_len;
 }
 
 /// Copies the newest `out.len` samples of the microphone ring into `out` in
@@ -9757,7 +9884,7 @@ fn readAudioWindow(session: *const Session, out: []f32) void {
 /// mic the way pollMlOutputs drives it from the camera.
 fn pollAudioInfer(session: *Session) void {
     const lens = if (session.active_lens) |*l| l else return;
-    for (session.audio_workers.items) |aw| {
+    for (session.audio_workers.items) |*aw| {
         const window_len = ml_infer.audioInputLen(aw.worker);
         if (window_len == 0 or window_len > session.audio_window.len) continue;
         const window = session.audio_window[0..window_len];
@@ -9770,12 +9897,21 @@ fn pollAudioInfer(session: *Session) void {
             };
             lens.setParam(out.param, value);
         }
+        if (aw.has_caption) {
+            decodeCaption(aw, ml_infer.audioOutputSlice(aw.worker, aw.caption_tensor));
+        }
     }
 }
 
-/// Destroys every audio.infer worker and clears the list, at lens deactivation.
+/// Destroys every audio.infer worker, freeing its caption vocab and node id, and
+/// clears the list, at lens deactivation.
 fn destroyAudioWorkers(session: *Session) void {
-    for (session.audio_workers.items) |aw| ml_infer.audioDestroy(aw.worker);
+    const gpa = session.engine.gpa;
+    for (session.audio_workers.items) |aw| {
+        ml_infer.audioDestroy(aw.worker);
+        freeCaptionLabels(gpa, aw.labels);
+        gpa.free(aw.node_id);
+    }
     session.audio_workers.clearRetainingCapacity();
 }
 

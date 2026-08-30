@@ -453,6 +453,13 @@ pub const AudioCore = struct {
         return self.outputs[tensor].len;
     }
 
+    /// The whole published output tensor, for a consumer that reads a sequence
+    /// (a caption's logits) rather than one element. Empty when out of range.
+    pub fn outputSlice(self: *const AudioCore, tensor: u32) []const f32 {
+        if (tensor >= self.output_count) return &.{};
+        return self.outputs[tensor];
+    }
+
     pub fn hasPublished(self: *const AudioCore) bool {
         return self.published;
     }

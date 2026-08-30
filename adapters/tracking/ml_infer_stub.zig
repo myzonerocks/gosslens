@@ -47,6 +47,11 @@ pub fn audioOutputLen(ai: *const AudioInfer, tensor: u32) usize {
     _ = tensor;
     return 0;
 }
+pub fn audioOutputSlice(ai: *const AudioInfer, tensor: u32) []const f32 {
+    _ = ai;
+    _ = tensor;
+    return &.{};
+}
 pub fn audioHasPublished(ai: *const AudioInfer) bool {
     _ = ai;
     return false;

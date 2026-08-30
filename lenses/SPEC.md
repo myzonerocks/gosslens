@@ -1308,7 +1308,9 @@ deterministic replay camera track. The byo-ml path is proven in the same
 harness: an `ml.infer` node runs a bundled TFLite segmenter and a bundled ONNX
 net, each driving a lens parameter from the frame; an audio.infer node runs a
 bounded model over the microphone window and drives a parameter, a doubling net
-reading about twice a constant tone and near zero on silence; an author ONNX
+reading about twice a constant tone and near zero on silence; an audio.infer
+caption binding greedy-CTC-decodes a logits tensor into text read back by node
+id, a synthetic net's fixed logits decoding to a known word; an author ONNX
 segmenter's output reaches the subject mask channel; an `argmax` reduce reads a
 classifier's predicted class into a parameter; a model output moves a sprite
 through its placement parameters; a restyle net's output image draws through a

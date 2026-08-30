@@ -967,12 +967,22 @@ pub const MlField = struct {
     temporal: bool = false,
 };
 
+/// A caption binding on an audio.infer node: an output tensor of [timesteps,
+/// vocab] logits the engine greedy-CTC-decodes into text, using a bundled labels
+/// file (assets/<labels>.txt, one vocab label per line, the blank label first).
+pub const CaptionField = struct {
+    tensor: u32 = 0,
+    labels: []const u8,
+};
+
 /// An audio.infer node: a bounded author model whose one input is a window of
-/// microphone PCM, and the scalar output bindings it drives into parameters,
-/// the way an ml.infer node drives parameters from the camera frame.
+/// microphone PCM, the scalar output bindings it drives into parameters (the way
+/// an ml.infer node drives parameters from the camera frame), and an optional
+/// caption binding that decodes a logits tensor into recognized text.
 pub const AudioField = struct {
     model: []const u8,
     outputs: []const MlOutput,
+    caption: ?CaptionField = null,
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -3568,9 +3578,29 @@ fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         try diags.add(path.slice(), "audio needs a model file", .{});
         return null;
     }
+    var caption: ?CaptionField = null;
+    if (getField(object, "caption")) |cv| {
+        const cmark = path.push("caption");
+        if (cv != .object) {
+            try diags.add(path.slice(), "audio caption must be an object", .{});
+        } else {
+            const labels = if (getField(cv.object, "labels")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (labels.len == 0) {
+                try diags.add(path.slice(), "audio caption needs a labels file", .{});
+            } else {
+                var field: CaptionField = .{ .labels = try arena.dupe(u8, labels) };
+                if (getField(cv.object, "tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) field.tensor = @intCast(v.integer);
+                }
+                caption = field;
+            }
+        }
+        path.pop(cmark);
+    }
     return .{
         .model = try arena.dupe(u8, model),
         .outputs = try parseMlOutputs(diags, path, arena, object),
+        .caption = caption,
     };
 }
 

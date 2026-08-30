@@ -379,6 +379,12 @@ is nothing to hand-mix:
 `pullAudio` still pulls the lens sound on its own for local playback with no
 call in progress; in a call, `mixOutputAudio` replaces it.
 
+When the lens carries an `audio.infer` node with a caption binding, the engine
+runs on-device ASR over the mic and `captionText` reads the decoded text by the
+node's id, for the app to draw as a live subtitle:
+
+    if let line = session.captionText("caption") { subtitleLabel.text = line }
+
 ## Method names
 
 The operation names match across the Swift, Kotlin, and TypeScript SDKs and are
