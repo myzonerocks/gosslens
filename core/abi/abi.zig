@@ -1091,6 +1091,16 @@ pub const Session = struct {
     /// The attenuation strength of each spliced dereflect.pass node, resolved
     /// once at activation.
     dereflect_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The blend strength and transfer direction (strength, direction) of each
+    /// spliced harmonize.pass node, resolved once at activation; the region
+    /// statistics are measured per frame.
+    harmonize_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// A CPU copy of the latest person segmentation mask, kept only when a
+    /// harmonize.pass node is active, so its region statistics can be measured on
+    /// the CPU without a GPU readback. Allocated to the mask resolution.
+    person_mask: []f32 = &.{},
+    person_mask_valid: bool = false,
+    wants_person_mask: bool = false,
     /// A small RGB downsample of the latest copied frame, filled at submit from
     /// the frame bytes (no GPU readback), so an auto-enhance pass can estimate a
     /// scene-adaptive correction from the whole frame's statistics.
@@ -2006,6 +2016,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .stabilize => s.stabilize_params.contains(entry.graph_index),
             .zoom => s.zoom_params.contains(entry.graph_index),
             .dereflect => s.dereflect_params.contains(entry.graph_index),
+            // Harmonize measures its region from the CPU person mask; without a
+            // mask filled yet the node holds the frame through unchanged.
+            .harmonize => s.harmonize_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2433,6 +2446,29 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const texel_w = 1.0 / @as(f32, @floatFromInt(width));
                 const texel_h = 1.0 / @as(f32, @floatFromInt(height));
                 r.submitDereflectPass(view_id, input_texture, strength, texel_w, texel_h);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .harmonize => {
+                const hp = s.harmonize_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // Region statistics come from the CPU person mask sampled against the
+                // frame thumb; with either missing the strength drops to zero, so the
+                // Reinhard transfer is a no-op regardless of the authored value.
+                const mask_side = isqrt(s.person_mask.len);
+                const active = s.person_mask_valid and s.thumb_valid and mask_side > 0;
+                const stats = if (active) computeHarmonizeStats(s, mask_side) else std.mem.zeroes(HarmonizeStats);
+                const strength = if (active) hp[0] else 0;
+                const mask_tex = s.segmentation_texture orelse r.zero_mask_texture;
+                r.submitHarmonizePass(view_id, input_texture, mask_tex, stats.fg_mean, stats.fg_std, stats.bg_mean, stats.bg_std, strength, hp[1]);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -4014,6 +4050,8 @@ pub fn destroySession(session: *Session) void {
     session.stabilize_params.deinit(session.engine.gpa);
     session.zoom_params.deinit(session.engine.gpa);
     session.dereflect_params.deinit(session.engine.gpa);
+    session.harmonize_params.deinit(session.engine.gpa);
+    if (session.person_mask.len > 0) session.engine.gpa.free(session.person_mask);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
@@ -6560,6 +6598,14 @@ pub fn injectMaskChannel(session: *Session, channel: usize, mask: *const [segmen
     }
 }
 
+/// Sets the CPU person mask a harmonize.pass measures its region statistics from,
+/// so the harness can prove the transfer without a running segmenter.
+pub fn injectPersonMaskCpu(session: *Session, mask: *const [segmentation.mask_len]f32) void {
+    if (session.person_mask.len != segmentation.mask_len) return;
+    @memcpy(session.person_mask, mask);
+    session.person_mask_valid = true;
+}
+
 /// How many of the active lens's particle nodes run on the GPU compute path,
 /// so the harness can prove the GPU sim was taken rather than the CPU fallback.
 pub fn activeGpuParticleSims(session: ?*Session) u32 {
@@ -6758,6 +6804,59 @@ fn fillFrameThumbNv12(s: *Session, y: [*]const u8, y_stride: u32, uv: [*]const u
 /// and the luma black and white points to stretch. Identity when the thumb is
 /// flat or absent.
 const AwbEstimate = struct { gains: [3]f32, black: f32, white: f32 };
+
+const HarmonizeStats = struct { fg_mean: [3]f32, fg_std: [3]f32, bg_mean: [3]f32, bg_std: [3]f32 };
+
+/// Per-channel mean and standard deviation of the person (foreground) and the
+/// rest of the frame (background), read from the frame thumb with the CPU person
+/// mask sampled at each thumb pixel. A region with no samples falls back to a
+/// mid-gray so the Reinhard transfer leaves it unchanged.
+fn computeHarmonizeStats(s: *const Session, mask_side: usize) HarmonizeStats {
+    var fg_sum = [3]f64{ 0, 0, 0 };
+    var fg_sq = [3]f64{ 0, 0, 0 };
+    var bg_sum = [3]f64{ 0, 0, 0 };
+    var bg_sq = [3]f64{ 0, 0, 0 };
+    var fg_n: f64 = 0;
+    var bg_n: f64 = 0;
+    for (0..thumb_side) |ty| {
+        const my = (ty * mask_side) / thumb_side;
+        for (0..thumb_side) |tx| {
+            const mx = (tx * mask_side) / thumb_side;
+            const fg = s.person_mask[my * mask_side + mx] > 0.5;
+            const o = (ty * thumb_side + tx) * 3;
+            inline for (0..3) |ch| {
+                const v: f64 = s.frame_thumb[o + ch];
+                if (fg) {
+                    fg_sum[ch] += v;
+                    fg_sq[ch] += v * v;
+                } else {
+                    bg_sum[ch] += v;
+                    bg_sq[ch] += v * v;
+                }
+            }
+            if (fg) fg_n += 1 else bg_n += 1;
+        }
+    }
+    var out: HarmonizeStats = undefined;
+    inline for (0..3) |ch| {
+        out.fg_mean[ch] = momentMean(fg_sum[ch], fg_n);
+        out.fg_std[ch] = momentStd(fg_sum[ch], fg_sq[ch], fg_n);
+        out.bg_mean[ch] = momentMean(bg_sum[ch], bg_n);
+        out.bg_std[ch] = momentStd(bg_sum[ch], bg_sq[ch], bg_n);
+    }
+    return out;
+}
+
+fn momentMean(sum: f64, n: f64) f32 {
+    if (n <= 0) return 0.5;
+    return @floatCast(sum / n);
+}
+
+fn momentStd(sum: f64, sq: f64, n: f64) f32 {
+    if (n <= 0) return 0.2;
+    const m = sum / n;
+    return @floatCast(@sqrt(@max(sq / n - m * m, 0)));
+}
 
 fn estimateAwb(thumb: []const f32) AwbEstimate {
     var sum = [3]f32{ 0, 0, 0 };
@@ -7371,6 +7470,13 @@ fn pollSegmentationMask(session: *Session) void {
     clearSegmentationTextures(session);
     session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, &mask);
 
+    // A harmonize.pass measures its region statistics from the CPU mask, so keep
+    // a copy when one is active.
+    if (session.wants_person_mask and session.person_mask.len == mask.len) {
+        @memcpy(session.person_mask, &mask);
+        session.person_mask_valid = true;
+    }
+
     // Class channels upload only when a consumer of the active lens names
     // them, shader or outline or tint, and the active model's label order
     // maps to them; the person channel (index zero) rides the subject
@@ -7738,6 +7844,9 @@ fn destroyBlendState(session: *Session) void {
     session.stabilize_params.clearRetainingCapacity();
     session.zoom_params.clearRetainingCapacity();
     session.dereflect_params.clearRetainingCapacity();
+    session.harmonize_params.clearRetainingCapacity();
+    session.wants_person_mask = false;
+    session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
@@ -8350,6 +8459,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createStabilizeParams(s, gpa) catch {};
     createZoomParams(s, gpa) catch {};
     createDereflectParams(s, gpa) catch {};
+    createHarmonizeParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -8529,6 +8639,24 @@ fn createDereflectParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(nodes);
     for (nodes) |n| {
         session.dereflect_params.put(gpa, n.graph_index, n.strength) catch {};
+    }
+}
+
+/// Resolves every spliced harmonize.pass node's (strength, direction) into
+/// session.harmonize_params once at activation, and asks the segmenter for a CPU
+/// person mask so the region statistics can be measured on the host thread.
+fn createHarmonizeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.harmonizePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    if (nodes.len == 0) return;
+    for (nodes) |n| {
+        const dir: f32 = @floatFromInt(n.direction);
+        session.harmonize_params.put(gpa, n.graph_index, .{ n.strength, dir }) catch {};
+    }
+    session.wants_person_mask = true;
+    if (session.person_mask.len != segmentation.mask_len) {
+        session.person_mask = gpa.alloc(f32, segmentation.mask_len) catch return;
     }
 }
 
@@ -11120,6 +11248,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createStabilizeParams(session, gpa);
     try createZoomParams(session, gpa);
     try createDereflectParams(session, gpa);
+    try createHarmonizeParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);

@@ -4159,6 +4159,120 @@ fn proveDereflect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeHarmonizeLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.harmonize","version":"1.0.0","display_name":"Harmonize","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"h","type":"harmonize.pass","inputs":{{"frame":"camera"}},"params":{{}},"harmonize":{{"strength":{d:.3},"direction":0}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Captures a harmonize.pass shot with the person region on the left. The CPU
+/// person mask feeds the region statistics and the same mask on channel 0 keys
+/// the shader, both injected once the first frame has filled the thumb.
+fn captureHarmonizeShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, mask: []const f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    abi.injectPersonMaskCpu(session, @ptrCast(mask.ptr));
+    abi.injectMaskChannel(session, 0, @ptrCast(mask.ptr));
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        abi.injectPersonMaskCpu(session, @ptrCast(mask.ptr));
+        abi.injectMaskChannel(session, 0, @ptrCast(mask.ptr));
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Mean rgb of the capture columns in [col_lo, col_hi), each channel 0..255.
+fn regionMean(shot: []const u8, col_lo: usize, col_hi: usize) [3]f64 {
+    var sum = [3]f64{ 0, 0, 0 };
+    var n: f64 = 0;
+    for (0..300) |row| {
+        for (col_lo..col_hi) |col| {
+            const idx = (row * 400 + col) * 4;
+            inline for (0..3) |ch| sum[ch] += @floatFromInt(shot[idx + ch]);
+            n += 1;
+        }
+    }
+    return .{ sum[0] / n, sum[1] / n, sum[2] / n };
+}
+
+/// Proves the statistical color transfer: a warm subject on the left, a cool
+/// background on the right, split by the person mask. At strength 1 the person
+/// region takes on the background's color distribution, so its red falls and blue
+/// rises toward the background while the background itself holds.
+fn proveHarmonize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const person = col < width / 2;
+        f[idx + 0] = if (person) 210 else 60; // warm subject vs cool background
+        f[idx + 1] = 70;
+        f[idx + 2] = if (person) 60 else 210;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const mask = try gpa.alloc(f32, abi.segmentation_mask_len);
+    defer gpa.free(mask);
+    const mask_side = std.math.sqrt(abi.segmentation_mask_len);
+    for (0..mask_side) |row| for (0..mask_side) |col| {
+        mask[row * mask_side + col] = if (col < mask_side / 2) 1.0 else 0.0;
+    };
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/harmonize-0");
+    try writeHarmonizeLens("zig-out/harmonize-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/harmonize-1");
+    try writeHarmonizeLens("zig-out/harmonize-1", 1.0);
+
+    const shot0 = try captureHarmonizeShot(gpa, engine, "zig-out/harmonize-0", planes, mask);
+    defer gpa.free(shot0);
+    const shot1 = try captureHarmonizeShot(gpa, engine, "zig-out/harmonize-1", planes, mask);
+    defer gpa.free(shot1);
+
+    // A left strip well inside the person region, and a right strip inside the
+    // background, both clear of the mask boundary.
+    const fg0 = regionMean(shot0, 40, 150);
+    const fg1 = regionMean(shot1, 40, 150);
+    const bg0 = regionMean(shot0, 250, 360);
+    const bg1 = regionMean(shot1, 250, 360);
+
+    // The person region moves toward the cool background: red down, blue up.
+    if (!(fg1[0] < fg0[0] - 20 and fg1[2] > fg0[2] + 20)) {
+        std.debug.print("conformance: FAIL harmonize did not shift the person toward the background (fg red {d:.1}->{d:.1}, blue {d:.1}->{d:.1})\n", .{ fg0[0], fg1[0], fg0[2], fg1[2] });
+        return false;
+    }
+    // The background region is held: the mask reads zero there, so it barely moves.
+    const bg_shift = @abs(bg1[0] - bg0[0]) + @abs(bg1[2] - bg0[2]);
+    const fg_shift = @abs(fg1[0] - fg0[0]) + @abs(fg1[2] - fg0[2]);
+    if (!(bg_shift * 5 < fg_shift)) {
+        std.debug.print("conformance: FAIL harmonize disturbed the background as much as the subject (bg shift {d:.1}, fg shift {d:.1})\n", .{ bg_shift, fg_shift });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a harmonize.pass matches the person's color distribution to the background: the subject's red falls and blue rises toward the background (fg {d:.0},{d:.0},{d:.0} -> {d:.0},{d:.0},{d:.0}) while the background holds\n", .{ fg0[0], fg0[1], fg0[2], fg1[0], fg1[1], fg1[2] });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -15577,6 +15691,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("zoom pass");
     if (!try proveDereflect(gpa, engine)) return 1;
     watchHold("dereflect pass");
+    if (!try proveHarmonize(gpa, engine)) return 1;
+    watchHold("harmonize pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

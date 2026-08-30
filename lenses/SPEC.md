@@ -443,6 +443,17 @@ the pass pulls each pixel's detail (its difference from the neighbourhood mean)
 back toward that mean, weighted by the pixel's brightness and by `strength`. Dark
 regions and strength 0 are untouched. It ships no asset and is always ready.
 
+A `"harmonize.pass"` node is a statistical color transfer between the person and
+its background. It carries a `"harmonize": {"strength", "direction"}` block:
+`strength` (0..1, default 1) blends the match in, and `direction` (0 or 1, default
+0) picks which region is recolored, 0 matching the person to the background and 1
+the reverse. It reads the person segmentation mask on the host thread, measures
+each region's mean and spread of color from the frame, and applies a Reinhard
+transfer (subtract the source mean, scale by the ratio of spreads, add the
+destination mean) inside the chosen region, so an inserted subject takes on the
+color cast of where it now sits. Without a person mask, or at strength 0, it holds
+the frame through, the standard capability degradation. It ships no asset.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1383,6 +1394,8 @@ a zoom.pass magnifies a centred region, a factor of 2 growing a centred disk
 toward four times its area;
 a dereflect.pass attenuates high-frequency detail in the bright regions far more
 than the dark, the bright texture softening to under half while the dark holds;
+a harmonize.pass matches the person's color distribution to the background, the
+subject's red falling and blue rising toward the background while it holds;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

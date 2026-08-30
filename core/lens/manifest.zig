@@ -348,6 +348,15 @@ pub const DereflectField = struct {
     strength: f32 = 1,
 };
 
+pub const HarmonizeField = struct {
+    /// A harmonize.pass node's statistical color transfer between the person mask
+    /// and its complement: `strength` (0..1) blends the match, and `direction`
+    /// picks which region moves (0 matches the foreground to the background, 1 the
+    /// reverse). The engine measures the region statistics from the frame.
+    strength: f32 = 1,
+    direction: u8 = 0,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1143,6 +1152,8 @@ pub const Node = struct {
     zoom: ?ZoomField = null,
     /// Set only on a dereflect.pass node: its specular attenuation strength.
     dereflect: ?DereflectField = null,
+    /// Set only on a harmonize.pass node: its fg/bg color transfer.
+    harmonize: ?HarmonizeField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -2168,6 +2179,23 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 dereflect_field = field;
             }
             path.pop(dmark);
+        }
+        var harmonize_field: ?HarmonizeField = null;
+        if (getField(object, "harmonize")) |hv| {
+            const hmark = path.push("harmonize");
+            if (!std.mem.eql(u8, node_type, "harmonize.pass")) {
+                try diags.add(path.slice(), "harmonize is a harmonize.pass field, found it on '{s}'", .{node_type});
+            } else if (hv != .object) {
+                try diags.add(path.slice(), "harmonize must be an object", .{});
+            } else {
+                var field: HarmonizeField = .{};
+                if (getField(hv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(hv.object, "direction")) |v| {
+                    if (v == .integer and v.integer >= 0) field.direction = if (v.integer > 0) 1 else 0;
+                }
+                harmonize_field = field;
+            }
+            path.pop(hmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3452,6 +3480,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .stabilize = stabilize_field,
             .zoom = zoom_field,
             .dereflect = dereflect_field,
+            .harmonize = harmonize_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

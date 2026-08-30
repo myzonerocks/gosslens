@@ -577,6 +577,19 @@ pub const Renderer = struct {
         _ = texel_h;
     }
 
+    pub fn submitHarmonizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, fg_mean: [3]f32, fg_std: [3]f32, bg_mean: [3]f32, bg_std: [3]f32, strength: f32, direction: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = fg_mean;
+        _ = fg_std;
+        _ = bg_mean;
+        _ = bg_std;
+        _ = strength;
+        _ = direction;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
@@ -1115,6 +1128,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadDereflectProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadHarmonizeProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 
