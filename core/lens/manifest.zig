@@ -986,6 +986,19 @@ pub const DiarizeField = struct {
     param: []const u8,
 };
 
+/// A translate binding on an audio.infer node: the node's own model is the
+/// encoder (its `memory_tensor` output), and a bundled `decoder` step model runs
+/// a greedy loop - memory plus previous token each step, argmax, stop on `eos` or
+/// `max_tokens` - detokenized through a `tokens` file into text read as a caption.
+pub const TranslateField = struct {
+    decoder: []const u8,
+    tokens: []const u8,
+    memory_tensor: u32 = 0,
+    max_tokens: u32 = 48,
+    bos: u32 = 0,
+    eos: u32 = 1,
+};
+
 /// An audio.infer node: a bounded author model whose one input is a window of
 /// microphone PCM, the scalar output bindings it drives into parameters (the way
 /// an ml.infer node drives parameters from the camera frame), and an optional
@@ -995,6 +1008,7 @@ pub const AudioField = struct {
     outputs: []const MlOutput,
     caption: ?CaptionField = null,
     diarize: ?DiarizeField = null,
+    translate: ?TranslateField = null,
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -3634,11 +3648,41 @@ fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         }
         path.pop(dmark);
     }
+    var translate: ?TranslateField = null;
+    if (getField(object, "translate")) |tv| {
+        const tmark = path.push("translate");
+        if (tv != .object) {
+            try diags.add(path.slice(), "audio translate must be an object", .{});
+        } else {
+            const decoder = if (getField(tv.object, "decoder")) |v| (try expectString(diags, path, v) orelse "") else "";
+            const tokens = if (getField(tv.object, "tokens")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (decoder.len == 0 or tokens.len == 0) {
+                try diags.add(path.slice(), "audio translate needs a decoder and tokens file", .{});
+            } else {
+                var field: TranslateField = .{ .decoder = try arena.dupe(u8, decoder), .tokens = try arena.dupe(u8, tokens) };
+                if (getField(tv.object, "memory_tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) field.memory_tensor = @intCast(v.integer);
+                }
+                if (getField(tv.object, "max_tokens")) |v| {
+                    if (v == .integer and v.integer > 0) field.max_tokens = @intCast(v.integer);
+                }
+                if (getField(tv.object, "bos")) |v| {
+                    if (v == .integer and v.integer >= 0) field.bos = @intCast(v.integer);
+                }
+                if (getField(tv.object, "eos")) |v| {
+                    if (v == .integer and v.integer >= 0) field.eos = @intCast(v.integer);
+                }
+                translate = field;
+            }
+        }
+        path.pop(tmark);
+    }
     return .{
         .model = try arena.dupe(u8, model),
         .outputs = try parseMlOutputs(diags, path, arena, object),
         .caption = caption,
         .diarize = diarize,
+        .translate = translate,
     };
 }
 

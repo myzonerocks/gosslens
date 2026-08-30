@@ -2261,6 +2261,86 @@ fn proveDiarize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A synthetic translation decoder: MatMul(prev_onehot[1,4], W[4,4]) yields the
+/// next-token logits, ignoring the memory input. W is a transition matrix where
+/// bos leads to "a", "a" to "b", and "b" to eos, so the greedy loop emits "ab".
+fn buildOnnxTranslateDecoder(a: std.mem.Allocator) []const u8 {
+    const v = 4; // tokens: bos(0), a(1), b(2), eos(3)
+    const wv = [_]f32{ 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0 };
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, v);
+    w.varintField(1, v);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (wv) |vv| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(vv), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const mm = onnxNode(a, "MatMul", &.{ "prev", "W" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, mm);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "mem", &.{ 1, 4 })); // input 0, the encoder memory (unused here)
+    g.bytesField(11, onnxValueInfo(a, "prev", &.{ 1, v })); // input 1, the previous token one-hot
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ v, v }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, v }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a translate lens: an audio.infer node whose model is the encoder and
+/// whose translate binding names the decoder step model, plus both models and a
+/// four-line tokens file.
+fn writeTranslateLens(dir: []const u8, encoder: []const u8, decoder: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.translate","version":"1.0.0","display_name":"Translate","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"translate":{"decoder":"decoder.onnx","tokens":"tokens","memory_tensor":0,"max_tokens":8,"bos":0,"eos":3}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const enc_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(enc_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = enc_path, .data = encoder });
+    const dec_path = try std.fmt.allocPrint(page, "{s}/assets/decoder.onnx", .{dir});
+    defer page.free(dec_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = dec_path, .data = decoder });
+    const tokens_path = try std.fmt.allocPrint(page, "{s}/assets/tokens.txt", .{dir});
+    defer page.free(tokens_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = tokens_path, .data = "<bos>\na\nb\n<eos>" });
+}
+
+/// Proves live translation: an audio.infer encoder feeds a greedy autoregressive
+/// decoder loop that emits tokens until eos, detokenized into text read like a
+/// caption. The synthetic transition decoder walks bos to "a" to "b" to eos, so
+/// the whole encode then decode loop yields "ab".
+fn proveTranslate(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const encoder = buildOnnxAudioProbe(arena.allocator(), 4);
+    const decoder = buildOnnxTranslateDecoder(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/translate/assets");
+    try writeTranslateLens("zig-out/translate", encoder, decoder);
+
+    const text = try runCaption(gpa, engine, "zig-out/translate", "aud");
+    defer gpa.free(text);
+    if (!std.mem.eql(u8, text, "ab")) {
+        std.debug.print("conformance: FAIL translate decoded '{s}', wanted 'ab'\n", .{text});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.infer translate binding runs a greedy autoregressive decoder over the encoder memory: the synthetic transition decoder walks bos to 'a' to 'b' to eos, yielding 'ab'\n", .{});
+    return true;
+}
+
 /// Emits an ONNX net that sums the three input channels (a 1x1 conv with unit
 /// weights) then averages the plane, so its one output is the frame's mean
 /// brightness. NCHW input [1,3,8,8] exercises the core's channel transpose.
@@ -15265,6 +15345,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("audio caption");
     if (!try proveDiarize(gpa, engine)) return 1;
     watchHold("audio diarize");
+    if (!try proveTranslate(gpa, engine)) return 1;
+    watchHold("audio translate");
     if (!try proveMlInferOnnx(gpa, engine)) return 1;
     watchHold("ml infer onnx");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;

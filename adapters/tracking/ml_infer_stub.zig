@@ -52,6 +52,39 @@ pub fn audioOutputSlice(ai: *const AudioInfer, tensor: u32) []const f32 {
     _ = tensor;
     return &.{};
 }
+
+pub const GenericModel = struct {};
+
+pub fn genericCreate(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*GenericModel {
+    _ = gpa;
+    _ = model_bytes;
+    _ = bounds;
+    _ = threads;
+    return error.Unsupported;
+}
+pub fn genericDestroy(m: *GenericModel) void {
+    _ = m;
+}
+pub fn genericWriteFloats(m: *GenericModel, index: usize, floats: []const f32) bool {
+    _ = m;
+    _ = index;
+    _ = floats;
+    return false;
+}
+pub fn genericInvoke(m: *GenericModel) bool {
+    _ = m;
+    return false;
+}
+pub fn genericOutput(m: *const GenericModel, index: usize) []const f32 {
+    _ = m;
+    _ = index;
+    return &.{};
+}
+pub fn genericInputLen(m: *const GenericModel, index: usize) usize {
+    _ = m;
+    _ = index;
+    return 0;
+}
 pub fn audioHasPublished(ai: *const AudioInfer) bool {
     _ = ai;
     return false;

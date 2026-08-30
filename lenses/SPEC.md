@@ -950,6 +950,15 @@ is cosine-matched against a bounded set of speaker centroids, matching the neare
 within `threshold` (and updating it) or allocating a new speaker up to
 `max_speakers`, and the matched speaker index drives `param`.
 
+For translation the node's model is the encoder and a `"translate"` block,
+`{"decoder", "tokens", "memory_tensor", "max_tokens", "bos", "eos"}`, names a
+second bundled decoder step model. The engine runs a greedy autoregressive loop:
+it feeds the encoder memory and the previous token (starting at `bos`) to the
+decoder each step, takes the argmax, and stops on `eos` or after `max_tokens` (a
+fixed-iteration bound, so it never hangs), detokenizing the tokens through a
+bundled `tokens` file into the recognized text, read back through the caption ABI
+like any other caption.
+
 An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
 that binds a whole output tensor as a segmentation mask. The tensor is read as
 a square single-channel image, resampled to the engine's mask resolution, and
@@ -1325,7 +1334,9 @@ caption binding greedy-CTC-decodes a logits tensor into text read back by node
 id, a synthetic net's fixed logits decoding to a known word; an audio.infer
 diarize binding clusters embeddings into speakers, a flat tone and an alternating
 tone reading as two distinct speakers and the flat tone returning to its own;
-an author ONNX
+an audio.infer translate binding runs a greedy autoregressive decoder over the
+encoder memory, a synthetic transition decoder walking bos to a to b to eos and
+yielding "ab"; an author ONNX
 segmenter's output reaches the subject mask channel; an `argmax` reduce reads a
 classifier's predicted class into a parameter; a model output moves a sprite
 through its placement parameters; a restyle net's output image draws through a

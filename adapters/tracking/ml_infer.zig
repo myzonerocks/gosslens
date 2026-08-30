@@ -39,6 +39,29 @@ pub fn audioOutputLen(ai: *const AudioInfer, tensor: u32) usize {
 pub fn audioOutputSlice(ai: *const AudioInfer, tensor: u32) []const f32 {
     return ai.outputSlice(tensor);
 }
+
+/// A generic model runner (the translation decoder step), a thin pass-through to
+/// the core since it runs synchronously in the decode loop.
+pub const GenericModel = core_mod.GenericCore;
+
+pub fn genericCreate(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*GenericModel {
+    return core_mod.GenericCore.init(gpa, model_bytes, bounds, threads);
+}
+pub fn genericDestroy(m: *GenericModel) void {
+    m.deinit();
+}
+pub fn genericWriteFloats(m: *GenericModel, index: usize, floats: []const f32) bool {
+    return m.writeFloats(index, floats);
+}
+pub fn genericInvoke(m: *GenericModel) bool {
+    return m.invoke();
+}
+pub fn genericOutput(m: *const GenericModel, index: usize) []const f32 {
+    return m.output(index);
+}
+pub fn genericInputLen(m: *const GenericModel, index: usize) usize {
+    return m.inputLen(index);
+}
 pub fn audioHasPublished(ai: *const AudioInfer) bool {
     return ai.hasPublished();
 }

@@ -8218,7 +8218,7 @@ pub export fn goss_session_caption_text(session: ?*Session, node_id: ?[*]const u
     const id_ptr = node_id orelse return .invalid_argument;
     const id = id_ptr[0..node_id_len];
     for (s.audio_workers.items) |aw| {
-        if (!aw.has_caption or !std.mem.eql(u8, aw.node_id, id)) continue;
+        if (!(aw.has_caption or aw.has_translate) or !std.mem.eql(u8, aw.node_id, id)) continue;
         const n = aw.caption_len;
         if (out_len) |ol| ol.* = n;
         if (out) |o| {
@@ -9576,6 +9576,17 @@ const AudioWorker = struct {
     max_speakers: u32 = 0,
     centroids: []f32 = &.{},
     speaker_count: u32 = 0,
+    /// A translate binding runs a greedy autoregressive loop on a second decoder
+    /// model, feeding the encoder memory and the previous token each step and
+    /// detokenizing into caption_buf. tokens are the owned detokenizer strings.
+    has_translate: bool = false,
+    decoder: ?*ml_infer.GenericModel = null,
+    tokens: [][]u8 = &.{},
+    translate_memory_tensor: u32 = 0,
+    translate_max_tokens: u32 = 48,
+    translate_bos: u32 = 0,
+    translate_eos: u32 = 1,
+    onehot_scratch: []f32 = &.{},
 };
 
 const MlWorker = struct {
@@ -9813,6 +9824,39 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 } else |_| {}
             }
         }
+        // A translate binding loads the decoder step model, the detokenizer, and
+        // the one-hot scratch for the previous token; a missing piece leaves the
+        // node driving only its other bindings.
+        var has_translate = false;
+        var decoder: ?*ml_infer.GenericModel = null;
+        var tokens: [][]u8 = &.{};
+        var onehot: []f32 = &.{};
+        var t_memory_tensor: u32 = 0;
+        var t_max_tokens: u32 = 48;
+        var t_bos: u32 = 0;
+        var t_eos: u32 = 1;
+        if (audio.translate) |tr| tr_blk: {
+            const dec_bytes = readBundleAsset(gpa, bundle_path, tr.decoder) orelse break :tr_blk;
+            defer gpa.free(dec_bytes);
+            const dec = ml_infer.genericCreate(gpa, dec_bytes, .{}, 2) catch break :tr_blk;
+            const toks = loadCaptionLabels(gpa, io, bundle_path, tr.tokens) orelse {
+                ml_infer.genericDestroy(dec);
+                break :tr_blk;
+            };
+            const oh = gpa.alloc(f32, toks.len) catch {
+                freeCaptionLabels(gpa, toks);
+                ml_infer.genericDestroy(dec);
+                break :tr_blk;
+            };
+            decoder = dec;
+            tokens = toks;
+            onehot = oh;
+            has_translate = true;
+            t_memory_tensor = tr.memory_tensor;
+            t_max_tokens = tr.max_tokens;
+            t_bos = tr.bos;
+            t_eos = tr.eos;
+        }
         session.audio_workers.append(gpa, .{
             .worker = worker,
             .outputs = audio.outputs,
@@ -9827,10 +9871,21 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .embed_dim = embed_dim,
             .max_speakers = max_speakers,
             .centroids = centroids,
+            .has_translate = has_translate,
+            .decoder = decoder,
+            .tokens = tokens,
+            .translate_memory_tensor = t_memory_tensor,
+            .translate_max_tokens = t_max_tokens,
+            .translate_bos = t_bos,
+            .translate_eos = t_eos,
+            .onehot_scratch = onehot,
         }) catch {
             freeCaptionLabels(gpa, labels);
             if (centroids.len > 0) gpa.free(centroids);
             if (diarize_param.len > 0) gpa.free(diarize_param);
+            if (decoder) |d| ml_infer.genericDestroy(d);
+            freeCaptionLabels(gpa, tokens);
+            if (onehot.len > 0) gpa.free(onehot);
             gpa.free(node_id);
             ml_infer.audioDestroy(worker);
             continue;
@@ -9957,6 +10012,47 @@ fn matchSpeaker(aw: *AudioWorker, emb: []const f32) u32 {
     return best_id;
 }
 
+/// Runs a translate worker's greedy autoregressive decode: the encoder memory
+/// (the audio.infer output) feeds the decoder step model with the previous token
+/// each step, taking the argmax, until the eos token or max_tokens, detokenizing
+/// the surviving tokens into caption_buf. A fixed-iteration loop, so no hang.
+fn runTranslate(aw: *AudioWorker) void {
+    const dec = aw.decoder orelse return;
+    const memory = ml_infer.audioOutputSlice(aw.worker, aw.translate_memory_tensor);
+    const vocab = aw.tokens.len;
+    if (memory.len == 0 or vocab == 0 or aw.onehot_scratch.len < vocab) return;
+    // The decoder's memory input must match the encoder's memory length.
+    if (ml_infer.genericInputLen(dec, 0) != memory.len) return;
+    var out_len: usize = 0;
+    var prev: u32 = aw.translate_bos;
+    var step: u32 = 0;
+    while (step < aw.translate_max_tokens) : (step += 1) {
+        @memset(aw.onehot_scratch[0..vocab], 0);
+        if (prev < vocab) aw.onehot_scratch[prev] = 1;
+        if (!ml_infer.genericWriteFloats(dec, 0, memory)) break;
+        if (!ml_infer.genericWriteFloats(dec, 1, aw.onehot_scratch[0..vocab])) break;
+        if (!ml_infer.genericInvoke(dec)) break;
+        const logits = ml_infer.genericOutput(dec, 0);
+        if (logits.len == 0) break;
+        var best: u32 = 0;
+        var best_v: f32 = logits[0];
+        for (logits, 0..) |v, i| {
+            if (v > best_v) {
+                best_v = v;
+                best = @intCast(i);
+            }
+        }
+        if (best == aw.translate_eos) break;
+        const tok = if (best < vocab) aw.tokens[best] else "";
+        if (out_len + tok.len <= aw.caption_buf.len) {
+            @memcpy(aw.caption_buf[out_len..][0..tok.len], tok);
+            out_len += tok.len;
+        }
+        prev = best;
+    }
+    aw.caption_len = out_len;
+}
+
 /// Copies the newest `out.len` samples of the microphone ring into `out` in
 /// chronological order (oldest first), zero-padding the front when the ring has
 /// not filled that far yet.
@@ -10001,6 +10097,9 @@ fn pollAudioInfer(session: *Session) void {
                 lens.setParam(aw.diarize_param, @floatFromInt(matchSpeaker(aw, emb[0..aw.embed_dim])));
             }
         }
+        if (aw.has_translate) {
+            runTranslate(aw);
+        }
     }
 }
 
@@ -10013,6 +10112,9 @@ fn destroyAudioWorkers(session: *Session) void {
         freeCaptionLabels(gpa, aw.labels);
         if (aw.centroids.len > 0) gpa.free(aw.centroids);
         if (aw.diarize_param.len > 0) gpa.free(aw.diarize_param);
+        if (aw.decoder) |d| ml_infer.genericDestroy(d);
+        freeCaptionLabels(gpa, aw.tokens);
+        if (aw.onehot_scratch.len > 0) gpa.free(aw.onehot_scratch);
         gpa.free(aw.node_id);
     }
     session.audio_workers.clearRetainingCapacity();

@@ -469,3 +469,72 @@ pub const AudioCore = struct {
     }
 };
 
+/// A bounded, generic model runner used off the audio path: it loads a model and
+/// lets a caller write float inputs by index, invoke, and read float outputs. The
+/// autoregressive translation decoder drives its step model through this, feeding
+/// the encoder memory and the previous token each step.
+pub const GenericCore = struct {
+    gpa: std.mem.Allocator,
+    model_bytes: []u8,
+    engine: ml_engine.Engine,
+    in_count: usize,
+    out_count: usize,
+
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32) CreateError!*GenericCore {
+        const self = gpa.create(GenericCore) catch return error.OutOfMemory;
+        errdefer gpa.destroy(self);
+        if (model_bytes.len > bounds.max_model_bytes) return error.ModelRejected;
+        const owned = gpa.dupe(u8, model_bytes) catch return error.OutOfMemory;
+        errdefer gpa.free(owned);
+        const engine = ml_engine.Engine.init(gpa, owned, threads) catch return error.InvalidModel;
+        const in_count = engine.inputCount();
+        const out_count = engine.outputCount();
+        if (in_count == 0 or out_count == 0) {
+            var e = engine;
+            e.deinit();
+            return error.InvalidModel;
+        }
+        self.* = .{ .gpa = gpa, .model_bytes = owned, .engine = engine, .in_count = in_count, .out_count = out_count };
+        return self;
+    }
+
+    pub fn deinit(self: *GenericCore) void {
+        const gpa = self.gpa;
+        self.engine.deinit();
+        gpa.free(self.model_bytes);
+        gpa.destroy(self);
+    }
+
+    /// Writes an input tensor from floats; the length must match the tensor's
+    /// element count. False on a backend or shape error.
+    pub fn writeFloats(self: *GenericCore, index: usize, floats: []const f32) bool {
+        if (index >= self.in_count) return false;
+        self.engine.writeInput(index, std.mem.sliceAsBytes(floats)) catch return false;
+        return true;
+    }
+
+    pub fn invoke(self: *GenericCore) bool {
+        self.engine.invoke() catch return false;
+        return true;
+    }
+
+    /// The output tensor, valid until the next invoke; empty on error or a bad
+    /// index. The caller reads it immediately (an argmax) before invoking again.
+    pub fn output(self: *const GenericCore, index: usize) []const f32 {
+        if (index >= self.out_count) return &.{};
+        return self.engine.outputFloats(index) catch &.{};
+    }
+
+    pub fn inputLen(self: *const GenericCore, index: usize) usize {
+        if (index >= self.in_count) return 0;
+        var dims_buf: [8]i32 = undefined;
+        const dims = self.engine.inputDims(index, &dims_buf) catch return 0;
+        var n: usize = 1;
+        for (dims) |d| {
+            if (d <= 0) return 0;
+            n *= @intCast(d);
+        }
+        return n;
+    }
+};
+
