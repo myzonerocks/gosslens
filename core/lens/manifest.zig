@@ -1409,12 +1409,10 @@ pub const Volume = struct {
     half: [3]f32 = .{ 0, 0, 0 },
 };
 
-/// A single directional light a lens declares to shade its model.gltf nodes.
-/// `direction` is the world direction the light travels; `intensity` scales
-/// the diffuse term and `ambient` lifts surfaces facing away off pure black.
-/// `sky` and `ground` tint that ambient by the surface normal's up-component,
-/// a hemisphere image-based-lighting approximation; both default to white, so
-/// the ambient stays a flat lift unless a lens sets them.
+/// A directional light a lens declares to shade its model.gltf nodes:
+/// `direction` (world travel), `intensity` (diffuse scale) and `ambient` (a
+/// lift for faces turned away). `sky` and `ground` tint the ambient by the
+/// normal's up-component, a hemisphere IBL approximation; both default white.
 pub const Light = struct {
     direction: [3]f32 = .{ 0, 0, -1 },
     color: [3]f32 = .{ 1, 1, 1 },
