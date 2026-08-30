@@ -73,6 +73,19 @@ void main()
 	// unmasked warp; below 1 it eases the displacement toward none.
 	float gate = texture2D(s_texDepth, uv).r;
 
+	if (mode > 8.5) {
+		// auto_frame: a global affine that repositions and scales the tracked face
+		// to a target anchor and size. u_warp.yz is the smoothed face center,
+		// u_warp.w the smoothed scale, and u_warpParams.xy the target anchor; a
+		// pixel past the frame edge clamps so the border holds instead of wrapping.
+		vec2 faceC = cen;
+		float scale = rad;
+		vec2 anchorpt = vec2(amount, idx);
+		vec2 srcuv = faceC + (uv - anchorpt) / scale;
+		gl_FragColor = texture2D(s_texColor, clamp(srcuv, 0.0, 1.0));
+		return;
+	}
+
 	if (mode > 7.5) {
 		// gaze_correct: two eye push points redirect the pupils, the same summed
 		// liquify displacement, so an off-camera gaze is nudged back to the lens.

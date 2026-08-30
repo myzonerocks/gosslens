@@ -4723,6 +4723,101 @@ fn proveGazeCorrect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The centroid column and pixel count of the bright marker in a capture, the
+/// pixels whose red passes the threshold; count 0 leaves the column at zero.
+fn brightMarker(shot: []const u8, threshold: u8) struct { cx: f64, count: usize } {
+    var sum_x: f64 = 0;
+    var count: usize = 0;
+    for (0..300) |row| {
+        for (0..400) |col| {
+            if (shot[(row * 400 + col) * 4] > threshold) {
+                sum_x += @floatFromInt(col);
+                count += 1;
+            }
+        }
+    }
+    return .{ .cx = if (count > 0) sum_x / @as(f64, @floatFromInt(count)) else 0, .count = count };
+}
+
+/// Proves auto-framing: a small face off to the left of the frame, marked by a
+/// bright dot at its center. The auto_frame warp steers the face toward the
+/// target anchor and grows it to the target size, so the marker moves toward the
+/// frame center and enlarges; with no face it holds the frame through.
+fn proveAutoFrame(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    const dot_x: f64 = 140;
+    const dot_y: f64 = 110;
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const dx = @as(f64, @floatFromInt(col)) - dot_x;
+        const dy = @as(f64, @floatFromInt(row)) - dot_y;
+        const on = dx * dx + dy * dy < 12.0 * 12.0;
+        const v: u8 = if (on) 240 else 20;
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    // A small synthetic face centered on the marker, so its center and covering
+    // size drive the reframe toward the anchor and target size.
+    var synthetic = std.mem.zeroes(abi.FaceResult);
+    synthetic.presence = 1.0;
+    const lm_count = synthetic.landmarks.len / 3;
+    synthetic.landmark_count_out = @intCast(lm_count);
+    for (0..lm_count) |lm| {
+        const ang = @as(f32, @floatFromInt(lm)) / @as(f32, @floatFromInt(lm_count)) * std.math.tau;
+        synthetic.landmarks[lm * 3 + 0] = @as(f32, @floatCast(dot_x)) + 38.0 * @cos(ang);
+        synthetic.landmarks[lm * 3 + 1] = @as(f32, @floatCast(dot_y)) + 38.0 * @sin(ang);
+    }
+    const faces_one = [_]abi.FaceResult{synthetic};
+    const no_faces = [_]abi.FaceResult{};
+
+    const frame_json =
+        \\{"glf":"1.0","id":"goss.reference.autoframe","version":"1.0.0","display_name":"Auto Frame","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"w","type":"warp.pass","inputs":{"frame":"camera"},"params":{},"warp":{"mode":"auto_frame","strength":0.4,"center_x":0.5,"center_y":0.42}}],"triggers":[]}
+    ;
+
+    const framed = try captureSubmittedFaceShot(gpa, engine, planes, frame_json, &faces_one);
+    defer gpa.free(framed);
+    const framed2 = try captureSubmittedFaceShot(gpa, engine, planes, frame_json, &faces_one);
+    defer gpa.free(framed2);
+    const no_face = try captureSubmittedFaceShot(gpa, engine, planes, frame_json, &no_faces);
+    defer gpa.free(no_face);
+    const plain = try captureSubmittedFaceShot(gpa, engine, planes, null, &no_faces);
+    defer gpa.free(plain);
+
+    if (!std.mem.eql(u8, framed, framed2)) {
+        std.debug.print("conformance: FAIL auto_frame is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, no_face, plain)) {
+        std.debug.print("conformance: FAIL auto_frame altered the frame with no face - not keyed to the face\n", .{});
+        return false;
+    }
+    const before = brightMarker(plain, 180);
+    const after = brightMarker(framed, 180);
+    if (before.count == 0 or after.count == 0) {
+        std.debug.print("conformance: FAIL the auto_frame marker was not found\n", .{});
+        return false;
+    }
+    // The marker moves toward the frame center (anchor x 0.5 -> column 200).
+    if (!(@abs(after.cx - 200.0) < @abs(before.cx - 200.0) - 20.0)) {
+        std.debug.print("conformance: FAIL auto_frame did not recenter the face (marker column {d:.0} -> {d:.0})\n", .{ before.cx, after.cx });
+        return false;
+    }
+    // The small face is grown toward the target size, so the marker enlarges.
+    if (!(after.count > before.count * 3 / 2)) {
+        std.debug.print("conformance: FAIL auto_frame did not enlarge the small face (marker {d} px -> {d} px)\n", .{ before.count, after.count });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an auto_frame warp steers the tracked face to the target anchor and size: an off-center small face's marker recenters (column {d:.0} -> {d:.0}) and grows ({d} px -> {d} px), holding the frame through with no face\n", .{ before.cx, after.cx, before.count, after.count });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -16151,6 +16246,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("roll_lock warp");
     if (!try proveGazeCorrect(gpa, engine)) return 1;
     watchHold("gaze_correct warp");
+    if (!try proveAutoFrame(gpa, engine)) return 1;
+    watchHold("auto_frame warp");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

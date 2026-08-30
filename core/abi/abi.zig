@@ -1146,6 +1146,13 @@ pub const Session = struct {
     /// The correction strength and sensor readout time (strength, readout) of each
     /// spliced rolling.pass node, resolved once at activation.
     rolling_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
+    /// The smoothed face center and scale an auto_frame warp steers toward its
+    /// target each frame, a running mean so the reframing eases instead of
+    /// snapping. Invalid until the first face seeds it.
+    auto_frame_cx: f32 = 0.5,
+    auto_frame_cy: f32 = 0.5,
+    auto_frame_scale: f32 = 1,
+    auto_frame_valid: bool = false,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1990,6 +1997,28 @@ fn faceScaleCenter(s: *Session, width: u16, height: u16, rotation: u32, mirror: 
     return .{ .cx = cx, .cy = cy, .radius = @max(maxd * 1.2, 0.02) };
 }
 
+/// The smoothed affine an auto_frame warp applies: the tracked face's center and
+/// a scale that grows it toward the target covering fraction, both eased by a
+/// running mean so the reframing tracks a moving subject without snapping. Null
+/// with no face, the same hold-through face_scale degrades to.
+fn autoFrameAffine(s: *Session, width: u16, height: u16, rotation: u32, mirror: bool, aspect: f32, target_frac: f32) ?struct { cx: f32, cy: f32, scale: f32 } {
+    const fc = faceScaleCenter(s, width, height, rotation, mirror, aspect) orelse return null;
+    const current = @max(fc.radius, 0.02);
+    const raw_scale = std.math.clamp(@max(target_frac, 0.05) / current, 0.25, 4.0);
+    const alpha: f32 = 0.25;
+    if (!s.auto_frame_valid) {
+        s.auto_frame_cx = fc.cx;
+        s.auto_frame_cy = fc.cy;
+        s.auto_frame_scale = raw_scale;
+        s.auto_frame_valid = true;
+    } else {
+        s.auto_frame_cx += (fc.cx - s.auto_frame_cx) * alpha;
+        s.auto_frame_cy += (fc.cy - s.auto_frame_cy) * alpha;
+        s.auto_frame_scale += (raw_scale - s.auto_frame_scale) * alpha;
+    }
+    return .{ .cx = s.auto_frame_cx, .cy = s.auto_frame_cy, .scale = s.auto_frame_scale };
+}
+
 /// The device roll a roll_lock warp levels: the submitted gravity's tilt in the
 /// image plane when the orientation stream is fed, else the tracked head's roll,
 /// else zero so the pass is identity. Positive tips the frame toward the right.
@@ -2166,10 +2195,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // bank, so it holds the frame through when no face is present.
             .warp => blk: {
                 const wp = s.warp_params.get(entry.graph_index) orelse break :blk false;
-                // gaze_correct (mode 8) rides the eyes and needs a face; roll_lock
-                // (mode 7) levels scenery and needs none; face_scale (mode 6) rides
-                // the tracked face and holds through without one.
-                if (wp[0] > 7.5) break :blk reshapeFaceReady(s);
+                // auto_frame (mode 9) and gaze_correct (mode 8) ride the tracked
+                // face; roll_lock (mode 7) levels scenery and needs none; face_scale
+                // (mode 6) rides the face and holds through without one.
+                if (wp[0] > 7.5 and wp[0] < 8.5) break :blk reshapeFaceReady(s);
+                if (wp[0] > 8.5) break :blk reshapeFaceReady(s);
                 if (wp[0] > 6.5) break :blk true;
                 break :blk if (wp[0] > 5.5) reshapeFaceReady(s) else true;
             },
@@ -2706,10 +2736,19 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // roll_lock (mode 7) rotates the whole frame about the center by
                 // the derived roll, so its amount is the signed angle, not wp[4].
                 var amount = wp[4];
-                if (wp[0] > 6.5) {
+                var param_y = wp[5];
+                if (wp[0] > 8.5) {
+                    // auto_frame packs the smoothed face center and scale into the
+                    // center/radius, and the authored anchor into the two params.
+                    const af = autoFrameAffine(s, width, height, rotation, mirror, aspect, wp[4]) orelse continue;
+                    center = .{ af.cx, af.cy };
+                    region_radius = af.scale;
+                    amount = wp[1];
+                    param_y = wp[2];
+                } else if (wp[0] > 6.5 and wp[0] < 7.5) {
                     center = .{ 0.5, 0.5 };
                     amount = rollAngle(s) * wp[4];
-                } else if (wp[0] > 5.5) {
+                } else if (wp[0] > 5.5 and wp[0] < 6.5) {
                     const fc = faceScaleCenter(s, width, height, rotation, mirror, aspect) orelse continue;
                     center = .{ fc.cx, fc.cy };
                     region_radius = fc.radius;
@@ -2733,7 +2772,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // centroids and the gaze the blendshapes carry, so the summed
                 // liquify redirect nudges each pupil back toward the lens.
                 var pt_count = wp[9];
-                if (wp[0] > 7.5) {
+                if (wp[0] > 7.5 and wp[0] < 8.5) {
                     const eyes = gazeEyePoints(s, width, height, rotation, mirror) orelse continue;
                     points[0] = eyes[0];
                     points[1] = eyes[1];
@@ -2749,7 +2788,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     (if (channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[channel] orelse r.zero_mask_texture)
                 else
                     r.default_mask_texture;
-                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], center[0], center[1], region_radius }, .{ amount, wp[5], aspect, 0.0 }, .{ pt_count, wp[7], wp[8], 0.0 }, &points, &fall);
+                r.submitWarpPass(view_id, input_texture, warp_mask, .{ wp[0], center[0], center[1], region_radius }, .{ amount, param_y, aspect, 0.0 }, .{ pt_count, wp[7], wp[8], 0.0 }, &points, &fall);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -8045,6 +8084,7 @@ fn destroyBlendState(session: *Session) void {
     session.harmonize_params.clearRetainingCapacity();
     session.inpaint_params.clearRetainingCapacity();
     session.rolling_params.clearRetainingCapacity();
+    session.auto_frame_valid = false;
     session.wants_person_mask = false;
     session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();

@@ -598,7 +598,7 @@ pub const WarpField = struct {
     /// within a radius: the two sphere modes bend the frame through glass,
     /// bulge, pinch and swirl displace it, liquify sums push points, and
     /// face_scale scales the whole tracked face about its own center.
-    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl, liquify, face_scale, roll_lock, gaze_correct } = .glass_sphere,
+    mode: enum { glass_sphere, sphere_refraction, bulge, pinch, swirl, liquify, face_scale, roll_lock, gaze_correct, auto_frame } = .glass_sphere,
     /// The distortion center in normalized frame coordinates.
     center_x: f32 = 0.5,
     center_y: f32 = 0.5,

@@ -679,8 +679,9 @@ refracts the frame through a sphere and lets the surround through),
 outside the sphere), `bulge` (magnify toward the center), `pinch` (pull the
 image inward), `swirl` (twist about the center), `liquify` (freeform
 multi-point push/pull), `face_scale` (scale the whole tracked face about its
-own center), `roll_lock` (counter-rotate the frame to level the horizon), or
-`gaze_correct` (redirect the eyes back toward the lens). `center_x` and
+own center), `roll_lock` (counter-rotate the frame to level the horizon),
+`gaze_correct` (redirect the eyes back toward the lens), or `auto_frame` (steer
+the tracked face to a target anchor and size). `center_x` and
 `center_y` place the distortion, `radius` sizes it, and `strength` scales how
 hard it pushes, with zero an identity.
 
@@ -705,6 +706,13 @@ tracked face's eyeLook blendshapes and pushes each pupil, at its iris centroid,
 opposite the measured gaze, the same summed liquify displacement confined to a
 per-eye `radius`. `strength` scales the redirection and zero is an identity. It
 needs a tracked face; with none it holds the frame through.
+
+`auto_frame` keeps the subject framed: it reads the tracked face's center and
+covering size each frame, eased by a running mean so a moving subject tracks
+without snapping, then applies a whole-frame affine that moves the face to the
+target anchor (`center_x`, `center_y`) and scales it toward the target covering
+fraction (`strength`). It needs a tracked face; with none it holds the frame
+through.
 `refractive_index` is the glass index the two sphere modes bend the view ray by;
 the displacement modes ignore it. `aspect_auto` keeps the region circular on
 screen by correcting for the frame's aspect.
@@ -1439,6 +1447,8 @@ a roll_lock warp levels the horizon from the orientation stream, a tilted bar
 coming level under a submitted device roll and holding without one;
 a gaze_correct warp reads the eyeLook blendshapes and redirects the pupils, the
 eye region shifting under a measured gaze while a far corner holds;
+an auto_frame warp steers the tracked face to the anchor and target size, an
+off-center small face recentering and growing while it holds without a face;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;
