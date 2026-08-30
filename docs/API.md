@@ -255,6 +255,7 @@ then reports the loaded model's class count.
 |---|---|---|
 | `goss_session_enable_segmentation` | `enableSegmentation(...)` (reserved, parameters not yet frozen) | pending contract |
 | `goss_session_disable_segmentation` | `disableSegmentation()` | all SDKs once exposed |
+| `goss_session_allow_model_digest` / `_clear_model_allowlist` | `allowModelDigest(digest)` / `clearModelAllowlist()`, allowlist a bring-your-own model by its 32-byte SHA-256 so an unlisted net is refused at enable time; none set admits any model | all SDKs |
 
 ### Beauty
 

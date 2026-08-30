@@ -269,6 +269,20 @@ export fn Java_com_gosslens_Gosslens_nativeEnableSegmentation(env: *JniEnv, cls:
     return @intFromEnum(abi.goss_session_enable_segmentation(sessionFromHandle(session), bytes, @intCast(@max(model_len, 0)), threads));
 }
 
+/// digest_buffer is a direct byte buffer of the 32-byte SHA-256 digest.
+export fn Java_com_gosslens_Gosslens_nativeAllowModelDigest(env: *JniEnv, cls: jobject, session: i64, digest_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, digest_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const digest: *const [32]u8 = @ptrCast(bytes);
+    return @intFromEnum(abi.goss_session_allow_model_digest(sessionFromHandle(session), digest));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeClearModelAllowlist(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_clear_model_allowlist(sessionFromHandle(session)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeDisableSegmentation(env: *JniEnv, cls: jobject, session: i64) void {
     _ = env;
     _ = cls;

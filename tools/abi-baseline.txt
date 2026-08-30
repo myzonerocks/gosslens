@@ -1,4 +1,4 @@
-abi 0.73
+abi 0.75
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -198,6 +198,8 @@ fn goss_status goss_session_body_joint(goss_session *session, uint32_t joint, fl
 fn goss_status goss_session_face_pose(goss_session *session, float *out_matrix)
 fn goss_status goss_session_face_region(goss_session *session, uint32_t region, float *out_xyz)
 fn goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)
+fn goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest)
+fn goss_status goss_session_clear_model_allowlist(goss_session *session)
 fn void goss_session_disable_segmentation(goss_session *session)
 fn goss_status goss_session_set_segmentation_mask(goss_session *session, const float *mask, uint32_t mask_len)
 fn uint32_t goss_session_segmentation_channels(goss_session *session)

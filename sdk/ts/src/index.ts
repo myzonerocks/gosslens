@@ -1127,6 +1127,22 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
   }
 
+  /// Allowlists a bring-your-own model by its 32-byte SHA-256 digest, so a net
+  /// whose digest is not listed is refused when a tracker or segmenter is
+  /// enabled. With none set, any model loads. Call before enabling the worker.
+  allowModelDigest(digest: Uint8Array): void {
+    if (digest.length !== 32) throw new Error("a model digest is 32 bytes");
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [32]) as number;
+    this.mod.HEAPU8.set(digest, ptr);
+    this.mod.ccall("goss_session_allow_model_digest", "number", ["number", "number"], [this.handle, ptr]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 32]);
+  }
+
+  /// Clears the model allowlist; with none set, any model loads again.
+  clearModelAllowlist(): void {
+    this.mod.ccall("goss_session_clear_model_allowlist", "number", ["number"], [this.handle]);
+  }
+
   private withName(name: string, fn: (ptr: number, len: number) => void): void {
     const bytes = new TextEncoder().encode(name);
     if (bytes.length === 0) return;

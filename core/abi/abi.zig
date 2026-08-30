@@ -201,6 +201,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_face_pose(goss_session *session, float *out_matrix)",
     "goss_status goss_session_face_region(goss_session *session, uint32_t region, float *out_xyz)",
     "goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)",
+    "goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest)",
+    "goss_status goss_session_clear_model_allowlist(goss_session *session)",
     "void goss_session_disable_segmentation(goss_session *session)",
     "goss_status goss_session_set_segmentation_mask(goss_session *session, const float *mask, uint32_t mask_len)",
     "uint32_t goss_session_segmentation_channels(goss_session *session)",
@@ -533,6 +535,10 @@ pub const GeoRegion = union(enum) {
 /// tick's matched-region view.
 const max_named_geofences: usize = 8;
 const max_geofence_name: usize = 48;
+
+/// The most bring-your-own model digests a session may allowlist at once. With
+/// any set, a model whose SHA-256 is not among them is refused at enable time.
+const max_model_digests: usize = 16;
 
 /// A geofence a lens references by name, so a lens fires `geo.in_region('name')`
 /// for its own place among several the host has set. The name is copied into a
@@ -1085,6 +1091,12 @@ pub const Session = struct {
     /// A location inside a named region lights `geo.in_region('name')`.
     named_geofences: [max_named_geofences]NamedGeofence = undefined,
     named_geofence_count: u8 = 0,
+    /// SHA-256 digests of the models a lens is allowed to load. Empty admits
+    /// any model (the default); once the host allowlists one, a model whose
+    /// digest is not listed is refused at enable time, so a bundle cannot swap
+    /// in an unvetted net.
+    model_allowlist: [max_model_digests][32]u8 = undefined,
+    model_allowlist_count: u8 = 0,
     /// The worst fix accuracy that still counts as inside a region. Zero means no
     /// gate: any fix is trusted. A fix reporting a larger radius reads outside.
     geo_required_accuracy_m: f32 = 0,
@@ -6833,6 +6845,42 @@ pub export fn goss_session_report_frame(session: ?*Session, frame_time_us: u32, 
     return @intFromEnum(s.controller.level);
 }
 
+/// Whether a model's bytes may be loaded: true when the session allowlists no
+/// digest (any model is admitted), otherwise true only when the model's SHA-256
+/// is one the host allowlisted. The hash is computed once here, at enable time.
+fn modelAllowed(s: *const Session, bytes: []const u8) bool {
+    if (s.model_allowlist_count == 0) return true;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    for (s.model_allowlist[0..s.model_allowlist_count]) |allowed| {
+        if (std.mem.eql(u8, &allowed, &digest)) return true;
+    }
+    return false;
+}
+
+/// Allowlists a model by its 32-byte SHA-256 digest, so a bring-your-own net
+/// whose digest is not listed is refused at enable time. Re-adding a digest is
+/// a no-op; the allowlist holds up to max_model_digests. With none set, any
+/// model loads (the default). Call before enabling the tracker or segmenter.
+pub export fn goss_session_allow_model_digest(session: ?*Session, digest: ?*const [32]u8) Status {
+    const s = session orelse return .invalid_argument;
+    const d = digest orelse return .invalid_argument;
+    for (s.model_allowlist[0..s.model_allowlist_count]) |allowed| {
+        if (std.mem.eql(u8, &allowed, d)) return .ok;
+    }
+    if (s.model_allowlist_count >= max_model_digests) return .pool_exhausted;
+    s.model_allowlist[s.model_allowlist_count] = d.*;
+    s.model_allowlist_count += 1;
+    return .ok;
+}
+
+/// Clears the model allowlist; with none set, any model loads again.
+pub export fn goss_session_clear_model_allowlist(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.model_allowlist_count = 0;
+    return .ok;
+}
+
 pub export fn goss_session_degrade_level(session: ?*const Session) c_int {
     const s = session orelse return 0;
     return @intFromEnum(s.controller.level);
@@ -6845,6 +6893,7 @@ pub export fn goss_session_enable_face_tracking(session: ?*Session, task_bytes: 
     const s = session orelse return .invalid_argument;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..task_len])) return .invalid_argument;
     if (s.face_tracking != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     s.face_tracking = tracking.create(s.engine.gpa, bytes[0..task_len], worker_threads) catch |err| switch (err) {
@@ -6868,6 +6917,7 @@ pub export fn goss_session_enable_hand_tracking(session: ?*Session, task_bytes: 
     const s = session orelse return .invalid_argument;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..task_len])) return .invalid_argument;
     if (s.hand_tracking != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     s.hand_tracking = tracking.hand_worker.create(s.engine.gpa, bytes[0..task_len], worker_threads) catch |err| switch (err) {
@@ -6891,6 +6941,7 @@ pub export fn goss_session_enable_pose_tracking(session: ?*Session, task_bytes: 
     const s = session orelse return .invalid_argument;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..task_len])) return .invalid_argument;
     if (s.pose_tracking != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     s.pose_tracking = tracking.pose_worker.create(s.engine.gpa, bytes[0..task_len], worker_threads) catch |err| switch (err) {
@@ -6915,6 +6966,7 @@ pub export fn goss_session_enable_segmentation(session: ?*Session, model_bytes: 
     const s = session orelse return .invalid_argument;
     const bytes = model_bytes orelse return .invalid_argument;
     if (model_len == 0) return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..model_len])) return .invalid_argument;
     if (s.segmentation_worker != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     s.segmentation_worker = segmentation.create(s.engine.gpa, bytes[0..model_len], worker_threads) catch |err| switch (err) {
@@ -6957,6 +7009,7 @@ fn sceneChannelSource(channel: u8) ?u32 {
 /// in: the bytes are copied and the caller may release them on return.
 pub fn enableSceneSegmentation(session: *Session, model_bytes: []const u8, threads: i32) Status {
     if (model_bytes.len == 0) return .invalid_argument;
+    if (!modelAllowed(session, model_bytes)) return .invalid_argument;
     if (session.scene_worker != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     session.scene_worker = segmentation.create(session.engine.gpa, model_bytes, worker_threads) catch |err| switch (err) {
@@ -14708,6 +14761,35 @@ test "ticking with no active lens reports again; ticking a firing trigger advanc
     try t.expect(session.active_lens.?.param_values[0] < 1.0);
 
     try t.expectEqual(Status.invalid_argument, goss_session_tick_lens(session, 8_333, null));
+}
+
+test "a model allowlist admits only its own digests and gates enable at the door" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    // With no allowlist, any model's bytes pass.
+    try t.expect(modelAllowed(session, "any bytes at all"));
+
+    // Allowlist the digest of one model; now only it passes.
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("the trusted model", &digest, .{});
+    try t.expectEqual(Status.ok, goss_session_allow_model_digest(session, &digest));
+    try t.expect(modelAllowed(session, "the trusted model"));
+    try t.expect(!modelAllowed(session, "a swapped-in model"));
+    // Re-adding the same digest is a no-op, not a second slot.
+    try t.expectEqual(Status.ok, goss_session_allow_model_digest(session, &digest));
+    try t.expectEqual(@as(u8, 1), session.model_allowlist_count);
+
+    // The gate fires at enable time: a disallowed model is refused before any
+    // worker is built (invalid_argument, not the unsupported a missing stack
+    // would give).
+    try t.expectEqual(Status.invalid_argument, goss_session_enable_segmentation(session, "a swapped-in model", 18, 1));
+
+    // Clearing the allowlist admits any model again.
+    try t.expectEqual(Status.ok, goss_session_clear_model_allowlist(session));
+    try t.expect(modelAllowed(session, "a swapped-in model"));
 }
 
 test "a named geofence fires geo.in_region by name only inside its own region" {

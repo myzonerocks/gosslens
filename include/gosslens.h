@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 73u
+#define GOSS_ABI_MINOR 75u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -535,6 +535,13 @@ goss_status goss_session_set_pose_upper_body(goss_session *session, uint32_t ena
  * release them on return. Builds without the inference stack report
  * unsupported. */
 goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads);
+/* Graph thread. Allowlists a bring-your-own model by its 32-byte SHA-256
+ * digest, so a net whose digest is not listed is refused when a tracker or
+ * segmenter is enabled; re-adding a digest is a no-op. clear_model_allowlist
+ * empties it. With none set, any model loads (the default). Call before
+ * enabling the worker. */
+goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest);
+goss_status goss_session_clear_model_allowlist(goss_session *session);
 void goss_session_disable_segmentation(goss_session *session);
 
 /* Graph thread. Feeds one NV12 frame to the tracking worker. The planes

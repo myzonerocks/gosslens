@@ -190,6 +190,8 @@ object Gosslens {
     internal external fun nativeSubmitFrame(session: Long, plane0: Long, plane1: Long, plane2: Long, planeCount: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, colorStandard: Int, colorRange: Int, timestampUs: Long): Int
     internal external fun nativeSubmitFrameRgbaCopy(session: Long, rgba: ByteBuffer, stride: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, timestampUs: Long): Int
     internal external fun nativeEnableSegmentation(session: Long, modelBuffer: ByteBuffer, modelLen: Int, threads: Int): Int
+    internal external fun nativeAllowModelDigest(session: Long, digestBuffer: ByteBuffer): Int
+    internal external fun nativeClearModelAllowlist(session: Long): Int
     internal external fun nativeDisableSegmentation(session: Long)
     internal external fun nativeSetFaceLandmarks(session: Long, pointsBuffer: ByteBuffer, pointCount: Int): Int
     internal external fun nativeSetBeautyLut(session: Long, slot: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
@@ -972,6 +974,20 @@ class GossSession private constructor(
         Gosslens.nativeEnableSegmentation(handle, model, model.remaining(), threads) == 0
 
     fun disableSegmentation() = Gosslens.nativeDisableSegmentation(handle)
+
+    /** Allowlists a bring-your-own model by its 32-byte SHA-256 digest, so a net
+     * whose digest is not listed is refused when a tracker or segmenter is
+     * enabled. With none set, any model loads. Call before enabling the worker. */
+    fun allowModelDigest(digest: ByteArray): Boolean {
+        require(digest.size == 32) { "a model digest is 32 bytes" }
+        val buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+        buf.put(digest)
+        buf.rewind()
+        return Gosslens.nativeAllowModelDigest(handle, buf) == 0
+    }
+
+    /** Clears the model allowlist; with none set, any model loads again. */
+    fun clearModelAllowlist(): Boolean = Gosslens.nativeClearModelAllowlist(handle) == 0
 
     /** Feeds one frame's tracked face landmarks in directly (x, y in frame
      * pixels, z in the same scale, three floats per point); an empty array

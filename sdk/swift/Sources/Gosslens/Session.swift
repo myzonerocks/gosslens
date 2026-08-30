@@ -192,6 +192,21 @@ public final class GossSession: @unchecked Sendable {
         goss_session_disable_segmentation(handle)
     }
 
+    /// Allowlists a bring-your-own model by its 32-byte SHA-256 digest, so a net
+    /// whose digest is not listed is refused when a tracker or segmenter is
+    /// enabled. With none set, any model loads. Call before enabling the worker.
+    public func allowModelDigest(_ digest: [UInt8]) throws {
+        precondition(digest.count == 32, "a model digest is 32 bytes")
+        try digest.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_allow_model_digest(handle, buffer.baseAddress))
+        }
+    }
+
+    /// Clears the model allowlist; with none set, any model loads again.
+    public func clearModelAllowlist() throws {
+        try checked(goss_session_clear_model_allowlist(handle))
+    }
+
     public func trackFrame(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, colorStandard: GossColorStandard = .bt709, colorRange: GossColorRange = .video, timestampUs: Int64) throws {
         var raw = GossFrameDesc(width: width, height: height, pixelFormat: .nv12, colorStandard: colorStandard, colorRange: colorRange, timestampUs: timestampUs).raw
         try checked(goss_session_track_frame(handle, &raw, y, yStride, uv, uvStride))
