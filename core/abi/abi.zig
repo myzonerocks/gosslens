@@ -10402,10 +10402,6 @@ fn pollMlOutputs(session: *Session) void {
     }
 }
 
-/// Builds an audio inference worker for every audio.infer node from its bundled
-/// model, holding the node's output-to-parameter bindings. Best-effort per node,
-/// and counted against the shared heavy-worker budget so the mic rail cannot
-/// oversubscribe the device either.
 /// Resolves the active lens's audio.enhance and voice.transform nodes into the
 /// session, so the output mix cleans and pitch-shifts the microphone. The last of
 /// each wins; none leaves the mic untouched.
@@ -10488,6 +10484,10 @@ fn tapAt(buf: *const [voice_delay_len]f32, wpos: usize, delay: f32) f32 {
     return buf[a] * (1.0 - frac) + buf[b] * frac;
 }
 
+/// Builds an audio inference worker for every audio.infer node from its bundled
+/// model, holding the node's output-to-parameter bindings. Best-effort per node,
+/// counted against the shared heavy-worker budget so the mic rail cannot
+/// oversubscribe the device.
 fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
     const lens = if (session.active_lens) |*l| l else return;
     const io = defaultIo();
