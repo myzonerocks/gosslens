@@ -1050,6 +1050,13 @@ one-pole low-pass that pulls the high-frequency hiss down and a soft gate that
 eases the near-silent noise floor toward zero, blended in by `strength` so zero
 leaves the mic untouched. It needs no model.
 
+A `"voice.transform"` node changes the outgoing voice. It draws nothing and
+carries a `"voice": {"pitch"}` block (0.5..2, default 1): the output mix pitch
+shifts the microphone by the `pitch` ratio, above 1 higher and below 1 lower,
+through a two-tap delay line swept at the ratio with a constant-power crossfade,
+so the pitch changes while the track keeps its length. A ratio of one is a
+passthrough. It needs no model.
+
 An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
 that binds a whole output tensor as a segmentation mask. The tensor is read as
 a square single-channel image, resampled to the engine's mask resolution, and
@@ -1480,6 +1487,8 @@ a temporal.fuse hdr net merges an exposure bracket submitted through the
 frame-bracket op to its mean, holding off until the whole bracket lands;
 an audio.enhance node cleans the outgoing microphone, a tone buried under
 per-sample hiss losing its high-frequency step energy while a control holds;
+a voice.transform node pitch-shifts the outgoing microphone by its ratio, a
+300 Hz tone's fundamental scaling by 1.5 while the track keeps its length;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

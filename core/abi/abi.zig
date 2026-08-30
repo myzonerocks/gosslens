@@ -675,6 +675,13 @@ pub const Session = struct {
     /// microphone cleanup is continuous. Resolved at activation.
     audio_enhance_strength: f32 = 0,
     audio_enhance_lp: [8]f32 = @splat(0),
+    /// An active voice.transform node's pitch-shift ratio (1 when none), and the
+    /// per-channel delay line the output mix pitch-shifts the microphone through,
+    /// a two-tap crossfade sweep carried across chunks. Resolved at activation.
+    voice_pitch: f32 = 1,
+    voice_delay: [8][voice_delay_len]f32 = @splat(@splat(0)),
+    voice_wpos: usize = 0,
+    voice_phase: f32 = 0,
     /// The diffusion restyle workers an active lens's diffusion nodes drive,
     /// each drawing its decoded frame through a sprite; built from the bundle at
     /// activation, fed the camera frame, uploaded to their sprite each render.
@@ -8178,6 +8185,7 @@ fn destroyBlendState(session: *Session) void {
     session.rolling_params.clearRetainingCapacity();
     session.auto_frame_valid = false;
     session.audio_enhance_strength = 0;
+    session.voice_pitch = 1;
     session.wants_person_mask = false;
     session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
@@ -8580,6 +8588,8 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
 
 const audio_sample_rate: u32 = 48000;
 const audio_channels: u32 = 1;
+/// The delay-line length a voice.transform pitch shifter sweeps over, per channel.
+const voice_delay_len: usize = 1024;
 
 /// Frees the lens mixer and its decoded sounds. Safe with no audio active.
 fn destroySounds(s: *Session) void {
@@ -8763,13 +8773,15 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
         }
         const base = @as(usize, done) * channels;
         const span = @as(usize, n) * channels;
-        // An active audio.enhance node cleans the mic chunk before it is summed
-        // with the lens voices; with none the raw mic passes straight through.
+        // An active audio.enhance node cleans the mic chunk and a voice.transform
+        // node pitch-shifts it before it is summed with the lens voices; with
+        // neither the raw mic passes straight through.
         const mic_chunk: ?[]const f32 = blk: {
             const raw = if (mic_slice) |m| m[base .. base + span] else break :blk null;
-            if (s.audio_enhance_strength <= 0) break :blk raw;
+            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1) break :blk raw;
             @memcpy(enhanced_buf[0..span], raw);
-            enhanceMic(s, enhanced_buf[0..span], n, channels);
+            if (s.audio_enhance_strength > 0) enhanceMic(s, enhanced_buf[0..span], n, channels);
+            if (s.voice_pitch != 1) voiceTransformMic(s, enhanced_buf[0..span], n, channels);
             break :blk enhanced_buf[0..span];
         };
         audio_mix.combine(lens, mic_chunk, out_slice[base .. base + span], n, channels);
@@ -10321,17 +10333,22 @@ fn pollMlOutputs(session: *Session) void {
 /// model, holding the node's output-to-parameter bindings. Best-effort per node,
 /// and counted against the shared heavy-worker budget so the mic rail cannot
 /// oversubscribe the device either.
-/// Resolves the active lens's audio.enhance node into the session, so the output
-/// mix cleans the microphone. The strongest node wins if a lens spliced more than
-/// one; none leaves the strength at zero and the mic untouched.
+/// Resolves the active lens's audio.enhance and voice.transform nodes into the
+/// session, so the output mix cleans and pitch-shifts the microphone. The last of
+/// each wins; none leaves the mic untouched.
 fn resolveAudioEnhance(session: *Session) void {
     session.audio_enhance_strength = 0;
     session.audio_enhance_lp = @splat(0);
+    session.voice_pitch = 1;
+    session.voice_delay = @splat(@splat(0));
+    session.voice_wpos = 0;
+    session.voice_phase = 0;
     const lens = if (session.active_lens) |*l| l else return;
     for (lens.manifest.nodes) |node| {
         if (node.audio_enhance) |ae| {
             if (ae.strength > session.audio_enhance_strength) session.audio_enhance_strength = ae.strength;
         }
+        if (node.voice_transform) |vt| session.voice_pitch = vt.pitch;
     }
 }
 
@@ -10354,6 +10371,48 @@ fn enhanceMic(session: *Session, mic: []f32, frame_count: u32, channels: u32) vo
             mic[idx] = x + (cleaned - x) * strength;
         }
     }
+}
+
+/// Pitch-shifts one interleaved output chunk's microphone in place while keeping
+/// its duration, a two-tap delay line swept at the pitch ratio with a constant
+/// power crossfade that hides the wrap. The delay state carries across chunks so
+/// the shift is continuous; a ratio of one is a passthrough.
+fn voiceTransformMic(session: *Session, mic: []f32, frame_count: u32, channels: u32) void {
+    const pitch = session.voice_pitch;
+    if (pitch == 1) return;
+    const n: f32 = @floatFromInt(voice_delay_len);
+    const half = voice_delay_len / 2;
+    for (0..frame_count) |f| {
+        // The two read taps lag the write head by phase and phase+half, each with
+        // a half-sine gain so the pair sums to constant power across the sweep.
+        const phase = session.voice_phase;
+        const g1 = @sin(std.math.pi * phase / n);
+        const phase2 = if (phase + @as(f32, @floatFromInt(half)) >= n) phase + @as(f32, @floatFromInt(half)) - n else phase + @as(f32, @floatFromInt(half));
+        const g2 = @sin(std.math.pi * phase2 / n);
+        const wpos = session.voice_wpos;
+        for (0..channels) |c| {
+            const ci = @min(c, @as(usize, 7));
+            const idx = f * channels + c;
+            session.voice_delay[ci][wpos] = mic[idx];
+            const s1 = tapAt(&session.voice_delay[ci], wpos, phase);
+            const s2 = tapAt(&session.voice_delay[ci], wpos, phase2);
+            mic[idx] = g1 * s1 + g2 * s2;
+        }
+        session.voice_wpos = (wpos + 1) % voice_delay_len;
+        var np = session.voice_phase + (1.0 - pitch);
+        if (np < 0) np += n;
+        if (np >= n) np -= n;
+        session.voice_phase = np;
+    }
+}
+
+/// One linearly-interpolated delay-line tap `delay` samples behind the write head.
+fn tapAt(buf: *const [voice_delay_len]f32, wpos: usize, delay: f32) f32 {
+    const di: usize = @intFromFloat(delay);
+    const frac = delay - @as(f32, @floatFromInt(di));
+    const a = (wpos + voice_delay_len - (di % voice_delay_len)) % voice_delay_len;
+    const b = (a + voice_delay_len - 1) % voice_delay_len;
+    return buf[a] * (1.0 - frac) + buf[b] * frac;
 }
 
 fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {

@@ -5236,6 +5236,88 @@ fn proveAudioDenoise(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeVoiceLens(dir: []const u8, pitch: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.voice","version":"1.0.0","display_name":"Voice","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"vox","type":"voice.transform","params":{{}},"voice":{{"pitch":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{pitch});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Counts the hysteresis-gated zero crossings over the latter half of an i16
+/// track (past the delay-line fill), a proxy for its fundamental frequency: a
+/// crossing counts only when the signal swings fully from below -thresh to above
+/// +thresh or back, so crossfade ripple does not inflate the count.
+fn gatedCrossings(track: []const i16) u64 {
+    const thresh: i32 = 3000;
+    var count: u64 = 0;
+    var high = false;
+    var started = false;
+    for (track[track.len / 2 ..]) |sample| {
+        const v: i32 = sample;
+        if (v > thresh) {
+            if (started and !high) count += 1;
+            high = true;
+            started = true;
+        } else if (v < -thresh) {
+            if (started and high) count += 1;
+            high = false;
+            started = true;
+        }
+    }
+    return count;
+}
+
+/// Proves real-time voice change: a 300 Hz tone through a voice.transform node at
+/// pitch 1.5 comes out near 450 Hz, its fundamental shifted by the ratio while the
+/// track keeps its length; a pitch-1 control leaves the tone's pitch unchanged.
+fn proveVoiceTransform(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sample_rate: u32 = 48000;
+    const n: usize = 9600;
+    const mic = try gpa.alloc(f32, n);
+    defer gpa.free(mic);
+    for (0..n) |i| {
+        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sample_rate));
+        mic[i] = 0.5 * @sin(2.0 * std.math.pi * 300.0 * t);
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-1");
+    try writeVoiceLens("zig-out/voice-1", 1.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-up");
+    try writeVoiceLens("zig-out/voice-up", 1.5);
+
+    const flat = try captureMixOutput(gpa, engine, "zig-out/voice-1", mic, sample_rate);
+    defer gpa.free(flat);
+    const shifted = try captureMixOutput(gpa, engine, "zig-out/voice-up", mic, sample_rate);
+    defer gpa.free(shifted);
+
+    if (shifted.len != mic.len) {
+        std.debug.print("conformance: FAIL voice.transform changed the track length\n", .{});
+        return false;
+    }
+    const zc_flat = gatedCrossings(flat);
+    const zc_shift = gatedCrossings(shifted);
+    if (!(zc_flat > 0)) {
+        std.debug.print("conformance: FAIL the voice.transform control tone had no measurable pitch\n", .{});
+        return false;
+    }
+    const ratio = @as(f64, @floatFromInt(zc_shift)) / @as(f64, @floatFromInt(zc_flat));
+    // The fundamental should scale by the pitch ratio 1.5, within a tolerance for
+    // the crossfade and the discrete crossing count.
+    if (!(ratio > 1.3 and ratio < 1.7)) {
+        std.debug.print("conformance: FAIL voice.transform did not shift the pitch by the ratio (crossings {d} -> {d}, ratio {d:.2})\n", .{ zc_flat, zc_shift, ratio });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a voice.transform node pitch-shifts the outgoing microphone by its ratio while keeping the track length: a 300 Hz tone's fundamental scales {d:.2}x (crossings {d} -> {d}) at pitch 1.5, and a pitch-1 control holds\n", .{ ratio, zc_flat, zc_shift });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -16674,6 +16756,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("temporal hdr");
     if (!try proveAudioDenoise(gpa, engine)) return 1;
     watchHold("audio enhance");
+    if (!try proveVoiceTransform(gpa, engine)) return 1;
+    watchHold("voice transform");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

@@ -1093,6 +1093,13 @@ pub const AudioEnhanceField = struct {
     strength: f32 = 1,
 };
 
+/// A voice.transform node's real-time voice change: `pitch` (0.5..2) the ratio
+/// the outgoing microphone's pitch is shifted by, 1 unchanged, above 1 higher and
+/// below 1 lower, the duration preserved. Applied in the output mix.
+pub const VoiceTransformField = struct {
+    pitch: f32 = 1,
+};
+
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
 /// VAE encoder, a UNet, a VAE decoder), an optional precomputed text embedding
 /// the UNet conditions on, the sprite the restyled frame draws through, and the
@@ -1167,6 +1174,8 @@ pub const Node = struct {
     audio: ?AudioField = null,
     /// Set on an audio.enhance node: its microphone noise-reduction strength.
     audio_enhance: ?AudioEnhanceField = null,
+    /// Set on a voice.transform node: its microphone pitch-shift ratio.
+    voice_transform: ?VoiceTransformField = null,
     diffusion: ?DiffusionField = null,
     /// Set on a splat.cloud node: the model that lifts the frame to a point cloud.
     splat: ?SplatField = null,
@@ -3519,6 +3528,16 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             audio_enhance_field = field;
         }
+        var voice_transform_field: ?VoiceTransformField = null;
+        if (std.mem.eql(u8, node_type, "voice.transform")) {
+            var field: VoiceTransformField = .{};
+            if (getField(object, "voice")) |vv| {
+                if (vv == .object) {
+                    if (getField(vv.object, "pitch")) |v| field.pitch = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.pitch)), 0.5, 2);
+                }
+            }
+            voice_transform_field = field;
+        }
         var diffusion_field: ?DiffusionField = null;
         if (getField(object, "diffusion")) |dv| {
             const diff_mark = path.push("diffusion");
@@ -3590,6 +3609,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .temporal = temporal_field,
             .audio = audio_field,
             .audio_enhance = audio_enhance_field,
+            .voice_transform = voice_transform_field,
             .diffusion = diffusion_field,
             .splat = splat_field,
             .body_anchor = body_anchor,
