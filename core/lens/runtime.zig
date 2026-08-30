@@ -428,6 +428,10 @@ pub const SplatNode = struct {
     /// True runs the model once on a submitted selfie (an avatar) rather than the
     /// live camera each tick.
     selfie: bool,
+    /// True draws the session's guided-capture reconstruction (built by
+    /// goss_session_capture_view) as a live gaussian cloud, with no model of its
+    /// own; always gaussian.
+    reconstruction: bool,
     /// True when the model emits rgb after xyz per point, so each splat carries
     /// its own color instead of the node color.
     colored: bool,
@@ -1547,7 +1551,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .splat_cloud) continue;
             const sf = node.splat orelse continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .gaussian = sf.draw == .gaussian, .placement = sf.placement, .portal = sf.portal, .selfie = sf.source == .selfie, .colored = sf.colored });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model = sf.model, .point = sf.point, .color = .{ sf.r, sf.g, sf.b }, .mesh = sf.draw == .mesh, .gaussian = sf.draw == .gaussian or sf.source == .reconstruction, .placement = sf.placement, .portal = sf.portal, .selfie = sf.source == .selfie, .reconstruction = sf.source == .reconstruction, .colored = sf.colored });
         }
         return out.toOwnedSlice(gpa);
     }
