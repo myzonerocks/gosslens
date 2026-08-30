@@ -464,6 +464,16 @@ surrounding content while the unmasked pixels hold. With no mask on the named
 channel it holds the frame through, the standard capability degradation. It ships
 no asset.
 
+A `"rolling.pass"` node is a rolling-shutter correction. It carries a `"rolling":
+{"strength", "readout"}` block: `strength` (0..1, default 1) scales the
+correction, and `readout` (0..0.05s, default 0.02) is the sensor's frame readout
+time the per-row skew scales by. A sensor reads its rows top-to-bottom over that
+readout, so camera rotation during it skews each scanline; the engine derives the
+image-plane motion from the orientation stream (submitted through
+`goss_session_submit_orientation`) and this pass counter-shifts each row by its
+readout offset from the centre. With no orientation submitted the motion is zero
+and it holds the frame through. It ships no asset.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1408,6 +1418,8 @@ a harmonize.pass matches the person's color distribution to the background, the
 subject's red falling and blue rising toward the background while it holds;
 an inpaint.pass fills a masked object from its surrounding boundary, the removed
 region's red falling and blue rising toward the field while the field holds;
+a rolling.pass with a submitted camera rotation shifts each scanline by its
+readout offset, a straight edge slanting under motion and holding without it;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

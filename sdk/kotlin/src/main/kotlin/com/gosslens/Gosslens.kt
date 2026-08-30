@@ -90,6 +90,7 @@ object Gosslens {
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
+    internal external fun nativeSubmitOrientation(session: Long, gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Int
     internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
     internal external fun nativeSetDubbing(session: Long, enabled: Int): Int
     internal external fun nativeSubmitSegmentationImage(session: Long, rgba: ByteBuffer, width: Int, height: Int): Int
@@ -1071,6 +1072,13 @@ class GossSession private constructor(
         buf.rewind()
         return Gosslens.nativeSubmitCameraIntrinsics(handle, fx, fy, cx, cy, buf, distortion.size) == 0
     }
+
+    /** Submits one device gravity sample with its timestamp in microseconds. A
+     * rolling.pass reads the image-plane motion derived from consecutive samples
+     * to correct rolling-shutter skew; feed one per frame from the IMU. A
+     * near-zero vector clears the stream, leaving a rolling.pass inert. */
+    fun submitOrientation(gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Boolean =
+        Gosslens.nativeSubmitOrientation(handle, gravityX, gravityY, gravityZ, timestampUs) == 0
 
     /** Enables or disables on-device dubbing: when on, a dub-bound audio.infer
      * node synthesizes its decoded caption or translation to speech and plays it

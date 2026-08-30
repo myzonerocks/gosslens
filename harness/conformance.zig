@@ -4388,6 +4388,117 @@ fn proveInpaint(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeRollingLens(dir: []const u8, strength: f32, readout: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.rolling","version":"1.0.0","display_name":"Rolling","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"r","type":"rolling.pass","inputs":{{"frame":"camera"}},"params":{{}},"rolling":{{"strength":{d:.3},"readout":{d:.4}}}}}],
+        \\ "triggers":[]}}
+    , .{ strength, readout });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Captures a rolling.pass shot. When motion is asked, two gravity samples a
+/// known interval apart are submitted so the engine derives a horizontal angular
+/// velocity; with none the orientation stream stays empty and the pass is inert.
+fn captureRollingShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, motion: bool) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    if (motion) {
+        _ = abi.goss_session_submit_orientation(session, 0, -1, 0, 0);
+        _ = abi.goss_session_submit_orientation(session, 0.2, -0.98, 0, 50_000);
+    }
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Mean column of the black-to-white transition across rows [row_lo, row_hi),
+/// the edge position; 0 if a row held no edge.
+fn edgeColumn(shot: []const u8, row_lo: usize, row_hi: usize) f64 {
+    var sum: f64 = 0;
+    var n: f64 = 0;
+    for (row_lo..row_hi) |row| {
+        var col: usize = 0;
+        while (col < 400) : (col += 1) {
+            if (shot[(row * 400 + col) * 4] > 128) {
+                sum += @floatFromInt(col);
+                n += 1;
+                break;
+            }
+        }
+    }
+    return if (n > 0) sum / n else 0;
+}
+
+/// Proves rolling-shutter correction: a straight vertical edge with a camera
+/// rotation submitted through the orientation stream. The engine derives the
+/// horizontal motion from consecutive gravity samples and counter-shifts each
+/// scanline by its readout offset, slanting the edge; still, it stays vertical.
+fn proveRolling(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const v: u8 = if (col < width / 2) 0 else 255; // a straight vertical edge
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/rolling");
+    try writeRollingLens("zig-out/rolling", 1.0, 0.05);
+
+    const still = try captureRollingShot(gpa, engine, "zig-out/rolling", planes, false);
+    defer gpa.free(still);
+    const moved = try captureRollingShot(gpa, engine, "zig-out/rolling", planes, true);
+    defer gpa.free(moved);
+
+    const still_top = edgeColumn(still, 30, 70);
+    const still_bot = edgeColumn(still, 230, 270);
+    const moved_top = edgeColumn(moved, 30, 70);
+    const moved_bot = edgeColumn(moved, 230, 270);
+
+    if (still_top == 0 or moved_top == 0) {
+        std.debug.print("conformance: FAIL the rolling test frame held no detectable edge\n", .{});
+        return false;
+    }
+    // With no motion the edge is vertical: top and bottom columns agree.
+    if (!(@abs(still_top - still_bot) < 8)) {
+        std.debug.print("conformance: FAIL rolling shifted a still frame (top {d:.0}, bottom {d:.0})\n", .{ still_top, still_bot });
+        return false;
+    }
+    // Under the submitted rotation the scanlines shift by their readout offset,
+    // so the edge slants: top and bottom columns diverge well past the still.
+    const moved_slant = @abs(moved_top - moved_bot);
+    if (!(moved_slant > 40)) {
+        std.debug.print("conformance: FAIL rolling did not slant the edge under motion (top {d:.0}, bottom {d:.0})\n", .{ moved_top, moved_bot });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a rolling.pass counter-shifts each scanline by its readout offset under a submitted camera rotation: a straight edge slants {d:.0}px top-to-bottom with motion ({d:.0} -> {d:.0}) and holds vertical without it\n", .{ moved_slant, moved_top, moved_bot });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -15810,6 +15921,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("harmonize pass");
     if (!try proveInpaint(gpa, engine)) return 1;
     watchHold("inpaint pass");
+    if (!try proveRolling(gpa, engine)) return 1;
+    watchHold("rolling pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

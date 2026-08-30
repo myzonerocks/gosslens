@@ -262,6 +262,14 @@ extension GossSession {
         }
     }
 
+    /// Submits one device gravity sample with its timestamp in microseconds. A
+    /// rolling.pass reads the image-plane motion derived from consecutive samples
+    /// to correct rolling-shutter skew; feed one per frame from the IMU. A
+    /// near-zero vector clears the stream, leaving a rolling.pass inert.
+    public func submitOrientation(gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Int64) throws {
+        try checked(goss_session_submit_orientation(handle, gravityX, gravityY, gravityZ, timestampUs))
+    }
+
     /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer
     /// node synthesizes its decoded caption or translation to speech and plays it
     /// into the lens mixer. Off by default; a host turns it on for a voice-over.

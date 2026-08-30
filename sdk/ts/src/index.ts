@@ -1503,6 +1503,14 @@ export class GossSession {
     this.mod.ccall("goss_session_submit_camera_intrinsics", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, fx, fy, cx, cy, ptr, distortion.length]);
   }
 
+  /// Submits one device gravity sample with its timestamp in microseconds. A
+  /// rolling.pass reads the image-plane motion derived from consecutive samples
+  /// to correct rolling-shutter skew; feed one per frame from the IMU. A
+  /// near-zero vector clears the stream, leaving a rolling.pass inert.
+  submitOrientation(gravityX: number, gravityY: number, gravityZ: number, timestampUs: bigint = 0n): void {
+    this.mod.ccall("goss_session_submit_orientation", "number", ["number", "number", "number", "number", "number"], [this.handle, gravityX, gravityY, gravityZ, timestampUs]);
+  }
+
   /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer node
   /// synthesizes its decoded caption or translation to speech and plays it into
   /// the lens mixer. Off by default; a host turns it on for a voice-over.

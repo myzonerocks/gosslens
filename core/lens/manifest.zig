@@ -365,6 +365,15 @@ pub const InpaintField = struct {
     radius: f32 = 0.08,
 };
 
+pub const RollingShutterField = struct {
+    /// A rolling.pass node's rolling-shutter correction. `strength` (0..1) scales
+    /// the correction, and `readout` (0..0.05s) is the sensor's frame readout time
+    /// the per-row skew scales by. The camera motion comes from the orientation
+    /// stream; with none submitted the pass holds the frame through.
+    strength: f32 = 1,
+    readout: f32 = 0.02,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1164,6 +1173,8 @@ pub const Node = struct {
     harmonize: ?HarmonizeField = null,
     /// Set only on an inpaint.pass node: its removal mask and search radius.
     inpaint: ?InpaintField = null,
+    /// Set only on a rolling.pass node: its correction strength and readout time.
+    rolling: ?RollingShutterField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -2225,6 +2236,21 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 inpaint_field = field;
             }
             path.pop(imark);
+        }
+        var rolling_field: ?RollingShutterField = null;
+        if (getField(object, "rolling")) |rv| {
+            const rmark = path.push("rolling");
+            if (!std.mem.eql(u8, node_type, "rolling.pass")) {
+                try diags.add(path.slice(), "rolling is a rolling.pass field, found it on '{s}'", .{node_type});
+            } else if (rv != .object) {
+                try diags.add(path.slice(), "rolling must be an object", .{});
+            } else {
+                var field: RollingShutterField = .{};
+                if (getField(rv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                if (getField(rv.object, "readout")) |v| field.readout = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.readout)), 0, 0.05);
+                rolling_field = field;
+            }
+            path.pop(rmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3511,6 +3537,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .dereflect = dereflect_field,
             .harmonize = harmonize_field,
             .inpaint = inpaint_field,
+            .rolling = rolling_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

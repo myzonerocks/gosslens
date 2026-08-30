@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 61u
+#define GOSS_ABI_MINOR 62u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -581,6 +581,12 @@ goss_status goss_session_submit_depth(goss_session *session, const float *depth,
  * the radial distortion coefficients (k1, k2 read; further terms ignored). A
  * zero focal length or zero coefficient count clears them. */
 goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len);
+
+/* Feeds one device gravity sample (an orientation vector, any scale) with its
+ * timestamp in microseconds. A rolling.pass reads the image-plane angular
+ * velocity derived from consecutive samples to correct rolling-shutter skew; the
+ * host submits one per frame from the IMU. A near-zero vector clears the stream. */
+goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us);
 
 /* Segments a host-provided still RGBA image (width*height*4 bytes, row-major):
  * converts it to NV12 and feeds the running segmenter, so the next render

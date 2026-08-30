@@ -211,6 +211,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
     "goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)",
+    "goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)",
     "goss_status goss_session_submit_segmentation_image(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_set_makeup_reference(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height, const float *landmarks, uint32_t landmark_count)",
     "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
@@ -1134,6 +1135,17 @@ pub const Session = struct {
     intrinsics_cx: f32 = 0,
     intrinsics_cy: f32 = 0,
     intrinsics_aspect: f32 = 1,
+    /// The device orientation stream a rolling.pass reads for its correction: the
+    /// last gravity vector and its timestamp, whether one has arrived, and the
+    /// image-plane angular velocity (rad/s) derived from consecutive samples.
+    orientation_set: bool = false,
+    orientation_have_prev: bool = false,
+    orientation_prev: [3]f32 = .{ 0, 0, 0 },
+    orientation_prev_ts: i64 = 0,
+    orientation_omega: [2]f32 = .{ 0, 0 },
+    /// The correction strength and sensor readout time (strength, readout) of each
+    /// spliced rolling.pass node, resolved once at activation.
+    rolling_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// The glow of each spliced bloom.pass node, packed as (threshold,
     /// intensity, 0, 0) - resolved once at activation like grade_params.
     bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -2028,6 +2040,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 (if (ip.channel == 0) s.segmentation_texture != null else s.segmentation_class_textures[ip.channel] != null)
             else
                 false,
+            // Rolling correction reads the orientation stream; with none the
+            // derived motion stays zero and the node holds the frame through.
+            .rolling => s.rolling_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2495,6 +2510,25 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const mask_tex = if (ip.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[ip.channel] orelse r.zero_mask_texture;
                 const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
                 r.submitInpaintPass(view_id, input_texture, mask_tex, ip.radius, aspect);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .rolling => {
+                const rp = s.rolling_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The per-row skew is the derived image-plane motion scaled by the
+                // sensor readout and strength; with no orientation submitted the
+                // motion is zero and the pass holds the frame through.
+                const gain = if (s.orientation_set) rp[1] * rp[0] else 0;
+                r.submitRollingPass(view_id, input_texture, s.orientation_omega[0] * gain, s.orientation_omega[1] * gain);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -4078,6 +4112,7 @@ pub fn destroySession(session: *Session) void {
     session.dereflect_params.deinit(session.engine.gpa);
     session.harmonize_params.deinit(session.engine.gpa);
     session.inpaint_params.deinit(session.engine.gpa);
+    session.rolling_params.deinit(session.engine.gpa);
     if (session.person_mask.len > 0) session.engine.gpa.free(session.person_mask);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
@@ -6769,6 +6804,37 @@ pub export fn goss_session_submit_camera_intrinsics(session: ?*Session, fx: f32,
     return .ok;
 }
 
+/// Feeds one gravity sample (a unit-ish device orientation vector) with its
+/// timestamp. A rolling.pass reads the image-plane angular velocity this derives
+/// from consecutive samples; the host submits one per frame from the IMU.
+pub export fn goss_session_submit_orientation(session: ?*Session, gravity_x: f32, gravity_y: f32, gravity_z: f32, timestamp_us: i64) Status {
+    const s = session orelse return .invalid_argument;
+    var g = [3]f32{ gravity_x, gravity_y, gravity_z };
+    const mag = @sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+    if (mag < 1e-4) {
+        s.orientation_set = false;
+        s.orientation_have_prev = false;
+        s.orientation_omega = .{ 0, 0 };
+        return .ok;
+    }
+    for (&g) |*v| v.* /= mag;
+    s.orientation_set = true;
+    if (s.orientation_have_prev) {
+        const dt_us = timestamp_us - s.orientation_prev_ts;
+        if (dt_us > 0) {
+            const dt: f32 = @as(f32, @floatFromInt(dt_us)) / 1_000_000.0;
+            // The gravity direction's drift in the image plane over dt is the
+            // rate the sensor's rows skew by, the per-scanline motion the
+            // correction counters.
+            s.orientation_omega = .{ (g[0] - s.orientation_prev[0]) / dt, (g[1] - s.orientation_prev[1]) / dt };
+        }
+    }
+    s.orientation_prev = g;
+    s.orientation_prev_ts = timestamp_us;
+    s.orientation_have_prev = true;
+    return .ok;
+}
+
 /// Segments a host-provided still RGBA image: converts it to NV12 and feeds
 /// the running segmenter, so the next render picks up the mask the same way a
 /// camera frame would. again when no segmenter is enabled.
@@ -7875,6 +7941,7 @@ fn destroyBlendState(session: *Session) void {
     session.dereflect_params.clearRetainingCapacity();
     session.harmonize_params.clearRetainingCapacity();
     session.inpaint_params.clearRetainingCapacity();
+    session.rolling_params.clearRetainingCapacity();
     session.wants_person_mask = false;
     session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
@@ -8491,6 +8558,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createDereflectParams(s, gpa) catch {};
     createHarmonizeParams(s, gpa) catch {};
     createInpaintParams(s, gpa) catch {};
+    createRollingParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -8699,6 +8767,17 @@ fn createInpaintParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(nodes);
     for (nodes) |n| {
         session.inpaint_params.put(gpa, n.graph_index, .{ .channel = n.mask_channel, .radius = n.radius }) catch {};
+    }
+}
+
+/// Resolves every spliced rolling.pass node's strength and readout into
+/// session.rolling_params once at activation - mirrors createInpaintParams.
+fn createRollingParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.rollingPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.rolling_params.put(gpa, n.graph_index, .{ n.strength, n.readout }) catch {};
     }
 }
 
@@ -11292,6 +11371,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createDereflectParams(session, gpa);
     try createHarmonizeParams(session, gpa);
     try createInpaintParams(session, gpa);
+    try createRollingParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);

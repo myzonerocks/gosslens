@@ -599,6 +599,14 @@ pub const Renderer = struct {
         _ = aspect;
     }
 
+    pub fn submitRollingPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, skew_x: f32, skew_y: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = skew_x;
+        _ = skew_y;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
