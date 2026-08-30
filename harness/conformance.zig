@@ -7352,6 +7352,83 @@ fn proveLocomotion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Activates a two-grade chain (a stop up then a stop down) on a fresh session,
+/// hdr or plain, feeds the constant frame, and returns the center pixel's green.
+/// The hdr lens allocates half-float composite targets and keeps its grade
+/// passes unclamped; the plain lens is byte-for-byte the same lens without hdr.
+fn captureGradeUpDown(gpa: std.mem.Allocator, engine: *abi.Engine, hdr: bool, planes: Nv12Copy) !u8 {
+    const dir = if (hdr) "zig-out/hdr-grade" else "zig-out/plain-grade";
+    const page = std.heap.page_allocator;
+    const manifest_json = if (hdr)
+        \\{"glf":"1.0","id":"goss.reference.hdr-grade","version":"1.0.0","display_name":"HDR Grade","engine_compat":">=0.5","capabilities":[],"hdr":true,
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"up","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"exposure":1.0}},
+        \\          {"id":"down","type":"grade.pass","inputs":{"frame":"up"},"params":{},"grade":{"exposure":-1.0}}],
+        \\ "triggers":[]}
+    else
+        \\{"glf":"1.0","id":"goss.reference.plain-grade","version":"1.0.0","display_name":"Plain Grade","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"up","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"exposure":1.0}},
+        \\          {"id":"down","type":"grade.pass","inputs":{"frame":"up"},"params":{},"grade":{"exposure":-1.0}}],
+        \\ "triggers":[]}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, dir);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const shot = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(shot);
+    var w: u32 = 0;
+    var h: u32 = 0;
+    try renderCapture(engine, session, &desc, planes, half_w, shot, &w, &h);
+    const cx = w / 2;
+    const cy = h / 2;
+    const idx = (cy * w + cx) * 4;
+    return shot[idx + 1];
+}
+
+/// Proves the HDR compositing chain: an "hdr":true lens grades a bright gray up
+/// a stop (past 1.0) then back down; the half-float intermediate keeps the
+/// bright value so the result recovers, while the identical non-HDR lens clips
+/// at 1.0 in its 8-bit intermediate and comes back darker. Deterministic.
+fn proveHdrComposite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const gray = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(gray);
+    var p: usize = 0;
+    while (p + 4 <= gray.len) : (p += 4) {
+        gray[p + 0] = 179;
+        gray[p + 1] = 179;
+        gray[p + 2] = 179;
+        gray[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = gray }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const hdr_green = try captureGradeUpDown(gpa, engine, true, planes);
+    const plain_green = try captureGradeUpDown(gpa, engine, false, planes);
+    const hdr_again = try captureGradeUpDown(gpa, engine, true, planes);
+
+    if (hdr_green != hdr_again) {
+        std.debug.print("conformance: FAIL HDR composite is not deterministic ({d} vs {d})\n", .{ hdr_green, hdr_again });
+        return false;
+    }
+    if (@as(i32, hdr_green) - @as(i32, plain_green) < 12) {
+        std.debug.print("conformance: FAIL HDR chain did not preserve the highlight (hdr {d} vs plain {d})\n", .{ hdr_green, plain_green });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF an hdr lens grades a highlight past 1.0 and back through a half-float intermediate, recovering it ({d}) where the 8-bit chain clips it ({d})\n", .{ hdr_green, plain_green });
+    return true;
+}
+
 /// Proves lens audio: a play_sound trigger starts a voice that the mixer
 /// pulls out as PCM, silent before the trigger, non-silent after, and
 /// bit-identical across two runs of the same sequence.
@@ -17974,6 +18051,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("script-state");
     if (!try proveLocomotion(gpa, engine)) return 1;
     watchHold("locomotion");
+    if (!try proveHdrComposite(gpa, engine)) return 1;
+    watchHold("hdr-composite");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;

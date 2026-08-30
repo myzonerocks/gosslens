@@ -1890,6 +1890,22 @@ pub const Renderer = struct {
         return .{ .framebuffer = framebuffer, .texture = texture };
     }
 
+    /// A half-float (RGBA16F) offscreen target for HDR compositing, so a pass
+    /// chain carries values past 1.0 and finer precision than 8-bit unorm. Falls
+    /// back to the 8-bit target where the backend cannot render 16F (some
+    /// WebGL2), so an HDR lens still composites, just without the extra range.
+    pub fn createOffscreenTargetHdr(width: u16, height: u16) !OffscreenTarget {
+        const caps = c.bgfx_get_caps();
+        const fmt_idx: usize = @intCast(c.BGFX_TEXTURE_FORMAT_RGBA16F);
+        const formats = caps.*.formats;
+        const fmt_flags: u32 = formats[fmt_idx];
+        if ((fmt_flags & @as(u32, c.BGFX_CAPS_FORMAT_TEXTURE_FRAMEBUFFER)) == 0) return createOffscreenTarget(width, height);
+        const framebuffer = c.bgfx_create_frame_buffer(width, height, c.BGFX_TEXTURE_FORMAT_RGBA16F, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP);
+        if (framebuffer.idx == invalid_handle) return createOffscreenTarget(width, height);
+        const texture = c.bgfx_get_texture(framebuffer, 0);
+        return .{ .framebuffer = framebuffer, .texture = texture };
+    }
+
     pub fn destroyOffscreenTarget(target: OffscreenTarget) void {
         if (target.framebuffer.idx != invalid_handle) c.bgfx_destroy_frame_buffer(target.framebuffer);
     }

@@ -363,6 +363,15 @@ region: the graded result blends over the original by the channel's soft mask,
 so a whitening grade lands on the teeth or a skin-tone lift on the face while the
 rest of the frame is untouched. With no `mask` the whole frame is graded.
 
+A lens may set a top-level `"hdr": true` to composite in high dynamic range.
+The color chain's intermediate targets then carry half-float precision (16-bit
+float where the backend can render it, 8-bit where it cannot, so the lens still
+runs) and grade passes keep values above 1.0 through the chain instead of
+clamping each pass, so a bright grade survives an intermediate and only the
+final present clamps to the display. It is off by default because half-float
+targets cost more bandwidth and memory every frame, a cost a lens opts into
+only when it needs the range; a plain lens composites in 8-bit exactly as before.
+
 A `"bloom.pass"` node is a glow post-effect. It carries a `"bloom":
 {"threshold", "intensity"}` block: it extracts the frame's highlights - what
 sits above `threshold` in luma - blurs them, and adds that blurred glow back

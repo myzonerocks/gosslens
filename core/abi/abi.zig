@@ -384,6 +384,11 @@ pub const Engine = struct {
     edge_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
     chain_width: u16 = 0,
     chain_height: u16 = 0,
+    /// Whether the chain targets currently hold half-float (HDR) precision. An
+    /// HDR lens flips this and forces a reallocation to 16F targets; a plain
+    /// lens flips it back to 8-bit, so the two never share an allocation and a
+    /// non-HDR lens's output is byte-identical to before this path existed.
+    chain_hdr: bool = false,
     /// Dedicated target for goss_engine_capture_frame - separate from
     /// chain_targets, which ping-pong and get overwritten mid-chain, so
     /// this one alone always holds the true final composited image
@@ -1466,28 +1471,35 @@ pub fn destroyEngine(engine: *Engine) void {
 /// (Re)creates both ping-pong chain targets when the frame size changes
 /// or they don't exist yet - never per frame once a size is stable, so
 /// the render path itself allocates nothing.
-fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
-    if (e.chain_width == width and e.chain_height == height and e.chain_targets[0] != null) return;
+/// One chain target, half-float when the lens opted into HDR, 8-bit otherwise.
+fn makeChainTarget(width: u16, height: u16, hdr: bool) !render.Renderer.OffscreenTarget {
+    return if (hdr) render.Renderer.createOffscreenTargetHdr(width, height) else render.Renderer.createOffscreenTarget(width, height);
+}
+
+fn ensureChainTargets(e: *Engine, width: u16, height: u16, hdr: bool) !void {
+    if (e.chain_width == width and e.chain_height == height and e.chain_hdr == hdr and e.chain_targets[0] != null) return;
     // Each slot is nulled between destroy and create, so a failed create
     // leaves null in the slot rather than a destroyed handle a later
-    // render or teardown would use again.
+    // render or teardown would use again. An HDR lens allocates half-float
+    // targets; a plain lens the 8-bit targets, and a format change reallocates.
     for (&e.chain_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = null;
-        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+        slot.* = try makeChainTarget(width, height, hdr);
     }
     for (&e.bloom_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = null;
-        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+        slot.* = try makeChainTarget(width, height, hdr);
     }
     for (&e.edge_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = null;
-        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+        slot.* = try makeChainTarget(width, height, hdr);
     }
     e.chain_width = width;
     e.chain_height = height;
+    e.chain_hdr = hdr;
 }
 
 fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
@@ -2370,7 +2382,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // visible viewport.
     const output_width: u16 = if (s.capture_requested) capture_out_width else @intCast(r.width);
     const output_height: u16 = if (s.capture_requested) capture_out_height else @intCast(r.height);
-    try ensureChainTargets(e, width, height);
+    const lens_hdr = if (s.active_lens) |*l| l.manifest.hdr else false;
+    try ensureChainTargets(e, width, height, lens_hdr);
     const targets = [2]render.Renderer.OffscreenTarget{ e.chain_targets[0].?, e.chain_targets[1].? };
 
     var next_view_id: u8 = 1;
@@ -2475,7 +2488,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .grade => {
-                const grade = s.grade_params.get(entry.graph_index) orelse continue;
+                var grade = s.grade_params.get(entry.graph_index) orelse continue;
+                // On an HDR lens the grade keeps values above 1.0 through the
+                // chain (the free u_grade[2].w slot toggles the display clamp),
+                // so a bright pass survives into the half-float target instead
+                // of clipping; the final present clamps for the 8-bit swap chain.
+                grade[11] = if (lens_hdr) 1 else 0;
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;

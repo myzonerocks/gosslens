@@ -1421,6 +1421,11 @@ pub const Manifest = struct {
     nodes: []const Node,
     triggers: []const Trigger,
     volume: ?Volume = null,
+    /// Opt-in high-dynamic-range compositing: the color chain's intermediate
+    /// targets carry half-float precision (16F where the backend renders it,
+    /// 8-bit otherwise) and grade passes keep values above 1.0 through the
+    /// chain, clamped only at the final present. Off by default.
+    hdr: bool = false,
 
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
@@ -4347,6 +4352,13 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
             manifest.triggers = try parseTriggers(arena, diags, &path, array) orelse &.{};
         }
         path.pop(mark);
+    }
+    if (getField(root, "hdr")) |hv| {
+        if (hv == .bool) manifest.hdr = hv.bool else {
+            const mark = path.push("hdr");
+            try diags.add(path.slice(), "hdr must be a boolean", .{});
+            path.pop(mark);
+        }
     }
     if (getField(root, "volume")) |vv| {
         const mark = path.push("volume");

@@ -1240,6 +1240,12 @@ pub const Renderer = struct {
         return error.RendererUnavailable;
     }
 
+    pub fn createOffscreenTargetHdr(width: u16, height: u16) !OffscreenTarget {
+        _ = width;
+        _ = height;
+        return error.RendererUnavailable;
+    }
+
     pub fn destroyOffscreenTarget(target: OffscreenTarget) void {
         _ = target;
     }
