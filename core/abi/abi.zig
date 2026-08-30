@@ -9548,6 +9548,9 @@ const audio_ring_len: usize = 48000;
 /// The most bytes a decoded caption holds.
 const caption_max: usize = 512;
 
+/// The largest speaker embedding a diarize binding may cluster.
+const max_embed_dim: usize = 512;
+
 /// One audio.infer worker ready to run: its synchronous inference core, the
 /// output-to-parameter bindings it drives each tick, and an optional caption
 /// binding that CTC-decodes a logits tensor into recognized text.
@@ -9562,6 +9565,17 @@ const AudioWorker = struct {
     labels: [][]u8 = &.{},
     caption_buf: [caption_max]u8 = undefined,
     caption_len: usize = 0,
+    /// A diarize binding clusters an embedding output into speaker ids: the owned
+    /// speaker-index parameter, the embedding tensor and dimension, the cosine
+    /// match threshold, and a bounded set of unit-vector centroids grown to a cap.
+    has_diarize: bool = false,
+    diarize_tensor: u32 = 0,
+    diarize_threshold: f32 = 0.75,
+    diarize_param: []u8 = &.{},
+    embed_dim: u32 = 0,
+    max_speakers: u32 = 0,
+    centroids: []f32 = &.{},
+    speaker_count: u32 = 0,
 };
 
 const MlWorker = struct {
@@ -9773,6 +9787,32 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 caption_tensor = cap.tensor;
             }
         }
+        // A diarize binding allocates the speaker centroids, sized to the
+        // embedding the worker's warm-up discovered; an unusable shape leaves it
+        // driving only its parameters.
+        var has_diarize = false;
+        var diarize_tensor: u32 = 0;
+        var diarize_threshold: f32 = 0.75;
+        var diarize_param: []u8 = &.{};
+        var embed_dim: u32 = 0;
+        var max_speakers: u32 = 0;
+        var centroids: []f32 = &.{};
+        if (audio.diarize) |di| {
+            const dim = ml_infer.audioOutputLen(worker, di.embed_tensor);
+            if (dim > 0 and dim <= max_embed_dim and di.max_speakers > 0) {
+                if (gpa.alloc(f32, dim * di.max_speakers)) |c| {
+                    if (gpa.dupe(u8, di.param)) |p| {
+                        centroids = c;
+                        diarize_param = p;
+                        has_diarize = true;
+                        diarize_tensor = di.embed_tensor;
+                        diarize_threshold = di.threshold;
+                        embed_dim = @intCast(dim);
+                        max_speakers = di.max_speakers;
+                    } else |_| gpa.free(c);
+                } else |_| {}
+            }
+        }
         session.audio_workers.append(gpa, .{
             .worker = worker,
             .outputs = audio.outputs,
@@ -9780,8 +9820,17 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             .has_caption = has_caption,
             .caption_tensor = caption_tensor,
             .labels = labels,
+            .has_diarize = has_diarize,
+            .diarize_tensor = diarize_tensor,
+            .diarize_threshold = diarize_threshold,
+            .diarize_param = diarize_param,
+            .embed_dim = embed_dim,
+            .max_speakers = max_speakers,
+            .centroids = centroids,
         }) catch {
             freeCaptionLabels(gpa, labels);
+            if (centroids.len > 0) gpa.free(centroids);
+            if (diarize_param.len > 0) gpa.free(diarize_param);
             gpa.free(node_id);
             ml_infer.audioDestroy(worker);
             continue;
@@ -9862,6 +9911,52 @@ fn decodeCaption(aw: *AudioWorker, logits: []const f32) void {
     aw.caption_len = out_len;
 }
 
+/// Matches a speaker embedding to a diarize worker's centroids: normalizes it,
+/// takes the nearest centroid by cosine, and either updates that centroid (when
+/// within threshold) and returns its id, allocates a new speaker up to the cap,
+/// or reuses the nearest at the cap. Returns the speaker index.
+fn matchSpeaker(aw: *AudioWorker, emb: []const f32) u32 {
+    const dim = aw.embed_dim;
+    var norm_buf: [max_embed_dim]f32 = undefined;
+    var mag: f32 = 0;
+    for (0..dim) |i| mag += emb[i] * emb[i];
+    mag = @sqrt(mag);
+    if (!(mag > 1e-6)) return 0;
+    for (0..dim) |i| norm_buf[i] = emb[i] / mag;
+    const unit = norm_buf[0..dim];
+    var best_id: u32 = 0;
+    var best_cos: f32 = -2;
+    for (0..aw.speaker_count) |s| {
+        const c = aw.centroids[s * dim ..][0..dim];
+        var dot: f32 = 0;
+        for (0..dim) |i| dot += unit[i] * c[i];
+        if (dot > best_cos) {
+            best_cos = dot;
+            best_id = @intCast(s);
+        }
+    }
+    if (aw.speaker_count > 0 and best_cos >= aw.diarize_threshold) {
+        const c = aw.centroids[best_id * dim ..][0..dim];
+        var m: f32 = 0;
+        for (0..dim) |i| {
+            c[i] += unit[i];
+            m += c[i] * c[i];
+        }
+        m = @sqrt(m);
+        if (m > 1e-6) for (0..dim) |i| {
+            c[i] /= m;
+        };
+        return best_id;
+    }
+    if (aw.speaker_count < aw.max_speakers) {
+        const id = aw.speaker_count;
+        @memcpy(aw.centroids[id * dim ..][0..dim], unit);
+        aw.speaker_count += 1;
+        return id;
+    }
+    return best_id;
+}
+
 /// Copies the newest `out.len` samples of the microphone ring into `out` in
 /// chronological order (oldest first), zero-padding the front when the ring has
 /// not filled that far yet.
@@ -9900,16 +9995,24 @@ fn pollAudioInfer(session: *Session) void {
         if (aw.has_caption) {
             decodeCaption(aw, ml_infer.audioOutputSlice(aw.worker, aw.caption_tensor));
         }
+        if (aw.has_diarize) {
+            const emb = ml_infer.audioOutputSlice(aw.worker, aw.diarize_tensor);
+            if (aw.embed_dim > 0 and emb.len >= aw.embed_dim) {
+                lens.setParam(aw.diarize_param, @floatFromInt(matchSpeaker(aw, emb[0..aw.embed_dim])));
+            }
+        }
     }
 }
 
-/// Destroys every audio.infer worker, freeing its caption vocab and node id, and
-/// clears the list, at lens deactivation.
+/// Destroys every audio.infer worker, freeing its caption vocab, speaker
+/// centroids, and node id, and clears the list, at lens deactivation.
 fn destroyAudioWorkers(session: *Session) void {
     const gpa = session.engine.gpa;
     for (session.audio_workers.items) |aw| {
         ml_infer.audioDestroy(aw.worker);
         freeCaptionLabels(gpa, aw.labels);
+        if (aw.centroids.len > 0) gpa.free(aw.centroids);
+        if (aw.diarize_param.len > 0) gpa.free(aw.diarize_param);
         gpa.free(aw.node_id);
     }
     session.audio_workers.clearRetainingCapacity();

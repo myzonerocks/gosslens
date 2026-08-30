@@ -975,6 +975,17 @@ pub const CaptionField = struct {
     labels: []const u8,
 };
 
+/// A diarize binding on an audio.infer node: an output tensor holding a speaker
+/// embedding the engine cosine-matches against a bounded set of speaker
+/// centroids, allocating a new speaker when nothing is within `threshold` up to
+/// `max_speakers`. The matched speaker index drives `param`.
+pub const DiarizeField = struct {
+    embed_tensor: u32 = 0,
+    max_speakers: u32 = 8,
+    threshold: f32 = 0.75,
+    param: []const u8,
+};
+
 /// An audio.infer node: a bounded author model whose one input is a window of
 /// microphone PCM, the scalar output bindings it drives into parameters (the way
 /// an ml.infer node drives parameters from the camera frame), and an optional
@@ -983,6 +994,7 @@ pub const AudioField = struct {
     model: []const u8,
     outputs: []const MlOutput,
     caption: ?CaptionField = null,
+    diarize: ?DiarizeField = null,
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -3597,10 +3609,36 @@ fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
         }
         path.pop(cmark);
     }
+    var diarize: ?DiarizeField = null;
+    if (getField(object, "diarize")) |dv| {
+        const dmark = path.push("diarize");
+        if (dv != .object) {
+            try diags.add(path.slice(), "audio diarize must be an object", .{});
+        } else {
+            const param = if (getField(dv.object, "param")) |v| (try expectString(diags, path, v) orelse "") else "";
+            if (param.len == 0) {
+                try diags.add(path.slice(), "audio diarize needs a param", .{});
+            } else {
+                var field: DiarizeField = .{ .param = try arena.dupe(u8, param) };
+                if (getField(dv.object, "embed_tensor")) |v| {
+                    if (v == .integer and v.integer >= 0) field.embed_tensor = @intCast(v.integer);
+                }
+                if (getField(dv.object, "max_speakers")) |v| {
+                    if (v == .integer and v.integer > 0) field.max_speakers = @intCast(v.integer);
+                }
+                if (getField(dv.object, "threshold")) |v| {
+                    field.threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.threshold)), 0, 1);
+                }
+                diarize = field;
+            }
+        }
+        path.pop(dmark);
+    }
     return .{
         .model = try arena.dupe(u8, model),
         .outputs = try parseMlOutputs(diags, path, arena, object),
         .caption = caption,
+        .diarize = diarize,
     };
 }
 

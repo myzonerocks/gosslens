@@ -2160,6 +2160,107 @@ fn proveCaption(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// A synthetic speaker-embedding net: MatMul(window[1,4], W[4,2]) yields a
+/// two-dimensional embedding whose first axis is the window's constant energy and
+/// second its alternating energy, so a flat tone and an alternating tone map to
+/// orthogonal embeddings the diarizer reads as two speakers.
+fn buildOnnxDiarizeProbe(a: std.mem.Allocator) []const u8 {
+    const n = 4;
+    const d = 2;
+    const wv = [_]f32{ 1, 1, 1, -1, 1, 1, 1, -1 }; // [4,2] row-major: sum axis, alternating axis
+    var w: OnnxPb = .{ .a = a };
+    w.varintField(1, n);
+    w.varintField(1, d);
+    w.varintField(2, 1);
+    var raw: std.ArrayList(u8) = .empty;
+    for (wv) |v| {
+        var b: [4]u8 = undefined;
+        std.mem.writeInt(u32, &b, @bitCast(v), .little);
+        raw.appendSlice(a, &b) catch unreachable;
+    }
+    w.bytesField(9, raw.items);
+    w.bytesField(8, "W");
+    const mm = onnxNode(a, "MatMul", &.{ "x", "W" }, &.{"out"}, &.{});
+    var g: OnnxPb = .{ .a = a };
+    g.bytesField(1, mm);
+    g.bytesField(5, w.buf.items);
+    g.bytesField(11, onnxValueInfo(a, "x", &.{ 1, n }));
+    g.bytesField(11, onnxValueInfo(a, "W", &.{ n, d }));
+    g.bytesField(12, onnxValueInfo(a, "out", &.{ 1, d }));
+    var model: OnnxPb = .{ .a = a };
+    model.varintField(1, 7);
+    model.bytesField(7, g.buf.items);
+    return model.buf.items;
+}
+
+/// Writes a diarize lens: an audio.infer node whose embedding output drives a
+/// `speaker` parameter, plus the model.
+fn writeDiarizeLens(dir: []const u8, model: []const u8) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.diarize","version":"1.0.0","display_name":"Diarize","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"speaker","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"diarize":{"embed_tensor":0,"max_speakers":8,"threshold":0.75,"param":"speaker"}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/model.onnx", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Submits an audio pattern several times through the diarize lens and returns
+/// the speaker parameter it settled on.
+fn diarizeSpeaker(session: *abi.Session, engine: *abi.Engine, pattern: []const f32, ts: *i64) f32 {
+    const signals = std.mem.zeroes(abi.LensSignals);
+    for (0..6) |_| {
+        _ = abi.goss_session_submit_audio(session, pattern.ptr, @intCast(pattern.len), 48000, 1, ts.*);
+        ts.* += 1000;
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    }
+    _ = engine;
+    var value: f32 = -999;
+    _ = abi.goss_session_parameter_value(session, "speaker", "speaker".len, &value);
+    return value;
+}
+
+/// Proves speaker diarization: an audio.infer embedding output is clustered into
+/// speaker ids. A flat tone and an alternating tone map to orthogonal embeddings,
+/// so they read as two distinct speakers, and returning to the first tone reads
+/// the first speaker again, showing stable clustering.
+fn proveDiarize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxDiarizeProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/diarize/assets");
+    try writeDiarizeLens("zig-out/diarize", model);
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/diarize", "zig-out/diarize".len) != .ok) return error.ActivationFailed;
+
+    const flat = [_]f32{ 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5 };
+    const alt = [_]f32{ 0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.5, -0.5 };
+    var ts: i64 = 1000;
+    const s_flat = diarizeSpeaker(session, engine, &flat, &ts);
+    const s_alt = diarizeSpeaker(session, engine, &alt, &ts);
+    const s_flat2 = diarizeSpeaker(session, engine, &flat, &ts);
+    if (s_flat == s_alt) {
+        std.debug.print("conformance: FAIL diarize gave the two tones the same speaker ({d})\n", .{s_flat});
+        return false;
+    }
+    if (s_flat != s_flat2) {
+        std.debug.print("conformance: FAIL diarize did not return the first tone to its speaker ({d} vs {d})\n", .{ s_flat, s_flat2 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.infer diarize binding clusters embeddings into speakers: a flat tone and an alternating tone read as two distinct speakers ({d}, {d}) and the flat tone returns to its own ({d})\n", .{ s_flat, s_alt, s_flat2 });
+    return true;
+}
+
 /// Emits an ONNX net that sums the three input channels (a 1x1 conv with unit
 /// weights) then averages the plane, so its one output is the frame's mean
 /// brightness. NCHW input [1,3,8,8] exercises the core's channel transpose.
@@ -15162,6 +15263,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("audio infer");
     if (!try proveCaption(gpa, engine)) return 1;
     watchHold("audio caption");
+    if (!try proveDiarize(gpa, engine)) return 1;
+    watchHold("audio diarize");
     if (!try proveMlInferOnnx(gpa, engine)) return 1;
     watchHold("ml infer onnx");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;
