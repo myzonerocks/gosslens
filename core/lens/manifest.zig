@@ -1330,6 +1330,10 @@ pub const Node = struct {
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
+    /// A bundle-relative script asset (assets/<file>) a "script" node runs
+    /// instead of an inline source, loaded at activation. Mutually exclusive
+    /// with `script`; null when the node inlines its source.
+    script_file: ?[]const u8 = null,
 };
 
 pub const ActionKind = enum {
@@ -3636,14 +3640,19 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         }
 
         var script_source: ?[]const u8 = null;
+        var script_file: ?[]const u8 = null;
         if (std.mem.eql(u8, node_type, "script")) {
             const src_mark = path.push("source");
             if (getField(object, "source")) |src_value| {
                 if (try expectString(diags, path, src_value)) |src| {
                     script_source = try arena.dupe(u8, src);
                 }
+            } else if (getField(object, "file")) |file_value| {
+                if (try expectString(diags, path, file_value)) |f| {
+                    script_file = try arena.dupe(u8, f);
+                }
             } else {
-                try diags.add(path.slice(), "a script node needs a source", .{});
+                try diags.add(path.slice(), "a script node needs a source or a file", .{});
             }
             path.pop(src_mark);
         }
@@ -3718,6 +3727,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .text = text_field,
             .video = video_field,
             .script = script_source,
+            .script_file = script_file,
         });
     }
     return try out.toOwnedSlice(arena);

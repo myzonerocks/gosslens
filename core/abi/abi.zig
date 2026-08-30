@@ -8732,6 +8732,21 @@ fn teardownScript(s: *Session) void {
     s.script_param_names = &.{};
 }
 
+/// Loads a script node's bundled asset (assets/<file>) and compiles it, for a
+/// lens that ships its script as a file instead of inlining the source. Runs
+/// only when a node named a file and nothing compiled inline; a missing or
+/// oversize file leaves the lens scriptless, the standard capability degrade.
+fn loadScriptFile(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    if (s.script_engine != null) return;
+    const lens = if (s.active_lens) |*l| l else return;
+    const file = lens.scriptFile() orelse return;
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, file }) catch return;
+    defer gpa.free(path);
+    const src = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(256 * 1024)) catch return;
+    defer gpa.free(src);
+    setupScriptFromSource(s, src);
+}
+
 /// Fires one named script handler outside the per-tick path, used for the
 /// lifecycle events. signals is null for a zeroed signal set; the current
 /// lens parameters go in and whatever the handler writes flows back.
@@ -8756,6 +8771,22 @@ fn fireScriptEvent(s: *Session, engine: *script.Script, handler: [*:0]const u8, 
 fn setupScript(s: *Session) void {
     const lens = if (s.active_lens) |*l| l else return;
     const src = lens.scriptSource() orelse return;
+    setupScriptFromSource(s, src);
+}
+
+/// Compiles a script source (inline or a bundled asset) into the session's
+/// script engine and captures the parameter names it drives. The source is only
+/// read during compile, so the caller may free it after; a second setup replaces
+/// the first, so a bundle file supersedes an absent inline source, no leak.
+fn setupScriptFromSource(s: *Session, src: []const u8) void {
+    const lens = if (s.active_lens) |*l| l else return;
+    if (s.script_engine) |*prev| {
+        prev.destroy();
+        s.script_engine = null;
+        for (s.script_param_names) |n| s.engine.gpa.free(n);
+        s.engine.gpa.free(s.script_param_names);
+        s.script_param_names = &.{};
+    }
     var engine = script.Script.create(src, script_fuel_per_tick) catch return;
     const params = lens.manifest.parameters;
     const names = s.engine.gpa.alloc([:0]const u8, params.len) catch {
@@ -12412,6 +12443,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     const manifest_json = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), manifest_path, gpa, .limited(manifest.max_manifest_bytes + 1));
     defer gpa.free(manifest_json);
     try activateLens(session, gpa, manifest_json);
+    loadScriptFile(session, gpa, bundle_path);
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
     try createBlendLoaders(session, gpa, bundle_path);

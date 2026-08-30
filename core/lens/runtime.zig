@@ -1726,6 +1726,15 @@ pub const Lens = struct {
         return null;
     }
 
+    /// The bundle-relative script asset a script node names instead of inlining
+    /// its source, so activation loads and compiles it from the bundle.
+    pub fn scriptFile(self: *const Lens) ?[]const u8 {
+        for (self.manifest.nodes) |node| {
+            if (node.script_file) |f| return f;
+        }
+        return null;
+    }
+
     /// Sets a live parameter by name, clamped to its declared range. Silent
     /// no-op for an unknown name, the same tolerance a trigger action takes.
     pub fn setParam(self: *Lens, name: []const u8, value: f32) void {

@@ -936,8 +936,12 @@ for the camera base's blend. The app still supplies the source media; the lens
 only arranges it. The node configures the composite at the head of the chain, so
 it never draws as a chain pass, and the arrangement clears when the lens changes.
 
-A `"script"` node carries an inline `"source"` string of JavaScript that
-defines a global `update(lens)` function. It draws nothing and never joins
+A `"script"` node carries JavaScript that defines a global `update(lens)`
+function, either inline as a `"source"` string or, for a script too large to
+sit in the manifest comfortably, as `"file": "<name>.js"` naming a bundled
+`assets/<name>.js` the host loads and compiles at activation. The two forms
+are mutually exclusive and produce the same lens; a node needs exactly one. It
+draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
 and ramps, exposing the current signals as `lens.signals.<name>` (read) and
 the lens parameters as `lens.params.<name>` (read and write). The signal

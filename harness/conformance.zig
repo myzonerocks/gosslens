@@ -7064,6 +7064,70 @@ fn proveScript(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a script node can ship its source as a bundled asset instead of
+/// inlining it: the manifest names "file":"drive.js", activation loads and
+/// compiles assets/drive.js, and it drives the parameter the same way the
+/// inline form does - bit-stable across ticks.
+fn proveScriptFile(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const dir = "zig-out/script-file";
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.script-file","version":"1.0.0","display_name":"Script File","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"drive","type":"script","params":{},"file":"drive.js"}],
+        \\ "triggers":[]}
+    ;
+    const script_src = "function update(lens) { lens.params.intensity = lens.signals.face_present > 0.5 ? 0.8 : 0.2; }";
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/script-file/assets");
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/drive.js", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = script_src });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+        std.debug.print("conformance: FAIL script-file lens activation\n", .{});
+        return false;
+    }
+
+    const name = "intensity";
+    var present = std.mem.zeroes(abi.LensSignals);
+    present.has_face = true;
+    const absent = std.mem.zeroes(abi.LensSignals);
+
+    var v_present: f32 = -1;
+    var v_absent: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &present);
+    if (abi.goss_session_parameter_value(session, name.ptr, name.len, &v_present) != .ok) {
+        std.debug.print("conformance: FAIL reading the file-script parameter\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_tick_lens(session, 16000, &absent);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_absent);
+
+    if (@abs(v_present - 0.8) > 1e-6 or @abs(v_absent - 0.2) > 1e-6) {
+        std.debug.print("conformance: FAIL bundled script drove intensity to {d}/{d}, wanted 0.8/0.2\n", .{ v_present, v_absent });
+        return false;
+    }
+
+    var v_again: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &present);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_again);
+    if (v_again != v_present) {
+        std.debug.print("conformance: FAIL bundled script is not deterministic ({d} vs {d})\n", .{ v_again, v_present });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a script node loads its source from a bundled assets/*.js and drives a parameter deterministically (0.8 present, 0.2 absent)\n", .{});
+    return true;
+}
+
 /// Proves lens audio: a play_sound trigger starts a voice that the mixer
 /// pulls out as PCM, silent before the trigger, non-silent after, and
 /// bit-identical across two runs of the same sequence.
@@ -17678,6 +17742,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("compile prompt");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
+    if (!try proveScriptFile(gpa, engine)) return 1;
+    watchHold("script-file");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;
