@@ -7183,6 +7183,91 @@ fn proveLogicGraphMath(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a script carries persistent state across ticks with no engine
+/// feature beyond its context outliving the frame: a ring buffer of the last
+/// four signal samples and an entity-component table both evolve tick to tick
+/// and drive parameters, identically across two fresh runs of the sequence.
+fn proveScriptState(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const dir = "zig-out/script-state";
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.script-state","version":"1.0.0","display_name":"Script State","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"window","type":"float","default":0.0,"min":0.0,"max":1.0},
+        \\               {"name":"alive","type":"float","default":0.0,"min":0.0,"max":1.0},
+        \\               {"name":"drift","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"drive","type":"script","params":{},"file":"state.js"}],
+        \\ "triggers":[]}
+    ;
+    const script_src =
+        \\var buf = [];
+        \\var ents = null;
+        \\function update(lens) {
+        \\  if (ents === null) { ents = []; for (var i = 0; i < 3; i++) ents.push({ ttl: 3, vy: 0.1 * (i + 1) }); }
+        \\  buf.push(lens.signals.face_present);
+        \\  if (buf.length > 4) buf.shift();
+        \\  var sum = 0; for (var i = 0; i < buf.length; i++) sum += buf[i];
+        \\  lens.params.window = sum / 4;
+        \\  var alive = 0, drift = 0;
+        \\  for (var i = 0; i < ents.length; i++) { var e = ents[i]; if (e.ttl > 0) { e.ttl -= 1; alive += 1; drift += e.vy; } }
+        \\  lens.params.alive = alive / 8;
+        \\  lens.params.drift = drift;
+        \\}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/script-state/assets");
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/state.js", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = script_src });
+
+    var present = std.mem.zeroes(abi.LensSignals);
+    present.has_face = true;
+
+    // Two fresh runs of four face-present ticks. The window rolls up
+    // 0.25 -> 0.5 -> 0.75 -> 1.0 (ring buffer), and the entities' ttl runs out
+    // by the fourth tick (alive 0.375 -> 0, drift 0.6 -> 0); both must match.
+    var runs: [2][3]f32 = undefined;
+    var first: [3]f32 = undefined;
+    for (0..2) |run| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+            std.debug.print("conformance: FAIL script-state lens activation\n", .{});
+            return false;
+        }
+        for (0..4) |tick| {
+            _ = abi.goss_session_tick_lens(session, 16000, &present);
+            if (tick == 0) {
+                _ = abi.goss_session_parameter_value(session, "window", "window".len, &first[0]);
+                _ = abi.goss_session_parameter_value(session, "alive", "alive".len, &first[1]);
+                _ = abi.goss_session_parameter_value(session, "drift", "drift".len, &first[2]);
+            }
+        }
+        _ = abi.goss_session_parameter_value(session, "window", "window".len, &runs[run][0]);
+        _ = abi.goss_session_parameter_value(session, "alive", "alive".len, &runs[run][1]);
+        _ = abi.goss_session_parameter_value(session, "drift", "drift".len, &runs[run][2]);
+    }
+
+    if (@abs(first[0] - 0.25) > 1e-6 or @abs(first[1] - 0.375) > 1e-6 or @abs(first[2] - 0.6) > 1e-4) {
+        std.debug.print("conformance: FAIL first tick state window {d} alive {d} drift {d}\n", .{ first[0], first[1], first[2] });
+        return false;
+    }
+    if (@abs(runs[0][0] - 1.0) > 1e-6 or @abs(runs[0][1]) > 1e-6 or @abs(runs[0][2]) > 1e-6) {
+        std.debug.print("conformance: FAIL fourth tick state window {d} alive {d} drift {d}\n", .{ runs[0][0], runs[0][1], runs[0][2] });
+        return false;
+    }
+    if (runs[0][0] != runs[1][0] or runs[0][1] != runs[1][1] or runs[0][2] != runs[1][2]) {
+        std.debug.print("conformance: FAIL script state is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a script carries a ring buffer and an entity-component table across ticks, driving parameters deterministically\n", .{});
+    return true;
+}
+
 /// Proves lens audio: a play_sound trigger starts a voice that the mixer
 /// pulls out as PCM, silent before the trigger, non-silent after, and
 /// bit-identical across two runs of the same sequence.
@@ -17801,6 +17886,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("script-file");
     if (!try proveLogicGraphMath(gpa, engine)) return 1;
     watchHold("logic-math");
+    if (!try proveScriptState(gpa, engine)) return 1;
+    watchHold("script-state");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;
