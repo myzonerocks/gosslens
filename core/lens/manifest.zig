@@ -1085,6 +1085,14 @@ pub const AudioField = struct {
     dub: ?DubField = null,
 };
 
+/// An audio.enhance node's microphone cleanup: `strength` (0..1) how far a
+/// deterministic noise reduction pulls the high-frequency hiss and the near
+/// silent noise floor out of the outgoing microphone track, applied in the
+/// output mix. Zero leaves the mic untouched.
+pub const AudioEnhanceField = struct {
+    strength: f32 = 1,
+};
+
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
 /// VAE encoder, a UNet, a VAE decoder), an optional precomputed text embedding
 /// the UNet conditions on, the sprite the restyled frame draws through, and the
@@ -1157,6 +1165,8 @@ pub const Node = struct {
     temporal: ?TemporalField = null,
     /// Set on an audio.infer node: the microphone model slot.
     audio: ?AudioField = null,
+    /// Set on an audio.enhance node: its microphone noise-reduction strength.
+    audio_enhance: ?AudioEnhanceField = null,
     diffusion: ?DiffusionField = null,
     /// Set on a splat.cloud node: the model that lifts the frame to a point cloud.
     splat: ?SplatField = null,
@@ -3499,6 +3509,16 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(temporal_mark);
         }
+        var audio_enhance_field: ?AudioEnhanceField = null;
+        if (std.mem.eql(u8, node_type, "audio.enhance")) {
+            var field: AudioEnhanceField = .{};
+            if (getField(object, "enhance")) |ev| {
+                if (ev == .object) {
+                    if (getField(ev.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                }
+            }
+            audio_enhance_field = field;
+        }
         var diffusion_field: ?DiffusionField = null;
         if (getField(object, "diffusion")) |dv| {
             const diff_mark = path.push("diffusion");
@@ -3569,6 +3589,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .ml = ml_field,
             .temporal = temporal_field,
             .audio = audio_field,
+            .audio_enhance = audio_enhance_field,
             .diffusion = diffusion_field,
             .splat = splat_field,
             .body_anchor = body_anchor,

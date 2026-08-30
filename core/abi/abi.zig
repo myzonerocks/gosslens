@@ -670,6 +670,11 @@ pub const Session = struct {
     /// node then synthesizes its decoded text to speech and plays it into the
     /// lens mixer. Off by default, since a dub speaks over the room.
     dubbing_enabled: bool = false,
+    /// An active audio.enhance node's noise-reduction strength (0 when none), and
+    /// the per-channel low-pass state the output mix carries across chunks so the
+    /// microphone cleanup is continuous. Resolved at activation.
+    audio_enhance_strength: f32 = 0,
+    audio_enhance_lp: [8]f32 = @splat(0),
     /// The diffusion restyle workers an active lens's diffusion nodes drive,
     /// each drawing its decoded frame through a sprite; built from the bundle at
     /// activation, fed the camera frame, uploaded to their sprite each render.
@@ -8172,6 +8177,7 @@ fn destroyBlendState(session: *Session) void {
     session.inpaint_params.clearRetainingCapacity();
     session.rolling_params.clearRetainingCapacity();
     session.auto_frame_valid = false;
+    session.audio_enhance_strength = 0;
     session.wants_person_mask = false;
     session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
@@ -8740,6 +8746,7 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
     // bounded chunk at a time, then sum with the mic. A missing mixer (no lens
     // sound) mixes silence, so the outgoing track is the mic alone.
     var lens_chunk: [1024]i16 = undefined;
+    var enhanced_buf: [1024 * 8]f32 = undefined;
     var done: u32 = 0;
     while (done < frame_count) {
         const n = @min(@as(u32, lens_chunk.len), frame_count - done);
@@ -8756,7 +8763,15 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
         }
         const base = @as(usize, done) * channels;
         const span = @as(usize, n) * channels;
-        const mic_chunk: ?[]const f32 = if (mic_slice) |m| m[base .. base + span] else null;
+        // An active audio.enhance node cleans the mic chunk before it is summed
+        // with the lens voices; with none the raw mic passes straight through.
+        const mic_chunk: ?[]const f32 = blk: {
+            const raw = if (mic_slice) |m| m[base .. base + span] else break :blk null;
+            if (s.audio_enhance_strength <= 0) break :blk raw;
+            @memcpy(enhanced_buf[0..span], raw);
+            enhanceMic(s, enhanced_buf[0..span], n, channels);
+            break :blk enhanced_buf[0..span];
+        };
         audio_mix.combine(lens, mic_chunk, out_slice[base .. base + span], n, channels);
         done += n;
     }
@@ -10306,6 +10321,41 @@ fn pollMlOutputs(session: *Session) void {
 /// model, holding the node's output-to-parameter bindings. Best-effort per node,
 /// and counted against the shared heavy-worker budget so the mic rail cannot
 /// oversubscribe the device either.
+/// Resolves the active lens's audio.enhance node into the session, so the output
+/// mix cleans the microphone. The strongest node wins if a lens spliced more than
+/// one; none leaves the strength at zero and the mic untouched.
+fn resolveAudioEnhance(session: *Session) void {
+    session.audio_enhance_strength = 0;
+    session.audio_enhance_lp = @splat(0);
+    const lens = if (session.active_lens) |*l| l else return;
+    for (lens.manifest.nodes) |node| {
+        if (node.audio_enhance) |ae| {
+            if (ae.strength > session.audio_enhance_strength) session.audio_enhance_strength = ae.strength;
+        }
+    }
+}
+
+/// Cleans one interleaved output chunk's microphone samples in place: a one-pole
+/// low-pass carried per channel across chunks pulls the high-frequency hiss down,
+/// and a soft gate eases the near-silent noise floor toward zero, blended in by
+/// the enhance strength so zero is the raw mic.
+fn enhanceMic(session: *Session, mic: []f32, frame_count: u32, channels: u32) void {
+    const strength = session.audio_enhance_strength;
+    if (strength <= 0) return;
+    const alpha: f32 = 0.35;
+    const gate: f32 = 0.02;
+    for (0..frame_count) |f| {
+        for (0..channels) |c| {
+            const idx = f * channels + c;
+            const x = mic[idx];
+            session.audio_enhance_lp[c] += alpha * (x - session.audio_enhance_lp[c]);
+            var cleaned = session.audio_enhance_lp[c];
+            if (@abs(cleaned) < gate) cleaned *= @abs(cleaned) / gate;
+            mic[idx] = x + (cleaned - x) * strength;
+        }
+    }
+}
+
 fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
     const lens = if (session.active_lens) |*l| l else return;
     const io = defaultIo();
@@ -11696,6 +11746,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     createMlLoaders(session, gpa, bundle_path);
     createTemporalLoaders(session, gpa, bundle_path);
     createAudioLoaders(session, gpa, bundle_path);
+    resolveAudioEnhance(session);
     createDiffusionLoaders(session, gpa, bundle_path);
     createSplatLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);

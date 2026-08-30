@@ -1042,6 +1042,14 @@ the model, synthesizes the output PCM to speech, and plays it into the lens mixe
 at `rate`, so the audio the SDK pulls carries the voice-over. Dubbing is off by
 default, since a dub speaks over the room.
 
+An `"audio.enhance"` node cleans the outgoing microphone. Like the other audio
+nodes it draws nothing; it carries an `"enhance": {"strength"}` block (0..1,
+default 1). When one is active, the output mix runs a deterministic noise
+reduction over the microphone before it is summed with the lens voices, a
+one-pole low-pass that pulls the high-frequency hiss down and a soft gate that
+eases the near-silent noise floor toward zero, blended in by `strength` so zero
+leaves the mic untouched. It needs no model.
+
 An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
 that binds a whole output tensor as a segmentation mask. The tensor is read as
 a square single-channel image, resampled to the engine's mask resolution, and
@@ -1470,6 +1478,8 @@ a temporal.fuse interpolate net blends two frames by the authored phase, a low
 phase reading toward the first frame and a high phase toward the second;
 a temporal.fuse hdr net merges an exposure bracket submitted through the
 frame-bracket op to its mean, holding off until the whole bracket lands;
+an audio.enhance node cleans the outgoing microphone, a tone buried under
+per-sample hiss losing its high-frequency step energy while a control holds;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

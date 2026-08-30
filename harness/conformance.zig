@@ -5155,6 +5155,87 @@ fn proveTemporalHdr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeAudioEnhanceLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.audio-enhance","version":"1.0.0","display_name":"Audio Enhance","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"clean","type":"audio.enhance","params":{{}},"enhance":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Mixes a mic buffer through an audio.enhance lens (no lens sound, so the output
+/// is the cleaned mic) and returns the i16 output track.
+fn captureMixOutput(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, mic: []const f32, sample_rate: u32) ![]i16 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const out = try gpa.alloc(i16, mic.len);
+    errdefer gpa.free(out);
+    if (abi.goss_session_mix_output_audio(session, mic.ptr, out.ptr, @intCast(mic.len), sample_rate, 1) != .ok) return error.MixFailed;
+    return out;
+}
+
+/// The total variation of an i16 track (the sum of absolute sample-to-sample
+/// steps), a proxy for its high-frequency energy: a hiss-laden signal steps hard
+/// every sample, a low-passed one steps gently.
+fn stepEnergy(track: []const i16) u64 {
+    var sum: u64 = 0;
+    for (1..track.len) |i| {
+        const d = @as(i32, track[i]) - @as(i32, track[i - 1]);
+        sum += @abs(d);
+    }
+    return sum;
+}
+
+/// Proves microphone noise suppression: a 500 Hz tone buried under a per-sample
+/// high-frequency hiss. An audio.enhance node low-passes the outgoing mic so the
+/// hiss (its high-frequency energy) drops sharply, while a strength-0 control
+/// passes the raw mic straight through.
+fn proveAudioDenoise(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sample_rate: u32 = 48000;
+    const n: usize = 4800;
+    const mic = try gpa.alloc(f32, n);
+    defer gpa.free(mic);
+    for (0..n) |i| {
+        const t = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sample_rate));
+        const tone = 0.3 * @sin(2.0 * std.math.pi * 500.0 * t);
+        const hiss: f32 = if (i % 2 == 0) 0.35 else -0.35;
+        mic[i] = tone + hiss;
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-enh-0");
+    try writeAudioEnhanceLens("zig-out/audio-enh-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-enh-1");
+    try writeAudioEnhanceLens("zig-out/audio-enh-1", 1.0);
+
+    const raw = try captureMixOutput(gpa, engine, "zig-out/audio-enh-0", mic, sample_rate);
+    defer gpa.free(raw);
+    const cleaned = try captureMixOutput(gpa, engine, "zig-out/audio-enh-1", mic, sample_rate);
+    defer gpa.free(cleaned);
+
+    const tv_raw = stepEnergy(raw);
+    const tv_clean = stepEnergy(cleaned);
+    if (!(tv_raw > 0)) {
+        std.debug.print("conformance: FAIL the audio-enhance test mic had no high-frequency energy\n", .{});
+        return false;
+    }
+    // The hiss carries most of the raw signal's step energy; the low-pass cuts it
+    // to well under half.
+    if (!(tv_clean * 2 < tv_raw)) {
+        std.debug.print("conformance: FAIL audio.enhance did not suppress the mic hiss (step energy {d} -> {d})\n", .{ tv_raw, tv_clean });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.enhance node cleans the outgoing microphone: a tone buried under per-sample hiss loses its high-frequency step energy ({d} -> {d}) while a strength-0 control passes the raw mic through\n", .{ tv_raw, tv_clean });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -16591,6 +16672,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("temporal interpolate");
     if (!try proveTemporalHdr(gpa, engine)) return 1;
     watchHold("temporal hdr");
+    if (!try proveAudioDenoise(gpa, engine)) return 1;
+    watchHold("audio enhance");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
