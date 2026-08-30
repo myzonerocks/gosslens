@@ -1470,6 +1470,16 @@ export class GossSession {
     return out;
   }
 
+  /// The stable track id of the index-th face, an integer that stays with the
+  /// same person across frames as the submission order shuffles, or null once
+  /// index reaches faceCount.
+  faceTrackId(index: number): number | null {
+    const ptr = this.scratch(4);
+    const status = this.mod.ccall("goss_session_face_track_id", "number", ["number", "number", "number"], [this.handle, index, ptr]) as number;
+    if (status !== 0) return null;
+    return this.mod.HEAPU32[ptr >> 2]!;
+  }
+
   /// Submits the bodies tracked this frame for the multi-person path, so a
   /// lens can instance effects across every body. An empty array clears the
   /// path; bodies past GOSS_BODY_MAX are ignored.

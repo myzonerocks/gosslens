@@ -535,6 +535,14 @@ export fn Java_com_gosslens_Gosslens_nativeFaceResultAt(env: *JniEnv, cls: jobje
     return @intFromEnum(abi.goss_session_face_result_at(sessionFromHandle(session), @intCast(@max(index, 0)), result));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeFaceTrackId(env: *JniEnv, cls: jobject, session: i64, index: i32) i32 {
+    _ = env;
+    _ = cls;
+    var id: u32 = 0;
+    if (abi.goss_session_face_track_id(sessionFromHandle(session), @intCast(@max(index, 0)), &id) != .ok) return -1;
+    return @intCast(id);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSubmitBodies(env: *JniEnv, cls: jobject, session: i64, bodies_buffer: jobject, count: i32) i32 {
     _ = cls;
     if (count == 0) return @intFromEnum(abi.goss_session_submit_bodies(sessionFromHandle(session), null, 0));

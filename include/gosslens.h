@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 69u
+#define GOSS_ABI_MINOR 70u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -573,6 +573,12 @@ goss_status goss_session_face_count(goss_session *session, uint32_t *out_count);
  * GOSS_ERROR_INVALID_ARGUMENT once index reaches the face count, so a
  * caller loops zero to the count to visit every face. */
 goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result);
+
+/* Graph thread. Reads the stable track id of the index-th face, an integer
+ * that stays with the same person across frames as the submission order
+ * shuffles, refreshed each tick. GOSS_ERROR_INVALID_ARGUMENT once index
+ * reaches the face count. */
+goss_status goss_session_face_track_id(goss_session *session, uint32_t index, uint32_t *out_id);
 
 /* Graph thread. Submits the bodies tracked this frame for the multi-person
  * path. count past GOSS_BODY_MAX is clamped; zero clears the path. Bodies

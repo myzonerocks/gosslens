@@ -209,6 +209,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count)",
     "goss_status goss_session_face_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result)",
+    "goss_status goss_session_face_track_id(goss_session *session, uint32_t index, uint32_t *out_id)",
     "goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count)",
     "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
@@ -821,6 +822,15 @@ pub const Session = struct {
     /// the anchor render, so a one-face lens never regresses.
     face_results: [face.max_faces]face.Result = @splat(std.mem.zeroes(face.Result)),
     face_count: u32 = 0,
+    /// A stable identity per current face slot, carried across frames by
+    /// nearest-centroid association so a host follows one person through a
+    /// crowd even as the submission order shuffles. The previous frame's
+    /// centroids and ids feed the match; an unmatched face takes a fresh id.
+    face_track_ids: [face.max_faces]u32 = @splat(0),
+    face_prev_centroids: [face.max_faces][2]f32 = @splat(.{ 0, 0 }),
+    face_prev_ids: [face.max_faces]u32 = @splat(0),
+    face_prev_count: u32 = 0,
+    next_face_track_id: u32 = 0,
     body_results: [pose.max_bodies]pose.Result = @splat(std.mem.zeroes(pose.Result)),
     body_count: u32 = 0,
     /// The most recent host-submitted depth map (metres per pixel, row
@@ -7161,6 +7171,18 @@ pub export fn goss_session_face_result_at(session: ?*Session, index: u32, out_re
     const out = out_result orelse return .invalid_argument;
     if (index >= s.face_count) return .invalid_argument;
     out.* = s.face_results[index];
+    return .ok;
+}
+
+/// Reads the stable track id of the index-th face, an integer that stays with
+/// the same person across frames even as the submission order shuffles, so a
+/// host can keep an effect on one face in a crowd. The ids are refreshed each
+/// tick; invalid_argument once index reaches face_count.
+pub export fn goss_session_face_track_id(session: ?*Session, index: u32, out_id: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_id orelse return .invalid_argument;
+    if (index >= s.face_count) return .invalid_argument;
+    out.* = s.face_track_ids[index];
     return .ok;
 }
 
@@ -13569,6 +13591,94 @@ fn volumeContains(vol: manifest.Volume, p: [3]f32) bool {
     return @abs(dx) <= vol.half[0] and @abs(dy) <= vol.half[1] and @abs(dz) <= vol.half[2];
 }
 
+/// The mean of a face's landmarks, a stable centre for cross-frame tracking.
+fn faceCentroid(result: *const face.Result) [2]f32 {
+    var sx: f32 = 0;
+    var sy: f32 = 0;
+    const n = result.landmark_count_out;
+    if (n == 0) return .{ 0, 0 };
+    for (0..n) |i| {
+        sx += result.landmarks[i * 3];
+        sy += result.landmarks[i * 3 + 1];
+    }
+    const inv = 1.0 / @as(f32, @floatFromInt(n));
+    return .{ sx * inv, sy * inv };
+}
+
+/// Assigns each current face a stable id by matching it to the nearest face of
+/// the previous frame within `threshold2` (squared distance), smallest gap
+/// first so a swap in submission order still follows position. A face that
+/// matches none takes the next fresh id. Returns the advanced id counter.
+fn associateFaceIds(
+    prev_c: []const [2]f32,
+    prev_ids: []const u32,
+    cur_c: []const [2]f32,
+    threshold2: f32,
+    next_id_in: u32,
+    out_ids: []u32,
+) u32 {
+    var next_id = next_id_in;
+    var prev_taken: [face.max_faces]bool = @splat(false);
+    var cur_matched: [face.max_faces]bool = @splat(false);
+    // Greedy: bind the closest still-free pair under the threshold, repeat.
+    while (true) {
+        var best_d: f32 = threshold2;
+        var best_c: ?usize = null;
+        var best_p: ?usize = null;
+        for (cur_c, 0..) |cc, ci| {
+            if (cur_matched[ci]) continue;
+            for (prev_c, 0..) |pc, pi| {
+                if (prev_taken[pi]) continue;
+                const dx = cc[0] - pc[0];
+                const dy = cc[1] - pc[1];
+                const d2 = dx * dx + dy * dy;
+                if (d2 < best_d) {
+                    best_d = d2;
+                    best_c = ci;
+                    best_p = pi;
+                }
+            }
+        }
+        const ci = best_c orelse break;
+        const pi = best_p.?;
+        out_ids[ci] = prev_ids[pi];
+        cur_matched[ci] = true;
+        prev_taken[pi] = true;
+    }
+    for (cur_c, 0..) |_, ci| {
+        if (!cur_matched[ci]) {
+            out_ids[ci] = next_id;
+            next_id += 1;
+        }
+    }
+    return next_id;
+}
+
+/// Refreshes the per-face stable ids for the frame and stores this frame's
+/// centroids as next frame's reference. The match threshold is a quarter of
+/// the frame width, so a face has to leap most of the frame to be read as new.
+fn updateFaceTrackIds(s: *Session) void {
+    const n = @min(s.face_count, face.max_faces);
+    var cur_c: [face.max_faces][2]f32 = @splat(.{ 0, 0 });
+    for (0..n) |i| cur_c[i] = faceCentroid(&s.face_results[i]);
+    const frame_w: f32 = if (s.current) |cf| @floatFromInt(cf.desc.width) else 1280.0;
+    const reach = frame_w * 0.25;
+    const threshold2 = reach * reach;
+    s.next_face_track_id = associateFaceIds(
+        s.face_prev_centroids[0..s.face_prev_count],
+        s.face_prev_ids[0..s.face_prev_count],
+        cur_c[0..n],
+        threshold2,
+        s.next_face_track_id,
+        s.face_track_ids[0..n],
+    );
+    for (0..n) |i| {
+        s.face_prev_centroids[i] = cur_c[i];
+        s.face_prev_ids[i] = s.face_track_ids[i];
+    }
+    s.face_prev_count = n;
+}
+
 const SphereMesh = struct {
     verts: [][3]f32,
     indices: []u32,
@@ -13676,6 +13786,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         s.cam_exposure_pulse = false;
         return .again;
     }
+    updateFaceTrackIds(s);
     // Borrowed from the lens's own activation-sized storage, valid
     // until the next tick - nothing to free, nothing allocated.
     var live_signals = toTriggerSignals(sig);
@@ -13797,6 +13908,37 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
 }
 
 const t = std.testing;
+
+test "face track ids follow position across a submission-order swap" {
+    const threshold2: f32 = 0.25 * 0.25;
+    // First frame: two faces, left and right, both fresh.
+    const left: [2]f32 = .{ 0.2, 0.5 };
+    const right: [2]f32 = .{ 0.8, 0.5 };
+    var ids: [2]u32 = undefined;
+    var next = associateFaceIds(&.{}, &.{}, &.{ left, right }, threshold2, 0, &ids);
+    try t.expectEqual(@as(u32, 0), ids[0]);
+    try t.expectEqual(@as(u32, 1), ids[1]);
+    try t.expectEqual(@as(u32, 2), next);
+
+    // Second frame submits the same two faces in the opposite slot order, each
+    // nudged slightly. The ids follow position, so the swap is undone: slot 0
+    // (now the right face) reads id 1 and slot 1 (the left) reads id 0.
+    const prev_c = [_][2]f32{ left, right };
+    const prev_ids = [_]u32{ 0, 1 };
+    const right2: [2]f32 = .{ 0.82, 0.52 };
+    const left2: [2]f32 = .{ 0.18, 0.48 };
+    next = associateFaceIds(&prev_c, &prev_ids, &.{ right2, left2 }, threshold2, next, &ids);
+    try t.expectEqual(@as(u32, 1), ids[0]);
+    try t.expectEqual(@as(u32, 0), ids[1]);
+    try t.expectEqual(@as(u32, 2), next);
+
+    // A face that leaps beyond the threshold is a new person, not a match.
+    var one_id: [1]u32 = undefined;
+    const far: [2]f32 = .{ 0.5, 0.5 };
+    const jumped = associateFaceIds(&.{far}, &.{7}, &.{.{ 0.95, 0.95 }}, threshold2, 8, &one_id);
+    try t.expectEqual(@as(u32, 8), one_id[0]);
+    try t.expectEqual(@as(u32, 9), jumped);
+}
 
 test "alloc and free round-trip through the abi allocator" {
     const p = goss_alloc(64) orelse return error.TestUnexpectedResult;

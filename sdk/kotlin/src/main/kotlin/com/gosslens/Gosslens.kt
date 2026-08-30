@@ -102,6 +102,7 @@ object Gosslens {
     internal external fun nativeSubmitFaces(session: Long, faces: ByteBuffer, count: Int): Int
     internal external fun nativeFaceCount(session: Long): Int
     internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
+    internal external fun nativeFaceTrackId(session: Long, index: Int): Int
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
@@ -1062,6 +1063,14 @@ class GossSession private constructor(
         if (Gosslens.nativeFaceResultAt(handle, index, result.buffer) != 0) return false
         result.parse()
         return true
+    }
+
+    /** The stable track id of the index-th face, an integer that stays with the
+     * same person across frames as the submission order shuffles, or null once
+     * index reaches faceCount. */
+    fun faceTrackId(index: Int): Int? {
+        val id = Gosslens.nativeFaceTrackId(handle, index)
+        return if (id < 0) null else id
     }
 
     /** Submits the bodies tracked this frame for the multi-person path, so a

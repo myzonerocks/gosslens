@@ -169,6 +169,15 @@ public final class GossSession: @unchecked Sendable {
         return ok ? out : nil
     }
 
+    /// The stable track id of the index-th face, an integer that stays with the
+    /// same person across frames as the submission order shuffles, or nil once
+    /// index reaches the face count.
+    public func faceTrackId(index: UInt32) -> UInt32? {
+        var out: UInt32 = 0
+        let ok = goss_session_face_track_id(handle, index, &out) == GOSS_OK
+        return ok ? out : nil
+    }
+
     /// Stands the segmentation worker up from a raw selfie or hair segmenter
     /// .tflite model (not bundled the way a face_landmarker.task is). The
     /// bytes are copied; the caller may release them on return. Throws
