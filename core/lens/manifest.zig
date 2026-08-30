@@ -1151,7 +1151,7 @@ pub const SplatPlacement = enum { overlay, background, portal };
 /// Where a splat.cloud's model reads its input. `camera` lifts the live frame
 /// each tick; `selfie` runs once on a still submitted through the ABI, so a
 /// photoreal avatar is generated from one photo and then held.
-pub const SplatSource = enum { camera, selfie };
+pub const SplatSource = enum { camera, selfie, reconstruction };
 
 pub const SplatField = struct {
     /// A splat.cloud node lifts a frame into 3D with a bundled model. `source`
@@ -3811,15 +3811,17 @@ fn parseDiffusionField(diags: *Diagnostics, path: *PathStack, arena: std.mem.All
 
 fn parseSplatField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?SplatField {
     const model = if (getField(object, "model")) |v| (try expectString(diags, path, v) orelse "") else "";
-    if (model.len == 0) {
-        try diags.add(path.slice(), "splat needs a model file", .{});
-        return null;
-    }
     var field: SplatField = .{ .model = try arena.dupe(u8, model) };
     if (getField(object, "source")) |v| {
         if (try expectString(diags, path, v)) |name| {
-            if (std.mem.eql(u8, name, "camera")) field.source = .camera else if (std.mem.eql(u8, name, "selfie")) field.source = .selfie else try diags.add(path.slice(), "splat source is 'camera' or 'selfie', found '{s}'", .{name});
+            if (std.mem.eql(u8, name, "camera")) field.source = .camera else if (std.mem.eql(u8, name, "selfie")) field.source = .selfie else if (std.mem.eql(u8, name, "reconstruction")) field.source = .reconstruction else try diags.add(path.slice(), "splat source is 'camera', 'selfie', or 'reconstruction', found '{s}'", .{name});
         }
+    }
+    // A reconstruction cloud draws the session's guided-capture gaussians and needs
+    // no model; every other source runs a bundled model.
+    if (field.source != .reconstruction and model.len == 0) {
+        try diags.add(path.slice(), "splat needs a model file", .{});
+        return null;
     }
     if (getField(object, "draw")) |v| {
         if (try expectString(diags, path, v)) |name| {

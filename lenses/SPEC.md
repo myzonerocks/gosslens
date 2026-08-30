@@ -902,7 +902,10 @@ so a photoreal selfie avatar carries the photo's color per point. `"source"`
 picks the input: `"camera"` (the default) lifts the live frame each tick;
 `"selfie"` runs the model once over a still submitted through
 `goss_session_submit_avatar_source` and then holds the result, so a photoreal
-avatar is generated from one photo and stays put off the live camera. `"draw"`
+avatar is generated from one photo and stays put off the live camera;
+`"reconstruction"` carries no model and draws the session's guided-capture
+reconstruction (the gaussians `goss_session_capture_view` back-projects from the
+scanned depth) live, so a captured scene renders as a gaussian cloud. `"draw"`
 picks the form: `"points"` (the default) draws camera-facing billboards, a splat
 cloud, sized by `"point"` (pixels); `"mesh"` reads the output as a square grid and
 draws it as a connected 3D surface, one quad per grid cell; `"gaussian"` reads the

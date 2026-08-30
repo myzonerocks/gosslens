@@ -6841,6 +6841,103 @@ fn proveCaptureReconstruct(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeReconLens(dir: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.splat-recon","version":"1.0.0","display_name":"Reconstruction","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"cloud","type":"splat.cloud","inputs":{"frame":"camera"},"params":{},
+        \\   "splat":{"source":"reconstruction","draw":"gaussian","point":8.0}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Activates the reconstruction lens; when capture is set, runs a short guided
+/// scan (world pose, depth, capture_view) to fill the reconstruction, then renders
+/// the composite over a black frame so the reconstructed cloud reads as its cover.
+fn runReconShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, capture: bool, out_w: *u32, out_h: *u32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ReconActivationFailed;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (capture) {
+        const dw: u32 = 16;
+        const dh: u32 = 16;
+        var depth: [dw * dh]f32 = undefined;
+        @memset(&depth, 0.5);
+        const proj = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+        for (0..3) |i| {
+            var ws: abi.WorldState = .{ .tracking_state = 1, .world_from_camera = makeYaw(0), .projection = proj, .timestamp_us = @intCast(i * 1000) };
+            _ = abi.goss_session_submit_world(session, &ws, null, 0, null, 0, null);
+            _ = abi.goss_session_submit_depth(session, &depth, dw, dh, 1.0, 3.0);
+            _ = abi.goss_session_capture_view(session, null);
+        }
+    }
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const shot = try gpa.alloc(u8, @as(usize, 1024) * 1024 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves the reconstruction render wire: a splat.cloud with source:reconstruction
+/// draws the session's guided-capture gaussians live. With no scan it holds the
+/// frame; once a scan fills the reconstruction, the cloud draws over it, bit-stable.
+fn proveReconstructionRender(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/splat-recon");
+    try writeReconLens("zig-out/splat-recon");
+
+    const dim: u32 = 320;
+    const black_rgba = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
+    defer gpa.free(black_rgba);
+    @memset(black_rgba, 0);
+    const black = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = black_rgba }, .width = dim, .height = dim });
+    defer black.deinit(gpa);
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    const empty = try runReconShot(gpa, engine, "zig-out/splat-recon", black, false, &w, &h);
+    defer gpa.free(empty);
+    const recon = try runReconShot(gpa, engine, "zig-out/splat-recon", black, true, &w, &h);
+    defer gpa.free(recon);
+    const recon2 = try runReconShot(gpa, engine, "zig-out/splat-recon", black, true, &w, &h);
+    defer gpa.free(recon2);
+
+    const n = @as(usize, w) * h * 4;
+    // With no scan the reconstruction is empty, so the cloud holds the black frame.
+    var empty_lit: usize = 0;
+    var i: usize = 0;
+    while (i < n) : (i += 4) {
+        if (@as(u32, empty[i]) + empty[i + 1] + empty[i + 2] > 60) empty_lit += 1;
+    }
+    if (empty_lit != 0) {
+        std.debug.print("conformance: FAIL the reconstruction drew before any scan ({d} lit)\n", .{empty_lit});
+        return false;
+    }
+    // After a scan the reconstructed cloud draws, so the black frame gains splats.
+    const drew = countDiff(empty[0..n], recon[0..n]);
+    if (drew < 100) {
+        std.debug.print("conformance: FAIL the scanned reconstruction did not draw ({d} px)\n", .{drew});
+        return false;
+    }
+    if (!std.mem.eql(u8, recon[0..n], recon2[0..n])) {
+        std.debug.print("conformance: FAIL the reconstruction render is not bit-stable across runs\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a splat.cloud with source:reconstruction draws the guided-capture gaussians live: no scan holds the frame, a scan draws the cloud over it ({d} px), bit-stable\n", .{drew});
+    return true;
+}
+
+/// Proves the photoreal selfie avatar: a splat.cloud with source:selfie runs its
+/// model once over a still submitted through goss_session_submit_avatar_source
 /// Proves the photoreal selfie avatar: a splat.cloud with source:selfie runs its
 /// model once over a still submitted through goss_session_submit_avatar_source
 /// (not the live camera) and draws the generated cloud, so an avatar is built
@@ -17475,6 +17572,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("splat background");
     if (!try proveCaptureReconstruct(gpa, engine)) return 1;
     watchHold("capture reconstruct");
+    if (!try proveReconstructionRender(gpa, engine)) return 1;
+    watchHold("reconstruction render");
     if (!try proveMlInferSelfieAvatar(gpa, engine)) return 1;
     watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;

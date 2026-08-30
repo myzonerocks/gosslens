@@ -2316,7 +2316,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
             // A splat cloud is ready once its model has produced its first point
             // set; until then it holds the frame through like any pending draw.
-            .splat => if (splatWorkerFor(s, entry.graph_index)) |sw| ml_infer.hasPublished(sw.worker) else false,
+            .splat => if (splatWorkerFor(s, entry.graph_index)) |sw| (if (sw.reconstruction) s.recon_gaussians.items.len > 0 else (if (sw.worker) |w| ml_infer.hasPublished(w) else false)) else false,
         };
         if (ready) ready_count += 1;
     }
@@ -3307,8 +3307,25 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             },
             .splat => {
                 const sw = splatWorkerFor(s, entry.graph_index) orelse continue;
-                if (!ml_infer.hasPublished(sw.worker)) continue;
-                if (!ml_infer.copyOutput(sw.worker, 0, sw.positions)) continue;
+                if (sw.reconstruction) {
+                    // A reconstruction cloud draws the session's guided-capture
+                    // gaussians. It grows as the scan captures views, so the mesh is
+                    // rebuilt only when the splat count changes, not every frame.
+                    const rc: u32 = @intCast(s.recon_gaussians.items.len / 14);
+                    if (rc == 0) continue;
+                    if (sw.mesh == null or sw.count != rc) {
+                        if (sw.mesh) |m| render.Renderer.destroyParticleMesh(m);
+                        sw.mesh = r.createParticleMesh(rc * 6, true) catch {
+                            sw.mesh = null;
+                            continue;
+                        };
+                        sw.count = rc;
+                    }
+                } else {
+                    const worker = sw.worker orelse continue;
+                    if (!ml_infer.hasPublished(worker)) continue;
+                    if (!ml_infer.copyOutput(worker, 0, sw.positions)) continue;
+                }
                 // A mesh draw reads the points as a square grid; a cell short of a
                 // full grid falls back to the point cloud so the node still draws.
                 const grid_side: usize = if (sw.mesh_draw) isqrt(sw.count) else 0;
@@ -3340,9 +3357,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const base_color: [4]f32 = .{ sw.color[0], sw.color[1], sw.color[2], 1.0 };
                 if (sw.gaussian) {
                     // Project each splat's covariance into an oriented screen
-                    // ellipse, sort the cloud back-to-front, and over-blend it.
+                    // ellipse, sort the cloud back-to-front, and over-blend it. A
+                    // reconstruction cloud reads the session's live gaussians.
+                    const gpos = if (sw.reconstruction) s.recon_gaussians.items else sw.positions;
                     if (frameStage(s, sw.count * 6 * 12)) |verts| {
-                        writeSplatGaussians(sw, verts);
+                        writeSplatGaussians(gpos, sw.count, sw.order, verts);
                         render.Renderer.updateParticleMeshFaded(mesh, verts);
                     }
                     switch (sw.placement) {
@@ -6758,7 +6777,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
         // A selfie avatar's model runs once off a submitted still, not the live
         // camera, so the per-frame feed skips it.
         if (sw.selfie) continue;
-        ml_infer.submitNv12(sw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        if (sw.worker) |w| ml_infer.submitNv12(w, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     return .ok;
 }
@@ -6785,7 +6804,7 @@ pub export fn goss_session_submit_avatar_source(session: ?*Session, desc: ?*cons
     var fed = false;
     for (s.splat_workers.items) |sw| {
         if (!sw.selfie) continue;
-        ml_infer.submitNv12(sw.worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+        if (sw.worker) |w| ml_infer.submitNv12(w, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
         fed = true;
     }
     return if (fed) .ok else .again;
@@ -6821,7 +6840,7 @@ pub export fn goss_session_submit_avatar_source_rgba(session: ?*Session, rgba: ?
     s.avatar_source_seq += 1;
     for (s.splat_workers.items) |sw| {
         if (!sw.selfie) continue;
-        ml_infer.submitNv12(sw.worker, width, height, s.avatar_source_seq, conversion, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
+        if (sw.worker) |sworker| ml_infer.submitNv12(sworker, width, height, s.avatar_source_seq, conversion, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
     }
     return .ok;
 }
@@ -6928,7 +6947,11 @@ pub fn styleTextureSide(session: *Session) u32 {
 pub fn splatCloudReadyCount(session: *Session) usize {
     var n: usize = 0;
     for (session.splat_workers.items) |sw| {
-        if (ml_infer.hasPublished(sw.worker)) n += 1;
+        if (sw.reconstruction) {
+            if (session.recon_gaussians.items.len > 0) n += 1;
+        } else if (sw.worker) |w| {
+            if (ml_infer.hasPublished(w)) n += 1;
+        }
     }
     return n;
 }
@@ -11491,7 +11514,9 @@ fn destroyTemporalWorkers(session: *Session) void {
 }
 
 const SplatWorker = struct {
-    worker: *ml_infer.MlInfer,
+    // Null for a reconstruction cloud, which has no model and draws the session's
+    // guided-capture gaussians live.
+    worker: ?*ml_infer.MlInfer,
     target: graph.NodeIndex,
     count: u32,
     point: f32,
@@ -11515,6 +11540,8 @@ const SplatWorker = struct {
     // Per-frame back-to-front draw order for the gaussian path, allocated once
     // at load and re-sorted each frame; empty for the point and mesh paths.
     order: []u32,
+    // True draws the session's guided-capture reconstruction live, with no model.
+    reconstruction: bool = false,
     // The billboard mesh is created lazily on the first draw, since it needs the
     // renderer; null marks it not yet built.
     mesh: ?render.Renderer.ParticleMesh = null,
@@ -11528,6 +11555,32 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     const splats = lens.splatNodes(gpa, &session.lens_graph) catch return;
     defer gpa.free(splats);
     for (splats) |node| {
+        if (node.reconstruction) {
+            // A reconstruction cloud has no model and no worker budget: it draws
+            // the session's guided-capture gaussians live, sized to their cap.
+            const order = gpa.alloc(u32, capture_max_gaussians) catch continue;
+            session.splat_workers.append(gpa, .{
+                .worker = null,
+                .target = node.graph_index,
+                .count = 0,
+                .point = node.point,
+                .color = node.color,
+                .mesh_draw = false,
+                .selfie = false,
+                .colored = false,
+                .gaussian = true,
+                .placement = node.placement,
+                .portal = node.portal,
+                .positions = &.{},
+                .order = order,
+                .reconstruction = true,
+            }) catch {
+                gpa.free(order);
+                continue;
+            };
+            reserveFrameStage(session, capture_max_gaussians * 6 * 12);
+            continue;
+        }
         if (session.ml_workers_loaded >= session.ml_worker_budget) {
             std.log.info("gosslens: splat.cloud node over the {d}-worker budget left inert", .{session.ml_worker_budget});
             continue;
@@ -11587,9 +11640,9 @@ fn destroySplatWorkers(session: *Session) void {
     const gpa = session.engine.gpa;
     for (session.splat_workers.items) |sw| {
         if (sw.mesh) |m| render.Renderer.destroyParticleMesh(m);
-        gpa.free(sw.positions);
+        if (sw.positions.len > 0) gpa.free(sw.positions);
         if (sw.order.len > 0) gpa.free(sw.order);
-        ml_infer.destroy(sw.worker);
+        if (sw.worker) |w| ml_infer.destroy(w);
     }
     session.splat_workers.clearRetainingCapacity();
 }
@@ -11685,13 +11738,11 @@ fn portalScissor(rect: [4]f32, w: u32, h: u32) [4]u16 {
 /// 3D covariance (the model emits xyz, scale, quaternion, opacity, rgb per splat).
 /// R S Sᵀ Rᵀ is eigen-decomposed into an oriented screen ellipse the six vertices
 /// carry, and the cloud is sorted back-to-front for the premultiplied over-blend.
-fn writeSplatGaussians(sw: *SplatWorker, out: []f32) void {
-    const count = sw.count;
-    const pos = sw.positions;
+fn writeSplatGaussians(pos: []const f32, count: u32, order: []u32, out: []f32) void {
     // The three-sigma extent the quad spans, so the gaussian tail is negligible
     // at the corners and the fragment discard trims the rest.
     const k: f32 = 3.0;
-    for (0..count) |i| sw.order[i] = @intCast(i);
+    for (0..count) |i| order[i] = @intCast(i);
     const Ctx = struct {
         p: []const f32,
         // The camera looks toward -z from z = 2, so a smaller z is farther and is
@@ -11703,10 +11754,10 @@ fn writeSplatGaussians(sw: *SplatWorker, out: []f32) void {
             return a < b;
         }
     };
-    std.sort.pdq(u32, sw.order[0..count], Ctx{ .p = pos }, Ctx.less);
+    std.sort.pdq(u32, order[0..count], Ctx{ .p = pos }, Ctx.less);
 
     const corners = [6][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ -1, -1 }, .{ 1, 1 }, .{ -1, 1 } };
-    for (sw.order[0..count], 0..) |splat, draw_i| {
+    for (order[0..count], 0..) |splat, draw_i| {
         const b = @as(usize, splat) * 14;
         const px = finiteOr(pos[b + 0], 0);
         const py = finiteOr(pos[b + 1], 0);
