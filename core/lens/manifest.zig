@@ -316,6 +316,13 @@ pub const UndistortField = struct {
     strength: f32 = 1,
 };
 
+pub const AwbField = struct {
+    /// An awb.pass node's `strength` (0..1) blends in a one-tap auto-enhance: a
+    /// gray-world white balance and auto-levels stretch estimated per frame from
+    /// the whole frame. 0 leaves the frame untouched.
+    strength: f32 = 1,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1047,6 +1054,8 @@ pub const Node = struct {
     lowlight: ?LowLightField = null,
     /// Set only on an undistort.pass node: its correction strength.
     undistort: ?UndistortField = null,
+    /// Set only on an awb.pass node: its auto-enhance blend strength.
+    awb: ?AwbField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -2013,6 +2022,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 undistort_field = field;
             }
             path.pop(umark);
+        }
+        var awb_field: ?AwbField = null;
+        if (getField(object, "awb")) |av| {
+            const amark = path.push("awb");
+            if (!std.mem.eql(u8, node_type, "awb.pass")) {
+                try diags.add(path.slice(), "awb is an awb.pass field, found it on '{s}'", .{node_type});
+            } else if (av != .object) {
+                try diags.add(path.slice(), "awb must be an object", .{});
+            } else {
+                var field: AwbField = .{};
+                if (getField(av.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                awb_field = field;
+            }
+            path.pop(amark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3281,6 +3304,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .vignette = vignette_field,
             .lowlight = lowlight_field,
             .undistort = undistort_field,
+            .awb = awb_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

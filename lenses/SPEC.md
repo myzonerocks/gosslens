@@ -412,6 +412,14 @@ output pixel the sampler reads the input at the radius the true point sits at,
 `r_d = r*(1 + k1 r^2 + k2 r^4)`, straightening a barrel or pincushion frame. With
 no intrinsics submitted the node is inert. It ships no asset and is always ready.
 
+An `"awb.pass"` node is a one-tap auto-enhance post-effect. It carries an `"awb":
+{"strength"}` block (0..1, default 1) that blends in a correction estimated per
+frame from a small downsample of the whole frame: gray-world per-channel gains
+that pull the average color toward neutral, then an auto-levels stretch that maps
+the luma black and white points to the full range. Nothing is authored; the
+estimate adapts to the scene. Strength 0 leaves the frame untouched. It ships no
+asset and is always ready.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1284,6 +1292,8 @@ an undistort.pass applies the submitted radial map, a positive k1 shrinking a
 centred disk and a negative growing it, where no intrinsics leaves it inert;
 a grade.pass naming a channel grades inside its mask in full and attenuates
 outside it, where the unmasked grade changes that outside too;
+an awb.pass estimates a gray-world balance from the frame thumb and neutralizes a
+color cast, pulling the channel spread to under half where strength 0 is untouched;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

@@ -191,6 +191,9 @@ pub const Renderer = struct {
     undistort_program: c.bgfx_program_handle_t,
     undistort_params_uniform: c.bgfx_uniform_handle_t,
     undistort_center_uniform: c.bgfx_uniform_handle_t,
+    awb_program: c.bgfx_program_handle_t,
+    awb_params_uniform: c.bgfx_uniform_handle_t,
+    awb_level_uniform: c.bgfx_uniform_handle_t,
     bloom_extract_program: c.bgfx_program_handle_t,
     bloom_composite_program: c.bgfx_program_handle_t,
     composite_program: c.bgfx_program_handle_t,
@@ -474,6 +477,7 @@ pub const Renderer = struct {
         const vignette_program = try loadVignetteProgram();
         const lowlight_program = try loadLowLightProgram();
         const undistort_program = try loadUndistortProgram();
+        const awb_program = try loadAwbProgram();
         const bloom_extract_program = try loadBloomExtractProgram();
         const bloom_composite_program = try loadBloomCompositeProgram();
         const composite_program = try loadCompositeProgram();
@@ -596,6 +600,9 @@ pub const Renderer = struct {
             .undistort_program = undistort_program,
             .undistort_params_uniform = c.bgfx_create_uniform("u_undistort", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .undistort_center_uniform = c.bgfx_create_uniform("u_undistortC", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .awb_program = awb_program,
+            .awb_params_uniform = c.bgfx_create_uniform("u_awb", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .awb_level_uniform = c.bgfx_create_uniform("u_awbLevel", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .bloom_extract_program = bloom_extract_program,
             .bloom_composite_program = bloom_composite_program,
             .composite_program = composite_program,
@@ -1014,6 +1021,18 @@ pub const Renderer = struct {
         };
     }
 
+    /// awb.pass's own fixed program: the gray-world white balance and auto-levels,
+    /// shared by every awb.pass node like grade_program.
+    pub fn loadAwbProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_awb_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_awb_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_awb_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_awb_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// stylize.pass's own fixed program: one artistic filter that branches on
     /// its mode uniform, shared by every stylize.pass node like grade_program.
     pub fn loadStylizeProgram() !c.bgfx_program_handle_t {
@@ -1406,6 +1425,9 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.undistort_program);
         c.bgfx_destroy_uniform(r.undistort_params_uniform);
         c.bgfx_destroy_uniform(r.undistort_center_uniform);
+        c.bgfx_destroy_program(r.awb_program);
+        c.bgfx_destroy_uniform(r.awb_params_uniform);
+        c.bgfx_destroy_uniform(r.awb_level_uniform);
         c.bgfx_destroy_program(r.composite_program);
         c.bgfx_destroy_program(r.bloom_extract_program);
         c.bgfx_destroy_program(r.bloom_composite_program);
@@ -2244,6 +2266,20 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.undistort_center_uniform, &center, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.undistort_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one awb.pass node as a full-screen pass into view_id: the frame on
+    /// unit 0, u_awb (gainR, gainG, gainB, strength), and u_awbLevel (black,
+    /// white), the one fixed awb_program every node shares.
+    pub fn submitAwbPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, gains: [3]f32, strength: f32, black: f32, white: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        var params = [4]f32{ gains[0], gains[1], gains[2], strength };
+        c.bgfx_set_uniform(r.awb_params_uniform, &params, 1);
+        var level = [4]f32{ black, white, 0, 0 };
+        c.bgfx_set_uniform(r.awb_level_uniform, &level, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.awb_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one lens stylize.pass node as a full-screen pass into view_id:

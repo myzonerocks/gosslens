@@ -540,6 +540,16 @@ pub const Renderer = struct {
         _ = cy;
     }
 
+    pub fn submitAwbPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, gains: [3]f32, strength: f32, black: f32, white: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = gains;
+        _ = strength;
+        _ = black;
+        _ = white;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;
@@ -1062,6 +1072,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadUndistortProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadAwbProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

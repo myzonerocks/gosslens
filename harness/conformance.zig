@@ -3307,6 +3307,82 @@ fn proveUndistort(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The spread between the brightest and dimmest channel mean of a capture, a
+/// stand-in for a color cast: a neutral frame's channels sit close together, a
+/// cast pushes one apart.
+fn channelSpread(shot: []const u8) u64 {
+    var sum = [3]u64{ 0, 0, 0 };
+    var i: usize = 0;
+    while (i + 4 <= shot.len) : (i += 4) {
+        sum[0] += shot[i];
+        sum[1] += shot[i + 1];
+        sum[2] += shot[i + 2];
+    }
+    const hi = @max(sum[0], @max(sum[1], sum[2]));
+    const lo = @min(sum[0], @min(sum[1], sum[2]));
+    return hi - lo;
+}
+
+/// Writes an awb.pass lens at a static blend strength (no asset).
+fn writeAwbLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.awb","version":"1.0.0","display_name":"Auto Enhance","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"a","type":"awb.pass","inputs":{{"frame":"camera"}},"params":{{}},"awb":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the one-tap auto-enhance: a blue-cast frame estimated from the frame
+/// thumb has its gray-world gains pull the channels back together. At strength 1
+/// the channel spread collapses toward neutral; strength 0 is untouched.
+fn proveAwb(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // A vertical luma ramp with a blue cast: a spread the gray-world balance
+    // removes, and a luma range the auto-levels leaves near intact.
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const base: u8 = @intCast((row * 200) / height);
+        f[idx + 0] = base;
+        f[idx + 1] = base;
+        f[idx + 2] = @intCast(@min(@as(usize, base) + 55, 255));
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/awb-0");
+    try writeAwbLens("zig-out/awb-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/awb-1");
+    try writeAwbLens("zig-out/awb-1", 1.0);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/awb-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/awb-1", planes);
+    defer gpa.free(shot1);
+
+    const spread0 = channelSpread(shot0);
+    const spread1 = channelSpread(shot1);
+    const changed = countDiff(shot0, shot1);
+    if (changed == 0) {
+        std.debug.print("conformance: FAIL awb at strength 1 left the frame identical to strength 0\n", .{});
+        return false;
+    }
+    if (spread0 == 0 or spread1 * 2 >= spread0) {
+        std.debug.print("conformance: FAIL awb did not pull the cast channels together (spread {d} -> {d})\n", .{ spread0, spread1 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an awb.pass estimates a gray-world balance from the frame thumb and neutralizes a color cast: strength 1 pulls the channel spread to under half where strength 0 is untouched ({d} -> {d})\n", .{ spread0, spread1 });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -14705,6 +14781,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("lowlight pass");
     if (!try proveUndistort(gpa, engine)) return 1;
     watchHold("undistort pass");
+    if (!try proveAwb(gpa, engine)) return 1;
+    watchHold("awb pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

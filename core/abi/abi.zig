@@ -1060,6 +1060,14 @@ pub const Session = struct {
     /// The correction strength of each spliced undistort.pass node, resolved
     /// once at activation. The radial map itself rides the submitted intrinsics.
     undistort_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// The blend strength of each spliced awb.pass node, resolved once at
+    /// activation; the correction itself is estimated per frame from the thumb.
+    awb_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    /// A small RGB downsample of the latest copied frame, filled at submit from
+    /// the frame bytes (no GPU readback), so an auto-enhance pass can estimate a
+    /// scene-adaptive correction from the whole frame's statistics.
+    frame_thumb: [thumb_side * thumb_side * 3]f32 = @splat(0),
+    thumb_valid: bool = false,
     /// The camera intrinsics an undistort.pass corrects for: the two radial
     /// coefficients, the principal point in pixels of the submitted frame
     /// (normalized against the working size at draw), the pixel aspect (fx/fy),
@@ -1951,6 +1959,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .vignette => s.vignette_params.contains(entry.graph_index),
             .lowlight => s.lowlight_params.contains(entry.graph_index),
             .undistort => s.undistort_params.contains(entry.graph_index),
+            .awb => s.awb_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2309,6 +2318,24 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const cx = if (s.intrinsics_set and width > 0) s.intrinsics_cx / @as(f32, @floatFromInt(width)) else 0.5;
                 const cy = if (s.intrinsics_set and height > 0) s.intrinsics_cy / @as(f32, @floatFromInt(height)) else 0.5;
                 r.submitUndistortPass(view_id, input_texture, s.intrinsics_k1, s.intrinsics_k2, eff, s.intrinsics_aspect, cx, cy);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .awb => {
+                const strength = s.awb_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // Estimate the correction from the frame thumb; an unfilled thumb
+                // gives identity gains and levels so the pass is a no-op.
+                const est = if (s.thumb_valid) estimateAwb(&s.frame_thumb) else AwbEstimate{ .gains = .{ 1, 1, 1 }, .black = 0, .white = 1 };
+                r.submitAwbPass(view_id, input_texture, est.gains, strength, est.black, est.white);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3886,6 +3913,7 @@ pub fn destroySession(session: *Session) void {
     session.vignette_params.deinit(session.engine.gpa);
     session.lowlight_params.deinit(session.engine.gpa);
     session.undistort_params.deinit(session.engine.gpa);
+    session.awb_params.deinit(session.engine.gpa);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
@@ -5978,6 +6006,7 @@ pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const F
         .uv = uploaded.uv,
         .conversion = math.color.yuvToRgb(standard, range),
     } } };
+    fillFrameThumbNv12(s, y_ptr, y_stride, uv_ptr, uv_stride, d.width, d.height, math.color.yuvToRgb(standard, range));
     s.copied_frames += 1;
     return .ok;
 }
@@ -6560,6 +6589,71 @@ pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?
 
 /// The mean RGB (0..1) of a reference image sampled at a landmark loop's
 /// points by nearest pixel, standing in for that face part's makeup color.
+/// The side of the square RGB thumbnail an auto-enhance pass reads: small enough
+/// that the per-frame reduction is a fixed handful of thousands of samples.
+const thumb_side = 32;
+
+/// Downsamples an NV12 frame into the session's RGB thumb, sampling the Y and UV
+/// planes at a thumb_side grid and converting each with the frame's color map.
+/// Bounded and CPU-only, so an auto-enhance pass has whole-frame statistics
+/// without a GPU readback.
+fn fillFrameThumbNv12(s: *Session, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32, width: u32, height: u32, conv: math.color.Conversion) void {
+    for (0..thumb_side) |ty| {
+        const sy = (ty * height) / thumb_side;
+        for (0..thumb_side) |tx| {
+            const sx = (tx * width) / thumb_side;
+            const yv = @as(f32, @floatFromInt(y[sy * y_stride + sx])) / 255.0;
+            const uo = (sy / 2) * uv_stride + (sx / 2) * 2;
+            const uu = @as(f32, @floatFromInt(uv[uo])) / 255.0;
+            const vv = @as(f32, @floatFromInt(uv[uo + 1])) / 255.0;
+            const rgb = conv.apply(.{ yv, uu, vv });
+            const o = (ty * thumb_side + tx) * 3;
+            s.frame_thumb[o + 0] = std.math.clamp(rgb[0], 0, 1);
+            s.frame_thumb[o + 1] = std.math.clamp(rgb[1], 0, 1);
+            s.frame_thumb[o + 2] = std.math.clamp(rgb[2], 0, 1);
+        }
+    }
+    s.thumb_valid = true;
+}
+
+/// The gray-world white balance and auto-levels an awb.pass applies, estimated
+/// from the frame thumb: per-channel gains that pull the average toward neutral,
+/// and the luma black and white points to stretch. Identity when the thumb is
+/// flat or absent.
+const AwbEstimate = struct { gains: [3]f32, black: f32, white: f32 };
+
+fn estimateAwb(thumb: []const f32) AwbEstimate {
+    var sum = [3]f32{ 0, 0, 0 };
+    var lmin: f32 = 1;
+    var lmax: f32 = 0;
+    const n = thumb.len / 3;
+    for (0..n) |i| {
+        const r = thumb[i * 3 + 0];
+        const g = thumb[i * 3 + 1];
+        const b = thumb[i * 3 + 2];
+        sum[0] += r;
+        sum[1] += g;
+        sum[2] += b;
+        const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+        lmin = @min(lmin, luma);
+        lmax = @max(lmax, luma);
+    }
+    const fn_: f32 = @floatFromInt(n);
+    const mr = sum[0] / fn_;
+    const mg = sum[1] / fn_;
+    const mb = sum[2] / fn_;
+    const gray = (mr + mg + mb) / 3.0;
+    // Gains pull each channel mean to the shared gray, clamped so a near-zero
+    // channel mean cannot blow the gain up.
+    const gain = struct {
+        fn f(mean: f32, target: f32) f32 {
+            if (mean < 0.02) return 1;
+            return std.math.clamp(target / mean, 0.25, 4.0);
+        }
+    }.f;
+    return .{ .gains = .{ gain(mr, gray), gain(mg, gray), gain(mb, gray) }, .black = lmin, .white = lmax };
+}
+
 fn averageLoopColor(rgba: []const u8, width: u32, height: u32, lm: [*]const f32, loop: []const u16) [3]f32 {
     var sum: [3]f32 = .{ 0, 0, 0 };
     var n: f32 = 0;
@@ -7421,6 +7515,7 @@ fn destroyBlendState(session: *Session) void {
     session.vignette_params.clearRetainingCapacity();
     session.lowlight_params.clearRetainingCapacity();
     session.undistort_params.clearRetainingCapacity();
+    session.awb_params.clearRetainingCapacity();
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
@@ -7998,6 +8093,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createVignetteParams(s, gpa) catch {};
     createLowLightParams(s, gpa) catch {};
     createUndistortParams(s, gpa) catch {};
+    createAwbParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -8133,6 +8229,17 @@ fn createUndistortParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(nodes);
     for (nodes) |n| {
         session.undistort_params.put(gpa, n.graph_index, n.strength) catch {};
+    }
+}
+
+/// Resolves every spliced awb.pass node's blend strength into session.awb_params
+/// once at activation - mirrors createUndistortParams.
+fn createAwbParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.awbPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.awb_params.put(gpa, n.graph_index, n.strength) catch {};
     }
 }
 
@@ -10190,6 +10297,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createVignetteParams(session, gpa);
     try createLowLightParams(session, gpa);
     try createUndistortParams(session, gpa);
+    try createAwbParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);
