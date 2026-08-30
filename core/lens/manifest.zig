@@ -1114,6 +1114,11 @@ pub const AudioField = struct {
 /// output mix. Zero leaves the mic untouched.
 pub const AudioEnhanceField = struct {
     strength: f32 = 1,
+    /// Echo cancellation: subtracts `echo` (0..1) of the outgoing mic delayed by
+    /// `echo_ms` milliseconds, so a room echo or acoustic feedback repeating at
+    /// that delay is removed from the outgoing track. Zero leaves it untouched.
+    echo: f32 = 0,
+    echo_ms: f32 = 40,
 };
 
 /// A voice.transform node's real-time voice change: `pitch` (0.5..2) the ratio
@@ -3578,6 +3583,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             if (getField(object, "enhance")) |ev| {
                 if (ev == .object) {
                     if (getField(ev.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                    if (getField(ev.object, "echo")) |v| field.echo = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.echo)), 0, 1);
+                    if (getField(ev.object, "echo_ms")) |v| field.echo_ms = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.echo_ms)), 5, 60);
                 }
             }
             audio_enhance_field = field;

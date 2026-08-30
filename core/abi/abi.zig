@@ -688,6 +688,14 @@ pub const Session = struct {
     /// microphone cleanup is continuous. Resolved at activation.
     audio_enhance_strength: f32 = 0,
     audio_enhance_lp: [8]f32 = @splat(0),
+    /// An active audio.enhance node's echo cancellation: the gain (0 when none)
+    /// and delay in milliseconds it subtracts, and the per-channel ring of past
+    /// enhanced samples the inverse comb reads the delayed copy from. The ring is
+    /// sized to channels times the delay at mix time and freed at teardown.
+    audio_echo_strength: f32 = 0,
+    audio_echo_ms: f32 = 0,
+    audio_echo_ring: []f32 = &.{},
+    audio_echo_pos: usize = 0,
     /// An active voice.transform node's pitch-shift ratio (1 when none), and the
     /// per-channel delay line the output mix pitch-shifts the microphone through,
     /// a two-tap crossfade sweep carried across chunks. Resolved at activation.
@@ -4496,6 +4504,7 @@ pub fn destroySession(session: *Session) void {
     destroyAudioWorkers(session);
     session.audio_workers.deinit(session.engine.gpa);
     if (session.audio_window.len > 0) session.engine.gpa.free(session.audio_window);
+    if (session.audio_echo_ring.len > 0) session.engine.gpa.free(session.audio_echo_ring);
     destroyDiffusionWorkers(session);
     session.diffusion_workers.deinit(session.engine.gpa);
     destroySplatWorkers(session);
@@ -9063,9 +9072,10 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
         // neither the raw mic passes straight through.
         const mic_chunk: ?[]const f32 = blk: {
             const raw = if (mic_slice) |m| m[base .. base + span] else break :blk null;
-            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1) break :blk raw;
+            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1 and s.audio_echo_strength <= 0) break :blk raw;
             @memcpy(enhanced_buf[0..span], raw);
             if (s.audio_enhance_strength > 0) enhanceMic(s, enhanced_buf[0..span], n, channels);
+            if (s.audio_echo_strength > 0) echoCancelMic(s, enhanced_buf[0..span], n, channels, sample_rate);
             if (s.voice_pitch != 1) voiceTransformMic(s, enhanced_buf[0..span], n, channels);
             break :blk enhanced_buf[0..span];
         };
@@ -10692,6 +10702,10 @@ fn pollMlOutputs(session: *Session) void {
 fn resolveAudioEnhance(session: *Session) void {
     session.audio_enhance_strength = 0;
     session.audio_enhance_lp = @splat(0);
+    session.audio_echo_strength = 0;
+    session.audio_echo_ms = 0;
+    session.audio_echo_pos = 0;
+    if (session.audio_echo_ring.len > 0) @memset(session.audio_echo_ring, 0);
     session.voice_pitch = 1;
     session.voice_delay = @splat(@splat(0));
     session.voice_wpos = 0;
@@ -10700,6 +10714,10 @@ fn resolveAudioEnhance(session: *Session) void {
     for (lens.manifest.nodes) |node| {
         if (node.audio_enhance) |ae| {
             if (ae.strength > session.audio_enhance_strength) session.audio_enhance_strength = ae.strength;
+            if (ae.echo > 0) {
+                session.audio_echo_strength = ae.echo;
+                session.audio_echo_ms = ae.echo_ms;
+            }
         }
         if (node.voice_transform) |vt| session.voice_pitch = vt.pitch;
     }
@@ -10724,6 +10742,43 @@ fn enhanceMic(session: *Session, mic: []f32, frame_count: u32, channels: u32) vo
             mic[idx] = x + (cleaned - x) * strength;
         }
     }
+}
+
+/// Cancels a room echo from one interleaved output chunk: an inverse comb filter
+/// subtracts the enhanced signal delayed by echo_ms and scaled by the echo gain,
+/// so a copy repeating at that delay is removed. The per-channel delay ring is
+/// sized once to the delay and carried across chunks; a resize reallocates it.
+fn echoCancelMic(session: *Session, mic: []f32, frame_count: u32, channels: u32, sample_rate: u32) void {
+    const gain = session.audio_echo_strength;
+    if (gain <= 0 or session.audio_echo_ms <= 0) return;
+    const delay: usize = @intFromFloat(session.audio_echo_ms / 1000.0 * @as(f32, @floatFromInt(sample_rate)));
+    if (delay == 0) return;
+    const need = delay * channels;
+    if (session.audio_echo_ring.len != need) {
+        const gpa = session.engine.gpa;
+        if (session.audio_echo_ring.len > 0) gpa.free(session.audio_echo_ring);
+        session.audio_echo_ring = gpa.alloc(f32, need) catch {
+            session.audio_echo_ring = &.{};
+            return;
+        };
+        @memset(session.audio_echo_ring, 0);
+        session.audio_echo_pos = 0;
+    }
+    var pos = session.audio_echo_pos % delay;
+    for (0..frame_count) |f| {
+        for (0..channels) |c| {
+            const idx = f * channels + c;
+            const slot = pos * channels + c;
+            // The ring slot holds the enhanced sample from `delay` frames ago; the
+            // inverse comb removes that scaled copy, then stores the new output.
+            const delayed = session.audio_echo_ring[slot];
+            const out = mic[idx] - gain * delayed;
+            session.audio_echo_ring[slot] = out;
+            mic[idx] = out;
+        }
+        pos = (pos + 1) % delay;
+    }
+    session.audio_echo_pos = pos;
 }
 
 /// Pitch-shifts one interleaved output chunk's microphone in place while keeping

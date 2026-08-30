@@ -1072,12 +1072,15 @@ at `rate`, so the audio the SDK pulls carries the voice-over. Dubbing is off by
 default, since a dub speaks over the room.
 
 An `"audio.enhance"` node cleans the outgoing microphone. Like the other audio
-nodes it draws nothing; it carries an `"enhance": {"strength"}` block (0..1,
-default 1). When one is active, the output mix runs a deterministic noise
-reduction over the microphone before it is summed with the lens voices, a
-one-pole low-pass that pulls the high-frequency hiss down and a soft gate that
-eases the near-silent noise floor toward zero, blended in by `strength` so zero
-leaves the mic untouched. It needs no model.
+nodes it draws nothing; it carries an `"enhance": {"strength", "echo", "echo_ms"}`
+block. `strength` (0..1, default 1) runs a deterministic noise reduction over the
+microphone before it is summed with the lens voices, a one-pole low-pass that
+pulls the high-frequency hiss down and a soft gate that eases the near-silent
+noise floor toward zero, blended in by `strength` so zero leaves the mic
+untouched. `echo` (0..1, default 0) then runs echo cancellation: an inverse comb
+subtracts `echo` of the enhanced signal delayed by `echo_ms` milliseconds (5..60,
+default 40), so a room echo or acoustic feedback repeating at that delay is
+removed. Zero echo leaves it off. It needs no model.
 
 A `"voice.transform"` node changes the outgoing voice. It draws nothing and
 carries a `"voice": {"pitch"}` block (0.5..2, default 1): the output mix pitch
