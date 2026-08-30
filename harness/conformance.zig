@@ -1080,6 +1080,109 @@ fn proveDepthOcclusion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeParallaxLens(dir: []const u8, amount: f32, focus: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.parallax","version":"1.0.0","display_name":"Parallax","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"p","type":"parallax.pass","inputs":{{"frame":"camera"}},"params":{{}},"parallax":{{"amount":{d:.4},"focus":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{ amount, focus });
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Activates a parallax.pass lens, submits a fixed device tilt, and renders the
+/// frame over a three-band synthetic depth map, returning the capture.
+fn captureParallaxShot(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, planes: Nv12Copy, depth: []const f32, dw: u32, dh: u32, tilt: [3]f32) ![]u8 {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    _ = abi.goss_session_submit_orientation(session, tilt[0], tilt[1], tilt[2], 1000);
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    errdefer gpa.free(shot);
+    var w: u32 = 0;
+    var h: u32 = 0;
+    try renderWithDepth(engine, session, &desc, planes, depth, dw, dh, 0.0, 1.0, shot, &w, &h);
+    return shot;
+}
+
+/// Proves the 3D-photo parallax warp: a red gradient over three depth bands (a
+/// near, a focus-plane, and a far band) with a submitted device tilt. The near
+/// band shifts by its distance from the focus plane while the focus band holds;
+/// the shift reverses with the tilt; a zero amount is an identity; bit-stable.
+fn proveParallax(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        f[idx + 0] = @intCast(col * 255 / (@as(usize, width) - 1)); // red rides the column
+        f[idx + 1] = 90;
+        f[idx + 2] = 160;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    // Three vertical depth bands: near (0), focus-plane (0.5), far (1).
+    const dw: u32 = 60;
+    const dh: u32 = 45;
+    var depth: [dw * dh]f32 = undefined;
+    for (0..dh) |y| for (0..dw) |x| {
+        depth[y * dw + x] = if (x < dw / 3) 0.0 else if (x < 2 * dw / 3) 0.5 else 1.0;
+    };
+
+    const tilt = [3]f32{ 0.6, -0.8, 0 };
+    const tilt_neg = [3]f32{ -0.6, -0.8, 0 };
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/parallax-0");
+    try writeParallaxLens("zig-out/parallax-0", 0.0, 0.5);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/parallax-1");
+    try writeParallaxLens("zig-out/parallax-1", 0.12, 0.5);
+
+    const raw = try captureParallaxShot(gpa, engine, "zig-out/parallax-0", planes, &depth, dw, dh, tilt);
+    defer gpa.free(raw);
+    const warp = try captureParallaxShot(gpa, engine, "zig-out/parallax-1", planes, &depth, dw, dh, tilt);
+    defer gpa.free(warp);
+    const warp2 = try captureParallaxShot(gpa, engine, "zig-out/parallax-1", planes, &depth, dw, dh, tilt);
+    defer gpa.free(warp2);
+    const warp_neg = try captureParallaxShot(gpa, engine, "zig-out/parallax-1", planes, &depth, dw, dh, tilt_neg);
+    defer gpa.free(warp_neg);
+
+    if (!std.mem.eql(u8, warp, warp2)) {
+        std.debug.print("conformance: FAIL parallax is not bit-stable across runs\n", .{});
+        return false;
+    }
+    // A zero amount is an identity: the warp equals the raw frame.
+    if (countDiff(raw, warp) == 0) {
+        std.debug.print("conformance: FAIL parallax at amount 0.12 did not move the frame\n", .{});
+        return false;
+    }
+    // The near band (left third) shifts; the focus band (middle third) holds.
+    const near_raw = regionMean(raw, 20, 120);
+    const near_warp = regionMean(warp, 20, 120);
+    const focus_raw = regionMean(raw, 150, 250);
+    const focus_warp = regionMean(warp, 150, 250);
+    const near_shift = @abs(near_warp[0] - near_raw[0]);
+    const focus_shift = @abs(focus_warp[0] - focus_raw[0]);
+    if (!(near_shift > focus_shift + 8)) {
+        std.debug.print("conformance: FAIL parallax did not shift the near band more than the focus band (near {d:.1}, focus {d:.1})\n", .{ near_shift, focus_shift });
+        return false;
+    }
+    // The shift direction reverses with the tilt.
+    if (std.mem.eql(u8, warp, warp_neg)) {
+        std.debug.print("conformance: FAIL parallax did not reverse with the tilt direction\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a parallax.pass warps the frame by the submitted depth's distance from the focus plane: the near band shifts (red {d:.0} -> {d:.0}) while the focus band holds ({d:.0} -> {d:.0}), reversing with the tilt and identity at amount 0, bit-stable\n", .{ near_raw[0], near_warp[0], focus_raw[0], focus_warp[0] });
+    return true;
+}
+
 /// Submits one frame with a set of faces, renders it settled, and captures.
 fn renderSubmittedFaces(engine: *abi.Engine, session: *abi.Session, desc: *const abi.FrameDesc, planes: anytype, faces: []const abi.FaceResult, shot: []u8, out_w: *u32, out_h: *u32) !void {
     const half_w = (planes.width + 1) / 2;
@@ -16645,6 +16748,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("skinned body mesh");
     if (!try proveDepthOcclusion(gpa, engine)) return 1;
     watchHold("depth occlusion");
+    if (!try proveParallax(gpa, engine)) return 1;
+    watchHold("parallax pass");
     if (!try proveFaceRegions(gpa, engine)) return 1;
     watchHold("face regions");
     if (!try proveBodyJoints(gpa, engine)) return 1;

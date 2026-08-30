@@ -607,6 +607,17 @@ pub const Renderer = struct {
         _ = skew_y;
     }
 
+    pub fn submitParallaxPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, depth_texture: TextureHandle, shift_x: f32, shift_y: f32, focus: f32, fill: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = depth_texture;
+        _ = shift_x;
+        _ = shift_y;
+        _ = focus;
+        _ = fill;
+    }
+
     pub fn submitStylizePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
         _ = r;
         _ = view_id;

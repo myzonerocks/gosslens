@@ -388,6 +388,16 @@ pub const RollingShutterField = struct {
     readout: f32 = 0.02,
 };
 
+pub const ParallaxField = struct {
+    /// A parallax.pass node's 3D-photo warp. `amount` (0..0.25) is the largest UV
+    /// shift a unit disparity gets, `focus` (0..1 in the submitted depth) the plane
+    /// that stays put, and `fill` the revealed-edge handling (0 clamp, 1 mirror).
+    /// The shift direction rides the orientation tilt, an identity with no tilt.
+    amount: f32 = 0.02,
+    focus: f32 = 0.5,
+    fill: u8 = 0,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1226,6 +1236,8 @@ pub const Node = struct {
     inpaint: ?InpaintField = null,
     /// Set only on a rolling.pass node: its correction strength and readout time.
     rolling: ?RollingShutterField = null,
+    /// Set only on a parallax.pass node: its 3D-photo depth warp.
+    parallax: ?ParallaxField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -2314,6 +2326,24 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 rolling_field = field;
             }
             path.pop(rmark);
+        }
+        var parallax_field: ?ParallaxField = null;
+        if (getField(object, "parallax")) |pv| {
+            const pmark = path.push("parallax");
+            if (!std.mem.eql(u8, node_type, "parallax.pass")) {
+                try diags.add(path.slice(), "parallax is a parallax.pass field, found it on '{s}'", .{node_type});
+            } else if (pv != .object) {
+                try diags.add(path.slice(), "parallax must be an object", .{});
+            } else {
+                var field: ParallaxField = .{};
+                if (getField(pv.object, "amount")) |v| field.amount = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.amount)), 0, 0.25);
+                if (getField(pv.object, "focus")) |v| field.focus = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.focus)), 0, 1);
+                if (getField(pv.object, "fill")) |v| {
+                    if (v == .integer and v.integer > 0) field.fill = 1;
+                }
+                parallax_field = field;
+            }
+            path.pop(pmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3636,6 +3666,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .harmonize = harmonize_field,
             .inpaint = inpaint_field,
             .rolling = rolling_field,
+            .parallax = parallax_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

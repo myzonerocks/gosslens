@@ -476,6 +476,18 @@ image-plane motion from the orientation stream (submitted through
 readout offset from the centre. With no orientation submitted the motion is zero
 and it holds the frame through. It ships no asset.
 
+A `"parallax.pass"` node is a 3D-photo depth warp. It carries a `"parallax":
+{"amount", "focus", "fill"}` block: `amount` (0..0.25, default 0.02) is the
+largest shift a unit disparity gets, `focus` (0..1 in the submitted depth,
+default 0.5) the plane that stays put, and `fill` the revealed-edge handling (0
+clamp, 1 mirror). Each pixel reads its color from a source shifted by the
+submitted depth's signed distance from the focus plane, so the layers nearer and
+farther than focus sway opposite ways as the device tilts while the subject at
+the focus plane holds, the living-photo look. The shift direction rides the
+orientation stream (submitted through `goss_session_submit_orientation`), so with
+no tilt it is an identity. It reads the depth the host submits; with no depth it
+holds the frame through, the standard capability degradation. It ships no asset.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1476,6 +1488,8 @@ an inpaint.pass fills a masked object from its surrounding boundary, the removed
 region's red falling and blue rising toward the field while the field holds;
 a rolling.pass with a submitted camera rotation shifts each scanline by its
 readout offset, a straight edge slanting under motion and holding without it;
+a parallax.pass warps the frame by the submitted depth's distance from the focus
+plane, the near band shifting under a device tilt while the focus band holds;
 a roll_lock warp levels the horizon from the orientation stream, a tilted bar
 coming level under a submitted device roll and holding without one;
 a gaze_correct warp reads the eyeLook blendshapes and redirects the pupils, the

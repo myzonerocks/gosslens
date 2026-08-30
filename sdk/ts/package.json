@@ -1,6 +1,6 @@
 {
   "name": "@gosslens/core",
-  "version": "0.1.0",
+  "version": "0.7.0",
   "description": "Web SDK for the gosslens camera and AR engine, over the wasm core.",
   "type": "module",
   "types": "./dist/index.d.ts",
