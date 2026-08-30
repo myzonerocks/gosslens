@@ -7268,6 +7268,90 @@ fn proveScriptState(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a character-locomotion controller from shipped primitives: a script
+/// ramps a speed and smoothsteps it into a normalized crossfade between two
+/// clip weights (the values a model.gltf's clip_weights blend walk and run by),
+/// all-walk to all-run, normalized every tick, identical across two runs.
+fn proveLocomotion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const dir = "zig-out/locomotion";
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.locomotion","version":"1.0.0","display_name":"Locomotion","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"walk_w","type":"float","default":1.0,"min":0.0,"max":1.0},
+        \\               {"name":"run_w","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"drive","type":"script","params":{},"file":"locomotion.js"}],
+        \\ "triggers":[]}
+    ;
+    const script_src =
+        \\var speed = 0.0;
+        \\function update(lens) {
+        \\  speed = speed + 0.05;
+        \\  var x = (speed - 0.3) / 0.4;
+        \\  if (x < 0) x = 0; if (x > 1) x = 1;
+        \\  var t = x * x * (3 - 2 * x);
+        \\  lens.params.run_w = t;
+        \\  lens.params.walk_w = 1 - t;
+        \\}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/locomotion/assets");
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/locomotion.js", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = script_src });
+
+    const signals = std.mem.zeroes(abi.LensSignals);
+    // Two runs of fourteen ticks. Sampled at tick 1 (all walk), tick 10
+    // (an even blend), and tick 14 (all run); the pair of weights sums to 1
+    // at every sample and both runs land on the same values.
+    var samples: [2][3][2]f32 = undefined;
+    for (0..2) |run| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+            std.debug.print("conformance: FAIL locomotion lens activation\n", .{});
+            return false;
+        }
+        for (1..15) |tick| {
+            _ = abi.goss_session_tick_lens(session, 16000, &signals);
+            const slot: ?usize = switch (tick) {
+                1 => 0,
+                10 => 1,
+                14 => 2,
+                else => null,
+            };
+            if (slot) |si| {
+                _ = abi.goss_session_parameter_value(session, "walk_w", "walk_w".len, &samples[run][si][0]);
+                _ = abi.goss_session_parameter_value(session, "run_w", "run_w".len, &samples[run][si][1]);
+            }
+        }
+    }
+
+    const s = samples[0];
+    for (s) |pair| {
+        if (@abs(pair[0] + pair[1] - 1.0) > 1e-5) {
+            std.debug.print("conformance: FAIL locomotion weights not normalized ({d} + {d})\n", .{ pair[0], pair[1] });
+            return false;
+        }
+    }
+    if (@abs(s[0][0] - 1.0) > 1e-6 or @abs(s[1][0] - 0.5) > 1e-5 or @abs(s[2][0]) > 1e-6) {
+        std.debug.print("conformance: FAIL locomotion crossfade walk {d}/{d}/{d}, wanted 1/0.5/0\n", .{ s[0][0], s[1][0], s[2][0] });
+        return false;
+    }
+    for (0..3) |i| {
+        if (samples[0][i][0] != samples[1][i][0] or samples[0][i][1] != samples[1][i][1]) {
+            std.debug.print("conformance: FAIL locomotion is not deterministic across runs\n", .{});
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF a locomotion controller smoothsteps an evolving speed into a normalized walk-to-run clip-weight crossfade, deterministically\n", .{});
+    return true;
+}
+
 /// Proves lens audio: a play_sound trigger starts a voice that the mixer
 /// pulls out as PCM, silent before the trigger, non-silent after, and
 /// bit-identical across two runs of the same sequence.
@@ -17888,6 +17972,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("logic-math");
     if (!try proveScriptState(gpa, engine)) return 1;
     watchHold("script-state");
+    if (!try proveLocomotion(gpa, engine)) return 1;
+    watchHold("locomotion");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;

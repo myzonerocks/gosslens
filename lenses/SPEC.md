@@ -180,7 +180,10 @@ scale and a weighted nlerp of rotation, so a lens crossfades between
 animations by moving the weights. Ramp them with `param_ramp` (6.3) for an
 eased transition. Each name must be a declared parameter, a clip past the
 list weighs nothing, and with no `clip_weights` the node plays its first
-clip unchanged.
+clip unchanged. Driving these weights from one speed input builds a locomotion
+controller: a `logic.graph` (or a script) smoothsteps a speed signal into a
+normalized idle-walk-run crossfade, and the model blends the clips by it, so a
+1D blend space is a matter of how the weights are wired, not a separate node.
 
 A `model.gltf` node may add `"morph_weights"`: an array of parameter names,
 one per morph target (blendshape) in the order the glTF declares them. Each
