@@ -436,6 +436,13 @@ the frame, so a sub-region fills the output and reads sharper after an upscale
 pass downstream. Factor 1 with a centred point is the identity. It ships no asset
 and is always ready.
 
+A `"dereflect.pass"` node is a localized specular attenuation post-effect. It
+carries a `"dereflect": {"strength"}` block (0..1, default 1): a glass reflection
+or glare sits as high-frequency detail over the bright regions of the frame, so
+the pass pulls each pixel's detail (its difference from the neighbourhood mean)
+back toward that mean, weighted by the pixel's brightness and by `strength`. Dark
+regions and strength 0 are untouched. It ships no asset and is always ready.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1365,6 +1372,8 @@ a stabilize.pass steadies a jittering camera, the settled inter-frame motion
 falling to under half of the same lens with stabilization off;
 a zoom.pass magnifies a centred region, a factor of 2 growing a centred disk
 toward four times its area;
+a dereflect.pass attenuates high-frequency detail in the bright regions far more
+than the dark, the bright texture softening to under half while the dark holds;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

@@ -3983,6 +3983,78 @@ fn proveZoom(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a dereflect.pass lens at a static strength (no asset).
+fn writeDereflectLens(dir: []const u8, strength: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.dereflect","version":"1.0.0","display_name":"Dereflect","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"d","type":"dereflect.pass","inputs":{{"frame":"camera"}},"params":{{}},"dereflect":{{"strength":{d:.3}}}}}],
+        \\ "triggers":[]}}
+    , .{strength});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the localized specular attenuation: a dark textured half and a bright
+/// textured half. At strength 1 the high-frequency detail (the checkerboard) in
+/// the bright half is pulled toward the local mean far more than in the dark
+/// half, so a reflection over the bright regions softens while the dark holds.
+fn proveDereflect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const checker = (row + col) % 2 == 0;
+        const v: u8 = if (col < width / 2)
+            (if (checker) @as(u8, 20) else 60) // dark textured half
+        else
+            (if (checker) @as(u8, 200) else 240); // bright textured half
+        f[idx + 0] = v;
+        f[idx + 1] = v;
+        f[idx + 2] = v;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dereflect-0");
+    try writeDereflectLens("zig-out/dereflect-0", 0.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/dereflect-1");
+    try writeDereflectLens("zig-out/dereflect-1", 1.0);
+
+    const shot0 = try captureDehazeShot(gpa, engine, "zig-out/dereflect-0", planes);
+    defer gpa.free(shot0);
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/dereflect-1", planes);
+    defer gpa.free(shot1);
+
+    const dark0 = roughnessThird(shot0, 0);
+    const dark1 = roughnessThird(shot1, 0);
+    const bright0 = roughnessThird(shot0, 2);
+    const bright1 = roughnessThird(shot1, 2);
+    if (bright0 == 0) {
+        std.debug.print("conformance: FAIL the dereflect test frame had no bright texture to attenuate\n", .{});
+        return false;
+    }
+    // The bright half's high-frequency detail is cut substantially.
+    if (!(bright1 * 2 < bright0)) {
+        std.debug.print("conformance: FAIL dereflect did not soften the bright reflection texture ({d} -> {d})\n", .{ bright0, bright1 });
+        return false;
+    }
+    // The dark half is largely held (a much smaller relative drop than the bright).
+    const bright_drop = bright0 - bright1;
+    const dark_drop = if (dark0 > dark1) dark0 - dark1 else 0;
+    if (!(bright_drop > dark_drop * 3)) {
+        std.debug.print("conformance: FAIL dereflect attenuated the dark half as much as the bright (dark drop {d}, bright drop {d})\n", .{ dark_drop, bright_drop });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a dereflect.pass attenuates high-frequency detail in the bright regions far more than the dark: the bright texture softens to under half while the dark holds (bright {d} -> {d}, dark {d} -> {d})\n", .{ bright0, bright1, dark0, dark1 });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -15397,6 +15469,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("stabilize pass");
     if (!try proveZoom(gpa, engine)) return 1;
     watchHold("zoom pass");
+    if (!try proveDereflect(gpa, engine)) return 1;
+    watchHold("dereflect pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;

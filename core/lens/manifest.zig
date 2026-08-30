@@ -340,6 +340,14 @@ pub const ZoomField = struct {
     cy: f32 = 0.5,
 };
 
+pub const DereflectField = struct {
+    /// A dereflect.pass node's `strength` (0..1): how far a bright pixel's
+    /// high-frequency detail is pulled toward its neighbourhood mean, attenuating
+    /// a glass reflection or glare that sits over the bright regions. 0 is
+    /// untouched.
+    strength: f32 = 1,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1123,6 +1131,8 @@ pub const Node = struct {
     stabilize: ?StabilizeField = null,
     /// Set only on a zoom.pass node: its digital region magnify.
     zoom: ?ZoomField = null,
+    /// Set only on a dereflect.pass node: its specular attenuation strength.
+    dereflect: ?DereflectField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -2134,6 +2144,20 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 zoom_field = field;
             }
             path.pop(zmark);
+        }
+        var dereflect_field: ?DereflectField = null;
+        if (getField(object, "dereflect")) |dv| {
+            const dmark = path.push("dereflect");
+            if (!std.mem.eql(u8, node_type, "dereflect.pass")) {
+                try diags.add(path.slice(), "dereflect is a dereflect.pass field, found it on '{s}'", .{node_type});
+            } else if (dv != .object) {
+                try diags.add(path.slice(), "dereflect must be an object", .{});
+            } else {
+                var field: DereflectField = .{};
+                if (getField(dv.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                dereflect_field = field;
+            }
+            path.pop(dmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3417,6 +3441,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .awb = awb_field,
             .stabilize = stabilize_field,
             .zoom = zoom_field,
+            .dereflect = dereflect_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

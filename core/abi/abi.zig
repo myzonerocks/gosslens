@@ -1083,6 +1083,9 @@ pub const Session = struct {
     /// The magnify factor and centre (factor, cx, cy) of each spliced zoom.pass
     /// node, resolved once at activation.
     zoom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [3]f32) = .empty,
+    /// The attenuation strength of each spliced dereflect.pass node, resolved
+    /// once at activation.
+    dereflect_params: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
     /// A small RGB downsample of the latest copied frame, filled at submit from
     /// the frame bytes (no GPU readback), so an auto-enhance pass can estimate a
     /// scene-adaptive correction from the whole frame's statistics.
@@ -1997,6 +2000,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .awb => s.awb_params.contains(entry.graph_index),
             .stabilize => s.stabilize_params.contains(entry.graph_index),
             .zoom => s.zoom_params.contains(entry.graph_index),
+            .dereflect => s.dereflect_params.contains(entry.graph_index),
             // Bloom is the same: no asset, params resolved at activation.
             .bloom => s.bloom_params.contains(entry.graph_index),
             // Depth of field needs the host's depth: with none submitted the
@@ -2407,6 +2411,23 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitZoomPass(view_id, input_texture, zp[0], zp[1], zp[2]);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .dereflect => {
+                const strength = s.dereflect_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const texel_w = 1.0 / @as(f32, @floatFromInt(width));
+                const texel_h = 1.0 / @as(f32, @floatFromInt(height));
+                r.submitDereflectPass(view_id, input_texture, strength, texel_w, texel_h);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3987,6 +4008,7 @@ pub fn destroySession(session: *Session) void {
     session.awb_params.deinit(session.engine.gpa);
     session.stabilize_params.deinit(session.engine.gpa);
     session.zoom_params.deinit(session.engine.gpa);
+    session.dereflect_params.deinit(session.engine.gpa);
     session.dof_params.deinit(session.engine.gpa);
     session.fog_params.deinit(session.engine.gpa);
     session.outline_params.deinit(session.engine.gpa);
@@ -7710,6 +7732,7 @@ fn destroyBlendState(session: *Session) void {
     session.awb_params.clearRetainingCapacity();
     session.stabilize_params.clearRetainingCapacity();
     session.zoom_params.clearRetainingCapacity();
+    session.dereflect_params.clearRetainingCapacity();
     session.dof_params.clearRetainingCapacity();
     session.fog_params.clearRetainingCapacity();
     session.outline_params.clearRetainingCapacity();
@@ -8312,6 +8335,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createAwbParams(s, gpa) catch {};
     createStabilizeParams(s, gpa) catch {};
     createZoomParams(s, gpa) catch {};
+    createDereflectParams(s, gpa) catch {};
     createLashParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
     createDofParams(s, gpa) catch {};
@@ -8480,6 +8504,17 @@ fn createZoomParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(nodes);
     for (nodes) |n| {
         session.zoom_params.put(gpa, n.graph_index, .{ n.factor, n.cx, n.cy }) catch {};
+    }
+}
+
+/// Resolves every spliced dereflect.pass node's strength into
+/// session.dereflect_params once at activation - mirrors createZoomParams.
+fn createDereflectParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const nodes = try lens.dereflectPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(nodes);
+    for (nodes) |n| {
+        session.dereflect_params.put(gpa, n.graph_index, n.strength) catch {};
     }
 }
 
@@ -10964,6 +10999,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createAwbParams(session, gpa);
     try createStabilizeParams(session, gpa);
     try createZoomParams(session, gpa);
+    try createDereflectParams(session, gpa);
     try createLashParams(session, gpa);
     try createBloomParams(session, gpa);
     try createDofParams(session, gpa);
