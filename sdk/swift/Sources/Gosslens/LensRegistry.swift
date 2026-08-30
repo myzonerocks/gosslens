@@ -272,6 +272,14 @@ extension GossSession {
         try checked(goss_session_brush_set_style(handle, red, green, blue, alpha, width))
     }
 
+    /// Uploads the RGBA sprite a stamp-mode stroke lays along its length, an
+    /// emoji or icon the host rasterizes. The bytes are copied.
+    public func setBrushStamp(rgba: [UInt8], width: Int, height: Int) throws {
+        try rgba.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_brush_set_stamp(handle, buffer.baseAddress, UInt32(width), UInt32(height)))
+        }
+    }
+
     /// Opens a stroke in the current style. A fresh stroke drops the redo stack.
     public func beginStroke() throws { try checked(goss_session_brush_begin(handle)) }
 

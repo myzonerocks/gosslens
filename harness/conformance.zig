@@ -8473,6 +8473,99 @@ fn proveBrushStroke(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the stamp brush lays its sprite into the composited frame: a stamp
+/// stroke across a gray frame draws nothing until a stamp sprite is set, and
+/// once a solid magenta sprite is uploaded the stroke's band lights magenta
+/// while a corner off the stroke stays byte-identical, bit-stable across runs.
+fn proveStampBrush(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    // A flat gray frame, so a magenta stamp reads clearly against it.
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..@as(usize, width) * height) |i| {
+        frame_rgba[i * 4 + 0] = 128;
+        frame_rgba[i * 4 + 1] = 128;
+        frame_rgba[i * 4 + 2] = 128;
+        frame_rgba[i * 4 + 3] = 255;
+    }
+    const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height });
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    // A horizontal stamp stroke across the middle in stamp mode (4).
+    _ = abi.goss_session_brush_set_style(session, 1.0, 1.0, 1.0, 1.0, 0.04);
+    _ = abi.goss_session_brush_set_mode(session, 4);
+    _ = abi.goss_session_brush_begin(session);
+    _ = abi.goss_session_brush_point(session, 0.15, 0.5);
+    _ = abi.goss_session_brush_point(session, 0.85, 0.5);
+    _ = abi.goss_session_brush_end(session);
+
+    const cap = @as(usize, width) * height * 4;
+    const control = try gpa.alloc(u8, cap);
+    defer gpa.free(control);
+    const stamped = try gpa.alloc(u8, cap);
+    defer gpa.free(stamped);
+    const again = try gpa.alloc(u8, cap);
+    defer gpa.free(again);
+
+    var cw: u32 = 0;
+    var ch: u32 = 0;
+    // No stamp sprite set yet: the stamp stroke draws nothing, so the frame is
+    // the plain gray.
+    try renderCapture(engine, session, &desc, planes, half_w, control, &cw, &ch);
+
+    // A solid magenta 8x8 sprite, then the stroke stamps it along its band.
+    var sprite: [8 * 8 * 4]u8 = undefined;
+    for (0..64) |i| {
+        sprite[i * 4 + 0] = 255;
+        sprite[i * 4 + 1] = 0;
+        sprite[i * 4 + 2] = 255;
+        sprite[i * 4 + 3] = 255;
+    }
+    if (abi.goss_session_brush_set_stamp(session, &sprite, 8, 8) != .ok) {
+        std.debug.print("conformance: FAIL stamp sprite upload\n", .{});
+        return false;
+    }
+    try renderCapture(engine, session, &desc, planes, half_w, stamped, &cw, &ch);
+    try renderCapture(engine, session, &desc, planes, half_w, again, &cw, &ch);
+
+    if (!std.mem.eql(u8, stamped, again)) {
+        std.debug.print("conformance: FAIL stamp brush is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    // The middle band (where the stroke runs) gains magenta; the top-left corner
+    // is off the stroke and stays byte-identical to the control.
+    var band_magenta: usize = 0;
+    const mid = height / 2;
+    for (0..width) |x| {
+        const idx = (mid * width + x) * 4;
+        if (stamped[idx] > 200 and stamped[idx + 1] < 80 and stamped[idx + 2] > 200) band_magenta += 1;
+    }
+    var corner_changed: usize = 0;
+    for (0..20) |y| {
+        for (0..20) |x| {
+            const idx = (y * width + x) * 4;
+            if (!std.mem.eql(u8, stamped[idx .. idx + 4], control[idx .. idx + 4])) corner_changed += 1;
+        }
+    }
+    if (band_magenta == 0 or corner_changed != 0) {
+        std.debug.print("conformance: FAIL stamp brush did not localize (band magenta {d}, corner changed {d})\n", .{ band_magenta, corner_changed });
+        return false;
+    }
+    if (std.mem.eql(u8, stamped, control)) {
+        std.debug.print("conformance: FAIL stamp sprite did not change the frame\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the stamp brush lays its sprite along the stroke ({d} magenta px on the band) and nothing without a sprite, the off-stroke corner byte-identical, bit-stable\n", .{band_magenta});
+    return true;
+}
+
 /// Proves the engine-side outgoing mix: at the native 48 kHz, the lens over a
 /// silent mic is bit-identical to pull_audio, a non-zero mic sums in with
 /// saturation, and the resampled 44.1 kHz path is non-silent and deterministic
@@ -18512,6 +18605,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("geofilter");
     if (!try proveBrushStroke(gpa, engine)) return 1;
     watchHold("brush stroke");
+    if (!try proveStampBrush(gpa, engine)) return 1;
+    watchHold("stamp brush");
     if (!try proveBlur(gpa, engine)) return 1;
     watchHold("blur");
     if (!try proveGrade(gpa, engine)) return 1;

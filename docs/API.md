@@ -322,7 +322,8 @@ ribbon for the renderer to draw.
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_session_brush_set_style` | `brushSetStyle(r, g, b, a, width)`, colour and width for the next stroke | all SDKs |
-| `goss_session_brush_set_mode` | `brushSetMode(mode)`, preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon (additive) | all SDKs |
+| `goss_session_brush_set_mode` | `brushSetMode(mode)`, preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon (additive), 4 stamp | all SDKs |
+| `goss_session_brush_set_stamp` | `setBrushStamp(rgba, width, height)`, the RGBA sprite a stamp-mode stroke lays along its length (an emoji or icon the host rasterizes) | all SDKs |
 | `goss_session_brush_begin` / `_point` / `_end` | `brushBegin()` / `brushPoint(x, y)` / `brushEnd()`, a stroke in normalized screen space | all SDKs |
 | `goss_session_brush_undo` / `_redo` / `_clear` | `brushUndo()` / `brushRedo()` / `brushClear()`, the stroke stacks | all SDKs |
 | `goss_session_brush_erase_at` | `brushEraseAt(x, y, radius)`, removes committed strokes within radius of a point (refused mid-stroke), returning the count | all SDKs |

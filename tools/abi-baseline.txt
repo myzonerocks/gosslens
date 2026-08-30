@@ -1,4 +1,4 @@
-abi 0.72
+abi 0.73
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -156,6 +156,7 @@ fn goss_status goss_session_set_named_geofence(goss_session *session, const uint
 fn goss_status goss_session_clear_named_geofences(goss_session *session)
 fn goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m)
 fn goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)
+fn goss_status goss_session_brush_set_stamp(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)
 fn goss_status goss_session_brush_begin(goss_session *session)
 fn goss_status goss_session_brush_point(goss_session *session, float x, float y)
 fn goss_status goss_session_brush_end(goss_session *session)

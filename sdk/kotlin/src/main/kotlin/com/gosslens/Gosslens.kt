@@ -149,6 +149,7 @@ object Gosslens {
     internal external fun nativeClearNamedGeofences(session: Long): Int
     internal external fun nativeSetGeoAccuracy(session: Long, maxAccuracyM: Float): Int
     internal external fun nativeBrushSetStyle(session: Long, r: Float, g: Float, b: Float, a: Float, width: Float): Int
+    internal external fun nativeBrushSetStamp(session: Long, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeBrushBegin(session: Long): Int
     internal external fun nativeBrushPoint(session: Long, x: Float, y: Float): Int
     internal external fun nativeBrushEnd(session: Long): Int
@@ -1463,6 +1464,15 @@ class GossSession private constructor(
     /** Sets the color and half-width (normalized units) the next stroke opens with. */
     fun setBrushStyle(r: Float, g: Float, b: Float, a: Float, width: Float): Boolean =
         Gosslens.nativeBrushSetStyle(handle, r, g, b, a, width) == 0
+
+    /** Uploads the RGBA sprite a stamp-mode stroke (brush mode 4) lays along its
+     * length, an emoji or icon the host rasterizes. [rgba] is width by height RGBA8. */
+    fun setBrushStamp(rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeBrushSetStamp(handle, buf, width, height) == 0
+    }
 
     /** Opens a stroke in the current style. A fresh stroke drops the redo stack. */
     fun beginStroke(): Boolean = Gosslens.nativeBrushBegin(handle) == 0

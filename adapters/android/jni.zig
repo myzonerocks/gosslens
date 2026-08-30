@@ -1024,6 +1024,14 @@ export fn Java_com_gosslens_Gosslens_nativeBrushSetStyle(env: *JniEnv, cls: jobj
     return @intFromEnum(abi.goss_session_brush_set_style(sessionFromHandle(session), r, g, b, a, width));
 }
 
+/// rgba_buffer is a direct byte buffer of width*height RGBA8 pixels.
+export fn Java_com_gosslens_Gosslens_nativeBrushSetStamp(env: *JniEnv, cls: jobject, session: i64, rgba_buffer: jobject, width: i32, height: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const rgba: [*]const u8 = @ptrCast(bytes);
+    return @intFromEnum(abi.goss_session_brush_set_stamp(sessionFromHandle(session), rgba, @intCast(@max(width, 0)), @intCast(@max(height, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeBrushBegin(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;

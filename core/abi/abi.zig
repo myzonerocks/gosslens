@@ -159,6 +159,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_clear_named_geofences(goss_session *session)",
     "goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m)",
     "goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)",
+    "goss_status goss_session_brush_set_stamp(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_brush_begin(goss_session *session)",
     "goss_status goss_session_brush_point(goss_session *session, float x, float y)",
     "goss_status goss_session_brush_end(goss_session *session)",
@@ -1090,6 +1091,10 @@ pub const Session = struct {
     /// The draw and AR-brush board. The engine owns stroke state and undo/redo;
     /// goss_session_brush_vertices reads the finished ribbon for the renderer.
     brush: stroke.Board = .{},
+    /// The sprite a stamp-mode stroke lays along its length (an emoji or icon
+    /// the host uploads); null until set, and a stamp stroke draws nothing
+    /// without it.
+    brush_stamp_texture: ?render.TextureHandle = null,
     /// World-anchored strokes and the screen-space board they project into each
     /// frame. The AR brush stores points in world space; the render path
     /// projects them through the camera pose and draws them like the screen
@@ -2055,11 +2060,24 @@ fn brushDrawnInChain(s: *Session) bool {
 /// Draws every committed stroke of `board` over view_id. Each stroke draws on
 /// its own so neon blends additively while pen, highlighter, and marker blend on
 /// alpha.
-fn drawBrushStrokes(r: *render.Renderer, board: *const stroke.Board, view_id: u8) void {
+fn drawBrushStrokes(r: *render.Renderer, board: *const stroke.Board, view_id: u8, stamp_tex: ?render.TextureHandle, aspect: f32) void {
     // One stroke's worst-case ribbon: every segment expanded to six vertices.
     var buf: [(stroke.max_points - 1) * 6 * stroke.floats_per_vertex]f32 = undefined;
+    var centers: [stroke.max_points][2]f32 = undefined;
     var si: u16 = 0;
     while (si < board.strokeCount()) : (si += 1) {
+        // A stamp-mode stroke lays the sprite along its length instead of a
+        // ribbon; with no stamp sprite set it simply draws nothing.
+        if (board.strokeMode(si).stamped()) {
+            const tex = stamp_tex orelse continue;
+            const half = board.strokeWidth(si);
+            const spacing = @max(half * 2.0, 1e-3);
+            const nc = board.buildStampCenters(si, spacing, &centers);
+            for (centers[0..nc]) |cpt| {
+                r.submitSpriteRotated(view_id, tex, cpt[0], cpt[1], half / aspect, half, 0, aspect, 1.0);
+            }
+            continue;
+        }
         const floats = board.buildStroke(si, &buf);
         if (floats == 0) continue;
         r.submitBrush(view_id, &buf, @intCast(floats / stroke.floats_per_vertex), board.strokeAdditive(si));
@@ -2117,8 +2135,9 @@ fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, w
     if (!draw_screen and !draw_ar) return;
     render.Renderer.setViewTarget(view_id, finalTarget(e, s), width, height);
     r.tile = null;
-    if (draw_screen) drawBrushStrokes(r, &s.brush, view_id);
-    if (draw_ar) drawBrushStrokes(r, &s.ar_projected, view_id);
+    const aspect = if (height > 0) @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)) else 1.0;
+    if (draw_screen) drawBrushStrokes(r, &s.brush, view_id, s.brush_stamp_texture, aspect);
+    if (draw_ar) drawBrushStrokes(r, &s.ar_projected, view_id, s.brush_stamp_texture, aspect);
 }
 
 /// Whether a reshape.bank node has a face to sculpt this frame: a valid
@@ -3426,7 +3445,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // The frame passes through whole, then the brush board draws its
                 // strokes over it at the node's own place in the chain.
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
-                drawBrushStrokes(r, &s.brush, view_id);
+                const brush_aspect = if (height > 0) @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)) else 1.0;
+                drawBrushStrokes(r, &s.brush, view_id, s.brush_stamp_texture, brush_aspect);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -4669,11 +4689,12 @@ pub fn destroySession(session: *Session) void {
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
     releaseCurrentFrame(session);
-    if (session.engine.renderer != null) {
+    if (session.engine.renderer) |*r| {
         session.preview_bgra.deinit();
         session.preview_y.deinit();
         session.preview_uv.deinit();
         for (0..session.source_count) |i| session.source_tex[i].deinit();
+        if (session.brush_stamp_texture) |tex| r.destroyTexture(tex);
     }
     session.engine.gpa.destroy(session);
 }
@@ -6296,6 +6317,20 @@ pub export fn goss_session_clear_named_geofences(session: ?*Session) Status {
 pub export fn goss_session_brush_set_style(session: ?*Session, r: f32, g: f32, b: f32, a: f32, width: f32) Status {
     const s = session orelse return .invalid_argument;
     s.brush.setStyle(.{ r, g, b, a }, width);
+    return .ok;
+}
+
+/// Uploads the sprite a stamp-mode stroke lays along its length (an emoji or
+/// icon rasterized to RGBA by the host), replacing any previous stamp. The
+/// bytes are copied into a texture; the caller may free them on return.
+pub export fn goss_session_brush_set_stamp(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const bytes = rgba orelse return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    const texture = render.Renderer.createStaticTexture(@intCast(width), @intCast(height), bytes[0 .. @as(usize, width) * height * 4]);
+    if (s.brush_stamp_texture) |old| r.destroyTexture(old);
+    s.brush_stamp_texture = texture;
     return .ok;
 }
 

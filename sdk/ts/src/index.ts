@@ -1254,6 +1254,15 @@ export class GossSession {
     this.mod.ccall("goss_session_brush_set_style", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, r, g, b, a, width]);
   }
 
+  /// Uploads the RGBA sprite a stamp-mode stroke (brush mode 4) lays along its
+  /// length, an emoji or icon the host rasterizes.
+  setBrushStamp(rgba: Uint8ClampedArray | Uint8Array, width: number, height: number): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    this.mod.HEAPU8.set(rgba, ptr);
+    this.mod.ccall("goss_session_brush_set_stamp", "number", ["number", "number", "number", "number"], [this.handle, ptr, width, height]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, rgba.length]);
+  }
+
   /// Opens a stroke in the current style. A fresh stroke drops the redo stack.
   beginStroke(): void {
     this.mod.ccall("goss_session_brush_begin", "number", ["number"], [this.handle]);

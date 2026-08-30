@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 72u
+#define GOSS_ABI_MINOR 73u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -827,6 +827,10 @@ goss_status goss_session_clear_named_geofences(goss_session *session);
  * ribbon (x, y, r, g, b, a per vertex) for the renderer to draw. brush_vertices
  * with a null out reports the float count the caller must size for. */
 goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width);
+/* Uploads the RGBA sprite a stamp-mode stroke (brush mode 4) lays along its
+ * length, an emoji or icon the host rasterizes; the bytes are copied. A stamp
+ * stroke draws nothing until one is set. */
+goss_status goss_session_brush_set_stamp(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height);
 goss_status goss_session_brush_begin(goss_session *session);
 goss_status goss_session_brush_point(goss_session *session, float x, float y);
 goss_status goss_session_brush_end(goss_session *session);
@@ -835,8 +839,9 @@ goss_status goss_session_brush_redo(goss_session *session);
 goss_status goss_session_brush_clear(goss_session *session);
 goss_status goss_session_brush_vertices(goss_session *session, float *out, size_t capacity_floats, size_t *out_count);
 /* Brush preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon
- * (drawn additively). Erase removes committed strokes within radius of a point,
- * refusing mid-stroke, and reports the count. */
+ * (drawn additively), 4 stamp (lays the brush_set_stamp sprite along the
+ * stroke). Erase removes committed strokes within radius of a point, refusing
+ * mid-stroke, and reports the count. */
 goss_status goss_session_brush_set_mode(goss_session *session, uint32_t mode);
 goss_status goss_session_brush_erase_at(goss_session *session, float x, float y, float radius, size_t *out_removed);
 
