@@ -429,6 +429,13 @@ jittery one. The smoothing level rides the recording policy's stabilization knob
 (off, standard, cinematic); with it off the node is inert. It ships no asset and
 is always ready.
 
+A `"zoom.pass"` node is a digital region zoom post-effect. It carries a `"zoom":
+{"factor", "cx", "cy"}` block: the region around the normalized centre (`cx`,
+`cy`, default the frame centre) is magnified by `factor` (1..8, default 1) to fill
+the frame, so a sub-region fills the output and reads sharper after an upscale
+pass downstream. Factor 1 with a centred point is the identity. It ships no asset
+and is always ready.
+
 A `"dof.pass"` node is a depth-of-field post-effect. It carries a `"dof":
 {"focus", "strength"}` block: `focus` is the plane it keeps sharp (0..1 in
 the host's submitted depth near..far range) and `strength` how sharply the
@@ -1317,6 +1324,8 @@ a per-session inference budget caps the heavy workers, four ml.infer nets all
 loading under a budget of eight but only two under a budget of two;
 a stabilize.pass steadies a jittering camera, the settled inter-frame motion
 falling to under half of the same lens with stabilization off;
+a zoom.pass magnifies a centred region, a factor of 2 growing a centred disk
+toward four times its area;
 a temporal ml.infer net feeds the previous output frame into its second input,
 a recurrent sum of the frame and its previous reading about twice a constant gray
 where the same graph on a zero reference reads it once;

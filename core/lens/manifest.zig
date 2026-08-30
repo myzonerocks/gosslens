@@ -331,6 +331,15 @@ pub const StabilizeField = struct {
     strength: f32 = 1,
 };
 
+pub const ZoomField = struct {
+    /// A zoom.pass node's digital region magnify: `factor` (>= 1) scales the
+    /// region around (`cx`, `cy`) up to fill the frame. Factor 1 with a centred
+    /// point is the identity.
+    factor: f32 = 1,
+    cx: f32 = 0.5,
+    cy: f32 = 0.5,
+};
+
 pub const BloomField = struct {
     /// A bloom.pass node's glow: threshold is the luma above which a pixel
     /// blooms, intensity how strongly the blurred highlights add back.
@@ -1066,6 +1075,8 @@ pub const Node = struct {
     awb: ?AwbField = null,
     /// Set only on a stabilize.pass node: its stabilization blend strength.
     stabilize: ?StabilizeField = null,
+    /// Set only on a zoom.pass node: its digital region magnify.
+    zoom: ?ZoomField = null,
     /// Set only on a shader.pass node that authors a material node graph
     /// instead of naming a built-in shader; lowers to a fragment shader.
     material: ?material.Graph = null,
@@ -2060,6 +2071,22 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 stabilize_field = field;
             }
             path.pop(smark);
+        }
+        var zoom_field: ?ZoomField = null;
+        if (getField(object, "zoom")) |zv| {
+            const zmark = path.push("zoom");
+            if (!std.mem.eql(u8, node_type, "zoom.pass")) {
+                try diags.add(path.slice(), "zoom is a zoom.pass field, found it on '{s}'", .{node_type});
+            } else if (zv != .object) {
+                try diags.add(path.slice(), "zoom must be an object", .{});
+            } else {
+                var field: ZoomField = .{};
+                if (getField(zv.object, "factor")) |v| field.factor = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.factor)), 1, 8);
+                if (getField(zv.object, "cx")) |v| field.cx = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.cx)), 0, 1);
+                if (getField(zv.object, "cy")) |v| field.cy = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.cy)), 0, 1);
+                zoom_field = field;
+            }
+            path.pop(zmark);
         }
         var material_field: ?material.Graph = null;
         if (getField(object, "material")) |mv| {
@@ -3330,6 +3357,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .undistort = undistort_field,
             .awb = awb_field,
             .stabilize = stabilize_field,
+            .zoom = zoom_field,
             .material = material_field,
             .bloom = bloom_field,
             .dof = dof_field,

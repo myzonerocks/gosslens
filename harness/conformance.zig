@@ -3562,6 +3562,66 @@ fn proveStabilize(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Writes a zoom.pass lens at a static factor, centred (no asset).
+fn writeZoomLens(dir: []const u8, factor: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.zoom","version":"1.0.0","display_name":"Zoom","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"z","type":"zoom.pass","inputs":{{"frame":"camera"}},"params":{{}},"zoom":{{"factor":{d:.3},"cx":0.5,"cy":0.5}}}}],
+        \\ "triggers":[]}}
+    , .{factor});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// Proves the digital region zoom: a centred white disk magnified by the factor
+/// fills more of the frame. At factor 1 the disk keeps its area; at factor 2 it
+/// grows toward four times it (the area of a doubled radius).
+fn proveZoom(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const f = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(f);
+    for (0..height) |row| for (0..width) |col| {
+        const idx = (row * @as(usize, width) + col) * 4;
+        const u = @as(f32, @floatFromInt(col)) / @as(f32, width) - 0.5;
+        const v = @as(f32, @floatFromInt(row)) / @as(f32, height) - 0.5;
+        const white = (u * u + v * v) < 0.15 * 0.15;
+        const val: u8 = if (white) 255 else 0;
+        f[idx + 0] = val;
+        f[idx + 1] = val;
+        f[idx + 2] = val;
+        f[idx + 3] = 255;
+    };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = f }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/zoom-1");
+    try writeZoomLens("zig-out/zoom-1", 1.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/zoom-2");
+    try writeZoomLens("zig-out/zoom-2", 2.0);
+
+    const shot1 = try captureDehazeShot(gpa, engine, "zig-out/zoom-1", planes);
+    defer gpa.free(shot1);
+    const shot2 = try captureDehazeShot(gpa, engine, "zig-out/zoom-2", planes);
+    defer gpa.free(shot2);
+
+    const area1 = brightArea(shot1);
+    const area2 = brightArea(shot2);
+    if (area1 == 0) {
+        std.debug.print("conformance: FAIL the zoom test frame had no disk to magnify\n", .{});
+        return false;
+    }
+    if (area2 <= area1 * 2) {
+        std.debug.print("conformance: FAIL zoom factor 2 did not magnify the disk (area {d} -> {d})\n", .{ area1, area2 });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a zoom.pass magnifies a centred region: a factor of 2 grows a centred disk toward four times its area ({d} -> {d})\n", .{ area1, area2 });
+    return true;
+}
+
 /// Emits a 1x1 conv net: input [1,cin,side,side] plus any extra (unused) inputs,
 /// a weight of cout x cin, output [1,cout,side,side]. The diffusion proof builds
 /// its encoder, unet, and decoder from this.
@@ -14966,6 +15026,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("inference budget");
     if (!try proveStabilize(gpa, engine)) return 1;
     watchHold("stabilize pass");
+    if (!try proveZoom(gpa, engine)) return 1;
+    watchHold("zoom pass");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
     watchHold("ml infer material");
     if (!try proveMlInferMaterialGraph(gpa, engine)) return 1;
