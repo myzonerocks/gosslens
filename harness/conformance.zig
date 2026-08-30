@@ -7128,6 +7128,61 @@ fn proveScriptFile(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the math-transform and vector logic.graph nodes: a graph chaining
+/// hypot(3,4)=5, mod(5,3)=2 and smoothstep(0,4,2)=0.5 drives a parameter to
+/// exactly 0.5, bit-stable across ticks, with no code and no host dependence.
+fn proveLogicGraphMath(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const dir = "zig-out/logic-math";
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.logic-math","version":"1.0.0","display_name":"Logic Math","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"lg","type":"logic.graph","params":{},"graph":{
+        \\   "nodes":[{"id":"m","op":"hypot","a":3.0,"b":4.0},
+        \\            {"id":"r","op":"mod","a":"m","b":3.0},
+        \\            {"id":"q","op":"smoothstep","a":0.0,"b":4.0,"c":"r"}],
+        \\   "output":"q","output_param":"intensity"}}],
+        \\ "triggers":[]}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, dir);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+        std.debug.print("conformance: FAIL logic-math lens activation\n", .{});
+        return false;
+    }
+
+    const name = "intensity";
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var v: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    if (abi.goss_session_parameter_value(session, name.ptr, name.len, &v) != .ok) {
+        std.debug.print("conformance: FAIL reading the logic-graph parameter\n", .{});
+        return false;
+    }
+    if (@abs(v - 0.5) > 1e-6) {
+        std.debug.print("conformance: FAIL logic graph drove intensity to {d}, wanted 0.5\n", .{v});
+        return false;
+    }
+    var v_again: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_again);
+    if (v_again != v) {
+        std.debug.print("conformance: FAIL logic graph is not deterministic ({d} vs {d})\n", .{ v_again, v });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a logic.graph chains hypot, mod and smoothstep to drive a parameter to exactly 0.5, deterministically\n", .{});
+    return true;
+}
+
 /// Proves lens audio: a play_sound trigger starts a voice that the mixer
 /// pulls out as PCM, silent before the trigger, non-silent after, and
 /// bit-identical across two runs of the same sequence.
@@ -17744,6 +17799,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("script");
     if (!try proveScriptFile(gpa, engine)) return 1;
     watchHold("script-file");
+    if (!try proveLogicGraphMath(gpa, engine)) return 1;
+    watchHold("logic-math");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;

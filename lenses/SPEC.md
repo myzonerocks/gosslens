@@ -973,8 +973,15 @@ node has an `"id"` and an `"op"`: a leaf reads the world with `signal` (its
 or `param` (its `"param"` names a parameter), or is a `const` with a `"value"`.
 The rest combine earlier nodes: `add`, `sub`, `mul`, `div`, `min`, `max`,
 `clamp`, `lerp`, `gt`, `lt`, `eq`, `and`, `or`, `not`, and `select` (a ? b : c).
-An input `"a"`, `"b"` or `"c"` is either a number literal or the id of an
-earlier node, so a graph reads only what comes before it. `"output"` names the
+The math-transform and vector nodes extend that set: `neg`, `abs`, `floor`,
+`ceil`, `round`, `trunc`, `frac`, `sign`, and `sqrt` transform a single input;
+`mod` is `a - b*floor(a/b)` like the shader `mod`; `hypot` is the magnitude
+`sqrt(a*a + b*b)` of a two-component vector; `step` yields 1 when `b >= a`; and
+`smoothstep` ramps 0..1 across the edges `a`..`b` at `c`. Each is built from
+exact operations so a logic graph stays bit-identical across platforms, the
+same determinism guarantee a trigger or a script gives. An input `"a"`, `"b"`
+or `"c"` is either a number literal or the id of an earlier node, so a graph
+reads only what comes before it. `"output"` names the
 node whose value flows to `"output_param"` each tick, evaluated before the
 triggers so they read its fresh value. The graph is pure and deterministic, so
 a logic-driven lens stays conformance bit-stable like a trigger or a script.
