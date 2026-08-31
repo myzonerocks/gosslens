@@ -89,7 +89,8 @@ is in one place.
 ## Objects, connected AR, and recognition
 
 - [ ] Stickers and cutouts: an auto-subject cutout sticker maker, motion-tracked stickers and text pinned to a moving object, and info and interactive stickers
-- [ ] Object removal and fill: magic-eraser object removal (still and temporally consistent video inpaint), generative fill/expand/outpaint, sky replacement, and object move/resize/duplicate with background fill
+- [x] Object removal and sky replacement: an inpaint.pass magic eraser fills a masked region (an object, blemish or passerby) from its surrounding color along cast rays, and env.pass replaces the sky behind the segmented foreground (the inpaint and env-sky/scene-sky reference lenses, both proven)
+- [ ] Object removal and fill, the rest: temporally consistent video inpaint, generative fill/expand/outpaint, and object move/resize/duplicate with background fill
 - [ ] A try-on catalog: eyewear, jewelry, watches, hats, shoes, apparel draping and tattoo/henna, each tied to its tracker with occlusion and PBR, plus an in-lens product info card and diffusion virtual try-on
 - [ ] Connected lenses: real-time shared AR sessions co-located and remote, deterministic shared-state netcode, matchmaking, phone-as-controller input, co-presence avatars, and shared persistent anchors
 - [ ] Recognition and geospatial: on-device object and scene recognition, live OCR and text detection with a translation overlay, barcode/product/plant/food/landmark recognition, QR-driven lens unlock, pre-scanned landmark anchoring, city-scale AR meshes, and VPS-class localization
