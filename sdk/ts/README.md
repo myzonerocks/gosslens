@@ -15,9 +15,19 @@ tracking worker.
 
 ## Install
 
-```json
-{ "dependencies": { "@gosslens/core": "workspace:*" } }
 ```
+bun add @myzonerocks/gosslens
+```
+
+Inside this monorepo, consume it from the workspace instead:
+
+```json
+{ "dependencies": { "@myzonerocks/gosslens": "workspace:*" } }
+```
+
+`bun run build` compiles `src/` to `dist/src/` (the package points `main`
+and `types` there); run it once so `dist/` exists before a workspace
+consumer resolves it.
 
 This package is the JS wrapper only. `zig build wasm-emscripten` builds
 the WebGL2 `gosslens_web.js`/`.wasm` pair; `zig build
@@ -28,7 +38,7 @@ They are separate artifacts, not bundled.
 ## Use
 
 ```ts
-import { Gosslens, GossEngine, GossSession, GossPreviewSession } from "@gosslens/core";
+import { Gosslens, GossEngine, GossSession, GossPreviewSession } from "@myzonerocks/gosslens";
 
 const gosslens = await Gosslens.load(canvas, wasmJsUrl);
 const engine = GossEngine.create(gosslens);
@@ -52,7 +62,7 @@ adapter.
 Capture reads a PNG back, and world tracking feeds WebXR frames in:
 
 ```ts
-import { GossWebXRWorldSource } from "@gosslens/core";
+import { GossWebXRWorldSource } from "@myzonerocks/gosslens";
 
 const png = await engine.captureFrame(session);   // data URL
 
@@ -82,4 +92,5 @@ with the host conformance in [`harness/`](../../harness/).
 
 ## TODO
 
-- Publish to npm; the dependency above assumes a monorepo workspace.
+- Publish `@myzonerocks/gosslens` to npm; until then `bun add` resolves
+  only inside the workspace.
