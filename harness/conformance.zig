@@ -14737,6 +14737,44 @@ fn proveHostileManifest(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The lens-format fuzzer: a valid manifest is hammered with deterministic byte
+/// and structural mutations and re-parsed, and the parser must return every time
+/// - a manifest or typed diagnostics, never a crash on malformed bytes. Proves
+/// the published, forkable lens format's parser is a hard trust boundary.
+fn proveManifestFuzz(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = engine;
+    const base =
+        \\{"glf":"1.0","id":"fuzz","version":"1.0.0","display_name":"Fuzz","engine_compat":">=0.5","capabilities":["hands"],"parameters":[{"name":"p","type":"int","default":5,"min":0,"max":100}],"nodes":[{"type":"model.gltf","id":"n","src":"m.glb","particles":{"color":[1,0,0]}},{"type":"sprite.2d","id":"s","asset":"s.png"}],"triggers":[{"when":"start","action":{"kind":"param_ramp","target":"p","to":1,"duration_ms":100}}]}
+    ;
+    var prng = std.Random.DefaultPrng.init(0xd1b54a32d192 ^ base.len);
+    const rand = prng.random();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    const iterations = 2000;
+    var iter: usize = 0;
+    while (iter < iterations) : (iter += 1) {
+        buf.clearRetainingCapacity();
+        try buf.appendSlice(gpa, base);
+        const mutations = 1 + rand.uintLessThan(usize, 6);
+        var m: usize = 0;
+        while (m < mutations) : (m += 1) {
+            if (buf.items.len == 0) break;
+            switch (rand.uintLessThan(u8, 4)) {
+                0 => buf.items[rand.uintLessThan(usize, buf.items.len)] = rand.int(u8),
+                1 => try buf.insert(gpa, rand.uintLessThan(usize, buf.items.len), rand.int(u8)),
+                2 => _ = buf.orderedRemove(rand.uintLessThan(usize, buf.items.len)),
+                3 => buf.shrinkRetainingCapacity(rand.uintLessThan(usize, buf.items.len)),
+                else => unreachable,
+            }
+        }
+        _ = manifestDiagCount(gpa, buf.items) catch |e| switch (e) {
+            error.OutOfMemory => continue,
+        };
+    }
+    std.debug.print("conformance: PROOF the lens-format parser survives {d} mutation-fuzz iterations without crashing\n", .{iterations});
+    return true;
+}
+
 /// Submits `frames` corpus frames through the loader and render path on
 /// the renderer-backed engine, the same submit/decode/nv12 sequence a
 /// live session runs.
@@ -20239,6 +20277,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveWorldMeshAnchor(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "manifest-fuzz")) {
+            if (!try proveManifestFuzz(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -20717,6 +20757,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("tiled post effect");
     if (!try proveHostileManifest(gpa, engine)) return 1;
     watchHold("hostile manifest");
+    if (!try proveManifestFuzz(gpa, engine)) return 1;
+    watchHold("manifest fuzz");
     if (!try proveNoLeaks(gpa, engine, &frame_counter)) return 1;
     watchHold("no leaks");
     if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;

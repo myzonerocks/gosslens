@@ -6047,3 +6047,41 @@ test "a lens declares custom hand gestures and rejects malformed ones" {
     defer result.deinit();
     try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "five states") != null);
 }
+
+test "the manifest parser survives deterministic mutation fuzzing without crashing or leaking" {
+    // The lens format is a public, forkable standard, so its parser is the trust
+    // boundary for untrusted lenses. Hammer a valid manifest with deterministic
+    // byte and structural mutations; the parser must always return, never crash
+    // on malformed bytes, and the testing allocator must see no leak.
+    const base =
+        \\{"glf":"1.0","id":"fuzz","version":"1.0.0","display_name":"Fuzz","engine_compat":">=0.5","capabilities":["hands"],"parameters":[{"name":"p","type":"int","default":5,"min":0,"max":100}],"nodes":[{"type":"model.gltf","id":"n","src":"m.glb","particles":{"color":[1,0,0]}},{"type":"sprite.2d","id":"s","asset":"s.png"}],"triggers":[{"when":"start","action":{"kind":"param_ramp","target":"p","to":1,"duration_ms":100}}]}
+    ;
+    var prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
+    const rand = prng.random();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(t.allocator);
+    var iter: usize = 0;
+    while (iter < 3000) : (iter += 1) {
+        buf.clearRetainingCapacity();
+        try buf.appendSlice(t.allocator, base);
+        const mutations = 1 + rand.uintLessThan(usize, 6);
+        var m: usize = 0;
+        while (m < mutations) : (m += 1) {
+            if (buf.items.len == 0) break;
+            switch (rand.uintLessThan(u8, 4)) {
+                0 => buf.items[rand.uintLessThan(usize, buf.items.len)] = rand.int(u8),
+                1 => try buf.insert(t.allocator, rand.uintLessThan(usize, buf.items.len), rand.int(u8)),
+                2 => _ = buf.orderedRemove(rand.uintLessThan(usize, buf.items.len)),
+                3 => buf.shrinkRetainingCapacity(rand.uintLessThan(usize, buf.items.len)),
+                else => unreachable,
+            }
+        }
+        var arena = std.heap.ArenaAllocator.init(t.allocator);
+        defer arena.deinit();
+        var diags: Diagnostics = .{ .arena = arena.allocator() };
+        var parsed = parse(t.allocator, &diags, buf.items) catch |e| switch (e) {
+            error.OutOfMemory => continue,
+        };
+        if (parsed) |*mani| mani.deinit();
+    }
+}

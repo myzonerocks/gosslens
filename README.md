@@ -37,7 +37,8 @@ are; new work extends the nearest existing boundary.
 
 The public architecture and dependency-license contract live in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The canonical SDK naming and
-parameter contract lives in [docs/API.md](docs/API.md).
+parameter contract lives in [docs/API.md](docs/API.md). The lens file format,
+published as a forkable standard, is [docs/LENS-FORMAT.md](docs/LENS-FORMAT.md).
 
 ## Building
 
