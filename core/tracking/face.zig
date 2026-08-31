@@ -271,6 +271,31 @@ pub const ear_regions = [_][]const u16{
     &.{ 454, 447, 366, 401, 361 },
 };
 
+/// Eyeshadow lid zones, each a cluster on the upper lid so a lens gradients
+/// eyeshadow across it. The three lid bands run inner corner to outer along the
+/// upper lid of each eye; a face-part matte fills their hulls and unions both
+/// eyes, so a tint keys the same band on both. Left eye then right per band.
+pub const lid_inner_regions = [_][]const u16{
+    &.{ 362, 398, 384 },
+    &.{ 133, 173, 157 },
+};
+pub const lid_center_regions = [_][]const u16{
+    &.{ 385, 386, 387 },
+    &.{ 158, 159, 160 },
+};
+pub const lid_outer_regions = [_][]const u16{
+    &.{ 388, 466, 263 },
+    &.{ 161, 246, 33 },
+};
+
+/// The crease zone above each lid: a hull spanning the outer upper lid up to
+/// the lower brow, covering the socket fold between them, so a deeper shade
+/// sits in the crease above the lid bands. Both eyes union into one channel.
+pub const lid_crease_regions = [_][]const u16{
+    &.{ 386, 387, 296, 334 },
+    &.{ 159, 160, 66, 105 },
+};
+
 /// A stable skin patch for reading skin tone from a reference photo: mid-cheek
 /// and mid-forehead landmarks, clear of the lips, eyes, brows, and hairline, so
 /// a reference-driven foundation samples skin, not a feature. averageLoopColor

@@ -1410,7 +1410,10 @@ the eye-white inside the eye contour with the iris punched out, and `t_zone` the
 forehead and nose bridge. `ear` marks the strip where each ear joins the face,
 filled from the face-oval silhouette landmarks beside the ears, for an earring
 or an ear tint (the mesh stops at the oval, so it is the ear's join to the face,
-not the whole pinna). A makeup or retouch lens keys those directly. One more
+not the whole pinna). `lid_inner`, `lid_center`, and `lid_outer` are the three
+eyeshadow bands across the upper lid (inner corner, centre, outer corner), and
+`lid_crease` the fold above, each unioning both eyes, so a lens gradients
+eyeshadow across the lid. A makeup or retouch lens keys those directly. One more
 is derived on the GPU: `hair_matte` is the strand-level hair alpha a `matte.hair`
 source refines from the coarse `hair` class against the camera luma, a soft
 feathered edge a hair effect keys in place of the hard `hair` bit; with no

@@ -14778,6 +14778,65 @@ fn proveEarMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the eyeshadow lid-zone clusters are anatomically placed on a real
+/// tracked face: per eye the centre band sits between the inner and outer bands
+/// along the lid, the inner band is nearer the nose than the outer, and the
+/// crease sits above the lid centre, so a mislabeled cluster fails here.
+fn proveEyeshadowZones(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL eyeshadow face tracking enable\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+    var result: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &result) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+    const lm = &result.landmarks;
+    const nose_x = lm[1 * 3];
+    // eye 0 is the subject's left (image right), eye 1 the right.
+    for (0..2) |eye| {
+        const inner = ringCentroid(lm, abi.lid_inner_regions[eye]);
+        const center = ringCentroid(lm, abi.lid_center_regions[eye]);
+        const outer = ringCentroid(lm, abi.lid_outer_regions[eye]);
+        const crease = ringCentroid(lm, abi.lid_crease_regions[eye]);
+        // The centre band lies between the inner and outer bands along the lid.
+        const lo = @min(inner[0], outer[0]);
+        const hi = @max(inner[0], outer[0]);
+        if (!(lo < center[0] and center[0] < hi)) {
+            std.debug.print("conformance: FAIL eye {d} lid centre not between inner and outer (x in {d:.1} c {d:.1} out {d:.1})\n", .{ eye, inner[0], center[0], outer[0] });
+            return false;
+        }
+        // The inner band is nearer the nose than the outer band.
+        if (!(@abs(inner[0] - nose_x) < @abs(outer[0] - nose_x))) {
+            std.debug.print("conformance: FAIL eye {d} inner band not nearer the nose than the outer (in {d:.1} out {d:.1} nose {d:.1})\n", .{ eye, inner[0], outer[0], nose_x });
+            return false;
+        }
+        // The crease sits above the lid centre (screen y grows downward).
+        if (!(crease[1] < center[1])) {
+            std.debug.print("conformance: FAIL eye {d} crease not above the lid centre (crease y {d:.1} lid {d:.1})\n", .{ eye, crease[1], center[1] });
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF the eyeshadow lid zones order inner-centre-outer along each lid, inner nearest the nose, the crease above the lid, on both eyes\n", .{});
+    return true;
+}
+
 fn proveContourHighlight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // First prove the region clusters are anatomically placed: on a real
     // tracked face the two cheek-hollow contours flank the nose, the nose-
@@ -18384,6 +18443,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("contour highlight");
     if (!try proveEarMatte(gpa, engine)) return 1;
     watchHold("ear matte");
+    if (!try proveEyeshadowZones(gpa, engine)) return 1;
+    watchHold("eyeshadow zones");
     if (!try proveEyeMakeup(gpa, engine)) return 1;
     watchHold("eye makeup");
     if (!try proveLashMesh(gpa, engine)) return 1;

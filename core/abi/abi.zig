@@ -94,6 +94,10 @@ pub const inner_lip_loop = face.inner_lip_loop;
 pub const contour_regions = face.contour_regions;
 pub const highlight_regions = face.highlight_regions;
 pub const ear_regions = face.ear_regions;
+pub const lid_inner_regions = face.lid_inner_regions;
+pub const lid_center_regions = face.lid_center_regions;
+pub const lid_outer_regions = face.lid_outer_regions;
+pub const lid_crease_regions = face.lid_crease_regions;
 pub const under_eye_regions = face.under_eye_regions;
 pub const nasolabial_regions = face.nasolabial_regions;
 pub const t_zone_regions = face.t_zone_regions;
@@ -8562,6 +8566,10 @@ fn pollLandmarkMattes(session: *Session) void {
     pollScleraMatte(session, manifest.sclera_channel);
     pollLashLineMatte(session, manifest.lash_line_channel);
     pollFaceHullMatte(session, manifest.ear_channel, &face.ear_regions);
+    pollFaceHullMatte(session, manifest.lid_inner_channel, &face.lid_inner_regions);
+    pollFaceHullMatte(session, manifest.lid_center_channel, &face.lid_center_regions);
+    pollFaceHullMatte(session, manifest.lid_outer_channel, &face.lid_outer_regions);
+    pollFaceHullMatte(session, manifest.lid_crease_channel, &face.lid_crease_regions);
 }
 
 /// Builds the sclera matte: each eye's lid contour filled, then its iris punched

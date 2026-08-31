@@ -68,7 +68,7 @@ pub const mask_channels = [_][]const u8{
     "eyes",    "brows",      "iris",    "teeth",     "contour",
     "highlight", "lash_line", "under_eye", "nasolabial", "sclera",
     "t_zone",  "hair_matte", "sky",     "ground",    "building",
-    "ear",
+    "ear",     "lid_inner",  "lid_center", "lid_outer", "lid_crease",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -120,6 +120,13 @@ pub const building_channel = 24;
 /// landmarks beside the ears; an earring or ear tint keys it. Rides the face
 /// landmarks, not a segmenter.
 pub const ear_channel = 25;
+/// The eyeshadow lid zones: three bands across the upper lid (inner corner,
+/// centre, outer corner) and the crease above, so a lens gradients eyeshadow.
+/// Each unions both eyes; all ride the eye and brow landmarks, not a segmenter.
+pub const lid_inner_channel = 26;
+pub const lid_center_channel = 27;
+pub const lid_outer_channel = 28;
+pub const lid_crease_channel = 29;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {
@@ -5570,11 +5577,15 @@ test "scene classes append at the frozen mask-channel tail" {
     try t.expectEqual(sky_channel, maskChannelIndex("sky").?);
     try t.expectEqual(ground_channel, maskChannelIndex("ground").?);
     try t.expectEqual(building_channel, maskChannelIndex("building").?);
-    // The ear-join channel extends the tail past the scene slot; existing
-    // numbers are untouched.
+    // The ear-join and eyeshadow lid-zone channels extend the tail past the
+    // scene slot; existing numbers are untouched.
     try t.expectEqual(@as(?u8, 25), maskChannelIndex("ear"));
     try t.expectEqual(ear_channel, maskChannelIndex("ear").?);
-    try t.expectEqual(@as(usize, 26), mask_channels.len);
+    try t.expectEqual(lid_inner_channel, maskChannelIndex("lid_inner").?);
+    try t.expectEqual(lid_center_channel, maskChannelIndex("lid_center").?);
+    try t.expectEqual(lid_outer_channel, maskChannelIndex("lid_outer").?);
+    try t.expectEqual(lid_crease_channel, maskChannelIndex("lid_crease").?);
+    try t.expectEqual(@as(usize, 30), mask_channels.len);
 }
 
 /// The on-device prompt-to-lens compiler: it turns a short text prompt into a
