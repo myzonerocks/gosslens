@@ -22,6 +22,10 @@ pub const Params = struct {
     bounds: [4]f32 = .{ -0.4, 0.4, -0.5, 0.6 },
     /// Speed kept when a particle bounces off a wall (0 dead, 1 perfect).
     wall_bounce: f32 = 0.3,
+    /// Circle obstacles the fluid flows around, each cx, cy, radius (the sim is
+    /// 2D). A particle inside one is pushed to its surface and its inward
+    /// velocity reflected, damped like a wall. Borrowed; empty is none.
+    colliders: []const [3]f32 = &.{},
     /// Internal substeps per step: SPH stays stable at a smaller step.
     substeps: u32 = 4,
 };
@@ -37,11 +41,16 @@ pub const Fluid = struct {
     particles: []Particle,
     params: Params,
     gpa: std.mem.Allocator,
+    /// The fluid owns a copy of its circle colliders, so the caller need not
+    /// keep the passed slice alive; params.colliders points into this.
+    colliders_owned: [][3]f32 = &.{},
 
     /// Seeds `count` particles in a square block near the top of the box, so
     /// they fall and pool. The block is a deterministic grid.
     pub fn init(gpa: std.mem.Allocator, count: u32, params: Params) !Fluid {
         const particles = try gpa.alloc(Particle, count);
+        errdefer gpa.free(particles);
+        const colliders_owned = try gpa.dupe([3]f32, params.colliders);
         const cols: u32 = @intFromFloat(@ceil(@sqrt(@as(f32, @floatFromInt(count)))));
         const spacing = params.h * 0.6;
         const start_x = -@as(f32, @floatFromInt(cols)) * spacing * 0.5;
@@ -54,11 +63,14 @@ pub const Fluid = struct {
                 .vel = .{ 0, 0 },
             };
         }
-        return .{ .particles = particles, .params = params, .gpa = gpa };
+        var owned_params = params;
+        owned_params.colliders = colliders_owned;
+        return .{ .particles = particles, .params = owned_params, .gpa = gpa, .colliders_owned = colliders_owned };
     }
 
     pub fn deinit(self: *Fluid) void {
         self.gpa.free(self.particles);
+        if (self.colliders_owned.len > 0) self.gpa.free(self.colliders_owned);
     }
 
     fn poly6(r2: f32, h: f32) f32 {
@@ -139,6 +151,26 @@ pub const Fluid = struct {
                 a.pos[1] = p.bounds[3];
                 a.vel[1] = -a.vel[1] * p.wall_bounce;
             }
+            // Circle obstacles: push a particle inside one back to its surface
+            // and reflect the inward velocity, damped like a wall bounce.
+            for (p.colliders) |c| {
+                const dx = a.pos[0] - c[0];
+                const dy = a.pos[1] - c[1];
+                const r = c[2];
+                const d2 = dx * dx + dy * dy;
+                if (d2 < r * r and d2 > 1e-12) {
+                    const d = @sqrt(d2);
+                    const nx = dx / d;
+                    const ny = dy / d;
+                    a.pos[0] = c[0] + nx * r;
+                    a.pos[1] = c[1] + ny * r;
+                    const vn = a.vel[0] * nx + a.vel[1] * ny;
+                    if (vn < 0) {
+                        a.vel[0] -= (1.0 + p.wall_bounce) * vn * nx;
+                        a.vel[1] -= (1.0 + p.wall_bounce) * vn * ny;
+                    }
+                }
+            }
         }
     }
 
@@ -190,4 +222,24 @@ test "an sph fluid pools at the bottom of its box, deterministically" {
     // Deterministic: two runs land the same, and the fluid spread into a pool.
     try t.expectEqual(runs[0], runs[1]);
     try t.expect(spread[0] > 0.3);
+}
+
+test "an sph fluid flows around a circle collider, deterministically" {
+    const collider = [_][3]f32{.{ 0.0, 0.1, 0.2 }};
+    const params: Params = .{ .colliders = &collider };
+    var heights: [2]f32 = undefined;
+    for (0..2) |run| {
+        var fluid = try Fluid.init(t.allocator, 80, params);
+        defer fluid.deinit();
+        for (0..150) |_| fluid.step(1.0 / 60.0);
+        // No settled particle sits inside the obstacle: every one is at or
+        // outside its radius (a small epsilon covers float slop).
+        for (fluid.particles) |part| {
+            const dx = part.pos[0] - collider[0][0];
+            const dy = part.pos[1] - collider[0][1];
+            try t.expect(dx * dx + dy * dy >= collider[0][2] * collider[0][2] - 1e-4);
+        }
+        heights[run] = fluid.meanHeight();
+    }
+    try t.expectEqual(heights[0], heights[1]);
 }

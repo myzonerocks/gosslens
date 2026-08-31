@@ -20,12 +20,14 @@ pub const Mode = enum(u8) {
     highlighter = 1, // translucent, wide
     marker = 2, // near-opaque, medium
     neon = 3, // translucent, wide, additive glow at draw time
+    stamp = 4, // stamps a sprite along the stroke instead of a ribbon
 
     pub fn fromU32(v: u32) Mode {
         return switch (v) {
             1 => .highlighter,
             2 => .marker,
             3 => .neon,
+            4 => .stamp,
             else => .pen,
         };
     }
@@ -37,6 +39,7 @@ pub const Mode = enum(u8) {
             .highlighter => 2.5,
             .marker => 1.6,
             .neon => 2.0,
+            .stamp => 3.0, // the stamp sprite reads best a touch wider
         };
     }
 
@@ -47,12 +50,19 @@ pub const Mode = enum(u8) {
             .highlighter => 0.4,
             .marker => 0.85,
             .neon => 0.6,
+            .stamp => 1.0,
         };
     }
 
     /// Whether the renderer should draw this stroke's ribbon additively.
     pub fn additive(self: Mode) bool {
         return self == .neon;
+    }
+
+    /// Whether this mode draws stamped sprites along the stroke rather than a
+    /// continuous ribbon; the renderer skips the ribbon path for it.
+    pub fn stamped(self: Mode) bool {
+        return self == .stamp;
     }
 };
 
@@ -212,7 +222,61 @@ pub const Board = struct {
         if (i >= self.count) return 0;
         return strokeRibbon(self.strokes[i], out);
     }
+
+    /// The draw mode of committed stroke i (pen for an out-of-range index).
+    pub fn strokeMode(self: *const Board, i: u16) Mode {
+        if (i >= self.count) return .pen;
+        return self.strokes[i].mode;
+    }
+
+    /// The half-width committed stroke i opened with, the stamp's half-size for
+    /// a stamp-mode stroke.
+    pub fn strokeWidth(self: *const Board, i: u16) f32 {
+        if (i >= self.count) return 0;
+        return self.strokes[i].width;
+    }
+
+    /// Writes evenly spaced stamp centers along committed stroke i into `out`,
+    /// returning how many were written. Spacing is the gap between centers along
+    /// the stroke; a non-positive spacing or a short stroke yields none.
+    pub fn buildStampCenters(self: *const Board, i: u16, spacing: f32, out: [][2]f32) usize {
+        if (i >= self.count) return 0;
+        return stampCenters(self.strokes[i].points[0..self.strokes[i].count], spacing, out);
+    }
 };
+
+/// Places a stamp center at the start of the polyline and every `spacing` of
+/// arc length after, walking segment by segment; a pure function of the points,
+/// so a stamp brush is deterministic. Returns the number of centers written,
+/// bounded by `out.len`.
+pub fn stampCenters(points: []const Point, spacing: f32, out: [][2]f32) usize {
+    if (points.len == 0 or spacing <= 0 or out.len == 0) return 0;
+    var n: usize = 0;
+    out[n] = .{ points[0].x, points[0].y };
+    n += 1;
+    // `carry` is the arc length walked since the last stamp; each time it
+    // crosses `spacing` a stamp lands at the interpolated point on the segment.
+    var carry: f32 = 0;
+    var i: usize = 0;
+    while (i + 1 < points.len) : (i += 1) {
+        const a = points[i];
+        const b = points[i + 1];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const seg = @sqrt(dx * dx + dy * dy);
+        if (seg < 1e-6) continue;
+        var dist_to_next = spacing - carry;
+        while (dist_to_next <= seg) {
+            if (n >= out.len) return n;
+            const tpar = dist_to_next / seg;
+            out[n] = .{ a.x + dx * tpar, a.y + dy * tpar };
+            n += 1;
+            dist_to_next += spacing;
+        }
+        carry = seg - (dist_to_next - spacing);
+    }
+    return n;
+}
 
 /// Expands one stroke into a per-segment triangle ribbon in `out`, returning the
 /// vertex float count. Each segment becomes a quad whose thickness is the
@@ -347,6 +411,27 @@ test "a mode biases the opened stroke width and alpha" {
     try t.expectApproxEqAbs(@as(f32, 0.4), s.color[3], 1e-6);
     try t.expect(Mode.neon.additive());
     try t.expect(!Mode.pen.additive());
+    try t.expect(Mode.stamp.stamped());
+    try t.expect(!Mode.pen.stamped());
+}
+
+test "stamp centers land evenly along a stroke, starting at its head" {
+    // A straight horizontal stroke of length 1, in three points.
+    const points = [_]Point{ .{ .x = 0, .y = 0.5 }, .{ .x = 0.5, .y = 0.5 }, .{ .x = 1.0, .y = 0.5 } };
+    var out: [16][2]f32 = undefined;
+    const n = stampCenters(&points, 0.25, &out);
+    // Head plus one every 0.25 over length 1.0: x = 0, .25, .5, .75, 1.0.
+    try t.expectEqual(@as(usize, 5), n);
+    for (0..5) |i| {
+        try t.expectApproxEqAbs(@as(f32, @floatFromInt(i)) * 0.25, out[i][0], 1e-5);
+        try t.expectApproxEqAbs(@as(f32, 0.5), out[i][1], 1e-5);
+    }
+    // A non-positive spacing or an empty stroke yields nothing; a tiny buffer is
+    // respected.
+    try t.expectEqual(@as(usize, 0), stampCenters(&points, 0, &out));
+    try t.expectEqual(@as(usize, 0), stampCenters(&.{}, 0.25, &out));
+    var one: [1][2]f32 = undefined;
+    try t.expectEqual(@as(usize, 1), stampCenters(&points, 0.25, &one));
 }
 
 test "eraseAt drops strokes it crosses and keeps the rest" {

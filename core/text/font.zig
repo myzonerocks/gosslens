@@ -103,6 +103,53 @@ pub fn measure(text: []const u8, scale: u32) struct { w: u32, h: u32 } {
     return .{ .w = max_len * glyph_px * s, .h = lines * glyph_px * s };
 }
 
+/// Greedy word-wraps `text` to at most `max_cols` monospace columns per line,
+/// breaking at spaces where a word fits and hard-breaking a word longer than a
+/// full line, while preserving the caller's own newlines. `max_cols` 0 returns
+/// the text unchanged. The caller owns and frees the returned bytes.
+pub fn wrap(gpa: std.mem.Allocator, text: []const u8, max_cols: u32) ![]u8 {
+    if (max_cols == 0) return gpa.dupe(u8, text);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var col: u32 = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const ch = text[i];
+        if (ch == '\n') {
+            try out.append(gpa, '\n');
+            col = 0;
+            i += 1;
+        } else if (ch == ' ') {
+            // A run of spaces collapses at a line start; otherwise decide by the
+            // next word: keep it on this line if the space plus the word fits,
+            // else wrap here and drop the space.
+            var j = i + 1;
+            while (j < text.len and text[j] != ' ' and text[j] != '\n') j += 1;
+            const word_len: u32 = @intCast(j - (i + 1));
+            if (col == 0) {
+                i += 1;
+            } else if (col + 1 + word_len > max_cols) {
+                try out.append(gpa, '\n');
+                col = 0;
+                i += 1;
+            } else {
+                try out.append(gpa, ' ');
+                col += 1;
+                i += 1;
+            }
+        } else {
+            if (col >= max_cols) {
+                try out.append(gpa, '\n');
+                col = 0;
+            }
+            try out.append(gpa, ch);
+            col += 1;
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 /// Rasterizes `text` into a freshly allocated RGBA buffer: each glyph
 /// pixel set to `color`, every other pixel fully transparent. The caller
 /// owns and frees the returned bytes.
@@ -175,14 +222,30 @@ fn nearMask(mask: []const bool, width: u32, height: u32, x: u32, y: u32, radius:
 }
 
 /// Rasterizes `text` with a vertical `gradient` (null holds `color`), an
+/// The vertical bow offset in pixels (up positive) for the glyph at column
+/// `col` of `cols`, along a parabola that is zero at the ends and `bow_px` at
+/// the middle, so a bent baseline arcs its text evenly. Zero for a lone glyph.
+pub fn arcBow(col: usize, cols: usize, bow_px: i32) i32 {
+    if (cols <= 1 or bow_px == 0) return 0;
+    const frac = @as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(cols - 1));
+    const parab = 1.0 - (2.0 * frac - 1.0) * (2.0 * frac - 1.0);
+    return @intFromFloat(@round(@as(f32, @floatFromInt(bow_px)) * parab));
+}
+
 /// optional down-right `shadow`, and an optional `stroke` outline. The glyph
 /// coverage is drawn into a mask, then composited main over stroke over shadow.
-pub fn rasterizeRich(gpa: std.mem.Allocator, text: []const u8, scale: u32, color: [4]u8, gradient: ?[3]u8, shadow: bool, stroke: ?[3]u8) !Raster {
+/// `bend` bows the baseline along an arc (positive up, negative down).
+pub fn rasterizeRich(gpa: std.mem.Allocator, text: []const u8, scale: u32, color: [4]u8, gradient: ?[3]u8, shadow: bool, stroke: ?[3]u8, bend: f32) !Raster {
     const s = @max(scale, 1);
     const dim = measure(text, s);
     const margin = 2 * s;
+    // A bent baseline bows each glyph up or down along a parabolic arc; reserve
+    // vertical room for the bow on both sides so the arc fits the buffer.
+    const cols = @max(dim.w / (glyph_px * s), 1);
+    const bow_px: i32 = @intFromFloat(bend * @as(f32, @floatFromInt(dim.h)) * 0.5);
+    const extra: u32 = @intCast(@abs(bow_px));
     const width = @max(dim.w + 2 * margin, 1);
-    const height = @max(dim.h + 2 * margin, 1);
+    const height = @max(dim.h + 2 * margin + 2 * extra, 1);
     const mask = try gpa.alloc(bool, width * height);
     defer gpa.free(mask);
     @memset(mask, false);
@@ -196,7 +259,11 @@ pub fn rasterizeRich(gpa: std.mem.Allocator, text: []const u8, scale: u32, color
         }
         const rows = glyph(ch);
         const base_x = margin + col * glyph_px * s;
-        const base_y = margin + line * glyph_px * s;
+        // The arc lifts (or drops) this glyph off the straight baseline by its
+        // column's place along the bow; the reserved `extra` room keeps base_y
+        // in range at the peak.
+        const arc = arcBow(col, cols, bow_px);
+        const base_y: u32 = @intCast(@max(@as(i32, @intCast(margin + extra + line * glyph_px * s)) - arc, 0));
         col += 1;
         for (rows, 0..) |row, ry| {
             var bit: u3 = 0;
@@ -323,6 +390,33 @@ test "measure sizes a monospace line" {
     try t.expectEqual(@as(u32, 8 * 2), m.h);
 }
 
+test "wrap breaks at word boundaries and hard-breaks long words" {
+    // Each word fits but three of them exceed eight columns, so it wraps twice.
+    const a = try wrap(t.allocator, "hello world foo", 8);
+    defer t.allocator.free(a);
+    try t.expectEqualStrings("hello\nworld\nfoo", a);
+
+    // A pair that fits exactly on one line stays on it.
+    const b = try wrap(t.allocator, "hello world", 11);
+    defer t.allocator.free(b);
+    try t.expectEqualStrings("hello world", b);
+
+    // A single word longer than a line hard-breaks into full-width chunks.
+    const c = try wrap(t.allocator, "abcdefghij", 4);
+    defer t.allocator.free(c);
+    try t.expectEqualStrings("abcd\nefgh\nij", c);
+
+    // An author's own newline is preserved, and each side wraps within it.
+    const d = try wrap(t.allocator, "one two\nthree four", 7);
+    defer t.allocator.free(d);
+    try t.expectEqualStrings("one two\nthree\nfour", d);
+
+    // No column budget returns the text untouched.
+    const e = try wrap(t.allocator, "unchanged text here", 0);
+    defer t.allocator.free(e);
+    try t.expectEqualStrings("unchanged text here", e);
+}
+
 test "measure and rasterize handle multiple lines" {
     // Two lines, the longer one four glyphs wide, so width is 4 cells and
     // height two rows.
@@ -389,7 +483,7 @@ test "extruded text builds a non-empty two-sided box mesh" {
 test "rich text adds stroke and shadow coverage beyond the plain glyphs" {
     const plain = try rasterize(t.allocator, "A", 4, .{ 255, 255, 255, 255 });
     defer t.allocator.free(plain.rgba);
-    const rich = try rasterizeRich(t.allocator, "A", 4, .{ 255, 255, 255, 255 }, .{ 255, 0, 0 }, true, .{ 0, 0, 0 });
+    const rich = try rasterizeRich(t.allocator, "A", 4, .{ 255, 255, 255, 255 }, .{ 255, 0, 0 }, true, .{ 0, 0, 0 }, 0);
     defer t.allocator.free(rich.rgba);
     var plain_set: u32 = 0;
     var pi: usize = 3;
@@ -404,7 +498,26 @@ test "rich text adds stroke and shadow coverage beyond the plain glyphs" {
     // The stroke outline and drop shadow add covered pixels around the glyph.
     try t.expect(rich_set > plain_set);
     // The gradient darkens the base of the glyph, so the fill is not flat.
-    const rich_flat = try rasterizeRich(t.allocator, "A", 4, .{ 255, 255, 255, 255 }, null, false, null);
+    const rich_flat = try rasterizeRich(t.allocator, "A", 4, .{ 255, 255, 255, 255 }, null, false, null, 0);
     defer t.allocator.free(rich_flat.rgba);
     try t.expect(!std.mem.eql(u8, rich.rgba, rich_flat.rgba));
+}
+
+test "a bent baseline arcs the middle glyphs off the straight line" {
+    // The parabola is zero at the ends and peaks in the middle, up for a
+    // positive bow and down for a negative one, and flat for a lone glyph.
+    try t.expectEqual(@as(i32, 0), arcBow(0, 5, 20));
+    try t.expectEqual(@as(i32, 0), arcBow(4, 5, 20));
+    try t.expectEqual(@as(i32, 20), arcBow(2, 5, 20));
+    try t.expectEqual(@as(i32, -20), arcBow(2, 5, -20));
+    try t.expectEqual(@as(i32, 0), arcBow(0, 1, 20));
+
+    // A bent render is taller than the straight one (it reserves bow room) and
+    // differs from it, while a zero bend is byte-identical to the straight rich.
+    const straight = try rasterizeRich(t.allocator, "CURVE", 4, .{ 255, 255, 255, 255 }, null, false, null, 0);
+    defer t.allocator.free(straight.rgba);
+    const bent = try rasterizeRich(t.allocator, "CURVE", 4, .{ 255, 255, 255, 255 }, null, false, null, 0.8);
+    defer t.allocator.free(bent.rgba);
+    try t.expect(bent.height > straight.height);
+    try t.expect(!(bent.width == straight.width and std.mem.eql(u8, bent.rgba, straight.rgba)));
 }

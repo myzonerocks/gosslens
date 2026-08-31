@@ -155,6 +155,29 @@ public final class GossSession: @unchecked Sendable {
         try checked(goss_session_set_pose_upper_body(handle, enabled ? 1 : 0))
     }
 
+    /// Raycasts a normalized screen point (0..1, origin top-left) against the
+    /// tracked ground plane, returning the world hit position. Nil until world
+    /// tracking is live and the ray meets the plane, so a tap-to-place lens
+    /// polls it and drops an anchor at the hit.
+    public func hitTest(screenX: Float, screenY: Float) -> SIMD3<Float>? {
+        var out = SIMD3<Float>(0, 0, 0)
+        let ok = withUnsafeMutablePointer(to: &out) { p in
+            p.withMemoryRebound(to: Float.self, capacity: 3) { fp in
+                goss_session_hit_test(handle, screenX, screenY, fp) == GOSS_OK
+            }
+        }
+        return ok ? out : nil
+    }
+
+    /// The stable track id of the index-th face, an integer that stays with the
+    /// same person across frames as the submission order shuffles, or nil once
+    /// index reaches the face count.
+    public func faceTrackId(index: UInt32) -> UInt32? {
+        var out: UInt32 = 0
+        let ok = goss_session_face_track_id(handle, index, &out) == GOSS_OK
+        return ok ? out : nil
+    }
+
     /// Stands the segmentation worker up from a raw selfie or hair segmenter
     /// .tflite model (not bundled the way a face_landmarker.task is). The
     /// bytes are copied; the caller may release them on return. Throws
@@ -167,6 +190,21 @@ public final class GossSession: @unchecked Sendable {
 
     public func disableSegmentation() {
         goss_session_disable_segmentation(handle)
+    }
+
+    /// Allowlists a bring-your-own model by its 32-byte SHA-256 digest, so a net
+    /// whose digest is not listed is refused when a tracker or segmenter is
+    /// enabled. With none set, any model loads. Call before enabling the worker.
+    public func allowModelDigest(_ digest: [UInt8]) throws {
+        precondition(digest.count == 32, "a model digest is 32 bytes")
+        try digest.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_allow_model_digest(handle, buffer.baseAddress))
+        }
+    }
+
+    /// Clears the model allowlist; with none set, any model loads again.
+    public func clearModelAllowlist() throws {
+        try checked(goss_session_clear_model_allowlist(handle))
     }
 
     public func trackFrame(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, colorStandard: GossColorStandard = .bt709, colorRange: GossColorRange = .video, timestampUs: Int64) throws {

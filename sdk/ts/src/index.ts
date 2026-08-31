@@ -161,6 +161,29 @@ export interface GossPoseOut {
   presences: Float32Array;
 }
 
+export const GOSS_HAND_LANDMARK_COUNT = 21;
+export const GOSS_HAND_MAX = 2;
+const HAND_RESULT_BYTES = 560;
+const HAND_ONE_BYTES = 268;
+
+/// One tracked hand read back from handResult. handedness is the score it is a
+/// right hand; gesture is the canned class index with its score; landmarks are
+/// GOSS_HAND_LANDMARK_COUNT * 3 frame-pixel floats.
+export interface GossHandOne {
+  presence: number;
+  handedness: number;
+  gesture: number;
+  gestureScore: number;
+  landmarks: Float32Array;
+}
+
+/// The hands read back from handResult, the frozen goss_hand_result laid out.
+export interface GossHandOut {
+  frameSerial: bigint;
+  timestampUs: bigint;
+  hands: GossHandOne[];
+}
+
 /// A named attach point on the tracked face mesh, for faceRegion. The
 /// left/right labels are the subject's own.
 export enum GossFaceRegion {
@@ -236,6 +259,7 @@ interface EngineModule {
   HEAPU8: Uint8Array;
   HEAP16: Int16Array;
   HEAP32: Int32Array;
+  HEAPU32: Uint32Array;
   HEAPF32: Float32Array;
   HEAPF64: Float64Array;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
@@ -958,6 +982,19 @@ export class GossSession {
     return value;
   }
 
+  /// Raycasts a normalized screen point (0..1, origin top-left) against the
+  /// tracked ground plane, returning the world hit position [x, y, z], or null
+  /// until world tracking is live and the ray meets the plane. A tap-to-place
+  /// lens polls this and drops an anchor at the hit.
+  hitTest(x: number, y: number): [number, number, number] | null {
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]);
+    const status = this.mod.ccall("goss_session_hit_test", "number", ["number", "number", "number", "number"], [this.handle, x, y, outPtr]);
+    const w = outPtr >> 2;
+    const hit: [number, number, number] | null = status === 0 ? [this.mod.HEAPF32[w]!, this.mod.HEAPF32[w + 1]!, this.mod.HEAPF32[w + 2]!] : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 12]);
+    return hit;
+  }
+
   /// Feeds interleaved f32 PCM into the session's own level and beat
   /// analysis, which drives the audio.level and audio.beat lens triggers.
   /// samples holds frameCount * channels floats; timestampUs is carried for a
@@ -1114,6 +1151,22 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
   }
 
+  /// Allowlists a bring-your-own model by its 32-byte SHA-256 digest, so a net
+  /// whose digest is not listed is refused when a tracker or segmenter is
+  /// enabled. With none set, any model loads. Call before enabling the worker.
+  allowModelDigest(digest: Uint8Array): void {
+    if (digest.length !== 32) throw new Error("a model digest is 32 bytes");
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [32]) as number;
+    this.mod.HEAPU8.set(digest, ptr);
+    this.mod.ccall("goss_session_allow_model_digest", "number", ["number", "number"], [this.handle, ptr]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 32]);
+  }
+
+  /// Clears the model allowlist; with none set, any model loads again.
+  clearModelAllowlist(): void {
+    this.mod.ccall("goss_session_clear_model_allowlist", "number", ["number"], [this.handle]);
+  }
+
   private withName(name: string, fn: (ptr: number, len: number) => void): void {
     const bytes = new TextEncoder().encode(name);
     if (bytes.length === 0) return;
@@ -1175,6 +1228,28 @@ export class GossSession {
       this.mod.ccall("goss_session_set_source_composite", "number", ["number", "number", "number", "number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, opacity, keyMode, chroma[0], chroma[1], chroma[2], similarity]));
   }
 
+  /// Uploads a per-source matte for key mode 3 (the red channel is the mask), so
+  /// an opaque guest is keyed to a subject without a baked alpha.
+  submitSourceMask(name: string, rgba: Uint8Array | Uint8ClampedArray, width: number, height: number): void {
+    const rgbaPtr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    this.mod.HEAPU8.set(rgba, rgbaPtr);
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_submit_source_mask", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, rgbaPtr, width, height]));
+    this.mod.ccall("goss_free", null, ["number", "number"], [rgbaPtr, rgba.length]);
+  }
+
+  /// Runs the engine's own segmenter on a source's frames so its key mode 3
+  /// matte is computed on-device (a virtual background for a remote guest). The
+  /// model is the selfie/hair net enableSegmentation takes; an empty model tears
+  /// the source segmenter down.
+  enableSourceSegmentation(name: string, model: Uint8Array, threads: number): void {
+    const modelPtr = model.length > 0 ? (this.mod.ccall("goss_alloc", "number", ["number"], [model.length]) as number) : 0;
+    if (modelPtr) this.mod.HEAPU8.set(model, modelPtr);
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_enable_source_segmentation", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, modelPtr, model.length, threads]));
+    if (modelPtr) this.mod.ccall("goss_free", null, ["number", "number"], [modelPtr, model.length]);
+  }
+
   /// Defines a screen-share source whose frame letterboxes to fit its cell.
   defineScreenShare(name: string): void {
     this.withName(name, (ptr, len) =>
@@ -1214,6 +1289,42 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
+  /// Adds a named circular geofence, so a lens fires geo.in_region('name') for
+  /// its own place among several; re-adding a name replaces its region.
+  setNamedGeofence(name: string, latitude: number, longitude: number, radiusM: number): void {
+    const bytes = new TextEncoder().encode(name);
+    if (bytes.length === 0) return;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    this.mod.HEAPU8.set(bytes, ptr);
+    this.mod.ccall("goss_session_set_named_geofence", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, bytes.length, latitude, longitude, radiusM]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+  }
+
+  /// Adds a named polygon geofence (a ring of [latitude, longitude] pairs, three
+  /// or more), the non-circular counterpart of setNamedGeofence; re-adding a name
+  /// replaces its region.
+  setNamedGeofencePolygon(name: string, vertices: [number, number][]): void {
+    const nameBytes = new TextEncoder().encode(name);
+    if (nameBytes.length === 0) return;
+    const namePtr = this.mod.ccall("goss_alloc", "number", ["number"], [nameBytes.length]) as number;
+    this.mod.HEAPU8.set(nameBytes, namePtr);
+    const coordBytes = vertices.length * 2 * 8;
+    const coordPtr = this.mod.ccall("goss_alloc", "number", ["number"], [coordBytes]) as number;
+    const base = coordPtr >> 3;
+    for (let i = 0; i < vertices.length; i += 1) {
+      this.mod.HEAPF64[base + i * 2] = vertices[i]![0];
+      this.mod.HEAPF64[base + i * 2 + 1] = vertices[i]![1];
+    }
+    this.mod.ccall("goss_session_set_named_geofence_polygon", "number", ["number", "number", "number", "number", "number"], [this.handle, namePtr, nameBytes.length, coordPtr, vertices.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [namePtr, nameBytes.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [coordPtr, coordBytes]);
+  }
+
+  /// Clears every named geofence; the default geofence is untouched.
+  clearNamedGeofences(): void {
+    this.mod.ccall("goss_session_clear_named_geofences", "number", ["number"], [this.handle]);
+  }
+
   /// Sets the worst fix accuracy (meters) that still counts as inside a region;
   /// zero clears the gate.
   setGeoAccuracy(maxAccuracyM: number): void {
@@ -1223,6 +1334,15 @@ export class GossSession {
   /// Sets the color and half-width (normalized units) the next stroke opens with.
   setBrushStyle(r: number, g: number, b: number, a: number, width: number): void {
     this.mod.ccall("goss_session_brush_set_style", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, r, g, b, a, width]);
+  }
+
+  /// Uploads the RGBA sprite a stamp-mode stroke (brush mode 4) lays along its
+  /// length, an emoji or icon the host rasterizes.
+  setBrushStamp(rgba: Uint8ClampedArray | Uint8Array, width: number, height: number): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    this.mod.HEAPU8.set(rgba, ptr);
+    this.mod.ccall("goss_session_brush_set_stamp", "number", ["number", "number", "number", "number"], [this.handle, ptr, width, height]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, rgba.length]);
   }
 
   /// Opens a stroke in the current style. A fresh stroke drops the redo stack.
@@ -1457,6 +1577,16 @@ export class GossSession {
     return out;
   }
 
+  /// The stable track id of the index-th face, an integer that stays with the
+  /// same person across frames as the submission order shuffles, or null once
+  /// index reaches faceCount.
+  faceTrackId(index: number): number | null {
+    const ptr = this.scratch(4);
+    const status = this.mod.ccall("goss_session_face_track_id", "number", ["number", "number", "number"], [this.handle, index, ptr]) as number;
+    if (status !== 0) return null;
+    return this.mod.HEAPU32[ptr >> 2]!;
+  }
+
   /// Submits the bodies tracked this frame for the multi-person path, so a
   /// lens can instance effects across every body. An empty array clears the
   /// path; bodies past GOSS_BODY_MAX are ignored.
@@ -1646,6 +1776,111 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [uvPtr, uv.length]);
   }
 
+  private submitPlanes(sym: string, y: Uint8Array, yStride: number, uv: Uint8Array, uvStride: number, width: number, height: number, colorStandard: number, colorRange: number): void {
+    const yPtr = this.mod.ccall("goss_alloc", "number", ["number"], [y.length]) as number;
+    this.mod.HEAPU8.set(y, yPtr);
+    const uvPtr = this.mod.ccall("goss_alloc", "number", ["number"], [uv.length]) as number;
+    this.mod.HEAPU8.set(uv, uvPtr);
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, colorStandard, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, colorRange, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 24, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
+    this.mod.ccall(sym, "number", ["number", "number", "number", "number", "number", "number"], [this.handle, this.frameDescPtr, yPtr, yStride, uvPtr, uvStride]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [yPtr, y.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [uvPtr, uv.length]);
+  }
+
+  /// Feeds one NV12 frame to the in-engine trackers only (no render), for a host
+  /// that renders elsewhere but wants the engine's face/hand/pose tracking. Web
+  /// usually tracks in its own worker and feeds results through the producer path.
+  trackFrame(y: Uint8Array, yStride: number, uv: Uint8Array, uvStride: number, width: number, height: number, colorStandard = 1, colorRange = 0): void {
+    this.submitPlanes("goss_session_track_frame", y, yStride, uv, uvStride, width, height, colorStandard, colorRange);
+  }
+
+  /// Submits one NV12 frame the engine copies into its own buffer (the caller may
+  /// reuse the planes at once), the copy counterpart of submitFrameRgbaCopy.
+  submitFrameCopy(y: Uint8Array, yStride: number, uv: Uint8Array, uvStride: number, width: number, height: number, colorStandard = 1, colorRange = 0): void {
+    this.submitPlanes("goss_session_submit_frame_copy", y, yStride, uv, uvStride, width, height, colorStandard, colorRange);
+  }
+
+  /// Submits one NV12 frame of a driving performance for avatar reenactment, so
+  /// the tracked avatar is posed from this source instead of the camera.
+  submitAvatarSource(y: Uint8Array, yStride: number, uv: Uint8Array, uvStride: number, width: number, height: number, colorStandard = 1, colorRange = 0): void {
+    this.submitPlanes("goss_session_submit_avatar_source", y, yStride, uv, uvStride, width, height, colorStandard, colorRange);
+  }
+
+  /// Reads the in-engine face tracker's single-face result, or null when no face
+  /// is tracked; faceResultAt visits every face on the multi-face path.
+  faceResult(): GossFaceOut | null {
+    const ptr = this.scratch(FACE_RESULT_BYTES);
+    if (this.mod.ccall("goss_session_face_result", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
+    const dv = new DataView(this.mod.HEAPU8.buffer, ptr, FACE_RESULT_BYTES);
+    const lmStart = (ptr + 24) >> 2;
+    const bsStart = lmStart + GOSS_FACE_LANDMARK_COUNT * 3;
+    return {
+      frameSerial: dv.getBigUint64(0, true),
+      timestampUs: dv.getBigInt64(8, true),
+      presence: dv.getFloat32(16, true),
+      landmarkCount: dv.getUint32(20, true),
+      landmarks: this.mod.HEAPF32.slice(lmStart, bsStart),
+      blendshapes: this.mod.HEAPF32.slice(bsStart, bsStart + GOSS_FACE_BLENDSHAPE_COUNT),
+    };
+  }
+
+  /// The tracked head pose as a 4x4 column-major matrix (16 floats), or null when
+  /// no face is tracked, for anchoring 3D content to the head.
+  facePose(): Float32Array | null {
+    const ptr = this.scratch(64);
+    if (this.mod.ccall("goss_session_face_pose", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
+    return this.mod.HEAPF32.slice(ptr >> 2, (ptr >> 2) + 16);
+  }
+
+  /// Reads the in-engine hand tracker's result, or null when no hand is tracked;
+  /// hands past handCount are omitted.
+  handResult(): GossHandOut | null {
+    const ptr = this.scratch(HAND_RESULT_BYTES);
+    if (this.mod.ccall("goss_session_hand_result", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
+    const dv = new DataView(this.mod.HEAPU8.buffer, ptr, HAND_RESULT_BYTES);
+    const count = dv.getUint32(16, true);
+    const hands: GossHandOne[] = [];
+    for (let i = 0; i < count && i < GOSS_HAND_MAX; i += 1) {
+      const base = ptr + 24 + i * HAND_ONE_BYTES;
+      const lm = (base + 16) >> 2;
+      hands.push({
+        presence: dv.getFloat32(24 + i * HAND_ONE_BYTES, true),
+        handedness: dv.getFloat32(24 + i * HAND_ONE_BYTES + 4, true),
+        gesture: dv.getUint32(24 + i * HAND_ONE_BYTES + 8, true),
+        gestureScore: dv.getFloat32(24 + i * HAND_ONE_BYTES + 12, true),
+        landmarks: this.mod.HEAPF32.slice(lm, lm + GOSS_HAND_LANDMARK_COUNT * 3),
+      });
+    }
+    return { frameSerial: dv.getBigUint64(0, true), timestampUs: dv.getBigInt64(8, true), hands };
+  }
+
+  /// Reads the in-engine pose tracker's single-body result, or null when no body
+  /// is tracked; bodyResultAt visits every body on the multi-person path.
+  poseResult(): GossPoseOut | null {
+    const ptr = this.scratch(POSE_RESULT_BYTES);
+    if (this.mod.ccall("goss_session_pose_result", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
+    const dv = new DataView(this.mod.HEAPU8.buffer, ptr, POSE_RESULT_BYTES);
+    const lmStart = (ptr + 24) >> 2;
+    const visStart = lmStart + GOSS_POSE_LANDMARK_COUNT * 3;
+    const presStart = visStart + GOSS_POSE_LANDMARK_COUNT;
+    return {
+      frameSerial: dv.getBigUint64(0, true),
+      timestampUs: dv.getBigInt64(8, true),
+      presence: dv.getFloat32(16, true),
+      landmarkCount: dv.getUint32(20, true),
+      landmarks: this.mod.HEAPF32.slice(lmStart, visStart),
+      visibilities: this.mod.HEAPF32.slice(visStart, presStart),
+      presences: this.mod.HEAPF32.slice(presStart, presStart + GOSS_POSE_LANDMARK_COUNT),
+    };
+  }
+
   /// Samples a reference photo's makeup color per face part, so a tint.pass
   /// with a reference source paints the live face in that color. rgba is width
   /// by height RGBA8; landmarks is the reference face's 478 x, y, z points. An
@@ -1736,6 +1971,93 @@ export class GossSession {
     const w = ptr >> 2;
     const out: [number, number, number] = [this.mod.HEAPF32[w], this.mod.HEAPF32[w + 1], this.mod.HEAPF32[w + 2]];
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
+    return out;
+  }
+
+  /// Runs the in-engine segmenter on the camera frames: model is any square RGB
+  /// segmenter (portrait or a multi-class scene net, up to 32 classes), read for
+  /// its own tensor dimensions; threads is the worker count. A build with no
+  /// inference stack returns unsupported and setSegmentationMask is used instead.
+  enableSegmentation(model: Uint8Array, threads: number): void {
+    const modelPtr = model.length > 0 ? (this.mod.ccall("goss_alloc", "number", ["number"], [model.length]) as number) : 0;
+    if (modelPtr) this.mod.HEAPU8.set(model, modelPtr);
+    this.mod.ccall("goss_session_enable_segmentation", "number", ["number", "number", "number", "number"], [this.handle, modelPtr, model.length, threads]);
+    if (modelPtr) this.mod.ccall("goss_free", null, ["number", "number"], [modelPtr, model.length]);
+  }
+
+  /// Tears the in-engine segmenter down; the subject and class channels go empty.
+  disableSegmentation(): void {
+    this.mod.ccall("goss_session_disable_segmentation", "number", ["number"], [this.handle]);
+  }
+
+  private enableTracker(sym: string, task: Uint8Array, threads: number): void {
+    const ptr = task.length > 0 ? (this.mod.ccall("goss_alloc", "number", ["number"], [task.length]) as number) : 0;
+    if (ptr) this.mod.HEAPU8.set(task, ptr);
+    this.mod.ccall(sym, "number", ["number", "number", "number", "number"], [this.handle, ptr, task.length, threads]);
+    if (ptr) this.mod.ccall("goss_free", null, ["number", "number"], [ptr, task.length]);
+  }
+
+  /// Enables the in-engine face tracker: task is a mediapipe face-landmarker
+  /// .task, threads the worker count. Web usually feeds faces through the
+  /// producer path (submitFaces); a build with no inference stack returns
+  /// unsupported.
+  enableFaceTracking(task: Uint8Array, threads: number): void {
+    this.enableTracker("goss_session_enable_face_tracking", task, threads);
+  }
+
+  /// Tears the in-engine face tracker down.
+  disableFaceTracking(): void {
+    this.mod.ccall("goss_session_disable_face_tracking", null, ["number"], [this.handle]);
+  }
+
+  /// Enables the in-engine hand tracker from a hand-landmarker .task.
+  enableHandTracking(task: Uint8Array, threads: number): void {
+    this.enableTracker("goss_session_enable_hand_tracking", task, threads);
+  }
+
+  /// Tears the in-engine hand tracker down.
+  disableHandTracking(): void {
+    this.mod.ccall("goss_session_disable_hand_tracking", null, ["number"], [this.handle]);
+  }
+
+  /// Enables the in-engine pose tracker from a pose-landmarker .task.
+  enablePoseTracking(task: Uint8Array, threads: number): void {
+    this.enableTracker("goss_session_enable_pose_tracking", task, threads);
+  }
+
+  /// Tears the in-engine pose tracker down.
+  disablePoseTracking(): void {
+    this.mod.ccall("goss_session_disable_pose_tracking", null, ["number"], [this.handle]);
+  }
+
+  /// Turns the in-engine beauty pass on. resourcePath points at the gpupixel
+  /// resource directory the native build ships; on web it is unused, so an
+  /// empty string is fine. A build without the beauty stack leaves it off.
+  enableBeauty(resourcePath = ""): void {
+    const bytes = new TextEncoder().encode(resourcePath);
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length + 1]) as number;
+    this.mod.HEAPU8.set(bytes, ptr);
+    this.mod.HEAPU8[ptr + bytes.length] = 0;
+    this.mod.ccall("goss_session_enable_beauty", "number", ["number", "number"], [this.handle, ptr]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length + 1]);
+  }
+
+  /// Turns the in-engine beauty pass off.
+  disableBeauty(): void {
+    this.mod.ccall("goss_session_disable_beauty", null, ["number"], [this.handle]);
+  }
+
+  /// Beautifies one RGBA frame on the CPU and returns a new RGBA buffer the same
+  /// size; the smoothing follows the beauty parameters set on the session. A
+  /// build without the beauty stack returns the input unchanged.
+  beautifyFrame(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number): Uint8Array {
+    const inPtr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    this.mod.HEAPU8.set(rgba, inPtr);
+    this.mod.ccall("goss_session_beautify_frame", "number", ["number", "number", "number", "number", "number"], [this.handle, inPtr, width, height, outPtr]);
+    const out = this.mod.HEAPU8.slice(outPtr, outPtr + rgba.length);
+    this.mod.ccall("goss_free", null, ["number", "number"], [inPtr, rgba.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, rgba.length]);
     return out;
   }
 

@@ -1,4 +1,4 @@
-abi 0.68
+abi 0.78
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -122,6 +122,7 @@ fn goss_status goss_engine_recording_start(goss_engine *engine, goss_session *se
 fn goss_status goss_engine_recording_stop(goss_engine *engine)
 fn goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)
 fn goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)
+fn goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position)
 fn goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)
 fn goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)
 fn goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_session *session, uint64_t native_handle, uint32_t width, uint32_t height)
@@ -145,14 +146,20 @@ fn goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session,
 fn goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement)
 fn goss_status goss_session_clear_layout(goss_session *session)
 fn goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity)
+fn goss_status goss_session_submit_source_mask(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *rgba, uint32_t width, uint32_t height)
+fn goss_status goss_session_enable_source_segmentation(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *model_bytes, size_t model_len, int32_t threads)
 fn goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len)
 fn goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us)
 fn goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m)
 fn goss_status goss_session_clear_geofence(goss_session *session)
 fn goss_status goss_session_set_geofence_bbox(goss_session *session, double min_lat, double min_lon, double max_lat, double max_lon)
 fn goss_status goss_session_set_geofence_polygon(goss_session *session, const double *coords, size_t vertex_count)
+fn goss_status goss_session_set_named_geofence(goss_session *session, const uint8_t *name, size_t name_len, double latitude, double longitude, double radius_m)
+fn goss_status goss_session_set_named_geofence_polygon(goss_session *session, const uint8_t *name, size_t name_len, const double *coords, size_t vertex_count)
+fn goss_status goss_session_clear_named_geofences(goss_session *session)
 fn goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m)
 fn goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)
+fn goss_status goss_session_brush_set_stamp(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)
 fn goss_status goss_session_brush_begin(goss_session *session)
 fn goss_status goss_session_brush_point(goss_session *session, float x, float y)
 fn goss_status goss_session_brush_end(goss_session *session)
@@ -194,6 +201,8 @@ fn goss_status goss_session_body_joint(goss_session *session, uint32_t joint, fl
 fn goss_status goss_session_face_pose(goss_session *session, float *out_matrix)
 fn goss_status goss_session_face_region(goss_session *session, uint32_t region, float *out_xyz)
 fn goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)
+fn goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest)
+fn goss_status goss_session_clear_model_allowlist(goss_session *session)
 fn void goss_session_disable_segmentation(goss_session *session)
 fn goss_status goss_session_set_segmentation_mask(goss_session *session, const float *mask, uint32_t mask_len)
 fn uint32_t goss_session_segmentation_channels(goss_session *session)
@@ -205,6 +214,7 @@ fn goss_status goss_session_face_result(goss_session *session, goss_face_result 
 fn goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count)
 fn goss_status goss_session_face_count(goss_session *session, uint32_t *out_count)
 fn goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result)
+fn goss_status goss_session_face_track_id(goss_session *session, uint32_t index, uint32_t *out_id)
 fn goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count)
 fn goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)
 fn goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)

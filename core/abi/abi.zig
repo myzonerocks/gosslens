@@ -93,6 +93,11 @@ pub const right_iris_loop = face.right_iris_loop;
 pub const inner_lip_loop = face.inner_lip_loop;
 pub const contour_regions = face.contour_regions;
 pub const highlight_regions = face.highlight_regions;
+pub const ear_regions = face.ear_regions;
+pub const lid_inner_regions = face.lid_inner_regions;
+pub const lid_center_regions = face.lid_center_regions;
+pub const lid_outer_regions = face.lid_outer_regions;
+pub const lid_crease_regions = face.lid_crease_regions;
 pub const under_eye_regions = face.under_eye_regions;
 pub const nasolabial_regions = face.nasolabial_regions;
 pub const t_zone_regions = face.t_zone_regions;
@@ -125,6 +130,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_recording_stop(goss_engine *engine)",
     "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
     "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
+    "goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position)",
     "goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_session *session, uint64_t native_handle, uint32_t width, uint32_t height)",
@@ -148,14 +154,20 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement)",
     "goss_status goss_session_clear_layout(goss_session *session)",
     "goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity)",
+    "goss_status goss_session_submit_source_mask(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *rgba, uint32_t width, uint32_t height)",
+    "goss_status goss_session_enable_source_segmentation(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *model_bytes, size_t model_len, int32_t threads)",
     "goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us)",
     "goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m)",
     "goss_status goss_session_clear_geofence(goss_session *session)",
     "goss_status goss_session_set_geofence_bbox(goss_session *session, double min_lat, double min_lon, double max_lat, double max_lon)",
     "goss_status goss_session_set_geofence_polygon(goss_session *session, const double *coords, size_t vertex_count)",
+    "goss_status goss_session_set_named_geofence(goss_session *session, const uint8_t *name, size_t name_len, double latitude, double longitude, double radius_m)",
+    "goss_status goss_session_set_named_geofence_polygon(goss_session *session, const uint8_t *name, size_t name_len, const double *coords, size_t vertex_count)",
+    "goss_status goss_session_clear_named_geofences(goss_session *session)",
     "goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m)",
     "goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)",
+    "goss_status goss_session_brush_set_stamp(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_brush_begin(goss_session *session)",
     "goss_status goss_session_brush_point(goss_session *session, float x, float y)",
     "goss_status goss_session_brush_end(goss_session *session)",
@@ -197,6 +209,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_face_pose(goss_session *session, float *out_matrix)",
     "goss_status goss_session_face_region(goss_session *session, uint32_t region, float *out_xyz)",
     "goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)",
+    "goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest)",
+    "goss_status goss_session_clear_model_allowlist(goss_session *session)",
     "void goss_session_disable_segmentation(goss_session *session)",
     "goss_status goss_session_set_segmentation_mask(goss_session *session, const float *mask, uint32_t mask_len)",
     "uint32_t goss_session_segmentation_channels(goss_session *session)",
@@ -208,6 +222,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_faces(goss_session *session, const goss_face_result *faces, uint32_t count)",
     "goss_status goss_session_face_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result)",
+    "goss_status goss_session_face_track_id(goss_session *session, uint32_t index, uint32_t *out_id)",
     "goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count)",
     "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
@@ -384,6 +399,11 @@ pub const Engine = struct {
     edge_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
     chain_width: u16 = 0,
     chain_height: u16 = 0,
+    /// Whether the chain targets currently hold half-float (HDR) precision. An
+    /// HDR lens flips this and forces a reallocation to 16F targets; a plain
+    /// lens flips it back to 8-bit, so the two never share an allocation and a
+    /// non-HDR lens's output is byte-identical to before this path existed.
+    chain_hdr: bool = false,
     /// Dedicated target for goss_engine_capture_frame - separate from
     /// chain_targets, which ping-pong and get overwritten mid-chain, so
     /// this one alone always holds the true final composited image
@@ -516,6 +536,28 @@ pub const GeoRegion = union(enum) {
             .bbox => |b| geo.withinBBox(lat, lon, b.min_lat, b.min_lon, b.max_lat, b.max_lon),
             .polygon => |p| geo.withinPolygon(lat, lon, p.verts[0..p.count]),
         };
+    }
+};
+
+/// The most named geofences a session may hold at once, a name each in the
+/// tick's matched-region view.
+const max_named_geofences: usize = 8;
+const max_geofence_name: usize = 48;
+
+/// The most bring-your-own model digests a session may allowlist at once. With
+/// any set, a model whose SHA-256 is not among them is refused at enable time.
+const max_model_digests: usize = 16;
+
+/// A geofence a lens references by name, so a lens fires `geo.in_region('name')`
+/// for its own place among several the host has set. The name is copied into a
+/// fixed buffer, so the caller need not keep its string alive.
+const NamedGeofence = struct {
+    name_buf: [max_geofence_name]u8 = undefined,
+    name_len: u8 = 0,
+    region: GeoRegion,
+
+    fn name(self: *const NamedGeofence) []const u8 {
+        return self.name_buf[0..self.name_len];
     }
 };
 
@@ -831,6 +873,15 @@ pub const Session = struct {
     /// the anchor render, so a one-face lens never regresses.
     face_results: [face.max_faces]face.Result = @splat(std.mem.zeroes(face.Result)),
     face_count: u32 = 0,
+    /// A stable identity per current face slot, carried across frames by
+    /// nearest-centroid association so a host follows one person through a
+    /// crowd even as the submission order shuffles. The previous frame's
+    /// centroids and ids feed the match; an unmatched face takes a fresh id.
+    face_track_ids: [face.max_faces]u32 = @splat(0),
+    face_prev_centroids: [face.max_faces][2]f32 = @splat(.{ 0, 0 }),
+    face_prev_ids: [face.max_faces]u32 = @splat(0),
+    face_prev_count: u32 = 0,
+    next_face_track_id: u32 = 0,
     body_results: [pose.max_bodies]pose.Result = @splat(std.mem.zeroes(pose.Result)),
     body_count: u32 = 0,
     /// The most recent host-submitted depth map (metres per pixel, row
@@ -1032,11 +1083,27 @@ pub const Session = struct {
     source_tex: [comp.max_sources]render.Renderer.PersistentTexture = @splat(.{}),
     source_dims: [comp.max_sources][2]u16 = @splat(.{ 0, 0 }),
     source_has_frame: [comp.max_sources]bool = @splat(false),
+    /// A per-source matte the host supplies for key mode 3, so an opaque guest
+    /// (a screen share, an opaque video) is cut to a mask without touching its
+    /// own alpha. Null until submitted; key mode 3 with none shows the source.
+    source_mask_tex: [comp.max_sources]?render.TextureHandle = @splat(null),
+    /// An optional per-source segmenter: with one, the engine runs it on the
+    /// guest source's own frame each submit and fills the source's key-mode-3
+    /// matte from the subject mask, so a guest's background keys out on-device
+    /// with no host segmenter. Its mask uploads through source_seg_mask.
+    source_segmenter: [comp.max_sources]?*segmentation.Segmentation = @splat(null),
+    source_seg_mask: [comp.max_sources]render.Renderer.DynamicMask = @splat(.{}),
+    /// Reused conversion scratch for feeding a source's own RGB to its
+    /// segmenter: a tight RGBA repack and the NV12 planes, grown only when a
+    /// source's dimensions grow, so the per-frame feed allocates nothing.
+    source_seg_tight: []u8 = &.{},
+    source_seg_y: []u8 = &.{},
+    source_seg_uv: []u8 = &.{},
     source_count: u8 = 0,
     /// Per-source composite blend the layout draws with: opacity, key mode
-    /// (0 none, 1 matte from the source alpha, 2 chroma-key), the chroma key
-    /// color and its match softness, and whether the source letterboxes to fit
-    /// its cell (a screen share) rather than filling it.
+    /// (0 none, 1 matte from the source alpha, 2 chroma-key, 3 a supplied
+    /// per-source mask), the chroma key color and its match softness, and
+    /// whether the source letterboxes to fit its cell rather than filling it.
     source_opacity: [comp.max_sources]f32 = @splat(1),
     source_key: [comp.max_sources]u8 = @splat(0),
     source_chroma: [comp.max_sources][4]f32 = @splat(.{ 0, 0, 0, 0 }),
@@ -1060,12 +1127,26 @@ pub const Session = struct {
     location_accuracy_m: f32 = 0,
     location_engine_fed: bool = false,
     geofence: ?GeoRegion = null,
+    /// Named geofences a lens fires by name, alongside the single default one.
+    /// A location inside a named region lights `geo.in_region('name')`.
+    named_geofences: [max_named_geofences]NamedGeofence = undefined,
+    named_geofence_count: u8 = 0,
+    /// SHA-256 digests of the models a lens is allowed to load. Empty admits
+    /// any model (the default); once the host allowlists one, a model whose
+    /// digest is not listed is refused at enable time, so a bundle cannot swap
+    /// in an unvetted net.
+    model_allowlist: [max_model_digests][32]u8 = undefined,
+    model_allowlist_count: u8 = 0,
     /// The worst fix accuracy that still counts as inside a region. Zero means no
     /// gate: any fix is trusted. A fix reporting a larger radius reads outside.
     geo_required_accuracy_m: f32 = 0,
     /// The draw and AR-brush board. The engine owns stroke state and undo/redo;
     /// goss_session_brush_vertices reads the finished ribbon for the renderer.
     brush: stroke.Board = .{},
+    /// The sprite a stamp-mode stroke lays along its length (an emoji or icon
+    /// the host uploads); null until set, and a stamp stroke draws nothing
+    /// without it.
+    brush_stamp_texture: ?render.TextureHandle = null,
     /// World-anchored strokes and the screen-space board they project into each
     /// frame. The AR brush stores points in world space; the render path
     /// projects them through the camera pose and draws them like the screen
@@ -1283,7 +1364,9 @@ pub const Session = struct {
     /// the draw cycles them at off the lens clock.
     sprite_anims: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteAnim) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
-    model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    /// Face-anchored model nodes, each mapped to the face index it binds to
+    /// (-1 draws on every submitted face, a non-negative index only that one).
+    model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, i32) = .empty,
     model_body_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     model_skeleton_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     /// model.gltf nodes anchored to the tracked world, by graph index.
@@ -1328,6 +1411,11 @@ const SkinnedRig = struct {
     skinned: [][3]f32,
     palette: []math.Mat4,
     joint_targets: []JointTarget,
+    /// A lit rig keeps a normal scratch and an index copy so it recomputes and
+    /// re-uploads normals from the skinned positions each frame. Both empty for
+    /// an unlit rig.
+    lit_normals: [][3]f32 = &.{},
+    lit_indices: []const u32 = &.{},
 };
 
 /// The most clips one model node blends in a frame. A model with more
@@ -1353,6 +1441,12 @@ const LoadedModel = struct {
     /// empty for a mesh with no morph targets.
     morph_rest: []const [3]f32 = &.{},
     morph_scratch: [][3]f32 = &.{},
+    /// Scratch for the per-frame vertex normals of a lit deforming mesh, plus a
+    /// kept copy of the triangle indices they recompute from, so a morphed mesh
+    /// re-uploads fresh normals each frame with no frame-path allocation. Both
+    /// empty for a static or unlit mesh.
+    lit_normals: [][3]f32 = &.{},
+    lit_indices: []const u32 = &.{},
     /// One entry per morph target: the face blendshape index it maps to by
     /// name, or -1 when the target has no matching ARKit name. Built once at
     /// load so an avatar drives each morph from the live blendshape array.
@@ -1363,6 +1457,15 @@ const LoadedModel = struct {
     /// When set, the jaw-open morph is driven by the audio envelope (a talking
     /// avatar), overriding its tracked or bound value.
     audio_talk: bool = false,
+    /// When set, the mesh carries per-vertex normals and draws through the lit
+    /// program against the lens's directional light; else it draws flat unlit.
+    lit: bool = false,
+    /// The glTF material's PBR factors, fed to the lit shader: metallic scales
+    /// the specular highlight, roughness sets its tightness, and emissive adds
+    /// self-illumination. Unused by the flat (unlit) path.
+    metallic: f32 = 0,
+    roughness: f32 = 1,
+    emissive: [3]f32 = .{ 0, 0, 0 },
 };
 
 /// Maps each morph target name to the face blendshape index it drives (or -1
@@ -1396,15 +1499,93 @@ fn morphPositions(out: [][3]f32, rest: []const [3]f32, targets: []const []const 
 /// blended by their bound weights (clip_weights). With none bound the
 /// first clip carries full weight, so a single-clip model is unchanged;
 /// a model with no clips draws on its rest transform.
+/// Packs a lens's directional light into the four vec4s the lit model shader
+/// reads: the world direction and intensity, the color and ambient term, then
+/// the hemisphere sky and ground ambient tints.
+fn lightParams(light: manifest.Light) [16]f32 {
+    return .{
+        light.direction[0], light.direction[1], light.direction[2], light.intensity,
+        light.color[0],     light.color[1],     light.color[2],     light.ambient,
+        light.sky[0],       light.sky[1],       light.sky[2],       0,
+        light.ground[0],    light.ground[1],    light.ground[2],    0,
+    };
+}
+
+/// Packs a model's PBR material into the two vec4s the lit shader reads: the
+/// emissive color and metallic factor, then the roughness.
+fn materialParams(loaded: LoadedModel) [8]f32 {
+    return .{ loaded.emissive[0], loaded.emissive[1], loaded.emissive[2], loaded.metallic, loaded.roughness, 0, 0, 0 };
+}
+
+/// Maps a 0..1 screen point to the world point where its camera ray meets the
+/// ground plane y=0, given the tracked projection and camera pose - the hit
+/// test a tap-to-place lens raycasts with. Null when the projection is
+/// singular, the ray runs parallel to the plane, or the hit is behind the eye.
+fn unprojectToPlane(projection: math.Mat4, world_from_camera: math.Mat4, sx: f32, sy: f32) ?[3]f32 {
+    const inv_proj = math.Mat4.inverse(projection) orelse return null;
+    const ndc_x = sx * 2.0 - 1.0;
+    const ndc_y = 1.0 - sy * 2.0;
+    // Two clip-space points down the ray (near z=0, far z=1 in zero-to-one depth).
+    const near_c = inv_proj.mulVec(.{ ndc_x, ndc_y, 0.0, 1.0 });
+    const far_c = inv_proj.mulVec(.{ ndc_x, ndc_y, 1.0, 1.0 });
+    if (near_c[3] == 0 or far_c[3] == 0) return null;
+    const near_cam = math.vec.vec3From4(near_c) / @as(math.Vec3, @splat(near_c[3]));
+    const far_cam = math.vec.vec3From4(far_c) / @as(math.Vec3, @splat(far_c[3]));
+    const near_w = world_from_camera.mulPoint(near_cam);
+    const far_w = world_from_camera.mulPoint(far_cam);
+    const dir = far_w - near_w;
+    if (@abs(dir[1]) < 1e-6) return null;
+    const dist = -near_w[1] / dir[1];
+    if (dist < 0) return null;
+    const hit = near_w + @as(math.Vec3, @splat(dist)) * dir;
+    return .{ hit[0], hit[1], hit[2] };
+}
+
+/// The world position a navigation path reaches at elapsed_seconds: the path is
+/// walked at constant time per segment over its duration, looping or holding at
+/// the last point. Fewer than two points yields the single point or the origin.
+fn pathPosition(path: manifest.PathField, elapsed_seconds: f32) [3]f32 {
+    if (path.points.len == 0) return .{ 0, 0, 0 };
+    if (path.points.len == 1) return path.points[0];
+    const seg_count: f32 = @floatFromInt(path.points.len - 1);
+    const now = if (path.loop) @mod(elapsed_seconds, path.duration) else std.math.clamp(elapsed_seconds, 0, path.duration);
+    const seg_dur = path.duration / seg_count;
+    var seg: usize = @intFromFloat(now / seg_dur);
+    if (seg >= path.points.len - 1) seg = path.points.len - 2;
+    const local = std.math.clamp((now - @as(f32, @floatFromInt(seg)) * seg_dur) / seg_dur, 0, 1);
+    const a = path.points[seg];
+    const b = path.points[seg + 1];
+    return .{ a[0] + (b[0] - a[0]) * local, a[1] + (b[1] - a[1]) * local, a[2] + (b[2] - a[2]) * local };
+}
+
 fn modelPoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
+    const base = basePoseMatrix(loaded, elapsed_seconds, lens, graph_index);
+    // A navigation path walks the model over time: translate its animated pose
+    // to the path position, so a model with a path moves even with no clip.
+    if (lens) |l| {
+        if (l.navPath(graph_index)) |p| {
+            if (p.points.len >= 2) return math.Mat4.translation(pathPosition(p, elapsed_seconds)).mul(base);
+        }
+    }
+    return base;
+}
+
+/// The model's local clip pose (before a navigation path places it), blending
+/// its animation clips by their weights and splitting to any clip_range.
+fn basePoseMatrix(loaded: LoadedModel, elapsed_seconds: f32, lens: ?*const runtime.Lens, graph_index: graph.NodeIndex) math.Mat4 {
     if (loaded.animations.len == 0) return math.Mat4.identity;
     const bound = if (lens) |l| l.bindsClipWeights(graph_index) else false;
-    if (!bound and loaded.animations.len == 1) return loaded.animations[0].sample(elapsed_seconds);
+    // A clip_range splits a longer clip into a looping sub-range the node plays.
+    const range: ?[2]f32 = if (lens) |l| l.clipRange(graph_index) else null;
+    if (!bound and loaded.animations.len == 1) {
+        if (range) |r| return loaded.animations[0].sampleRangeComponents(elapsed_seconds, r[0], r[1]).toMatrix();
+        return loaded.animations[0].sample(elapsed_seconds);
+    }
     var poses: [max_blend_clips]gltf.Components = undefined;
     var weights: [max_blend_clips]f32 = undefined;
     const n = @min(loaded.animations.len, max_blend_clips);
     for (0..n) |ci| {
-        poses[ci] = loaded.animations[ci].sampleComponents(elapsed_seconds);
+        poses[ci] = if (range) |r| loaded.animations[ci].sampleRangeComponents(elapsed_seconds, r[0], r[1]) else loaded.animations[ci].sampleComponents(elapsed_seconds);
         weights[ci] = if (bound) (lens.?.clipWeight(graph_index, ci) orelse 0) else (if (ci == 0) @as(f32, 1.0) else 0.0);
     }
     return gltf.blendComponents(poses[0..n], weights[0..n]).toMatrix();
@@ -1482,28 +1663,35 @@ pub fn destroyEngine(engine: *Engine) void {
 /// (Re)creates both ping-pong chain targets when the frame size changes
 /// or they don't exist yet - never per frame once a size is stable, so
 /// the render path itself allocates nothing.
-fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
-    if (e.chain_width == width and e.chain_height == height and e.chain_targets[0] != null) return;
+/// One chain target, half-float when the lens opted into HDR, 8-bit otherwise.
+fn makeChainTarget(width: u16, height: u16, hdr: bool) !render.Renderer.OffscreenTarget {
+    return if (hdr) render.Renderer.createOffscreenTargetHdr(width, height) else render.Renderer.createOffscreenTarget(width, height);
+}
+
+fn ensureChainTargets(e: *Engine, width: u16, height: u16, hdr: bool) !void {
+    if (e.chain_width == width and e.chain_height == height and e.chain_hdr == hdr and e.chain_targets[0] != null) return;
     // Each slot is nulled between destroy and create, so a failed create
     // leaves null in the slot rather than a destroyed handle a later
-    // render or teardown would use again.
+    // render or teardown would use again. An HDR lens allocates half-float
+    // targets; a plain lens the 8-bit targets, and a format change reallocates.
     for (&e.chain_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = null;
-        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+        slot.* = try makeChainTarget(width, height, hdr);
     }
     for (&e.bloom_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = null;
-        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+        slot.* = try makeChainTarget(width, height, hdr);
     }
     for (&e.edge_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = null;
-        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+        slot.* = try makeChainTarget(width, height, hdr);
     }
     e.chain_width = width;
     e.chain_height = height;
+    e.chain_hdr = hdr;
 }
 
 fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
@@ -1935,11 +2123,24 @@ fn brushDrawnInChain(s: *Session) bool {
 /// Draws every committed stroke of `board` over view_id. Each stroke draws on
 /// its own so neon blends additively while pen, highlighter, and marker blend on
 /// alpha.
-fn drawBrushStrokes(r: *render.Renderer, board: *const stroke.Board, view_id: u8) void {
+fn drawBrushStrokes(r: *render.Renderer, board: *const stroke.Board, view_id: u8, stamp_tex: ?render.TextureHandle, aspect: f32) void {
     // One stroke's worst-case ribbon: every segment expanded to six vertices.
     var buf: [(stroke.max_points - 1) * 6 * stroke.floats_per_vertex]f32 = undefined;
+    var centers: [stroke.max_points][2]f32 = undefined;
     var si: u16 = 0;
     while (si < board.strokeCount()) : (si += 1) {
+        // A stamp-mode stroke lays the sprite along its length instead of a
+        // ribbon; with no stamp sprite set it simply draws nothing.
+        if (board.strokeMode(si).stamped()) {
+            const tex = stamp_tex orelse continue;
+            const half = board.strokeWidth(si);
+            const spacing = @max(half * 2.0, 1e-3);
+            const nc = board.buildStampCenters(si, spacing, &centers);
+            for (centers[0..nc]) |cpt| {
+                r.submitSpriteRotated(view_id, tex, cpt[0], cpt[1], half / aspect, half, 0, aspect, 1.0);
+            }
+            continue;
+        }
         const floats = board.buildStroke(si, &buf);
         if (floats == 0) continue;
         r.submitBrush(view_id, &buf, @intCast(floats / stroke.floats_per_vertex), board.strokeAdditive(si));
@@ -1997,8 +2198,9 @@ fn drawBrushOverlay(e: *Engine, r: *render.Renderer, s: *Session, view_id: u8, w
     if (!draw_screen and !draw_ar) return;
     render.Renderer.setViewTarget(view_id, finalTarget(e, s), width, height);
     r.tile = null;
-    if (draw_screen) drawBrushStrokes(r, &s.brush, view_id);
-    if (draw_ar) drawBrushStrokes(r, &s.ar_projected, view_id);
+    const aspect = if (height > 0) @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)) else 1.0;
+    if (draw_screen) drawBrushStrokes(r, &s.brush, view_id, s.brush_stamp_texture, aspect);
+    if (draw_ar) drawBrushStrokes(r, &s.ar_projected, view_id, s.brush_stamp_texture, aspect);
 }
 
 /// Whether a reshape.bank node has a face to sculpt this frame: a valid
@@ -2198,6 +2400,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     r.tile = null;
     var ready_count: usize = 0;
     for (s.chain_order) |entry| {
+        // A node a hide or swap_subgraph action hid does not draw and is not
+        // counted, so the frame passes through it like any inactive pass.
+        if (s.active_lens) |*lens| {
+            if (lens.isNodeHidden(entry.graph_index)) continue;
+        }
         const ready = switch (entry.kind) {
             .shader => s.shader_programs.contains(entry.graph_index),
             .lut => s.lut_textures.contains(entry.graph_index),
@@ -2381,7 +2588,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // visible viewport.
     const output_width: u16 = if (s.capture_requested) capture_out_width else @intCast(r.width);
     const output_height: u16 = if (s.capture_requested) capture_out_height else @intCast(r.height);
-    try ensureChainTargets(e, width, height);
+    const lens_hdr = if (s.active_lens) |*l| l.manifest.hdr else false;
+    try ensureChainTargets(e, width, height, lens_hdr);
     const targets = [2]render.Renderer.OffscreenTarget{ e.chain_targets[0].?, e.chain_targets[1].? };
 
     var next_view_id: u8 = 1;
@@ -2417,6 +2625,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     var drawn: usize = 0;
     var next_slot: usize = 1;
     for (s.chain_order) |entry| {
+        // Skip a node a hide/swap_subgraph action hid, matching the ready-count
+        // pass above so drawn stays in step with ready_count for is_final.
+        if (s.active_lens) |*lens| {
+            if (lens.isNodeHidden(entry.graph_index)) continue;
+        }
         switch (entry.kind) {
             .shader => {
                 const program_idx = s.shader_programs.get(entry.graph_index) orelse continue;
@@ -2481,7 +2694,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .grade => {
-                const grade = s.grade_params.get(entry.graph_index) orelse continue;
+                var grade = s.grade_params.get(entry.graph_index) orelse continue;
+                // On an HDR lens the grade keeps values above 1.0 through the
+                // chain (the free u_grade[2].w slot toggles the display clamp),
+                // so a bright pass survives into the half-float target instead
+                // of clipping; the final present clamps for the 8-bit swap chain.
+                grade[11] = if (lens_hdr) 1 else 0;
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
@@ -3290,7 +3508,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 // The frame passes through whole, then the brush board draws its
                 // strokes over it at the node's own place in the chain.
                 r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
-                drawBrushStrokes(r, &s.brush, view_id);
+                const brush_aspect = if (height > 0) @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height)) else 1.0;
+                drawBrushStrokes(r, &s.brush, view_id, s.brush_stamp_texture, brush_aspect);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -4062,7 +4281,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                                 }
                             }
                             morphPositions(loaded.morph_scratch, loaded.morph_rest, loaded.morph_targets[0..n], weights[0..n]);
-                            r.updateModelMesh(loaded.mesh, loaded.morph_scratch);
+                            if (loaded.lit) {
+                                // Recompute normals from the freshly morphed positions and
+                                // re-upload them with the positions, so the lit shader shades
+                                // the deformed surface instead of a stale rest-pose normal.
+                                computeVertexNormalsInto(loaded.lit_normals, loaded.morph_scratch, loaded.lit_indices);
+                                r.updateLitModelMesh(loaded.mesh, loaded.morph_scratch, loaded.lit_normals);
+                            } else {
+                                r.updateModelMesh(loaded.mesh, loaded.morph_scratch);
+                            }
                         }
                     }
                 }
@@ -4097,7 +4324,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     continue;
                 }
                 var anchored_without_target = false;
-                if (s.model_face_anchors.contains(entry.graph_index)) {
+                if (s.model_face_anchors.get(entry.graph_index)) |bound_face_index| {
                     // The head transform lands in source-frame pixels, stretched
                     // by the preview blit to fill a rect whose z=0 plane spans
                     // 4*tan(22.5) world units vertically.
@@ -4117,7 +4344,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         // blit the frame once through the first, draw the rest
                         // of the meshes over it.
                         var drawn_face = false;
-                        for (s.face_results[0..s.face_count]) |*fr| {
+                        for (s.face_results[0..s.face_count], 0..) |*fr, fi| {
+                            // A node bound to one face index skips the others; the
+                            // default -1 draws on every submitted face.
+                            if (bound_face_index >= 0 and bound_face_index != @as(i32, @intCast(fi))) continue;
                             const head = face_geometry.estimateHeadPose(&fr.landmarks) orelse continue;
                             const m = pixel_to_world.mul(head).mul(base_model_matrix);
                             if (!drawn_face) {
@@ -4172,10 +4402,24 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             const bp = bodyAnchorPose(lm) orelse break :skinned;
                             const anchor_full = bp.mul(base_model_matrix);
                             buildBodySkinPalette(rig, lm, anchor_full);
-                            skinPositions(rig.rest, rig.skin.vertex_joints, rig.skin.vertex_weights, rig.palette, rig.skinned);
-                            r.updateSkinnedMesh(rig.mesh, rig.skinned);
+                            // A skinned mesh that also morphs skins its morphed
+                            // rest (the morph pass above wrote it into
+                            // morph_scratch) instead of the bind rest, so a body
+                            // avatar's blendshapes deform under the skin.
+                            const skin_src = if (loaded.morph_scratch.len == rig.rest.len) loaded.morph_scratch else rig.rest;
+                            skinPositions(skin_src, rig.skin.vertex_joints, rig.skin.vertex_weights, rig.palette, rig.skinned);
                             r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
-                            r.drawSkinnedMesh(mesh_view, rig.mesh, pixel_to_world.mul(anchor_full), loaded.base_color, tiledAspect(s, rect_width, rect_height));
+                            if (loaded.lit) {
+                                // Recompute normals from the skinned positions and re-upload
+                                // both, so the lit shader shades the posed surface.
+                                computeVertexNormalsInto(rig.lit_normals, rig.skinned, rig.lit_indices);
+                                r.updateLitSkinnedMesh(rig.mesh, rig.skinned, rig.lit_normals);
+                                const light = if (active_lens) |l| l.manifest.light orelse manifest.Light{} else manifest.Light{};
+                                r.drawLitSkinnedMesh(mesh_view, rig.mesh, pixel_to_world.mul(anchor_full), loaded.base_color, lightParams(light), materialParams(loaded), tiledAspect(s, rect_width, rect_height));
+                            } else {
+                                r.updateSkinnedMesh(rig.mesh, rig.skinned);
+                                r.drawSkinnedMesh(mesh_view, rig.mesh, pixel_to_world.mul(anchor_full), loaded.base_color, tiledAspect(s, rect_width, rect_height));
+                            }
                             if (output) |target| {
                                 input_texture = target.texture;
                                 if (!is_final) next_slot += 1;
@@ -4272,6 +4516,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // The anchor's capability degradation: the frame
                     // still passes through, the mesh alone stays off.
                     r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                } else if (loaded.lit) {
+                    const light = if (active_lens) |l| l.manifest.light orelse manifest.Light{} else manifest.Light{};
+                    r.submitLitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, lightParams(light), materialParams(loaded), aspect_ratio);
                 } else {
                     r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, aspect_ratio);
                 }
@@ -4524,12 +4771,23 @@ pub fn destroySession(session: *Session) void {
     clearSegmentationTextures(session);
     destroySegmentationStores(session);
     releaseCurrentFrame(session);
-    if (session.engine.renderer != null) {
+    if (session.engine.renderer) |*r| {
         session.preview_bgra.deinit();
         session.preview_y.deinit();
         session.preview_uv.deinit();
-        for (0..session.source_count) |i| session.source_tex[i].deinit();
+        for (0..session.source_count) |i| {
+            session.source_tex[i].deinit();
+            if (session.source_mask_tex[i]) |tex| r.destroyTexture(tex);
+            if (session.source_segmenter[i]) |seg| segmentation.destroy(seg);
+            session.source_seg_mask[i].deinit();
+        }
+        if (session.brush_stamp_texture) |tex| r.destroyTexture(tex);
     }
+    // The source-segmenter conversion scratch is plain host memory, freed
+    // whether or not a renderer was ever attached.
+    if (session.source_seg_tight.len > 0) session.engine.gpa.free(session.source_seg_tight);
+    if (session.source_seg_y.len > 0) session.engine.gpa.free(session.source_seg_y);
+    if (session.source_seg_uv.len > 0) session.engine.gpa.free(session.source_seg_uv);
     session.engine.gpa.destroy(session);
 }
 
@@ -4816,6 +5074,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollSpriteLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
+        pollSourceSegmentation(s);
         pollMlMasks(s);
         pollMlStyle(s);
         pollMlDepth(s);
@@ -4918,6 +5177,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollSourceSegmentation(s);
     pollMlMasks(s);
     pollMlStyle(s);
     pollMlDepth(s);
@@ -5020,6 +5280,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollSourceSegmentation(s);
     pollMlMasks(s);
     pollMlStyle(s);
     pollMlDepth(s);
@@ -5278,6 +5539,21 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
     s.world.dropped_anchors +|= @intCast(anchor_count -| max_world_anchors);
     if (light) |l| s.world.light = l.*;
     s.world_engine_fed = true;
+    return .ok;
+}
+
+/// Raycasts a normalized screen point (0..1, origin top-left) against the
+/// tracked ground plane and writes the world hit position into out_position.
+/// `.again` until world tracking is in its tracked state and the ray meets the
+/// plane, so a tap-to-place lens can poll it and place an anchor at the hit.
+pub export fn goss_session_hit_test(session: ?*Session, screen_x: f32, screen_y: f32, out_position: ?*[3]f32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_position orelse return .invalid_argument;
+    if (!s.world_engine_fed or s.world.state.tracking_state != 2) return .again;
+    const projection: math.Mat4 = .{ .cols = @bitCast(s.world.state.projection) };
+    const world_from_camera: math.Mat4 = .{ .cols = @bitCast(s.world.state.world_from_camera) };
+    const hit = unprojectToPlane(projection, world_from_camera, screen_x, screen_y) orelse return .again;
+    out.* = hit;
     return .ok;
 }
 
@@ -5835,6 +6111,7 @@ pub export fn goss_session_define_source(session: ?*Session, name: ?[*]const u8,
     s.source_tex[slot] = .{};
     s.source_dims[slot] = .{ 0, 0 };
     s.source_has_frame[slot] = false;
+    s.source_mask_tex[slot] = null;
     s.source_opacity[slot] = 1;
     s.source_key[slot] = 0;
     s.source_chroma[slot] = .{ 0, 0, 0, 0 };
@@ -5855,24 +6132,70 @@ pub export fn goss_session_define_screen_share(session: ?*Session, name: ?[*]con
 }
 
 /// Sets a source's composite blend for the layout: opacity in [0,1], key mode
-/// (0 none, 1 matte from the source alpha, 2 chroma-key), the chroma key color,
-/// and a match similarity. The name "camera" addresses the live camera base.
+/// (0 none, 1 matte from the source alpha, 2 chroma-key, 3 a supplied per-source
+/// mask), the chroma key color, and a match similarity. The name "camera"
+/// addresses the live camera base; mode 3 is source-only.
 pub export fn goss_session_set_source_composite(session: ?*Session, name: ?[*]const u8, name_len: usize, opacity: f32, key_mode: u32, key_r: f32, key_g: f32, key_b: f32, similarity: f32) Status {
     const s = session orelse return .invalid_argument;
     const nm = name orelse return .invalid_argument;
     const op = std.math.clamp(opacity, 0, 1);
-    const key: u8 = @intCast(@min(key_mode, 2));
     const sim = if (similarity > 0) similarity else 0;
     if (std.mem.eql(u8, nm[0..name_len], "camera")) {
         s.camera_opacity = op;
-        s.camera_key = key;
+        s.camera_key = @intCast(@min(key_mode, 2)); // the camera has no source mask
         s.camera_chroma = .{ key_r, key_g, key_b, sim };
         return .ok;
     }
     const idx = findSource(s, nm[0..name_len]) orelse return .again;
     s.source_opacity[idx] = op;
-    s.source_key[idx] = key;
+    s.source_key[idx] = @intCast(@min(key_mode, 3));
     s.source_chroma[idx] = .{ key_r, key_g, key_b, sim };
+    return .ok;
+}
+
+/// Uploads a per-source matte for key mode 3: an RGBA image whose red channel is
+/// the mask (1 keeps the source, 0 cuts it), resampled to the source's cell, so
+/// an opaque guest is keyed to a subject without a baked alpha. Replaces any
+/// prior mask; camera or an unknown source is rejected.
+pub export fn goss_session_submit_source_mask(session: ?*Session, name: ?[*]const u8, name_len: usize, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    const bytes = rgba orelse return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    if (std.mem.eql(u8, nm[0..name_len], "camera")) return .invalid_argument;
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    const texture = render.Renderer.createStaticTexture(@intCast(width), @intCast(height), bytes[0 .. @as(usize, width) * height * 4]);
+    if (s.source_mask_tex[idx]) |old| r.destroyTexture(old);
+    s.source_mask_tex[idx] = texture;
+    return .ok;
+}
+
+/// Stands up a segmenter that runs on a guest source's own frames, so its
+/// subject mask fills the source's key-mode-3 matte on-device with no host
+/// segmenter (a virtual background for a remote guest). The model bytes are the
+/// same selfie/hair segmenter enable_segmentation takes; model_len 0 disables.
+pub export fn goss_session_enable_source_segmentation(session: ?*Session, name: ?[*]const u8, name_len: usize, model_bytes: ?[*]const u8, model_len: usize, threads: i32) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    if (std.mem.eql(u8, nm[0..name_len], "camera")) return .invalid_argument;
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+    if (model_len == 0) {
+        if (s.source_segmenter[idx]) |seg| segmentation.destroy(seg);
+        s.source_segmenter[idx] = null;
+        s.source_seg_mask[idx].deinit();
+        s.source_seg_mask[idx] = .{};
+        return .ok;
+    }
+    const bytes = model_bytes orelse return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..model_len])) return .invalid_argument;
+    if (s.source_segmenter[idx] != null) return .ok;
+    const worker_threads = if (threads <= 0) 2 else threads;
+    s.source_segmenter[idx] = segmentation.create(s.engine.gpa, bytes[0..model_len], worker_threads) catch |err| switch (err) {
+        error.Unsupported => return .unsupported,
+        error.InvalidModel => return .invalid_argument,
+        error.OutOfMemory => return .out_of_memory,
+    };
     return .ok;
 }
 
@@ -5883,6 +6206,11 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
     const n = name orelse return .invalid_argument;
     const idx = findSource(s, n[0..name_len]) orelse return .again;
     s.source_tex[idx].deinit();
+    if (s.source_mask_tex[idx]) |old| {
+        if (s.engine.renderer) |*r| r.destroyTexture(old);
+    }
+    if (s.source_segmenter[idx]) |seg| segmentation.destroy(seg);
+    s.source_seg_mask[idx].deinit();
     var i: u8 = idx;
     while (i + 1 < s.source_count) : (i += 1) {
         s.source_names[i] = s.source_names[i + 1];
@@ -5890,6 +6218,9 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
         s.source_tex[i] = s.source_tex[i + 1];
         s.source_dims[i] = s.source_dims[i + 1];
         s.source_has_frame[i] = s.source_has_frame[i + 1];
+        s.source_mask_tex[i] = s.source_mask_tex[i + 1];
+        s.source_segmenter[i] = s.source_segmenter[i + 1];
+        s.source_seg_mask[i] = s.source_seg_mask[i + 1];
         s.source_opacity[i] = s.source_opacity[i + 1];
         s.source_key[i] = s.source_key[i + 1];
         s.source_chroma[i] = s.source_chroma[i + 1];
@@ -5898,6 +6229,9 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
     }
     s.source_count -= 1;
     s.source_tex[s.source_count] = .{}; // its handle moved down; do not deinit here
+    s.source_mask_tex[s.source_count] = null; // moved down; do not destroy here
+    s.source_segmenter[s.source_count] = null; // moved down; do not destroy here
+    s.source_seg_mask[s.source_count] = .{}; // moved down; do not deinit here
     s.source_has_frame[s.source_count] = false;
     s.source_opacity[s.source_count] = 1;
     s.source_key[s.source_count] = 0;
@@ -5921,7 +6255,53 @@ pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, nam
     _ = s.source_tex[idx].uploadCopy(@intCast(d.width), @intCast(d.height), format, rgba_ptr, stride);
     s.source_dims[idx] = .{ @intCast(d.width), @intCast(d.height) };
     s.source_has_frame[idx] = true;
+    if (s.source_segmenter[idx]) |seg| feedSourceSegmenter(s, seg, d, rgba_ptr, stride);
     return .ok;
+}
+
+/// Grows a scratch slice to at least `need` bytes, reusing it otherwise; null
+/// only if a grow ever fails, in which case the caller skips the frame.
+fn growScratch(gpa: std.mem.Allocator, buf: *[]u8, need: usize) ?[]u8 {
+    if (need > buf.len) {
+        const grown = gpa.alloc(u8, need) catch return null;
+        if (buf.len != 0) gpa.free(buf.*);
+        buf.* = grown;
+    }
+    return buf.*[0..need];
+}
+
+/// Feeds a source's own frame to its segmenter: repacks the (possibly strided,
+/// possibly BGRA) RGBA into tight RGBA, converts to NV12, and submits it. A
+/// best effort - an allocation failure just skips this frame's mask update.
+fn feedSourceSegmenter(s: *Session, seg: *segmentation.Segmentation, d: *const FrameDesc, rgba_ptr: [*]const u8, stride: u32) void {
+    const gpa = s.engine.gpa;
+    const w: usize = d.width;
+    const h: usize = d.height;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    // Reused scratch grown only when a source gets bigger, so a steady source
+    // stream feeds its segmenter with no per-frame allocation.
+    const tight = growScratch(gpa, &s.source_seg_tight, w * h * 4) orelse return;
+    const y_out = growScratch(gpa, &s.source_seg_y, w * h) orelse return;
+    const uv_out = growScratch(gpa, &s.source_seg_uv, half_w * half_h * 2) orelse return;
+    const bgra = d.pixel_format == pixel_format_bgra8;
+    for (0..h) |row| {
+        const srow = rgba_ptr[row * stride ..][0 .. w * 4];
+        const drow = tight[row * w * 4 ..][0 .. w * 4];
+        if (bgra) {
+            for (0..w) |col| {
+                drow[col * 4 + 0] = srow[col * 4 + 2];
+                drow[col * 4 + 1] = srow[col * 4 + 1];
+                drow[col * 4 + 2] = srow[col * 4 + 0];
+                drow[col * 4 + 3] = srow[col * 4 + 3];
+            }
+        } else {
+            @memcpy(drow, srow);
+        }
+    }
+    const conv = math.color.rgbToYuv(.bt601, .video);
+    image.argbToNv12(tight, @intCast(w), @intCast(h), .bt601, .video, y_out, uv_out) catch return;
+    segmentation.submitNv12(seg, @intCast(w), @intCast(h), d.timestamp_us, conv, y_out.ptr, @intCast(w), uv_out.ptr, @intCast(half_w * 2));
 }
 
 /// Sets the composite arrangement over the camera plus the named sources
@@ -5998,7 +6378,7 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
                 view += 1;
                 const params = [4]f32{ s.camera_opacity, @floatFromInt(s.camera_key), s.camera_chroma[3], s.camera_softness };
                 const chroma = [4]f32{ s.camera_chroma[0], s.camera_chroma[1], s.camera_chroma[2], 0 };
-                r.submitCompositeSource(view, scratch.texture, targets0, dx, dy, dw, dh, params, chroma);
+                r.submitCompositeSource(view, scratch.texture, r.default_mask_texture, targets0, dx, dy, dw, dh, params, chroma);
                 view += 1;
             }
         } else {
@@ -6021,7 +6401,14 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
             } else {
                 const params = [4]f32{ s.source_opacity[src], @floatFromInt(s.source_key[src]), s.source_chroma[src][3], s.source_softness[src] };
                 const chroma = [4]f32{ s.source_chroma[src][0], s.source_chroma[src][1], s.source_chroma[src][2], 0 };
-                r.submitCompositeSource(view, s.source_tex[src].handle, targets0, cx, cy, cw, ch, params, chroma);
+                // The engine's own segmentation of the source wins when a
+                // per-source segmenter is active, else the host-supplied matte,
+                // else a full-white mask (mode 3 with none shows the source).
+                const source_mask = if (s.source_segmenter[src] != null)
+                    s.source_seg_mask[src].handle
+                else
+                    (s.source_mask_tex[src] orelse r.default_mask_texture);
+                r.submitCompositeSource(view, s.source_tex[src].handle, source_mask, targets0, cx, cy, cw, ch, params, chroma);
             }
             view += 1;
         }
@@ -6097,11 +6484,83 @@ pub export fn goss_session_clear_geofence(session: ?*Session) Status {
     return .ok;
 }
 
+/// Stores a region under a name, replacing a same-named one in place, else
+/// appending if the store has room; the name is copied into its fixed buffer.
+fn putNamedGeofence(s: *Session, name_slice: []const u8, region: GeoRegion) Status {
+    for (s.named_geofences[0..s.named_geofence_count]) |*ng| {
+        if (std.mem.eql(u8, ng.name(), name_slice)) {
+            ng.region = region;
+            return .ok;
+        }
+    }
+    if (s.named_geofence_count >= max_named_geofences) return .pool_exhausted;
+    var ng: NamedGeofence = .{ .region = region };
+    @memcpy(ng.name_buf[0..name_slice.len], name_slice);
+    ng.name_len = @intCast(name_slice.len);
+    s.named_geofences[s.named_geofence_count] = ng;
+    s.named_geofence_count += 1;
+    return .ok;
+}
+
+/// Adds a named circular geofence, so a lens fires `geo.in_region('name')` for
+/// its own place among several the host has set (distinct from the single
+/// default geofence). Re-adding a name replaces its region; the store holds up
+/// to max_named_geofences at once. The name is copied; the caller may free it.
+pub export fn goss_session_set_named_geofence(session: ?*Session, name: ?[*]const u8, name_len: usize, latitude: f64, longitude: f64, radius_m: f64) Status {
+    const s = session orelse return .invalid_argument;
+    const name_ptr = name orelse return .invalid_argument;
+    if (name_len == 0 or name_len > max_geofence_name) return .invalid_argument;
+    if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180 or !(radius_m > 0)) return .invalid_argument;
+    return putNamedGeofence(s, name_ptr[0..name_len], .{ .circle = .{ .lat = latitude, .lon = longitude, .radius_m = radius_m } });
+}
+
+/// Adds a named polygon geofence: the region is a ring of three to
+/// max_polygon_verts `(lat, lon)` pairs, so `geo.in_region('name')` fires for a
+/// non-circular place among several. The counterpart of the default polygon
+/// geofence; the name is copied and re-adding a name replaces its region.
+pub export fn goss_session_set_named_geofence_polygon(session: ?*Session, name: ?[*]const u8, name_len: usize, coords: ?[*]const f64, vertex_count: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const name_ptr = name orelse return .invalid_argument;
+    const src = coords orelse return .invalid_argument;
+    if (name_len == 0 or name_len > max_geofence_name) return .invalid_argument;
+    if (vertex_count < 3 or vertex_count > geo.max_polygon_verts) return .invalid_argument;
+    var poly: @FieldType(GeoRegion, "polygon") = .{ .verts = undefined, .count = vertex_count };
+    var i: usize = 0;
+    while (i < vertex_count) : (i += 1) {
+        const lat = src[i * 2];
+        const lon = src[i * 2 + 1];
+        if (lat < -90 or lat > 90 or lon < -180 or lon > 180) return .invalid_argument;
+        poly.verts[i] = .{ lat, lon };
+    }
+    return putNamedGeofence(s, name_ptr[0..name_len], .{ .polygon = poly });
+}
+
+/// Clears every named geofence; the default geofence is untouched.
+pub export fn goss_session_clear_named_geofences(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.named_geofence_count = 0;
+    return .ok;
+}
+
 /// Sets the color and half-width the next stroke begins with. Width is in
 /// normalized units; a non-positive width falls back to a hairline.
 pub export fn goss_session_brush_set_style(session: ?*Session, r: f32, g: f32, b: f32, a: f32, width: f32) Status {
     const s = session orelse return .invalid_argument;
     s.brush.setStyle(.{ r, g, b, a }, width);
+    return .ok;
+}
+
+/// Uploads the sprite a stamp-mode stroke lays along its length (an emoji or
+/// icon rasterized to RGBA by the host), replacing any previous stamp. The
+/// bytes are copied into a texture; the caller may free them on return.
+pub export fn goss_session_brush_set_stamp(session: ?*Session, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const bytes = rgba orelse return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    const texture = render.Renderer.createStaticTexture(@intCast(width), @intCast(height), bytes[0 .. @as(usize, width) * height * 4]);
+    if (s.brush_stamp_texture) |old| r.destroyTexture(old);
+    s.brush_stamp_texture = texture;
     return .ok;
 }
 
@@ -6604,6 +7063,42 @@ pub export fn goss_session_report_frame(session: ?*Session, frame_time_us: u32, 
     return @intFromEnum(s.controller.level);
 }
 
+/// Whether a model's bytes may be loaded: true when the session allowlists no
+/// digest (any model is admitted), otherwise true only when the model's SHA-256
+/// is one the host allowlisted. The hash is computed once here, at enable time.
+fn modelAllowed(s: *const Session, bytes: []const u8) bool {
+    if (s.model_allowlist_count == 0) return true;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    for (s.model_allowlist[0..s.model_allowlist_count]) |allowed| {
+        if (std.mem.eql(u8, &allowed, &digest)) return true;
+    }
+    return false;
+}
+
+/// Allowlists a model by its 32-byte SHA-256 digest, so a bring-your-own net
+/// whose digest is not listed is refused at enable time. Re-adding a digest is
+/// a no-op; the allowlist holds up to max_model_digests. With none set, any
+/// model loads (the default). Call before enabling the tracker or segmenter.
+pub export fn goss_session_allow_model_digest(session: ?*Session, digest: ?*const [32]u8) Status {
+    const s = session orelse return .invalid_argument;
+    const d = digest orelse return .invalid_argument;
+    for (s.model_allowlist[0..s.model_allowlist_count]) |allowed| {
+        if (std.mem.eql(u8, &allowed, d)) return .ok;
+    }
+    if (s.model_allowlist_count >= max_model_digests) return .pool_exhausted;
+    s.model_allowlist[s.model_allowlist_count] = d.*;
+    s.model_allowlist_count += 1;
+    return .ok;
+}
+
+/// Clears the model allowlist; with none set, any model loads again.
+pub export fn goss_session_clear_model_allowlist(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.model_allowlist_count = 0;
+    return .ok;
+}
+
 pub export fn goss_session_degrade_level(session: ?*const Session) c_int {
     const s = session orelse return 0;
     return @intFromEnum(s.controller.level);
@@ -6616,6 +7111,7 @@ pub export fn goss_session_enable_face_tracking(session: ?*Session, task_bytes: 
     const s = session orelse return .invalid_argument;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..task_len])) return .invalid_argument;
     if (s.face_tracking != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     s.face_tracking = tracking.create(s.engine.gpa, bytes[0..task_len], worker_threads) catch |err| switch (err) {
@@ -6639,6 +7135,7 @@ pub export fn goss_session_enable_hand_tracking(session: ?*Session, task_bytes: 
     const s = session orelse return .invalid_argument;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..task_len])) return .invalid_argument;
     if (s.hand_tracking != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     s.hand_tracking = tracking.hand_worker.create(s.engine.gpa, bytes[0..task_len], worker_threads) catch |err| switch (err) {
@@ -6662,6 +7159,7 @@ pub export fn goss_session_enable_pose_tracking(session: ?*Session, task_bytes: 
     const s = session orelse return .invalid_argument;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..task_len])) return .invalid_argument;
     if (s.pose_tracking != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     s.pose_tracking = tracking.pose_worker.create(s.engine.gpa, bytes[0..task_len], worker_threads) catch |err| switch (err) {
@@ -6686,6 +7184,7 @@ pub export fn goss_session_enable_segmentation(session: ?*Session, model_bytes: 
     const s = session orelse return .invalid_argument;
     const bytes = model_bytes orelse return .invalid_argument;
     if (model_len == 0) return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..model_len])) return .invalid_argument;
     if (s.segmentation_worker != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     s.segmentation_worker = segmentation.create(s.engine.gpa, bytes[0..model_len], worker_threads) catch |err| switch (err) {
@@ -6728,6 +7227,7 @@ fn sceneChannelSource(channel: u8) ?u32 {
 /// in: the bytes are copied and the caller may release them on return.
 pub fn enableSceneSegmentation(session: *Session, model_bytes: []const u8, threads: i32) Status {
     if (model_bytes.len == 0) return .invalid_argument;
+    if (!modelAllowed(session, model_bytes)) return .invalid_argument;
     if (session.scene_worker != null) return .ok;
     const worker_threads = if (threads <= 0) 2 else threads;
     session.scene_worker = segmentation.create(session.engine.gpa, model_bytes, worker_threads) catch |err| switch (err) {
@@ -7035,6 +7535,18 @@ pub export fn goss_session_face_result_at(session: ?*Session, index: u32, out_re
     const out = out_result orelse return .invalid_argument;
     if (index >= s.face_count) return .invalid_argument;
     out.* = s.face_results[index];
+    return .ok;
+}
+
+/// Reads the stable track id of the index-th face, an integer that stays with
+/// the same person across frames even as the submission order shuffles, so a
+/// host can keep an effect on one face in a crowd. The ids are refreshed each
+/// tick; invalid_argument once index reaches face_count.
+pub export fn goss_session_face_track_id(session: ?*Session, index: u32, out_id: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_id orelse return .invalid_argument;
+    if (index >= s.face_count) return .invalid_argument;
+    out.* = s.face_track_ids[index];
     return .ok;
 }
 
@@ -8071,6 +8583,18 @@ fn fuseDepthIntoMask(session: *Session, mask: *[segmentation.mask_len]f32) void 
     }
 }
 
+/// Reads each source segmenter's latest subject mask into that source's key-
+/// mode-3 matte texture, so the composite keys the guest by the engine's own
+/// segmentation of its frame. No mask yet leaves the source showing whole.
+fn pollSourceSegmentation(session: *Session) void {
+    var mask: [segmentation.mask_len]f32 = undefined;
+    for (0..session.source_count) |i| {
+        const seg = session.source_segmenter[i] orelse continue;
+        if (!segmentation.readMask(seg, &mask)) continue;
+        _ = uploadMaskFromF32(&session.source_seg_mask[i], &mask);
+    }
+}
+
 fn pollSegmentationMask(session: *Session) void {
     const worker = session.segmentation_worker orelse return;
     var mask: [segmentation.mask_len]f32 = undefined;
@@ -8266,6 +8790,11 @@ fn pollLandmarkMattes(session: *Session) void {
     pollFaceHullMatte(session, manifest.t_zone_channel, &face.t_zone_regions);
     pollScleraMatte(session, manifest.sclera_channel);
     pollLashLineMatte(session, manifest.lash_line_channel);
+    pollFaceHullMatte(session, manifest.ear_channel, &face.ear_regions);
+    pollFaceHullMatte(session, manifest.lid_inner_channel, &face.lid_inner_regions);
+    pollFaceHullMatte(session, manifest.lid_center_channel, &face.lid_center_regions);
+    pollFaceHullMatte(session, manifest.lid_outer_channel, &face.lid_outer_regions);
+    pollFaceHullMatte(session, manifest.lid_crease_channel, &face.lid_crease_regions);
 }
 
 /// Builds the sclera matte: each eye's lid contour filled, then its iris punched
@@ -8642,6 +9171,8 @@ fn destroyModelState(session: *Session) void {
         gltf.freeMorphTargets(session.engine.gpa, loaded.morph_targets);
         if (loaded.morph_rest.len > 0) session.engine.gpa.free(loaded.morph_rest);
         if (loaded.morph_scratch.len > 0) session.engine.gpa.free(loaded.morph_scratch);
+        if (loaded.lit_normals.len > 0) session.engine.gpa.free(loaded.lit_normals);
+        if (loaded.lit_indices.len > 0) session.engine.gpa.free(loaded.lit_indices);
         if (loaded.morph_to_blendshape.len > 0) session.engine.gpa.free(loaded.morph_to_blendshape);
         if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
@@ -8740,6 +9271,21 @@ fn teardownScript(s: *Session) void {
     s.script_param_names = &.{};
 }
 
+/// Loads a script node's bundled asset (assets/<file>) and compiles it, for a
+/// lens that ships its script as a file instead of inlining the source. Runs
+/// only when a node named a file and nothing compiled inline; a missing or
+/// oversize file leaves the lens scriptless, the standard capability degrade.
+fn loadScriptFile(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    if (s.script_engine != null) return;
+    const lens = if (s.active_lens) |*l| l else return;
+    const file = lens.scriptFile() orelse return;
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, file }) catch return;
+    defer gpa.free(path);
+    const src = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(256 * 1024)) catch return;
+    defer gpa.free(src);
+    setupScriptFromSource(s, src);
+}
+
 /// Fires one named script handler outside the per-tick path, used for the
 /// lifecycle events. signals is null for a zeroed signal set; the current
 /// lens parameters go in and whatever the handler writes flows back.
@@ -8764,6 +9310,22 @@ fn fireScriptEvent(s: *Session, engine: *script.Script, handler: [*:0]const u8, 
 fn setupScript(s: *Session) void {
     const lens = if (s.active_lens) |*l| l else return;
     const src = lens.scriptSource() orelse return;
+    setupScriptFromSource(s, src);
+}
+
+/// Compiles a script source (inline or a bundled asset) into the session's
+/// script engine and captures the parameter names it drives. The source is only
+/// read during compile, so the caller may free it after; a second setup replaces
+/// the first, so a bundle file supersedes an absent inline source, no leak.
+fn setupScriptFromSource(s: *Session, src: []const u8) void {
+    const lens = if (s.active_lens) |*l| l else return;
+    if (s.script_engine) |*prev| {
+        prev.destroy();
+        s.script_engine = null;
+        for (s.script_param_names) |n| s.engine.gpa.free(n);
+        s.engine.gpa.free(s.script_param_names);
+        s.script_param_names = &.{};
+    }
     var engine = script.Script.create(src, script_fuel_per_tick) catch return;
     const params = lens.manifest.parameters;
     const names = s.engine.gpa.alloc([:0]const u8, params.len) catch {
@@ -10184,11 +10746,15 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
             } else |_| {}
             continue;
         }
-        const rich = txt.gradient != null or txt.shadow or txt.stroke != null;
+        // A wrapped text node flows its string onto several lines to the column
+        // budget before rasterizing; an unwrapped one rasterizes as authored.
+        const content = if (txt.wrap > 0) (font.wrap(gpa, txt.content, txt.wrap) catch txt.content) else txt.content;
+        defer if (txt.wrap > 0 and content.ptr != txt.content.ptr) gpa.free(content);
+        const rich = txt.gradient != null or txt.shadow or txt.stroke != null or txt.bend != 0;
         const raster = if (rich)
-            font.rasterizeRich(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }, txt.gradient, txt.shadow, txt.stroke) catch continue
+            font.rasterizeRich(gpa, content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }, txt.gradient, txt.shadow, txt.stroke, txt.bend) catch continue
         else
-            font.rasterize(gpa, txt.content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
+            font.rasterize(gpa, content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
         defer gpa.free(raster.rgba);
         const texture = render.Renderer.createStaticTexture(@intCast(raster.width), @intCast(raster.height), raster.rgba);
         session.sprite_textures.put(gpa, txt.graph_index, texture) catch {
@@ -12078,7 +12644,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     defer gpa.free(models);
     for (models) |model| {
         if (model.face_anchor) {
-            session.model_face_anchors.put(gpa, model.graph_index, {}) catch {};
+            session.model_face_anchors.put(gpa, model.graph_index, model.face_index) catch {};
         }
         if (model.retarget) {
             session.model_retargets.put(gpa, model.graph_index, {}) catch {};
@@ -12102,8 +12668,18 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             if (session.engine.renderer) |*r| {
                 if (pf.sph) {
                     // A 2D SPH fluid: its own sim, drawn as a shared base mesh
-                    // per particle at that particle's pooled position.
-                    if (sph.Fluid.init(gpa, pf.count, .{ .gravity = pf.gravity })) |fluid| {
+                    // per particle at that particle's pooled position. The
+                    // node's sphere colliders become circle obstacles the fluid
+                    // flows around, their z dropped since the fluid is in z=0.
+                    var circles: [][3]f32 = &.{};
+                    if (pf.colliders.len > 0) {
+                        if (gpa.alloc([3]f32, pf.colliders.len)) |c| {
+                            for (pf.colliders, 0..) |sp, ci| c[ci] = .{ sp[0], sp[1], sp[3] };
+                            circles = c;
+                        } else |_| {}
+                    }
+                    defer if (circles.len > 0) gpa.free(circles);
+                    if (sph.Fluid.init(gpa, pf.count, .{ .gravity = pf.gravity, .colliders = circles })) |fluid| {
                         if (r.createModelMesh(&octahedron_positions, &octahedron_indices)) |base| {
                             session.fluid_sims.put(gpa, model.graph_index, fluid) catch {
                                 var f = fluid;
@@ -12392,6 +12968,56 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     }
 }
 
+/// Area-weighted per-vertex normals for a lit model: each triangle's geometric
+/// normal (its edge cross product, whose length is twice the area) is added to
+/// its three vertices, then each vertex normal is normalized. A degenerate
+/// vertex falls back to +Z. Deterministic, so a lit lens stays conformance-stable.
+fn computeVertexNormals(gpa: std.mem.Allocator, positions: []const [3]f32, indices: []const u32) ![][3]f32 {
+    const normals = try gpa.alloc([3]f32, positions.len);
+    computeVertexNormalsInto(normals, positions, indices);
+    return normals;
+}
+
+/// Area-weighted vertex normals written into a caller-owned buffer, so a
+/// deforming mesh recomputes them each frame with no allocation. `out` is sized
+/// to the vertex count; a vertex with no triangle takes a +Z default.
+fn computeVertexNormalsInto(out: [][3]f32, positions: []const [3]f32, indices: []const u32) void {
+    const normals = out[0..@min(out.len, positions.len)];
+    @memset(normals, .{ 0, 0, 0 });
+    var i: usize = 0;
+    while (i + 3 <= indices.len) : (i += 3) {
+        const ia = indices[i];
+        const ib = indices[i + 1];
+        const ic = indices[i + 2];
+        if (ia >= normals.len or ib >= normals.len or ic >= normals.len) continue;
+        const pa = positions[ia];
+        const pb = positions[ib];
+        const pc = positions[ic];
+        const e1 = [3]f32{ pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2] };
+        const e2 = [3]f32{ pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2] };
+        const fn_ = [3]f32{
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        };
+        for ([_]u32{ ia, ib, ic }) |vi| {
+            normals[vi][0] += fn_[0];
+            normals[vi][1] += fn_[1];
+            normals[vi][2] += fn_[2];
+        }
+    }
+    for (normals) |*n| {
+        const len = @sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (len > 1e-8) {
+            n[0] /= len;
+            n[1] /= len;
+            n[2] /= len;
+        } else {
+            n.* = .{ 0, 0, 1 };
+        }
+    }
+}
+
 /// Turns every .glb load that finished (or failed) since the last
 /// frame into a real gpu mesh (or drops it) - mirrors pollLutLoaders/
 /// pollBlendLoaders, except the decoded geometry is freed right after
@@ -12420,8 +13046,21 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             // A morphable mesh draws from a dynamic buffer the morph pass
             // re-uploads each frame; a plain mesh uploads once and stays static.
             const has_morph = decoded.morph_targets.len > 0;
-            const mesh = (if (has_morph)
+            // A lens with a directional light lights its meshes by their
+            // per-vertex normals. A morphing or skinned mesh recomputes and
+            // re-uploads its normals each frame from a lit dynamic buffer (its
+            // rig for the skinned path); a normal-compute failure draws flat.
+            const light_present = if (session.active_lens) |*l| l.manifest.light != null else false;
+            const want_lit = light_present;
+            const normals: ?[][3]f32 = if (want_lit) (computeVertexNormals(gpa, decoded.positions, decoded.indices) catch null) else null;
+            defer if (normals) |n| gpa.free(n);
+            const is_lit = normals != null;
+            const mesh = (if (has_morph and normals != null)
+                r.createLitDynamicModelMesh(decoded.positions, normals.?, decoded.indices)
+            else if (has_morph)
                 r.createDynamicModelMesh(decoded.positions, decoded.indices)
+            else if (normals) |n|
+                r.createLitModelMesh(decoded.positions, n, decoded.indices)
             else
                 r.createModelMesh(decoded.positions, decoded.indices)) catch {
                 gpa.free(decoded.positions);
@@ -12429,6 +13068,8 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 gltf.freeAnimations(gpa, decoded.animations);
                 if (decoded.skin) |*sk| gltf.freeSkin(gpa, sk);
                 gltf.freeMorphTargets(gpa, decoded.morph_targets);
+                for (decoded.morph_names) |n| gpa.free(n);
+                gpa.free(decoded.morph_names);
                 finished.append(gpa, entry.key_ptr.*) catch {};
                 continue;
             };
@@ -12436,7 +13077,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             // rig takes over the skin and a copy of the bind positions,
             // while the static mesh still uploaded and can drop them.
             const rig: ?SkinnedRig = if (decoded.skin) |sk|
-                (buildSkinnedRig(r, gpa, decoded.positions, decoded.indices, sk) catch null)
+                (buildSkinnedRig(r, gpa, decoded.positions, decoded.indices, sk, is_lit) catch null)
             else
                 null;
             // A morph mesh keeps its rest positions to deform against and a
@@ -12446,12 +13087,25 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             if (has_morph) {
                 if (gpa.alloc([3]f32, decoded.positions.len)) |scratch| {
                     morph_rest = decoded.positions;
+                    // Seed the scratch with the rest pose so a frame that morphs
+                    // nothing (and the skinned-mesh path, which reads it as its
+                    // skin source) still has valid positions to work from.
+                    @memcpy(scratch, decoded.positions);
                     morph_scratch = scratch;
                 } else |_| {
                     gpa.free(decoded.positions);
                 }
             } else {
                 gpa.free(decoded.positions);
+            }
+            // A lit morphing mesh keeps a normal scratch and an index copy so it
+            // recomputes and re-uploads normals each frame; both stay empty
+            // otherwise, and an allocation failure degrades to flat +Z normals.
+            var lit_normals: [][3]f32 = &.{};
+            var lit_indices: []const u32 = &.{};
+            if (has_morph and is_lit) {
+                if (gpa.alloc([3]f32, morph_rest.len)) |ln| lit_normals = ln else |_| {}
+                if (gpa.dupe(u32, decoded.indices)) |li| lit_indices = li else |_| {}
             }
             gpa.free(decoded.indices);
             // Distil the morph target names into a blendshape index per target
@@ -12467,9 +13121,15 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 .morph_targets = decoded.morph_targets,
                 .morph_rest = morph_rest,
                 .morph_scratch = morph_scratch,
+                .lit_normals = lit_normals,
+                .lit_indices = lit_indices,
                 .morph_to_blendshape = morph_to_blendshape,
                 .auto_bind_blendshapes = session.model_retargets.contains(entry.key_ptr.*),
                 .audio_talk = session.model_talks.contains(entry.key_ptr.*),
+                .lit = is_lit,
+                .metallic = decoded.metallic,
+                .roughness = decoded.roughness,
+                .emissive = decoded.emissive,
             }) catch {
                 render.Renderer.destroyModelMesh(mesh);
                 if (rig) |rg| {
@@ -12512,6 +13172,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     const manifest_json = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), manifest_path, gpa, .limited(manifest.max_manifest_bytes + 1));
     defer gpa.free(manifest_json);
     try activateLens(session, gpa, manifest_json);
+    loadScriptFile(session, gpa, bundle_path);
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
     try createBlendLoaders(session, gpa, bundle_path);
@@ -12932,6 +13593,78 @@ test "morphPositions adds weighted target deltas to the rest pose" {
     try t.expectApproxEqAbs(@as(f32, 0.0), out[1][1], 0.001);
 }
 
+test "a morphed rest skins to a different pose than the bind rest" {
+    // Both vertices are fully weighted to joint 0, which translates by +x, so
+    // skinning shifts every vertex by ten in x while preserving its y.
+    const joints = [_][4]u16{ .{ 0, 0, 0, 0 }, .{ 0, 0, 0, 0 } };
+    const weights = [_][4]f32{ .{ 1, 0, 0, 0 }, .{ 1, 0, 0, 0 } };
+    const mats = [_]math.Mat4{math.Mat4.translation(.{ 10, 0, 0 })};
+    const bind_rest = [_][3]f32{ .{ 0, 0, 0 }, .{ 0, 1, 0 } };
+    // The morph pass lifted the second vertex from y=1 to y=2; this is what the
+    // skinned-mesh path now feeds skinPositions instead of the bind rest.
+    const morphed_rest = [_][3]f32{ .{ 0, 0, 0 }, .{ 0, 2, 0 } };
+    var out_bind: [2][3]f32 = undefined;
+    var out_morphed: [2][3]f32 = undefined;
+    skinPositions(&bind_rest, &joints, &weights, &mats, &out_bind);
+    skinPositions(&morphed_rest, &joints, &weights, &mats, &out_morphed);
+    // Both shift +10 in x; the morphed second vertex carries its higher y through
+    // the skin, so the two skinned poses differ - the morph deforms under it.
+    try t.expectApproxEqAbs(@as(f32, 10), out_bind[1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 1), out_bind[1][1], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 10), out_morphed[1][0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 2), out_morphed[1][1], 0.001);
+    try t.expect(out_morphed[1][1] != out_bind[1][1]);
+}
+
+test "pathPosition walks its waypoints over time and loops" {
+    const points = [_][3]f32{ .{ 0, 0, 0 }, .{ 10, 0, 0 }, .{ 10, 10, 0 } };
+    const path: manifest.PathField = .{ .points = &points, .duration = 2.0, .loop = true };
+    // Two segments over two seconds, one second each. Start at the first point.
+    var p = pathPosition(path, 0);
+    try t.expectApproxEqAbs(@as(f32, 0), p[0], 0.001);
+    // Halfway along the first segment: x reaches the midpoint.
+    p = pathPosition(path, 0.5);
+    try t.expectApproxEqAbs(@as(f32, 5), p[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0), p[1], 0.001);
+    // The segment boundary lands exactly on the middle waypoint.
+    p = pathPosition(path, 1.0);
+    try t.expectApproxEqAbs(@as(f32, 10), p[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 0), p[1], 0.001);
+    // Halfway along the second segment, moving up in y.
+    p = pathPosition(path, 1.5);
+    try t.expectApproxEqAbs(@as(f32, 10), p[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 5), p[1], 0.001);
+    // A full duration wraps back to the start.
+    p = pathPosition(path, 2.0);
+    try t.expectApproxEqAbs(@as(f32, 0), p[0], 0.001);
+
+    // A single waypoint holds there regardless of time.
+    const one = [_][3]f32{.{ 3, 4, 5 }};
+    const held = pathPosition(.{ .points = &one, .duration = 1, .loop = true }, 7.3);
+    try t.expectApproxEqAbs(@as(f32, 3), held[0], 0.001);
+    try t.expectApproxEqAbs(@as(f32, 5), held[2], 0.001);
+}
+
+test "unprojectToPlane raycasts a screen point onto the ground plane" {
+    // A camera one unit up looking straight down at the ground.
+    const eye: math.Vec3 = .{ 0, 1, 0 };
+    const view = math.Mat4.lookAt(eye, .{ 0, 0, 0 }, .{ 0, 0, -1 });
+    const world_from_camera = view.inverseRigid();
+    const proj = math.Mat4.perspective(math.scalar.radians(60.0), 1.0, 0.05, 100.0, .zero_to_one);
+
+    // The center ray lands directly under the camera, at the origin.
+    const center = unprojectToPlane(proj, world_from_camera, 0.5, 0.5) orelse return error.NoHit;
+    try t.expectApproxEqAbs(@as(f32, 0), center[0], 0.01);
+    try t.expectApproxEqAbs(@as(f32, 0), center[1], 0.01);
+    try t.expectApproxEqAbs(@as(f32, 0), center[2], 0.01);
+
+    // An off-center ray lands away from the point under the camera but still on
+    // the ground plane (y stays zero).
+    const off = unprojectToPlane(proj, world_from_camera, 0.85, 0.5) orelse return error.NoHit;
+    try t.expect(@abs(off[0]) > 0.05 or @abs(off[2]) > 0.05);
+    try t.expectApproxEqAbs(@as(f32, 0), off[1], 0.01);
+}
+
 test "buildMorphBlendshapeTable maps ARKit names to blendshape indices" {
     const names = [_][]const u8{ "jawOpen", "not_a_blendshape", "eyeBlinkLeft", "" };
     const table = buildMorphBlendshapeTable(t.allocator, &names);
@@ -13106,10 +13839,10 @@ fn boneRotatedPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark_c
 /// a kept copy of the bind positions, scratch for the skinned output,
 /// the joint palette, and each joint's resolved landmark target. Takes
 /// ownership of the passed skin.
-fn buildSkinnedRig(r: *render.Renderer, gpa: std.mem.Allocator, positions: []const [3]f32, indices: []const u32, skin: gltf.DecodedSkin) !SkinnedRig {
+fn buildSkinnedRig(r: *render.Renderer, gpa: std.mem.Allocator, positions: []const [3]f32, indices: []const u32, skin: gltf.DecodedSkin, lit: bool) !SkinnedRig {
     var owned = skin;
     errdefer gltf.freeSkin(gpa, &owned);
-    const mesh = try r.createSkinnedMesh(@intCast(positions.len), indices);
+    const mesh = if (lit) try r.createLitSkinnedMesh(@intCast(positions.len), indices) else try r.createSkinnedMesh(@intCast(positions.len), indices);
     errdefer render.Renderer.destroySkinnedMesh(mesh);
     const rest = try gpa.dupe([3]f32, positions);
     errdefer gpa.free(rest);
@@ -13120,7 +13853,20 @@ fn buildSkinnedRig(r: *render.Renderer, gpa: std.mem.Allocator, positions: []con
     const joint_targets = try gpa.alloc(JointTarget, owned.joint_count);
     errdefer gpa.free(joint_targets);
     for (joint_targets, owned.joint_names) |*jt, name| jt.* = mapJointTarget(name);
-    return .{ .mesh = mesh, .skin = owned, .rest = rest, .skinned = skinned, .palette = palette, .joint_targets = joint_targets };
+    // A lit rig keeps a normal scratch and an index copy so it re-uploads fresh
+    // normals from the skinned positions each frame; the initial upload seeds
+    // the bind-pose normals so it lights before the first skin.
+    var lit_normals: [][3]f32 = &.{};
+    var lit_indices: []const u32 = &.{};
+    if (lit) {
+        lit_normals = try gpa.alloc([3]f32, positions.len);
+        errdefer gpa.free(lit_normals);
+        lit_indices = try gpa.dupe(u32, indices);
+        errdefer gpa.free(lit_indices);
+        computeVertexNormalsInto(lit_normals, positions, indices);
+        r.updateLitSkinnedMesh(mesh, positions, lit_normals);
+    }
+    return .{ .mesh = mesh, .skin = owned, .rest = rest, .skinned = skinned, .palette = palette, .joint_targets = joint_targets, .lit_normals = lit_normals, .lit_indices = lit_indices };
 }
 
 fn destroySkinnedRig(gpa: std.mem.Allocator, rig: *SkinnedRig) void {
@@ -13130,6 +13876,8 @@ fn destroySkinnedRig(gpa: std.mem.Allocator, rig: *SkinnedRig) void {
     gpa.free(rig.skinned);
     gpa.free(rig.palette);
     gpa.free(rig.joint_targets);
+    if (rig.lit_normals.len > 0) gpa.free(rig.lit_normals);
+    if (rig.lit_indices.len > 0) gpa.free(rig.lit_indices);
 }
 
 test "mapJointTarget covers mixamo and vrm naming" {
@@ -13356,6 +14104,94 @@ fn volumeContains(vol: manifest.Volume, p: [3]f32) bool {
     return @abs(dx) <= vol.half[0] and @abs(dy) <= vol.half[1] and @abs(dz) <= vol.half[2];
 }
 
+/// The mean of a face's landmarks, a stable centre for cross-frame tracking.
+fn faceCentroid(result: *const face.Result) [2]f32 {
+    var sx: f32 = 0;
+    var sy: f32 = 0;
+    const n = result.landmark_count_out;
+    if (n == 0) return .{ 0, 0 };
+    for (0..n) |i| {
+        sx += result.landmarks[i * 3];
+        sy += result.landmarks[i * 3 + 1];
+    }
+    const inv = 1.0 / @as(f32, @floatFromInt(n));
+    return .{ sx * inv, sy * inv };
+}
+
+/// Assigns each current face a stable id by matching it to the nearest face of
+/// the previous frame within `threshold2` (squared distance), smallest gap
+/// first so a swap in submission order still follows position. A face that
+/// matches none takes the next fresh id. Returns the advanced id counter.
+fn associateFaceIds(
+    prev_c: []const [2]f32,
+    prev_ids: []const u32,
+    cur_c: []const [2]f32,
+    threshold2: f32,
+    next_id_in: u32,
+    out_ids: []u32,
+) u32 {
+    var next_id = next_id_in;
+    var prev_taken: [face.max_faces]bool = @splat(false);
+    var cur_matched: [face.max_faces]bool = @splat(false);
+    // Greedy: bind the closest still-free pair under the threshold, repeat.
+    while (true) {
+        var best_d: f32 = threshold2;
+        var best_c: ?usize = null;
+        var best_p: ?usize = null;
+        for (cur_c, 0..) |cc, ci| {
+            if (cur_matched[ci]) continue;
+            for (prev_c, 0..) |pc, pi| {
+                if (prev_taken[pi]) continue;
+                const dx = cc[0] - pc[0];
+                const dy = cc[1] - pc[1];
+                const d2 = dx * dx + dy * dy;
+                if (d2 < best_d) {
+                    best_d = d2;
+                    best_c = ci;
+                    best_p = pi;
+                }
+            }
+        }
+        const ci = best_c orelse break;
+        const pi = best_p.?;
+        out_ids[ci] = prev_ids[pi];
+        cur_matched[ci] = true;
+        prev_taken[pi] = true;
+    }
+    for (cur_c, 0..) |_, ci| {
+        if (!cur_matched[ci]) {
+            out_ids[ci] = next_id;
+            next_id += 1;
+        }
+    }
+    return next_id;
+}
+
+/// Refreshes the per-face stable ids for the frame and stores this frame's
+/// centroids as next frame's reference. The match threshold is a quarter of
+/// the frame width, so a face has to leap most of the frame to be read as new.
+fn updateFaceTrackIds(s: *Session) void {
+    const n = @min(s.face_count, face.max_faces);
+    var cur_c: [face.max_faces][2]f32 = @splat(.{ 0, 0 });
+    for (0..n) |i| cur_c[i] = faceCentroid(&s.face_results[i]);
+    const frame_w: f32 = if (s.current) |cf| @floatFromInt(cf.desc.width) else 1280.0;
+    const reach = frame_w * 0.25;
+    const threshold2 = reach * reach;
+    s.next_face_track_id = associateFaceIds(
+        s.face_prev_centroids[0..s.face_prev_count],
+        s.face_prev_ids[0..s.face_prev_count],
+        cur_c[0..n],
+        threshold2,
+        s.next_face_track_id,
+        s.face_track_ids[0..n],
+    );
+    for (0..n) |i| {
+        s.face_prev_centroids[i] = cur_c[i];
+        s.face_prev_ids[i] = s.face_track_ids[i];
+    }
+    s.face_prev_count = n;
+}
+
 const SphereMesh = struct {
     verts: [][3]f32,
     indices: []u32,
@@ -13463,6 +14299,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         s.cam_exposure_pulse = false;
         return .again;
     }
+    updateFaceTrackIds(s);
     // Borrowed from the lens's own activation-sized storage, valid
     // until the next tick - nothing to free, nothing allocated.
     var live_signals = toTriggerSignals(sig);
@@ -13507,9 +14344,27 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (s.hand_tracking) |worker| {
         var hands: hand.Result = undefined;
         if (tracking.hand_worker.readResult(worker, &hands)) {
+            const region = s.active_lens.?.manifest.region2d;
+            const gestures = s.active_lens.?.manifest.gestures;
             for (hands.hands[0..@min(hands.hand_count, hand.max_hands)]) |*h| {
                 if (h.gesture != 0 and live_signals.hand_gesture == 0) live_signals.hand_gesture = h.gesture;
                 if (hand.isPinching(&h.landmarks)) live_signals.hand_pinch = true;
+                // The index fingertip against the lens's 2D trigger rectangle,
+                // both in the normalized frame, so a lens fires while the hand
+                // points into a screen zone. Any tracked hand inside sets it.
+                if (region) |reg| {
+                    const tip = hand.jointPoint(&h.landmarks, .index_tip);
+                    if (reg.contains(tip[0], tip[1])) live_signals.hand_in_region = true;
+                }
+                // The hand's finger poses against each lens-declared custom
+                // gesture: a match lights that gesture's bit for the trigger.
+                if (gestures.len > 0) {
+                    const ext = hand.fingerExtensions(&h.landmarks);
+                    for (gestures, 0..) |gd, gi| {
+                        const cg = hand.CustomGesture{ .mask = gd.mask, .want = gd.want };
+                        if (cg.matches(ext)) live_signals.hand_custom_gestures |= @as(u32, 1) << @intCast(gi);
+                    }
+                }
             }
         }
     }
@@ -13543,13 +14398,26 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
             live_signals.device_in_volume = volumeContains(vol, .{ wfc[12], wfc[13], wfc[14] });
         }
     }
+    var geo_region_view: [max_named_geofences][]const u8 = undefined;
     if (s.location_engine_fed) {
+        // An accuracy gate, when set, refuses a fix vaguer than it asks for,
+        // so a lens does not fire on a location the device is unsure of.
+        const accurate = s.geo_required_accuracy_m == 0 or
+            (s.location_accuracy_m > 0 and s.location_accuracy_m <= s.geo_required_accuracy_m);
         if (s.geofence) |region| {
-            // An accuracy gate, when set, refuses a fix vaguer than it asks for,
-            // so a lens does not fire on a location the device is unsure of.
-            const accurate = s.geo_required_accuracy_m == 0 or
-                (s.location_accuracy_m > 0 and s.location_accuracy_m <= s.geo_required_accuracy_m);
             live_signals.geo_in_region = accurate and region.contains(s.location_lat, s.location_lon);
+        }
+        // Each named region the fix is inside lights geo.in_region('name'); the
+        // names borrow the session's store, valid for this tick only.
+        if (accurate) {
+            var matched: usize = 0;
+            for (s.named_geofences[0..s.named_geofence_count]) |*ng| {
+                if (ng.region.contains(s.location_lat, s.location_lon)) {
+                    geo_region_view[matched] = ng.name();
+                    matched += 1;
+                }
+            }
+            live_signals.geo_regions = geo_region_view[0..matched];
         }
     }
     // The events fired since the last tick reach the triggers for this tick
@@ -13576,6 +14444,37 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
 }
 
 const t = std.testing;
+
+test "face track ids follow position across a submission-order swap" {
+    const threshold2: f32 = 0.25 * 0.25;
+    // First frame: two faces, left and right, both fresh.
+    const left: [2]f32 = .{ 0.2, 0.5 };
+    const right: [2]f32 = .{ 0.8, 0.5 };
+    var ids: [2]u32 = undefined;
+    var next = associateFaceIds(&.{}, &.{}, &.{ left, right }, threshold2, 0, &ids);
+    try t.expectEqual(@as(u32, 0), ids[0]);
+    try t.expectEqual(@as(u32, 1), ids[1]);
+    try t.expectEqual(@as(u32, 2), next);
+
+    // Second frame submits the same two faces in the opposite slot order, each
+    // nudged slightly. The ids follow position, so the swap is undone: slot 0
+    // (now the right face) reads id 1 and slot 1 (the left) reads id 0.
+    const prev_c = [_][2]f32{ left, right };
+    const prev_ids = [_]u32{ 0, 1 };
+    const right2: [2]f32 = .{ 0.82, 0.52 };
+    const left2: [2]f32 = .{ 0.18, 0.48 };
+    next = associateFaceIds(&prev_c, &prev_ids, &.{ right2, left2 }, threshold2, next, &ids);
+    try t.expectEqual(@as(u32, 1), ids[0]);
+    try t.expectEqual(@as(u32, 0), ids[1]);
+    try t.expectEqual(@as(u32, 2), next);
+
+    // A face that leaps beyond the threshold is a new person, not a match.
+    var one_id: [1]u32 = undefined;
+    const far: [2]f32 = .{ 0.5, 0.5 };
+    const jumped = associateFaceIds(&.{far}, &.{7}, &.{.{ 0.95, 0.95 }}, threshold2, 8, &one_id);
+    try t.expectEqual(@as(u32, 8), one_id[0]);
+    try t.expectEqual(@as(u32, 9), jumped);
+}
 
 test "alloc and free round-trip through the abi allocator" {
     const p = goss_alloc(64) orelse return error.TestUnexpectedResult;
@@ -14229,6 +15128,95 @@ test "ticking with no active lens reports again; ticking a firing trigger advanc
     try t.expect(session.active_lens.?.param_values[0] < 1.0);
 
     try t.expectEqual(Status.invalid_argument, goss_session_tick_lens(session, 8_333, null));
+}
+
+test "a model allowlist admits only its own digests and gates enable at the door" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    // With no allowlist, any model's bytes pass.
+    try t.expect(modelAllowed(session, "any bytes at all"));
+
+    // Allowlist the digest of one model; now only it passes.
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("the trusted model", &digest, .{});
+    try t.expectEqual(Status.ok, goss_session_allow_model_digest(session, &digest));
+    try t.expect(modelAllowed(session, "the trusted model"));
+    try t.expect(!modelAllowed(session, "a swapped-in model"));
+    // Re-adding the same digest is a no-op, not a second slot.
+    try t.expectEqual(Status.ok, goss_session_allow_model_digest(session, &digest));
+    try t.expectEqual(@as(u8, 1), session.model_allowlist_count);
+
+    // The gate fires at enable time: a disallowed model is refused before any
+    // worker is built (invalid_argument, not the unsupported a missing stack
+    // would give).
+    try t.expectEqual(Status.invalid_argument, goss_session_enable_segmentation(session, "a swapped-in model", 18, 1));
+
+    // Clearing the allowlist admits any model again.
+    try t.expectEqual(Status.ok, goss_session_clear_model_allowlist(session));
+    try t.expect(modelAllowed(session, "a swapped-in model"));
+}
+
+test "a named geofence fires geo.in_region by name only inside its own region" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const manifest_json =
+        \\{"glf": "1.0", "id": "g", "version": "1.0.0", "display_name": "G", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "grade", "type": "grade.pass", "inputs": {"frame": "camera"}, "params": {}}],
+        \\ "triggers": [{"when": "geo.in_region('downtown')", "action": {"kind": "param_set", "target": "intensity", "to": 1.0}}]}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len));
+
+    // Two named regions; the lens only watches "downtown". A harbor-only fix
+    // leaves the parameter at its default.
+    try t.expectEqual(Status.ok, goss_session_set_named_geofence(session, "downtown", 8, 40.0, -74.0, 100.0));
+    try t.expectEqual(Status.ok, goss_session_set_named_geofence(session, "harbor", 6, 0.0, 0.0, 100.0));
+
+    var signals = std.mem.zeroes(LensSignals);
+    _ = goss_session_submit_location(session, 0.0, 0.0, 5.0, 1000);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
+    try t.expectEqual(@as(f32, 0.0), session.active_lens.?.param_values[0]);
+
+    // A fix at downtown's center lights its region, firing the trigger.
+    _ = goss_session_submit_location(session, 40.0, -74.0, 5.0, 2000);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
+    try t.expectEqual(@as(f32, 1.0), session.active_lens.?.param_values[0]);
+}
+
+test "a named polygon geofence fires geo.in_region only inside its ring" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const manifest_json =
+        \\{"glf": "1.0", "id": "g", "version": "1.0.0", "display_name": "G", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "grade", "type": "grade.pass", "inputs": {"frame": "camera"}, "params": {}}],
+        \\ "triggers": [{"when": "geo.in_region('zone')", "action": {"kind": "param_set", "target": "intensity", "to": 1.0}}]}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len));
+
+    // A square ring (lat, lon) covering [0,2] x [0,2].
+    const verts = [_]f64{ 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0 };
+    try t.expectEqual(Status.ok, goss_session_set_named_geofence_polygon(session, "zone", 4, &verts, 4));
+
+    var signals = std.mem.zeroes(LensSignals);
+    // A fix outside the ring leaves the parameter at its default.
+    _ = goss_session_submit_location(session, 5.0, 5.0, 5.0, 1000);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
+    try t.expectEqual(@as(f32, 0.0), session.active_lens.?.param_values[0]);
+
+    // A fix inside the ring fires the trigger.
+    _ = goss_session_submit_location(session, 1.0, 1.0, 5.0, 2000);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
+    try t.expectEqual(@as(f32, 1.0), session.active_lens.?.param_values[0]);
 }
 
 test "a script node drives a parameter from a signal" {

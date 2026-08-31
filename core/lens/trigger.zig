@@ -24,6 +24,7 @@ pub const SignalKind = enum {
     param,
     event,
     geo_in_region,
+    geo_named_region,
     camera_zoom,
     camera_focus,
     camera_exposure,
@@ -34,6 +35,7 @@ pub const SignalKind = enum {
     head_shake,
     head_tilt,
     hand_gesture,
+    hand_custom_gesture,
     hand_pinch,
     body_present,
     bone_angle,
@@ -41,6 +43,7 @@ pub const SignalKind = enum {
     body_wave,
     body_dance,
     device_in_volume,
+    hand_in_region,
     touch_double_tap,
     touch_long_press,
     touch_swipe,
@@ -54,7 +57,7 @@ pub const SignalKind = enum {
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
         .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
     };
 }
@@ -138,10 +141,18 @@ pub const Signals = struct {
     /// on-device from goss_session_submit_location; the location never crosses
     /// the ABI, only this boolean.
     geo_in_region: bool = false,
+    /// The names of the host's named geofences the current fix is inside, so
+    /// geo.in_region('name') fires for its own place. Empty with no fix or no
+    /// named region matched; borrows the session's store for the tick.
+    geo_regions: []const []const u8 = &.{},
     /// Whether the tracked device is inside the lens's trigger volume, computed
     /// on-device each tick from the submitted world pose and the manifest's
     /// volume region. False with no world tracking or no volume declared.
     device_in_volume: bool = false,
+    /// Whether a tracked hand's index fingertip is inside the lens's 2D trigger
+    /// rectangle, computed on-device each tick from the hand landmarks and the
+    /// manifest's region2d. False with no hand tracking or no region declared.
+    hand_in_region: bool = false,
     /// The camera's current zoom factor, engine-fed at tick from the session's
     /// camera controls, so a lens fires an effect on zoom (`camera.zoom > 2`).
     /// One means no zoom, the resting value before any control is set.
@@ -163,6 +174,10 @@ pub const Signals = struct {
     /// gesture classes, engine-fed at tick from the hand worker. Zero is the
     /// no-gesture class, the resting value with no hand or no gesture.
     hand_gesture: u32 = 0,
+    /// A bit per lens-declared custom gesture that a tracked hand currently
+    /// matches (bit i for the i-th gesture in the manifest), engine-fed at tick
+    /// from the hand landmarks. Zero with no hand or no match.
+    hand_custom_gestures: u32 = 0,
     /// True while a tracked hand's thumb and index tips are pinched together,
     /// engine-fed at tick from the hand landmarks. False with no hand.
     hand_pinch: bool = false,
@@ -243,7 +258,14 @@ fn readBool(s: Signal, signals: Signals) bool {
             return false;
         },
         .geo_in_region => signals.geo_in_region,
+        .geo_named_region => {
+            for (signals.geo_regions) |name| {
+                if (std.mem.eql(u8, name, s.event_name)) return true;
+            }
+            return false;
+        },
         .device_in_volume => signals.device_in_volume,
+        .hand_in_region => signals.hand_in_region,
         .camera_focus => signals.camera_focus,
         .camera_exposure => signals.camera_exposure,
         .looking_at_camera => {
@@ -254,6 +276,7 @@ fn readBool(s: Signal, signals: Signals) bool {
         .head_nod => signals.head_nod,
         .head_shake => signals.head_shake,
         .hand_gesture => signals.hand_gesture == s.gesture_index,
+        .hand_custom_gesture => (signals.hand_custom_gestures >> @intCast(s.gesture_index)) & 1 != 0,
         .hand_pinch => signals.hand_pinch,
         .body_present => signals.body_present,
         .body_jump => signals.body_jump,
@@ -450,6 +473,7 @@ const Parser = struct {
     arena: std.mem.Allocator,
     diag_arena: std.mem.Allocator,
     param_names: []const []const u8,
+    gesture_names: []const []const u8 = &.{},
     depth: u32 = 0,
     err: ?CompileError = null,
 
@@ -660,10 +684,17 @@ const Parser = struct {
         }
         if (std.mem.eql(u8, head, "hands") and std.mem.eql(u8, tail, "gesture")) {
             const name = try self.parseCall();
-            const index = hand.gestureIndex(name) orelse {
-                return self.fail("unknown gesture '{s}'", .{name});
-            };
-            return .{ .kind = .hand_gesture, .gesture_index = index };
+            if (hand.gestureIndex(name)) |index| {
+                return .{ .kind = .hand_gesture, .gesture_index = index };
+            }
+            // Not a canned class: resolve it against the lens's own declared
+            // custom gestures, matched from finger poses at tick.
+            for (self.gesture_names, 0..) |candidate, i| {
+                if (std.mem.eql(u8, candidate, name)) {
+                    return .{ .kind = .hand_custom_gesture, .gesture_index = @intCast(i) };
+                }
+            }
+            return self.fail("unknown gesture '{s}'", .{name});
         }
         if (std.mem.eql(u8, head, "hands") and std.mem.eql(u8, tail, "pinch")) {
             return .{ .kind = .hand_pinch };
@@ -672,10 +703,19 @@ const Parser = struct {
             return .{ .kind = .world_tracking_state };
         }
         if (std.mem.eql(u8, head, "geo") and std.mem.eql(u8, tail, "in_region")) {
+            // Bare geo.in_region reads the single default geofence; with a name
+            // it reads one of the host's named regions matched at tick.
+            if (self.current == .lparen) {
+                const name = try self.parseCall();
+                return .{ .kind = .geo_named_region, .event_name = try self.arena.dupe(u8, name) };
+            }
             return .{ .kind = .geo_in_region };
         }
         if (std.mem.eql(u8, head, "device") and std.mem.eql(u8, tail, "in_volume")) {
             return .{ .kind = .device_in_volume };
+        }
+        if (std.mem.eql(u8, head, "hand") and std.mem.eql(u8, tail, "in_region")) {
+            return .{ .kind = .hand_in_region };
         }
         if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "level")) {
             return .{ .kind = .audio_level };
@@ -763,13 +803,14 @@ pub fn signalValue(s: Signal, signals: Signals) f64 {
 /// blendshape name) to a Signal a logic graph reads with signalValue: no
 /// comparison or combinator, just the one signal. Name slices dupe into arena;
 /// returns null with err set on a parse failure.
-pub fn compileSignal(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, source: []const u8, param_names: []const []const u8, err: *?CompileError) error{OutOfMemory}!?Signal {
+pub fn compileSignal(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, source: []const u8, param_names: []const []const u8, gesture_names: []const []const u8, err: *?CompileError) error{OutOfMemory}!?Signal {
     var parser = Parser{
         .tok = .{ .source = source },
         .current = undefined,
         .arena = arena,
         .diag_arena = diag_arena,
         .param_names = param_names,
+        .gesture_names = gesture_names,
     };
     parser.advance() catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -798,7 +839,7 @@ pub fn compileSignal(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, so
 /// failure, not a runtime one. Returns null with err populated on failure;
 /// err's message allocates from diag_arena (independent of the Expression's
 /// own arena, which is freed before returning on any failure path).
-pub fn compile(gpa: std.mem.Allocator, diag_arena: std.mem.Allocator, source: []const u8, param_names: []const []const u8, err: *?CompileError) error{OutOfMemory}!?Expression {
+pub fn compile(gpa: std.mem.Allocator, diag_arena: std.mem.Allocator, source: []const u8, param_names: []const []const u8, gesture_names: []const []const u8, err: *?CompileError) error{OutOfMemory}!?Expression {
     var expr = Expression{ .arena = std.heap.ArenaAllocator.init(gpa), .root = undefined };
     errdefer expr.arena.deinit();
     const arena = expr.arena.allocator();
@@ -809,6 +850,7 @@ pub fn compile(gpa: std.mem.Allocator, diag_arena: std.mem.Allocator, source: []
         .arena = arena,
         .diag_arena = diag_arena,
         .param_names = param_names,
+        .gesture_names = gesture_names,
     };
     parser.advance() catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -841,7 +883,7 @@ const t = std.testing;
 
 fn compileOk(source: []const u8) !Expression {
     var err: ?CompileError = null;
-    const result = try compile(t.allocator, t.allocator, source, &.{"smooth_amount"}, &err);
+    const result = try compile(t.allocator, t.allocator, source, &.{"smooth_amount"}, &.{"rock"}, &err);
     if (result == null) std.debug.print("compile error: {s} at {d}\n", .{ err.?.message, err.?.offset });
     return result orelse error.TestUnexpectedResult;
 }
@@ -850,7 +892,7 @@ fn compileOk(source: []const u8) !Expression {
 /// t.allocator.free(err.message) once done reading it.
 fn compileFails(source: []const u8) !CompileError {
     var err: ?CompileError = null;
-    var result = try compile(t.allocator, t.allocator, source, &.{"smooth_amount"}, &err);
+    var result = try compile(t.allocator, t.allocator, source, &.{"smooth_amount"}, &.{"rock"}, &err);
     if (result) |*e| {
         e.deinit();
         return error.TestUnexpectedResult;
@@ -928,6 +970,16 @@ test "hands.gesture matches the tracked gesture class by name" {
     const err = try compileFails("hands.gesture('Nope')");
     defer t.allocator.free(err.message);
     try t.expect(std.mem.indexOf(u8, err.message, "unknown gesture") != null);
+}
+
+test "hands.gesture resolves a lens-declared custom gesture off its match bit" {
+    // compileOk declares one custom gesture, "rock", at index 0.
+    var expr = try compileOk("hands.gesture('rock')");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .hand_custom_gestures = 0b1 }));
+    // A different custom gesture's bit does not fire this one.
+    try t.expect(!evaluate(expr.root, .{ .hand_custom_gestures = 0b10 }));
 }
 
 test "hands.pinch reads the fed pinch state" {
@@ -1074,6 +1126,23 @@ test "geo.in_region reads the on-device membership boolean" {
     defer expr.deinit();
     try t.expect(!evaluate(expr.root, .{}));
     try t.expect(evaluate(expr.root, .{ .geo_in_region = true }));
+}
+
+test "geo.in_region('name') reads its own named region among the matched set" {
+    var expr = try compileOk("geo.in_region('downtown')");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    // The default region boolean does not fire a named check.
+    try t.expect(!evaluate(expr.root, .{ .geo_in_region = true }));
+    try t.expect(!evaluate(expr.root, .{ .geo_regions = &.{"harbor"} }));
+    try t.expect(evaluate(expr.root, .{ .geo_regions = &.{ "harbor", "downtown" } }));
+}
+
+test "hand.in_region reads the on-device fingertip-membership boolean" {
+    var expr = try compileOk("hand.in_region");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .hand_in_region = true }));
 }
 
 test "camera.zoom compiles as a numeric signal and compares live" {

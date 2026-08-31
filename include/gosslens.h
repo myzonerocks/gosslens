@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 68u
+#define GOSS_ABI_MINOR 78u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -374,6 +374,13 @@ typedef struct goss_capture_guidance {
  * trigger signal and world-anchored lens content. */
 goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light);
 
+/* Raycasts a normalized screen point (0..1, origin top-left) against the
+ * tracked ground plane and writes the world hit position into out_position
+ * (three floats). Returns goss_again until world tracking is in its tracked
+ * state and the ray meets the plane, so a tap-to-place lens polls it and
+ * places an anchor at the hit. */
+goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position);
+
 typedef struct goss_capture_config {
   uint32_t width;       /* 0 = the submitted frame's own resolution */
   uint32_t height;
@@ -528,6 +535,13 @@ goss_status goss_session_set_pose_upper_body(goss_session *session, uint32_t ena
  * release them on return. Builds without the inference stack report
  * unsupported. */
 goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads);
+/* Graph thread. Allowlists a bring-your-own model by its 32-byte SHA-256
+ * digest, so a net whose digest is not listed is refused when a tracker or
+ * segmenter is enabled; re-adding a digest is a no-op. clear_model_allowlist
+ * empties it. With none set, any model loads (the default). Call before
+ * enabling the worker. */
+goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest);
+goss_status goss_session_clear_model_allowlist(goss_session *session);
 void goss_session_disable_segmentation(goss_session *session);
 
 /* Graph thread. Feeds one NV12 frame to the tracking worker. The planes
@@ -566,6 +580,12 @@ goss_status goss_session_face_count(goss_session *session, uint32_t *out_count);
  * GOSS_ERROR_INVALID_ARGUMENT once index reaches the face count, so a
  * caller loops zero to the count to visit every face. */
 goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result);
+
+/* Graph thread. Reads the stable track id of the index-th face, an integer
+ * that stays with the same person across frames as the submission order
+ * shuffles, refreshed each tick. GOSS_ERROR_INVALID_ARGUMENT once index
+ * reaches the face count. */
+goss_status goss_session_face_track_id(goss_session *session, uint32_t index, uint32_t *out_id);
 
 /* Graph thread. Submits the bodies tracked this frame for the multi-person
  * path. count past GOSS_BODY_MAX is clamped; zero clears the path. Bodies
@@ -783,9 +803,21 @@ goss_status goss_session_clear_layout(goss_session *session);
 /* arrangement 5 overlay stacks the sources full-frame over each other. A source
  * composites with a per-source blend: opacity, key_mode 1 mattes from the
  * source alpha, key_mode 2 chroma-keys against (key_r,key_g,key_b) by color
- * distance with a similarity threshold; the name "camera" addresses the base.
+ * distance with a similarity threshold, key_mode 3 keys by a supplied per-source
+ * mask (submit_source_mask); the name "camera" addresses the base (no mode 3).
  * A screen-share source letterboxes to fit its cell instead of stretching. */
 goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity);
+/* Uploads a per-source matte for key_mode 3: an RGBA image whose red channel is
+ * the mask (1 keeps the source, 0 cuts it), resampled to the source's cell, so
+ * an opaque guest is keyed to a subject without a baked alpha. The bytes are
+ * copied; the camera and an unknown source are rejected. */
+goss_status goss_session_submit_source_mask(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *rgba, uint32_t width, uint32_t height);
+/* Runs the engine's own segmenter on a named source's frames, so the subject
+ * mask that feeds its key_mode 3 matte is computed on-device with no host
+ * segmenter (a virtual background for a remote guest). model_bytes is the same
+ * selfie/hair model enable_segmentation takes and must pass the digest allow
+ * list when one is set; model_len 0 tears the source segmenter down. */
+goss_status goss_session_enable_source_segmentation(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *model_bytes, size_t model_len, int32_t threads);
 goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len);
 
 /* Graph thread. Geofilters: location-gated overlay lenses. set_geofence sets a
@@ -802,12 +834,26 @@ goss_status goss_session_clear_geofence(goss_session *session);
 goss_status goss_session_set_geofence_bbox(goss_session *session, double min_lat, double min_lon, double max_lat, double max_lon);
 goss_status goss_session_set_geofence_polygon(goss_session *session, const double *coords, size_t vertex_count);
 goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m);
+/* Named circular geofences alongside the single default one, so a lens fires
+ * geo.in_region('name') for its own place among several. Re-adding a name
+ * replaces its region; the name is copied. clear_named_geofences empties the
+ * set and leaves the default geofence untouched. */
+goss_status goss_session_set_named_geofence(goss_session *session, const uint8_t *name, size_t name_len, double latitude, double longitude, double radius_m);
+/* A named polygon geofence: the region is a ring of three or more (lat, lon)
+ * pairs, the non-circular counterpart of set_geofence_polygon for named
+ * regions. Re-adding a name replaces its region; the name is copied. */
+goss_status goss_session_set_named_geofence_polygon(goss_session *session, const uint8_t *name, size_t name_len, const double *coords, size_t vertex_count);
+goss_status goss_session_clear_named_geofences(goss_session *session);
 
 /* Brush board. The engine owns stroke state and the undo/redo stacks; the app
  * feeds points in normalized screen space and pulls the finished triangle
  * ribbon (x, y, r, g, b, a per vertex) for the renderer to draw. brush_vertices
  * with a null out reports the float count the caller must size for. */
 goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width);
+/* Uploads the RGBA sprite a stamp-mode stroke (brush mode 4) lays along its
+ * length, an emoji or icon the host rasterizes; the bytes are copied. A stamp
+ * stroke draws nothing until one is set. */
+goss_status goss_session_brush_set_stamp(goss_session *session, const uint8_t *rgba, uint32_t width, uint32_t height);
 goss_status goss_session_brush_begin(goss_session *session);
 goss_status goss_session_brush_point(goss_session *session, float x, float y);
 goss_status goss_session_brush_end(goss_session *session);
@@ -816,8 +862,9 @@ goss_status goss_session_brush_redo(goss_session *session);
 goss_status goss_session_brush_clear(goss_session *session);
 goss_status goss_session_brush_vertices(goss_session *session, float *out, size_t capacity_floats, size_t *out_count);
 /* Brush preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon
- * (drawn additively). Erase removes committed strokes within radius of a point,
- * refusing mid-stroke, and reports the count. */
+ * (drawn additively), 4 stamp (lays the brush_set_stamp sprite along the
+ * stroke). Erase removes committed strokes within radius of a point, refusing
+ * mid-stroke, and reports the count. */
 goss_status goss_session_brush_set_mode(goss_session *session, uint32_t mode);
 goss_status goss_session_brush_erase_at(goss_session *session, float x, float y, float radius, size_t *out_removed);
 

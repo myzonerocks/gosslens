@@ -85,6 +85,31 @@ int main(void) {
         goss_session_report_frame(session, 12000, GOSS_THERMAL_NOMINAL);
     printf("degrade level %d\n", (int)level);
 
+    /* Named geofences: several regions alongside the default one, each firing
+     * geo.in_region('name') on-device. Only that boolean crosses the rail. */
+    const uint8_t venue[] = "venue";
+    CHECK(goss_session_set_named_geofence(session, venue, sizeof(venue) - 1,
+                                          37.7749, -122.4194, 250.0));
+    CHECK(goss_session_clear_named_geofences(session));
+
+    /* The model allowlist: pin a bring-your-own tracker or segmenter to its
+     * 32-byte SHA-256 digest before the worker is enabled, then clear it. */
+    uint8_t digest[32];
+    memset(digest, 0xab, sizeof(digest));
+    CHECK(goss_session_allow_model_digest(session, digest));
+    CHECK(goss_session_clear_model_allowlist(session));
+
+    /* Multi-source composition: register a named RGBA source, matte it from its
+     * own alpha, and stack it full-frame over the camera. No renderer needed to
+     * hold the composition state; a platform build draws it. */
+    const uint8_t guest[] = "guest";
+    CHECK(goss_session_define_source(session, guest, sizeof(guest) - 1));
+    CHECK(goss_session_set_source_composite(session, guest, sizeof(guest) - 1,
+                                            0.85f, 1, 0.0f, 0.0f, 0.0f, 0.0f));
+    CHECK(goss_session_set_layout(session, 5)); /* overlay */
+    CHECK(goss_session_clear_layout(session));
+    CHECK(goss_session_remove_source(session, guest, sizeof(guest) - 1));
+
     /* The GPU path, called honestly against the host stub. */
     goss_status render = goss_engine_render_frame(engine, session);
     printf("render_frame -> status %d (host has no renderer)\n", (int)render);

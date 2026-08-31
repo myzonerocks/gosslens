@@ -151,6 +151,7 @@ pub const Renderer = struct {
     width: u32,
     height: u32,
     layout: c.bgfx_vertex_layout_t,
+    lit_model_layout: c.bgfx_vertex_layout_t,
     billboard_layout: c.bgfx_vertex_layout_t,
     brush_layout: c.bgfx_vertex_layout_t,
     rgba_program: c.bgfx_program_handle_t,
@@ -219,6 +220,7 @@ pub const Renderer = struct {
     face_swap_program: c.bgfx_program_handle_t,
     lash_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
+    model_lit_program: c.bgfx_program_handle_t,
     model_instanced_program: c.bgfx_program_handle_t,
     billboard_program: c.bgfx_program_handle_t,
     splat_program: c.bgfx_program_handle_t,
@@ -325,6 +327,8 @@ pub const Renderer = struct {
     /// fs_beauty_reshape.sc's own u_facePoints packing.
     face_points_uniform: c.bgfx_uniform_handle_t,
     model_color_uniform: c.bgfx_uniform_handle_t,
+    light_uniform: c.bgfx_uniform_handle_t,
+    material_uniform: c.bgfx_uniform_handle_t,
     particle_cool_uniform: c.bgfx_uniform_handle_t,
     particle_size_uniform: c.bgfx_uniform_handle_t,
     particle_fx_uniform: c.bgfx_uniform_handle_t,
@@ -426,6 +430,16 @@ pub const Renderer = struct {
         _ = c.bgfx_vertex_layout_add(&layout, c.BGFX_ATTRIB_TEXCOORD0, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         c.bgfx_vertex_layout_end(&layout);
 
+        // A lit model carries its per-vertex normal between position and
+        // texcoord so a directional light can shade it; the flat model layout
+        // above stays untouched, so a lens with no light renders exactly as before.
+        var lit_model_layout: c.bgfx_vertex_layout_t = undefined;
+        _ = c.bgfx_vertex_layout_begin(&lit_model_layout, c.BGFX_RENDERER_TYPE_NOOP);
+        _ = c.bgfx_vertex_layout_add(&lit_model_layout, c.BGFX_ATTRIB_POSITION, 3, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        _ = c.bgfx_vertex_layout_add(&lit_model_layout, c.BGFX_ATTRIB_NORMAL, 3, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        _ = c.bgfx_vertex_layout_add(&lit_model_layout, c.BGFX_ATTRIB_TEXCOORD0, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        c.bgfx_vertex_layout_end(&lit_model_layout);
+
         // The fading-sprite mesh carries per vertex, alongside the particle
         // centre: a corner index, remaining-life fraction and spin seed
         // (texcoord0), then the world velocity xy for the stretch (texcoord1).
@@ -511,6 +525,7 @@ pub const Renderer = struct {
         const face_swap_program = try loadFaceSwapProgram();
         const lash_program = try loadLashProgram();
         const model_program = try loadModelProgram();
+        const model_lit_program = try loadModelLitProgram();
         const model_instanced_program = try loadModelInstancedProgram();
         const billboard_program = try loadBillboardProgram();
         const splat_program = try loadSplatProgram();
@@ -583,6 +598,7 @@ pub const Renderer = struct {
             .width = options.width,
             .height = options.height,
             .layout = layout,
+            .lit_model_layout = lit_model_layout,
             .billboard_layout = billboard_layout,
             .brush_layout = brush_layout,
             .rgba_program = rgba_program,
@@ -651,6 +667,7 @@ pub const Renderer = struct {
             .face_swap_program = face_swap_program,
             .lash_program = lash_program,
             .model_program = model_program,
+            .model_lit_program = model_lit_program,
             .model_instanced_program = model_instanced_program,
             .billboard_program = billboard_program,
             .splat_program = splat_program,
@@ -733,6 +750,8 @@ pub const Renderer = struct {
             .lash_shape_uniform = c.bgfx_create_uniform("u_lashShape", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .light_uniform = c.bgfx_create_uniform("u_light", c.BGFX_UNIFORM_TYPE_VEC4, 4),
+            .material_uniform = c.bgfx_create_uniform("u_material", c.BGFX_UNIFORM_TYPE_VEC4, 2),
             .particle_cool_uniform = c.bgfx_create_uniform("u_particleCool", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .particle_size_uniform = c.bgfx_create_uniform("u_particleSize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .particle_fx_uniform = c.bgfx_create_uniform("u_particleFx", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -1351,6 +1370,19 @@ pub const Renderer = struct {
         };
     }
 
+    /// The lit model program: the normal-carrying vertex stage and the
+    /// directional-light fragment stage, shading a model.gltf when its lens
+    /// declares a light. Same renderer split as the flat model program.
+    pub fn loadModelLitProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_model_lit_metal, blobs.fs_model_lit_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_model_lit_spirv, blobs.fs_model_lit_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_model_lit_essl, blobs.fs_model_lit_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_model_lit_wgsl, blobs.fs_model_lit_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// The model program's instanced twin: the same fragment stage over the
     /// instanced vertex stage, so a cloud of the same mesh draws in one call.
     pub fn loadModelInstancedProgram() !c.bgfx_program_handle_t {
@@ -1783,6 +1815,11 @@ pub const Renderer = struct {
             if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
             self.* = .{};
         }
+
+        /// True once a mask has been uploaded, so its texture is live.
+        pub fn valid(self: DynamicMask) bool {
+            return self.handle.idx != invalid_handle;
+        }
     };
 
     /// A mutable BGRA texture whose pixels are replaced each frame - a
@@ -1886,6 +1923,22 @@ pub const Renderer = struct {
     pub fn createOffscreenTarget(width: u16, height: u16) !OffscreenTarget {
         const framebuffer = c.bgfx_create_frame_buffer(width, height, c.BGFX_TEXTURE_FORMAT_RGBA8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP);
         if (framebuffer.idx == invalid_handle) return error.FrameBufferCreate;
+        const texture = c.bgfx_get_texture(framebuffer, 0);
+        return .{ .framebuffer = framebuffer, .texture = texture };
+    }
+
+    /// A half-float (RGBA16F) offscreen target for HDR compositing, so a pass
+    /// chain carries values past 1.0 and finer precision than 8-bit unorm. Falls
+    /// back to the 8-bit target where the backend cannot render 16F (some
+    /// WebGL2), so an HDR lens still composites, just without the extra range.
+    pub fn createOffscreenTargetHdr(width: u16, height: u16) !OffscreenTarget {
+        const caps = c.bgfx_get_caps();
+        const fmt_idx: usize = @intCast(c.BGFX_TEXTURE_FORMAT_RGBA16F);
+        const formats = caps.*.formats;
+        const fmt_flags: u32 = formats[fmt_idx];
+        if ((fmt_flags & @as(u32, c.BGFX_CAPS_FORMAT_TEXTURE_FRAMEBUFFER)) == 0) return createOffscreenTarget(width, height);
+        const framebuffer = c.bgfx_create_frame_buffer(width, height, c.BGFX_TEXTURE_FORMAT_RGBA16F, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP);
+        if (framebuffer.idx == invalid_handle) return createOffscreenTarget(width, height);
         const texture = c.bgfx_get_texture(framebuffer, 0);
         return .{ .framebuffer = framebuffer, .texture = texture };
     }
@@ -2008,12 +2061,15 @@ pub const Renderer = struct {
     /// program: opacity, a matte, or a chroma-key from `params` (opacity, key
     /// mode, similarity, softness) and `chroma`, alpha-blended over what the
     /// target already holds. No clear, so the sources below it stay.
-    pub fn submitCompositeSource(r: *Renderer, view_id: c.bgfx_view_id_t, source_tex: c.bgfx_texture_handle_t, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16, params: [4]f32, chroma: [4]f32) void {
+    pub fn submitCompositeSource(r: *Renderer, view_id: c.bgfx_view_id_t, source_tex: c.bgfx_texture_handle_t, mask_tex: c.bgfx_texture_handle_t, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16, params: [4]f32, chroma: [4]f32) void {
         c.bgfx_set_view_frame_buffer(view_id, target.framebuffer);
         c.bgfx_set_view_rect(view_id, @intCast(dx), @intCast(dy), dw, dh);
         c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, source_tex, std.math.maxInt(u32));
+        // Key mode 3 samples this per-source matte; other modes ignore it, but
+        // the sampler must be bound because the shader declares it.
+        c.bgfx_set_texture(2, r.tex_mask, mask_tex, std.math.maxInt(u32));
         c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
         c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
         const blend = blendFunc(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA);
@@ -2786,6 +2842,10 @@ pub const Renderer = struct {
         vertex_buffer: c.bgfx_vertex_buffer_handle_t = .{ .idx = invalid_handle },
         dynamic_vertex_buffer: c.bgfx_dynamic_vertex_buffer_handle_t = .{ .idx = invalid_handle },
         dynamic: bool = false,
+        // A dynamic mesh carrying per-vertex normals in the lit layout, so a
+        // deforming mesh (morph) re-uploads positions and normals together and
+        // lights each frame instead of drawing flat.
+        lit: bool = false,
         vertex_count: u32 = 0,
         index_buffer: c.bgfx_index_buffer_handle_t,
         index_count: u32,
@@ -2799,6 +2859,10 @@ pub const Renderer = struct {
         index_buffer: c.bgfx_index_buffer_handle_t,
         vertex_count: u32,
         index_count: u32,
+        // A lit skinned mesh carries per-vertex normals in the lit layout, so a
+        // body-skinned mesh re-uploads skinned positions and normals together and
+        // lights each frame instead of drawing flat.
+        lit: bool = false,
     };
 
     /// A simulated cloth grid: positions live in a dynamic vertex
@@ -2837,6 +2901,22 @@ pub const Renderer = struct {
         return .{ .vertex_buffer = vertex_buffer, .vertex_count = @intCast(positions.len), .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
     }
 
+    /// A model mesh that carries per-vertex normals for directional lighting,
+    /// interleaved position/normal/texcoord into the lit layout. A vertex past
+    /// the normal list (a mesh that shipped no normals) takes a +Z default, so
+    /// it still draws, lit flat toward the camera.
+    pub fn createLitModelMesh(r: *Renderer, positions: []const [3]f32, normals: []const [3]f32, indices: []const u32) !ModelMesh {
+        const interleaved = try r.gpa.alloc(f32, positions.len * 8);
+        defer r.gpa.free(interleaved);
+        for (positions, 0..) |p, i| {
+            const n = if (i < normals.len) normals[i] else [3]f32{ 0.0, 0.0, 1.0 };
+            interleaved[i * 8 ..][0..8].* = .{ p[0], p[1], p[2], n[0], n[1], n[2], 0.0, 0.0 };
+        }
+        const vertex_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))), &r.lit_model_layout, 0);
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        return .{ .vertex_buffer = vertex_buffer, .vertex_count = @intCast(positions.len), .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
+    }
+
     /// Like createModelMesh but backs the positions with a dynamic buffer
     /// the morph pass re-uploads each frame; the initial upload is the
     /// mesh's rest positions, so it draws unmorphed until a weight moves.
@@ -2846,6 +2926,31 @@ pub const Renderer = struct {
         const mesh: ModelMesh = .{ .dynamic_vertex_buffer = position_buffer, .dynamic = true, .vertex_count = @intCast(positions.len), .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
         r.updateModelMesh(mesh, positions);
         return mesh;
+    }
+
+    /// A dynamic mesh in the lit layout: a morphing mesh under a light re-uploads
+    /// its deformed positions and freshly computed normals together each frame,
+    /// so it lights like a static lit mesh instead of drawing flat.
+    pub fn createLitDynamicModelMesh(r: *Renderer, positions: []const [3]f32, normals: []const [3]f32, indices: []const u32) !ModelMesh {
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(@intCast(positions.len), &r.lit_model_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        const mesh: ModelMesh = .{ .dynamic_vertex_buffer = position_buffer, .dynamic = true, .lit = true, .vertex_count = @intCast(positions.len), .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
+        r.updateLitModelMesh(mesh, positions, normals);
+        return mesh;
+    }
+
+    /// Re-uploads deformed positions and their normals into a lit dynamic mesh,
+    /// padding the texcoord to zero to match lit_model_layout. A no-op on a mesh
+    /// that is not a lit dynamic one.
+    pub fn updateLitModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32, normals: []const [3]f32) void {
+        if (!mesh.dynamic or !mesh.lit) return;
+        const count = @min(positions.len, mesh.vertex_count);
+        const interleaved = r.interleaveStage(count * 8) orelse return;
+        for (0..count) |i| {
+            const n = if (i < normals.len) normals[i] else [3]f32{ 0.0, 0.0, 1.0 };
+            interleaved[i * 8 ..][0..8].* = .{ positions[i][0], positions[i][1], positions[i][2], n[0], n[1], n[2], 0.0, 0.0 };
+        }
+        c.bgfx_update_dynamic_vertex_buffer(mesh.dynamic_vertex_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
     }
 
     /// The reused interleave staging sized for `floats`, grown on the first
@@ -2863,7 +2968,7 @@ pub const Renderer = struct {
     /// Re-uploads deformed positions into a dynamic model mesh, padding
     /// the texcoord to zero to match r.layout. A no-op on a static mesh.
     pub fn updateModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32) void {
-        if (!mesh.dynamic) return;
+        if (!mesh.dynamic or mesh.lit) return;
         const count = @min(positions.len, mesh.vertex_count);
         const interleaved = r.interleaveStage(count * 5) orelse return;
         for (0..count) |i| {
@@ -2905,6 +3010,46 @@ pub const Renderer = struct {
             interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
         }
         c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+    }
+
+    /// A skinned mesh in the lit layout: a body-skinned mesh under a light
+    /// re-uploads its skinned positions and freshly computed normals together
+    /// each frame, so it lights like a static lit mesh instead of drawing flat.
+    pub fn createLitSkinnedMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !SkinnedMesh {
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(vertex_count, &r.lit_model_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        return .{ .position_buffer = position_buffer, .index_buffer = index_buffer, .vertex_count = vertex_count, .index_count = @intCast(indices.len), .lit = true };
+    }
+
+    /// Uploads CPU-skinned positions and their normals into a lit skinned mesh,
+    /// padding the texcoord to zero to match lit_model_layout.
+    pub fn updateLitSkinnedMesh(r: *Renderer, mesh: SkinnedMesh, positions: []const [3]f32, normals: []const [3]f32) void {
+        const count = @min(positions.len, mesh.vertex_count);
+        const interleaved = r.interleaveStage(count * 8) orelse return;
+        for (0..count) |i| {
+            const n = if (i < normals.len) normals[i] else [3]f32{ 0.0, 0.0, 1.0 };
+            interleaved[i * 8 ..][0..8].* = .{ positions[i][0], positions[i][1], positions[i][2], n[0], n[1], n[2], 0.0, 0.0 };
+        }
+        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+    }
+
+    /// drawSkinnedMesh through the lit program: the same content camera, plus the
+    /// light and material uniforms so the skinned surface shades by its normals.
+    pub fn drawLitSkinnedMesh(r: *Renderer, mesh_view: c.bgfx_view_id_t, mesh: SkinnedMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [16]f32, material: [8]f32, aspect_ratio: f32) void {
+        const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
+        const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
+        _ = c.bgfx_set_transform(&model_matrix.cols, 1);
+        c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
+        c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
+        c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
+        var light_params = light;
+        c.bgfx_set_uniform(r.light_uniform, &light_params, 4);
+        var material_params = material;
+        c.bgfx_set_uniform(r.material_uniform, &material_params, 2);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(mesh_view, r.model_lit_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     pub fn destroySkinnedMesh(mesh: SkinnedMesh) void {
@@ -3247,6 +3392,34 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// submitModel's lit twin: blits the frame, then draws a normal-carrying
+    /// mesh through the directional-light program. `light` is two vec4s: the
+    /// world light direction and intensity, then its color and the ambient term;
+    /// `material` is two vec4s: the emissive color and metallic, then roughness.
+    pub fn submitLitModel(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [16]f32, material: [8]f32, aspect_ratio: f32) void {
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+        r.drawLitModelMesh(mesh_view, mesh, model_matrix, base_color, light, material, aspect_ratio);
+    }
+
+    /// The mesh half of submitLitModel, without the frame blit, mirroring
+    /// drawModelMesh for the multi-node fan-out.
+    pub fn drawLitModelMesh(r: *Renderer, mesh_view: c.bgfx_view_id_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [16]f32, material: [8]f32, aspect_ratio: f32) void {
+        const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
+        const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
+        _ = c.bgfx_set_transform(&model_matrix.cols, 1);
+        setModelVertexBuffer(mesh);
+        c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
+        c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
+        var light_params = light;
+        c.bgfx_set_uniform(r.light_uniform, &light_params, 4);
+        var material_params = material;
+        c.bgfx_set_uniform(r.material_uniform, &material_params, 2);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(mesh_view, r.model_lit_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws mesh-mode particles: blits the frame once, then draws the shared

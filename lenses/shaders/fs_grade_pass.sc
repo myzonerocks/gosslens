@@ -68,5 +68,8 @@ void main()
 		rgb = mix(orig, rgb, m);
 	}
 
-	gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), color.a);
+	// u_grade[2].w is the HDR flag: 0 clamps to the display range as always,
+	// 1 keeps values past 1.0 so a bright pass survives an HDR (half-float)
+	// intermediate target and only the final present clamps.
+	gl_FragColor = vec4(mix(clamp(rgb, 0.0, 1.0), rgb, u_grade[2].w), color.a);
 }

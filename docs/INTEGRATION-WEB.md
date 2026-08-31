@@ -7,7 +7,7 @@ The [TypeScript SDK](../sdk/ts/README.md) is the surface; the
 The web build is different from the native ones in one way worth stating up
 front: the engine is WebAssembly, and the browser will not let a package fetch
 a `.wasm` from inside `node_modules` the way a native app links an archive. So
-`@gosslens/core` ships the JavaScript wrapper only, and you host the wasm and
+`@myzonerocks/gosslens` ships the JavaScript wrapper only, and you host the wasm and
 model assets yourself and hand the SDK their URLs. The SDK never guesses a
 path.
 
@@ -24,15 +24,15 @@ use, from your own static host.
 
 ## Install
 
-`@gosslens/core` is not published to a registry yet. Consume it from this
+`@myzonerocks/gosslens` is not published to a registry yet. Consume it from this
 checkout as a workspace dependency (the demo does), pointing your workspace at
 `sdk/ts`:
 
-    { "dependencies": { "@gosslens/core": "workspace:*" } }
+    { "dependencies": { "@myzonerocks/gosslens": "workspace:*" } }
 
 or a direct path while you develop:
 
-    { "dependencies": { "@gosslens/core": "file:../gosslens/sdk/ts" } }
+    { "dependencies": { "@myzonerocks/gosslens": "file:../gosslens/sdk/ts" } }
 
 Run `bun run build` in `sdk/ts` first so `dist/` exists. The imports below use
 the package name either way.
@@ -42,7 +42,7 @@ the package name either way.
 `GossPreviewSession` does the engine, renderer, session, and capture loop in
 one call - most apps want this:
 
-    import { GossPreviewSession, pickEngineUrl } from "@gosslens/core";
+    import { GossPreviewSession, pickEngineUrl } from "@myzonerocks/gosslens";
 
     const wasmJsUrl = await pickEngineUrl(webgpuUrl, webgl2Url);
     const preview = await GossPreviewSession.create(canvas, wasmJsUrl);
@@ -51,7 +51,7 @@ one call - most apps want this:
 `pickEngineUrl` confirms a real WebGPU adapter before choosing, and falls back
 to the WebGL2 URL. If you drive the loop yourself, the pieces are public too:
 
-    import { Gosslens, GossEngine, GossSession } from "@gosslens/core";
+    import { Gosslens, GossEngine, GossSession } from "@myzonerocks/gosslens";
 
     const gosslens = await Gosslens.load(canvas, wasmJsUrl);
     const engine = GossEngine.create(gosslens);
@@ -152,7 +152,7 @@ off the main thread in a Worker. Each pipeline is a class that takes the module
 bytes and a model bundle and runs inference synchronously inside the worker:
 
     // tracking-worker.ts
-    import { GossFaceTracker, GossHandTracker, GossPoseTracker } from "@gosslens/core";
+    import { GossFaceTracker, GossHandTracker, GossPoseTracker } from "@myzonerocks/gosslens";
 
     const moduleBytes = await (await fetch(trackingWasmUrl)).arrayBuffer();
     const face = await GossFaceTracker.create(moduleBytes, faceTaskBytes);

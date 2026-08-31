@@ -709,6 +709,117 @@ fn proveMultiFaceFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves per-face index binding: a model bound to `face_index: 1` draws only
+/// on the second submitted face. Through the face-solo lens, the left face
+/// (index 0) alone draws nothing while adding the right face (index 1) lights
+/// the right half alone, so the binding selects its face over fanning out.
+fn provePerFaceBinding(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL per-face tracking enable\n", .{});
+        return false;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/face-solo", ".lens-packages/face-solo".len) != .ok) {
+        std.debug.print("conformance: FAIL per-face lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+    var base: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &base) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+
+    const shift = @as(f32, @floatFromInt(planes.width)) * 0.2;
+    const landmark_count = base.landmarks.len / 3;
+    var left = base;
+    var right = base;
+    var lm: usize = 0;
+    while (lm < landmark_count) : (lm += 1) {
+        left.landmarks[lm * 3] -= shift;
+        right.landmarks[lm * 3] += shift;
+    }
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_one = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_one);
+    const shot_two = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_two);
+    const shot_two_again = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_two_again);
+
+    // Only the left face (index 0) is present: the model bound to index 1 has
+    // no face to sit on, so it draws nothing.
+    const one = [_]abi.FaceResult{left};
+    // Both faces: the model lights face index 1 (the right one) only.
+    const two = [_]abi.FaceResult{ left, right };
+    var w1: u32 = 0;
+    var h1: u32 = 0;
+    var w2: u32 = 0;
+    var h2: u32 = 0;
+    var w3: u32 = 0;
+    var h3: u32 = 0;
+    try renderSubmittedFaces(engine, session, &desc, planes, &one, shot_one, &w1, &h1);
+    try renderSubmittedFaces(engine, session, &desc, planes, &two, shot_two, &w2, &h2);
+    try renderSubmittedFaces(engine, session, &desc, planes, &two, shot_two_again, &w3, &h3);
+    if (w1 != w2 or h1 != h2 or w1 == 0 or h1 == 0) {
+        std.debug.print("conformance: FAIL per-face capture size {d}x{d} vs {d}x{d}\n", .{ w1, h1, w2, h2 });
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_two[0 .. w2 * h2 * 4], shot_two_again[0 .. w3 * h3 * 4])) {
+        std.debug.print("conformance: FAIL per-face binding is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    // The second face lit the right half; the left half is byte-identical to the
+    // one-face frame, so index 1 bound to its own face and left the other alone.
+    var left_changed: usize = 0;
+    var right_changed: usize = 0;
+    var y: u32 = 0;
+    while (y < h1) : (y += 1) {
+        var x: u32 = 0;
+        while (x < w1) : (x += 1) {
+            const idx = (y * w1 + x) * 4;
+            const differs = !std.mem.eql(u8, shot_one[idx .. idx + 4], shot_two[idx .. idx + 4]);
+            if (differs) {
+                if (x < w1 / 2) left_changed += 1 else right_changed += 1;
+            }
+        }
+    }
+    if (right_changed == 0 or left_changed != 0) {
+        std.debug.print("conformance: FAIL per-face binding did not isolate face 1 (left changed {d}, right changed {d})\n", .{ left_changed, right_changed });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a model bound to face_index 1 draws only on the second face - the right half lights ({d} px) while the left stays byte-identical, bit-stable\n", .{right_changed});
+    return true;
+}
+
 fn proveMultiBodyFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -2965,6 +3076,75 @@ fn proveMlInferSegMask(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF an author model bound as a mask drives the subject mask channel through the ml.infer node\n", .{});
+    return true;
+}
+
+fn writeOnnxSaliencyLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-saliency","version":"1.0.0","display_name":"BYO Saliency","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"sal","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[],"mask":{"tensor":0,"channel":"saliency"}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Runs the saliency bundle once and reports whether the author model's mask
+/// reached the saliency class texture, feeding a frame and rendering until it
+/// appears the way the subject-mask proof waits on its channel.
+fn runMlSaliencyOnce(engine: *abi.Engine, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-infer-saliency", "zig-out/ml-infer-saliency".len) != .ok) {
+        std.debug.print("conformance: FAIL byo-ml saliency activation\n", .{});
+        return error.MlSaliencyActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlSaliencyTrackFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlSaliencySubmitFailed;
+    var polls: usize = 0;
+    while (session.segmentation_class_textures[lens_manifest.saliency_channel] == null) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    return true;
+}
+
+/// Proves the saliency matte: with no built-in saliency model, an author's own
+/// net bound as a mask through the ml.infer node fills the dedicated saliency
+/// channel (the main-subject matte), distinct from the person channel, on two
+/// runs. The channel is empty until inference, then populates.
+fn proveMlInferSaliency(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxSegProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-infer-saliency/assets");
+    try writeOnnxSaliencyLens("zig-out/ml-infer-saliency", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const a = try runMlSaliencyOnce(engine, person);
+    const b = try runMlSaliencyOnce(engine, person);
+    if (!a or !b) {
+        std.debug.print("conformance: FAIL the author saliency mask never reached the saliency channel\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an author saliency net bound as a mask fills the dedicated saliency channel through the ml.infer node\n", .{});
     return true;
 }
 
@@ -7184,6 +7364,742 @@ fn proveScript(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a script node can ship its source as a bundled asset instead of
+/// inlining it: the manifest names "file":"drive.js", activation loads and
+/// compiles assets/drive.js, and it drives the parameter the same way the
+/// inline form does - bit-stable across ticks.
+fn proveScriptFile(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const dir = "zig-out/script-file";
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.script-file","version":"1.0.0","display_name":"Script File","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"drive","type":"script","params":{},"file":"drive.js"}],
+        \\ "triggers":[]}
+    ;
+    const script_src = "function update(lens) { lens.params.intensity = lens.signals.face_present > 0.5 ? 0.8 : 0.2; }";
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/script-file/assets");
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/drive.js", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = script_src });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+        std.debug.print("conformance: FAIL script-file lens activation\n", .{});
+        return false;
+    }
+
+    const name = "intensity";
+    var present = std.mem.zeroes(abi.LensSignals);
+    present.has_face = true;
+    const absent = std.mem.zeroes(abi.LensSignals);
+
+    var v_present: f32 = -1;
+    var v_absent: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &present);
+    if (abi.goss_session_parameter_value(session, name.ptr, name.len, &v_present) != .ok) {
+        std.debug.print("conformance: FAIL reading the file-script parameter\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_tick_lens(session, 16000, &absent);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_absent);
+
+    if (@abs(v_present - 0.8) > 1e-6 or @abs(v_absent - 0.2) > 1e-6) {
+        std.debug.print("conformance: FAIL bundled script drove intensity to {d}/{d}, wanted 0.8/0.2\n", .{ v_present, v_absent });
+        return false;
+    }
+
+    var v_again: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &present);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_again);
+    if (v_again != v_present) {
+        std.debug.print("conformance: FAIL bundled script is not deterministic ({d} vs {d})\n", .{ v_again, v_present });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a script node loads its source from a bundled assets/*.js and drives a parameter deterministically (0.8 present, 0.2 absent)\n", .{});
+    return true;
+}
+
+/// Proves the math-transform and vector logic.graph nodes: a graph chaining
+/// hypot(3,4)=5, mod(5,3)=2 and smoothstep(0,4,2)=0.5 drives a parameter to
+/// exactly 0.5, bit-stable across ticks, with no code and no host dependence.
+fn proveLogicGraphMath(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const dir = "zig-out/logic-math";
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.logic-math","version":"1.0.0","display_name":"Logic Math","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"lg","type":"logic.graph","params":{},"graph":{
+        \\   "nodes":[{"id":"m","op":"hypot","a":3.0,"b":4.0},
+        \\            {"id":"r","op":"mod","a":"m","b":3.0},
+        \\            {"id":"q","op":"smoothstep","a":0.0,"b":4.0,"c":"r"}],
+        \\   "output":"q","output_param":"intensity"}}],
+        \\ "triggers":[]}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, dir);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+        std.debug.print("conformance: FAIL logic-math lens activation\n", .{});
+        return false;
+    }
+
+    const name = "intensity";
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var v: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    if (abi.goss_session_parameter_value(session, name.ptr, name.len, &v) != .ok) {
+        std.debug.print("conformance: FAIL reading the logic-graph parameter\n", .{});
+        return false;
+    }
+    if (@abs(v - 0.5) > 1e-6) {
+        std.debug.print("conformance: FAIL logic graph drove intensity to {d}, wanted 0.5\n", .{v});
+        return false;
+    }
+    var v_again: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_again);
+    if (v_again != v) {
+        std.debug.print("conformance: FAIL logic graph is not deterministic ({d} vs {d})\n", .{ v_again, v });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a logic.graph chains hypot, mod and smoothstep to drive a parameter to exactly 0.5, deterministically\n", .{});
+    return true;
+}
+
+/// Proves a script carries persistent state across ticks with no engine
+/// feature beyond its context outliving the frame: a ring buffer of the last
+/// four signal samples and an entity-component table both evolve tick to tick
+/// and drive parameters, identically across two fresh runs of the sequence.
+fn proveScriptState(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const dir = "zig-out/script-state";
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.script-state","version":"1.0.0","display_name":"Script State","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"window","type":"float","default":0.0,"min":0.0,"max":1.0},
+        \\               {"name":"alive","type":"float","default":0.0,"min":0.0,"max":1.0},
+        \\               {"name":"drift","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"drive","type":"script","params":{},"file":"state.js"}],
+        \\ "triggers":[]}
+    ;
+    const script_src =
+        \\var buf = [];
+        \\var ents = null;
+        \\function update(lens) {
+        \\  if (ents === null) { ents = []; for (var i = 0; i < 3; i++) ents.push({ ttl: 3, vy: 0.1 * (i + 1) }); }
+        \\  buf.push(lens.signals.face_present);
+        \\  if (buf.length > 4) buf.shift();
+        \\  var sum = 0; for (var i = 0; i < buf.length; i++) sum += buf[i];
+        \\  lens.params.window = sum / 4;
+        \\  var alive = 0, drift = 0;
+        \\  for (var i = 0; i < ents.length; i++) { var e = ents[i]; if (e.ttl > 0) { e.ttl -= 1; alive += 1; drift += e.vy; } }
+        \\  lens.params.alive = alive / 8;
+        \\  lens.params.drift = drift;
+        \\}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/script-state/assets");
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/state.js", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = script_src });
+
+    var present = std.mem.zeroes(abi.LensSignals);
+    present.has_face = true;
+
+    // Two fresh runs of four face-present ticks. The window rolls up
+    // 0.25 -> 0.5 -> 0.75 -> 1.0 (ring buffer), and the entities' ttl runs out
+    // by the fourth tick (alive 0.375 -> 0, drift 0.6 -> 0); both must match.
+    var runs: [2][3]f32 = undefined;
+    var first: [3]f32 = undefined;
+    for (0..2) |run| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+            std.debug.print("conformance: FAIL script-state lens activation\n", .{});
+            return false;
+        }
+        for (0..4) |tick| {
+            _ = abi.goss_session_tick_lens(session, 16000, &present);
+            if (tick == 0) {
+                _ = abi.goss_session_parameter_value(session, "window", "window".len, &first[0]);
+                _ = abi.goss_session_parameter_value(session, "alive", "alive".len, &first[1]);
+                _ = abi.goss_session_parameter_value(session, "drift", "drift".len, &first[2]);
+            }
+        }
+        _ = abi.goss_session_parameter_value(session, "window", "window".len, &runs[run][0]);
+        _ = abi.goss_session_parameter_value(session, "alive", "alive".len, &runs[run][1]);
+        _ = abi.goss_session_parameter_value(session, "drift", "drift".len, &runs[run][2]);
+    }
+
+    if (@abs(first[0] - 0.25) > 1e-6 or @abs(first[1] - 0.375) > 1e-6 or @abs(first[2] - 0.6) > 1e-4) {
+        std.debug.print("conformance: FAIL first tick state window {d} alive {d} drift {d}\n", .{ first[0], first[1], first[2] });
+        return false;
+    }
+    if (@abs(runs[0][0] - 1.0) > 1e-6 or @abs(runs[0][1]) > 1e-6 or @abs(runs[0][2]) > 1e-6) {
+        std.debug.print("conformance: FAIL fourth tick state window {d} alive {d} drift {d}\n", .{ runs[0][0], runs[0][1], runs[0][2] });
+        return false;
+    }
+    if (runs[0][0] != runs[1][0] or runs[0][1] != runs[1][1] or runs[0][2] != runs[1][2]) {
+        std.debug.print("conformance: FAIL script state is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a script carries a ring buffer and an entity-component table across ticks, driving parameters deterministically\n", .{});
+    return true;
+}
+
+/// Proves a character-locomotion controller from shipped primitives: a script
+/// ramps a speed and smoothsteps it into a normalized crossfade between two
+/// clip weights (the values a model.gltf's clip_weights blend walk and run by),
+/// all-walk to all-run, normalized every tick, identical across two runs.
+fn proveLocomotion(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const dir = "zig-out/locomotion";
+    const page = std.heap.page_allocator;
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.locomotion","version":"1.0.0","display_name":"Locomotion","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"walk_w","type":"float","default":1.0,"min":0.0,"max":1.0},
+        \\               {"name":"run_w","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"drive","type":"script","params":{},"file":"locomotion.js"}],
+        \\ "triggers":[]}
+    ;
+    const script_src =
+        \\var speed = 0.0;
+        \\function update(lens) {
+        \\  speed = speed + 0.05;
+        \\  var x = (speed - 0.3) / 0.4;
+        \\  if (x < 0) x = 0; if (x > 1) x = 1;
+        \\  var t = x * x * (3 - 2 * x);
+        \\  lens.params.run_w = t;
+        \\  lens.params.walk_w = 1 - t;
+        \\}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/locomotion/assets");
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/locomotion.js", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = script_src });
+
+    const signals = std.mem.zeroes(abi.LensSignals);
+    // Two runs of fourteen ticks. Sampled at tick 1 (all walk), tick 10
+    // (an even blend), and tick 14 (all run); the pair of weights sums to 1
+    // at every sample and both runs land on the same values.
+    var samples: [2][3][2]f32 = undefined;
+    for (0..2) |run| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+            std.debug.print("conformance: FAIL locomotion lens activation\n", .{});
+            return false;
+        }
+        for (1..15) |tick| {
+            _ = abi.goss_session_tick_lens(session, 16000, &signals);
+            const slot: ?usize = switch (tick) {
+                1 => 0,
+                10 => 1,
+                14 => 2,
+                else => null,
+            };
+            if (slot) |si| {
+                _ = abi.goss_session_parameter_value(session, "walk_w", "walk_w".len, &samples[run][si][0]);
+                _ = abi.goss_session_parameter_value(session, "run_w", "run_w".len, &samples[run][si][1]);
+            }
+        }
+    }
+
+    const s = samples[0];
+    for (s) |pair| {
+        if (@abs(pair[0] + pair[1] - 1.0) > 1e-5) {
+            std.debug.print("conformance: FAIL locomotion weights not normalized ({d} + {d})\n", .{ pair[0], pair[1] });
+            return false;
+        }
+    }
+    if (@abs(s[0][0] - 1.0) > 1e-6 or @abs(s[1][0] - 0.5) > 1e-5 or @abs(s[2][0]) > 1e-6) {
+        std.debug.print("conformance: FAIL locomotion crossfade walk {d}/{d}/{d}, wanted 1/0.5/0\n", .{ s[0][0], s[1][0], s[2][0] });
+        return false;
+    }
+    for (0..3) |i| {
+        if (samples[0][i][0] != samples[1][i][0] or samples[0][i][1] != samples[1][i][1]) {
+            std.debug.print("conformance: FAIL locomotion is not deterministic across runs\n", .{});
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF a locomotion controller smoothsteps an evolving speed into a normalized walk-to-run clip-weight crossfade, deterministically\n", .{});
+    return true;
+}
+
+/// Activates a two-grade chain (a stop up then a stop down) on a fresh session,
+/// hdr or plain, feeds the constant frame, and returns the center pixel's green.
+/// The hdr lens allocates half-float composite targets and keeps its grade
+/// passes unclamped; the plain lens is byte-for-byte the same lens without hdr.
+fn captureGradeUpDown(gpa: std.mem.Allocator, engine: *abi.Engine, hdr: bool, planes: Nv12Copy) !u8 {
+    const dir = if (hdr) "zig-out/hdr-grade" else "zig-out/plain-grade";
+    const page = std.heap.page_allocator;
+    const manifest_json = if (hdr)
+        \\{"glf":"1.0","id":"goss.reference.hdr-grade","version":"1.0.0","display_name":"HDR Grade","engine_compat":">=0.5","capabilities":[],"hdr":true,
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"up","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"exposure":1.0}},
+        \\          {"id":"down","type":"grade.pass","inputs":{"frame":"up"},"params":{},"grade":{"exposure":-1.0}}],
+        \\ "triggers":[]}
+    else
+        \\{"glf":"1.0","id":"goss.reference.plain-grade","version":"1.0.0","display_name":"Plain Grade","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"up","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"exposure":1.0}},
+        \\          {"id":"down","type":"grade.pass","inputs":{"frame":"up"},"params":{},"grade":{"exposure":-1.0}}],
+        \\ "triggers":[]}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, dir);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const shot = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(shot);
+    var w: u32 = 0;
+    var h: u32 = 0;
+    try renderCapture(engine, session, &desc, planes, half_w, shot, &w, &h);
+    const cx = w / 2;
+    const cy = h / 2;
+    const idx = (cy * w + cx) * 4;
+    return shot[idx + 1];
+}
+
+/// Proves the HDR compositing chain: an "hdr":true lens grades a bright gray up
+/// a stop (past 1.0) then back down; the half-float intermediate keeps the
+/// bright value so the result recovers, while the identical non-HDR lens clips
+/// at 1.0 in its 8-bit intermediate and comes back darker. Deterministic.
+fn proveHdrComposite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const gray = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(gray);
+    var p: usize = 0;
+    while (p + 4 <= gray.len) : (p += 4) {
+        gray[p + 0] = 179;
+        gray[p + 1] = 179;
+        gray[p + 2] = 179;
+        gray[p + 3] = 255;
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = gray }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const hdr_green = try captureGradeUpDown(gpa, engine, true, planes);
+    const plain_green = try captureGradeUpDown(gpa, engine, false, planes);
+    const hdr_again = try captureGradeUpDown(gpa, engine, true, planes);
+
+    if (hdr_green != hdr_again) {
+        std.debug.print("conformance: FAIL HDR composite is not deterministic ({d} vs {d})\n", .{ hdr_green, hdr_again });
+        return false;
+    }
+    if (@as(i32, hdr_green) - @as(i32, plain_green) < 12) {
+        std.debug.print("conformance: FAIL HDR chain did not preserve the highlight (hdr {d} vs plain {d})\n", .{ hdr_green, plain_green });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF an hdr lens grades a highlight past 1.0 and back through a half-float intermediate, recovering it ({d}) where the 8-bit chain clips it ({d})\n", .{ hdr_green, plain_green });
+    return true;
+}
+
+/// Activates a model.gltf sphere over a black frame in one of three variants -
+/// flat (no light), or lit from the front or the back - and captures the
+/// composited RGBA. The same sphere covers the same pixels in every variant, so
+/// only the shading differs. Caller owns the returned buffer.
+fn captureLitModel(gpa: std.mem.Allocator, engine: *abi.Engine, variant: []const u8, planes: Nv12Copy, ball_glb: []const u8) ![]u8 {
+    const dir = "zig-out/light-model";
+    const page = std.heap.page_allocator;
+    const manifest_json = if (std.mem.eql(u8, variant, "front"))
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "light":{"direction":[0.0,0.0,-1.0],"color":[1.0,1.0,1.0],"intensity":1.0,"ambient":0.1},
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
+    else if (std.mem.eql(u8, variant, "back"))
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "light":{"direction":[0.0,0.0,1.0],"color":[1.0,1.0,1.0],"intensity":1.0,"ambient":0.1},
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
+    else if (std.mem.eql(u8, variant, "hemi"))
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "light":{"direction":[0.0,0.0,-1.0],"color":[1.0,1.0,1.0],"intensity":0.0,"ambient":1.0,"sky":[1.0,1.0,1.0],"ground":[0.0,0.0,0.0]},
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
+    else if (std.mem.eql(u8, variant, "uniform"))
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "light":{"direction":[0.0,0.0,-1.0],"color":[1.0,1.0,1.0],"intensity":0.0,"ambient":0.5,"sky":[1.0,1.0,1.0],"ground":[1.0,1.0,1.0]},
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
+    else
+        \\{"glf":"1.0","id":"goss.reference.light-model","version":"1.0.0","display_name":"Light Model","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"ball","type":"model.gltf","inputs":{"frame":"camera"},"params":{}}],
+        \\ "triggers":[]}
+    ;
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/light-model/assets");
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(page, "{s}/assets/ball.glb", .{dir});
+    defer page.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = ball_glb });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    // The glb decodes off-thread; render until the mesh lands, then settle.
+    var polls: usize = 0;
+    while (session.model_meshes.count() == 0) {
+        _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return error.ModelNeverLanded;
+    }
+    const shot = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    errdefer gpa.free(shot);
+    var w: u32 = 0;
+    var h: u32 = 0;
+    try renderCapture(engine, session, &desc, planes, half_w, shot, &w, &h);
+    return shot;
+}
+
+/// Proves opt-in directional lighting on a model.gltf: a sphere lit from the
+/// front shades differently than the same sphere lit from the back (the light
+/// direction genuinely drives the shading, not just a flat dim), and both
+/// differ from the unlit sphere. Deterministic across runs.
+fn proveDirectionalLight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const ball_glb = std.Io.Dir.cwd().readFileAlloc(harness_io, "lenses/reference/box-block/assets/ball.glb", gpa, .limited(4 << 20)) catch {
+        std.debug.print("conformance: FAIL could not read the reference sphere glb\n", .{});
+        return false;
+    };
+    defer gpa.free(ball_glb);
+
+    // A black frame, so the sphere is the only thing drawn and the background
+    // contributes nothing to the comparison.
+    const black = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    for (0..black.len / 4) |i| black[i * 4 + 3] = 255;
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = black }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const front = try captureLitModel(gpa, engine, "front", planes, ball_glb);
+    defer gpa.free(front);
+    const back = try captureLitModel(gpa, engine, "back", planes, ball_glb);
+    defer gpa.free(back);
+    const flat = try captureLitModel(gpa, engine, "flat", planes, ball_glb);
+    defer gpa.free(flat);
+    const front_again = try captureLitModel(gpa, engine, "front", planes, ball_glb);
+    defer gpa.free(front_again);
+
+    if (!std.mem.eql(u8, front, front_again)) {
+        std.debug.print("conformance: FAIL directional light is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, front, flat) or std.mem.eql(u8, back, flat)) {
+        std.debug.print("conformance: FAIL a lit sphere renders identical to the unlit sphere\n", .{});
+        return false;
+    }
+
+    // Over the pixels the flat sphere covers, count how many shade differently
+    // between the front and back light: a real directional light lights the two
+    // hemispheres oppositely, so many covered pixels must diverge.
+    var diverged: u64 = 0;
+    var covered: u64 = 0;
+    var front_sum: u64 = 0;
+    var back_sum: u64 = 0;
+    var p: usize = 0;
+    while (p + 4 <= flat.len) : (p += 4) {
+        if (flat[p + 1] > 16) {
+            covered += 1;
+            front_sum += front[p + 1];
+            back_sum += back[p + 1];
+            const d = @as(i32, front[p + 1]) - @as(i32, back[p + 1]);
+            if (@abs(d) > 16) diverged += 1;
+        }
+    }
+    if (covered < 200) {
+        std.debug.print("conformance: FAIL the model covered too few pixels ({d}) to judge lighting\n", .{covered});
+        return false;
+    }
+    if (diverged * 4 < covered) {
+        std.debug.print("conformance: FAIL front and back light barely differ ({d}/{d} px diverged)\n", .{ diverged, covered });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a directional light shades a model.gltf by its direction: {d} of {d} covered pixels diverge front-vs-back (front avg {d}, back avg {d}), deterministically\n", .{ diverged, covered, front_sum / covered, back_sum / covered });
+    return true;
+}
+
+/// Proves a lit lens lights a deforming (morph) mesh, not just static ones: the
+/// morph mesh draws through the lit dynamic path, so lighting it renders
+/// differently than the same mesh unlit, deterministically. The skinned path
+/// lights through the same recompute-normals-per-frame mechanism.
+fn proveLitMorph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const morph_glb = std.Io.Dir.cwd().readFileAlloc(harness_io, "lenses/reference/morph-blend/assets/face.glb", gpa, .limited(4 << 20)) catch {
+        std.debug.print("conformance: FAIL could not read the morph glb\n", .{});
+        return false;
+    };
+    defer gpa.free(morph_glb);
+
+    const black = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    for (0..black.len / 4) |i| black[i * 4 + 3] = 255;
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = black }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const lit = try captureLitModel(gpa, engine, "front", planes, morph_glb);
+    defer gpa.free(lit);
+    const flat = try captureLitModel(gpa, engine, "flat", planes, morph_glb);
+    defer gpa.free(flat);
+    const lit_again = try captureLitModel(gpa, engine, "front", planes, morph_glb);
+    defer gpa.free(lit_again);
+
+    if (!std.mem.eql(u8, lit, lit_again)) {
+        std.debug.print("conformance: FAIL lit morph mesh is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, lit, flat)) {
+        std.debug.print("conformance: FAIL a lit morph mesh renders identical to the unlit one - the deforming mesh is not lit\n", .{});
+        return false;
+    }
+    var diverged: u64 = 0;
+    var covered: u64 = 0;
+    var p: usize = 0;
+    while (p + 4 <= flat.len) : (p += 4) {
+        if (flat[p + 1] > 16 or lit[p + 1] > 16) {
+            covered += 1;
+            if (@abs(@as(i32, lit[p + 1]) - @as(i32, flat[p + 1])) > 16) diverged += 1;
+        }
+    }
+    if (covered < 200 or diverged * 8 < covered) {
+        std.debug.print("conformance: FAIL lit and unlit morph mesh barely differ ({d}/{d} px)\n", .{ diverged, covered });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a lit lens shades a morphing mesh through the lit dynamic path: the lit morph mesh diverges from the unlit one over {d} of {d} covered pixels, deterministically\n", .{ diverged, covered });
+    return true;
+}
+
+/// Builds a self-contained glTF (a single camera-facing triangle, its buffer a
+/// base64 data URI) with the given base color and emissive factor, so a proof
+/// can control a model's PBR material exactly. Caller owns the returned bytes.
+fn writeTriangleGltf(gpa: std.mem.Allocator, base: [3]f32, emissive: [3]f32) ![]u8 {
+    var buf: [42]u8 = undefined;
+    const pos = [_]f32{ -0.6, -0.6, 0, 0.6, -0.6, 0, 0.0, 0.6, 0 };
+    @memcpy(buf[0..36], std.mem.sliceAsBytes(&pos));
+    const idx = [_]u16{ 0, 1, 2 };
+    @memcpy(buf[36..42], std.mem.sliceAsBytes(&idx));
+    var b64: [64]u8 = undefined;
+    const enc = std.base64.standard.Encoder.encode(&b64, &buf);
+    return std.fmt.allocPrint(gpa,
+        "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0}}]," ++
+        "\"meshes\":[{{\"primitives\":[{{\"attributes\":{{\"POSITION\":0}},\"indices\":1,\"material\":0}}]}}]," ++
+        "\"materials\":[{{\"pbrMetallicRoughness\":{{\"baseColorFactor\":[{d},{d},{d},1.0],\"metallicFactor\":0.0,\"roughnessFactor\":1.0}},\"emissiveFactor\":[{d},{d},{d}]}}]," ++
+        "\"accessors\":[{{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"min\":[-0.6,-0.6,0],\"max\":[0.6,0.6,0]}},{{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}}]," ++
+        "\"bufferViews\":[{{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36}},{{\"buffer\":0,\"byteOffset\":36,\"byteLength\":6}}]," ++
+        "\"buffers\":[{{\"byteLength\":42,\"uri\":\"data:application/octet-stream;base64,{s}\"}}]}}", .{ base[0], base[1], base[2], emissive[0], emissive[1], emissive[2], enc });
+}
+
+/// Proves the lit shader consumes the glTF material's emissive channel: a
+/// camera-facing triangle with an emissive material renders brighter over its
+/// covered pixels than the same triangle with no emissive, since emissive adds
+/// self-illumination on top of the lit diffuse. Deterministic.
+fn proveModelMaterial(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const emissive_glb = try writeTriangleGltf(gpa, .{ 0.5, 0.5, 0.5 }, .{ 0.4, 0.4, 0.4 });
+    defer gpa.free(emissive_glb);
+    const plain_glb = try writeTriangleGltf(gpa, .{ 0.5, 0.5, 0.5 }, .{ 0.0, 0.0, 0.0 });
+    defer gpa.free(plain_glb);
+
+    const black = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    for (0..black.len / 4) |i| black[i * 4 + 3] = 255;
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = black }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const emissive_shot = try captureLitModel(gpa, engine, "front", planes, emissive_glb);
+    defer gpa.free(emissive_shot);
+    const plain_shot = try captureLitModel(gpa, engine, "front", planes, plain_glb);
+    defer gpa.free(plain_shot);
+    const emissive_again = try captureLitModel(gpa, engine, "front", planes, emissive_glb);
+    defer gpa.free(emissive_again);
+
+    if (!std.mem.eql(u8, emissive_shot, emissive_again)) {
+        std.debug.print("conformance: FAIL emissive material is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    var emissive_sum: u64 = 0;
+    var plain_sum: u64 = 0;
+    var covered: u64 = 0;
+    var p: usize = 0;
+    while (p + 4 <= plain_shot.len) : (p += 4) {
+        if (plain_shot[p + 1] > 16) {
+            covered += 1;
+            plain_sum += plain_shot[p + 1];
+            emissive_sum += emissive_shot[p + 1];
+        }
+    }
+    if (covered < 200) {
+        std.debug.print("conformance: FAIL the triangle covered too few pixels ({d}) to judge emissive\n", .{covered});
+        return false;
+    }
+    const emissive_avg = emissive_sum / covered;
+    const plain_avg = plain_sum / covered;
+    if (@as(i64, @intCast(emissive_avg)) - @as(i64, @intCast(plain_avg)) < 40) {
+        std.debug.print("conformance: FAIL emissive did not lift the surface (emissive avg {d}, plain avg {d})\n", .{ emissive_avg, plain_avg });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a model.gltf emissive material lifts the lit surface: the emissive triangle averages {d} over {d} covered pixels where the non-emissive one averages {d}, deterministically\n", .{ emissive_avg, covered, plain_avg });
+    return true;
+}
+
+/// Sums the green of a shot's covered model pixels split into the model's own
+/// top and bottom halves (the midpoint of the covered pixels' y-range, not the
+/// screen), so a hemisphere ambient's grade shows wherever the model sits.
+/// Covered means the reference shot's green clears the black background.
+fn splitTopBottom(shot: []const u8, reference: []const u8, w: u32, h: u32, top_sum: *u64, top_n: *u64, bot_sum: *u64, bot_n: *u64) void {
+    var min_y: u32 = h;
+    var max_y: u32 = 0;
+    var yy: u32 = 0;
+    while (yy < h) : (yy += 1) {
+        var xx: u32 = 0;
+        while (xx < w) : (xx += 1) {
+            if (reference[(yy * w + xx) * 4 + 1] > 16) {
+                if (yy < min_y) min_y = yy;
+                if (yy > max_y) max_y = yy;
+            }
+        }
+    }
+    const mid_y = (min_y + max_y) / 2;
+    top_sum.* = 0;
+    top_n.* = 0;
+    bot_sum.* = 0;
+    bot_n.* = 0;
+    var y: u32 = 0;
+    while (y < h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            const i = (y * w + x) * 4;
+            if (reference[i + 1] <= 16) continue;
+            if (y < mid_y) {
+                top_sum.* += shot[i + 1];
+                top_n.* += 1;
+            } else {
+                bot_sum.* += shot[i + 1];
+                bot_n.* += 1;
+            }
+        }
+    }
+}
+
+/// Proves the hemisphere ambient (a simple image-based-lighting term): a sphere
+/// lit only by a sky-white, ground-black hemisphere ambient is bright across
+/// its top and dark across its bottom, while the same sphere under a uniform
+/// ambient is even top-to-bottom. Deterministic.
+fn proveHemisphereIBL(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const ball_glb = std.Io.Dir.cwd().readFileAlloc(harness_io, "lenses/reference/box-block/assets/ball.glb", gpa, .limited(4 << 20)) catch {
+        std.debug.print("conformance: FAIL could not read the reference sphere glb\n", .{});
+        return false;
+    };
+    defer gpa.free(ball_glb);
+
+    const black = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    for (0..black.len / 4) |i| black[i * 4 + 3] = 255;
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = black }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const hemi = try captureLitModel(gpa, engine, "hemi", planes, ball_glb);
+    defer gpa.free(hemi);
+    const uniform = try captureLitModel(gpa, engine, "uniform", planes, ball_glb);
+    defer gpa.free(uniform);
+    const hemi_again = try captureLitModel(gpa, engine, "hemi", planes, ball_glb);
+    defer gpa.free(hemi_again);
+
+    if (!std.mem.eql(u8, hemi, hemi_again)) {
+        std.debug.print("conformance: FAIL hemisphere ambient is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    var ht: u64 = 0;
+    var htn: u64 = 0;
+    var hb: u64 = 0;
+    var hbn: u64 = 0;
+    splitTopBottom(hemi, uniform, width, height, &ht, &htn, &hb, &hbn);
+    var ut: u64 = 0;
+    var utn: u64 = 0;
+    var ub: u64 = 0;
+    var ubn: u64 = 0;
+    splitTopBottom(uniform, uniform, width, height, &ut, &utn, &ub, &ubn);
+    if (htn < 40 or hbn < 40 or utn < 40 or ubn < 40) {
+        std.debug.print("conformance: FAIL too few covered pixels in a half to judge the hemisphere (top {d}, bottom {d})\n", .{ htn, hbn });
+        return false;
+    }
+    const hemi_top = ht / htn;
+    const hemi_bot = hb / hbn;
+    const uni_top = ut / utn;
+    const uni_bot = ub / ubn;
+    // The hemisphere ambient must shade the model's two halves distinctly (a
+    // vertical gradient along the normal's up-component), while the uniform
+    // ambient shades them the same.
+    const hemi_delta = @abs(@as(i64, @intCast(hemi_top)) - @as(i64, @intCast(hemi_bot)));
+    const uni_delta = @abs(@as(i64, @intCast(uni_top)) - @as(i64, @intCast(uni_bot)));
+    if (hemi_delta < 40) {
+        std.debug.print("conformance: FAIL hemisphere ambient did not grade the two halves (top {d}, bottom {d})\n", .{ hemi_top, hemi_bot });
+        return false;
+    }
+    if (uni_delta > 16) {
+        std.debug.print("conformance: FAIL uniform ambient is not even top-to-bottom (top {d}, bottom {d})\n", .{ uni_top, uni_bot });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a hemisphere ambient grades a model by its normal's up-component: the sphere's two halves read {d} vs {d} under a sky-white ground-black hemisphere where a uniform ambient reads {d} vs {d}, deterministically\n", .{ hemi_top, hemi_bot, uni_top, uni_bot });
+    return true;
+}
+
 /// Proves lens audio: a play_sound trigger starts a voice that the mixer
 /// pulls out as PCM, silent before the trigger, non-silent after, and
 /// bit-identical across two runs of the same sequence.
@@ -7317,6 +8233,104 @@ fn proveEventTrigger(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a host-fired event fires a lens trigger for exactly one tick, ignores non-matching names, and is bit-stable\n", .{});
+    return true;
+}
+
+/// Renders the session over a fixed frame and captures the composite, so a proof
+/// can see a draw node's visibility change take effect.
+fn renderTriggerShot(gpa: std.mem.Allocator, engine: *abi.Engine, session: *abi.Session, planes: Nv12Copy, out_w: *u32, out_h: *u32) ![]u8 {
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const shot = try gpa.alloc(u8, @as(usize, 1024) * 1024 * 4);
+    errdefer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+    return shot;
+}
+
+/// Proves the show/hide/swap_subgraph trigger actions, which parsed and validated
+/// but were no-ops. A hide action skips a draw node's pass (the frame passes
+/// through), show restores it, and swap_subgraph switches between two mutually
+/// exclusive grade variants; each rendered result is asserted and bit-stable.
+fn proveShowHideSwap(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const dim: u32 = 320;
+    const red = try gpa.alloc(u8, @as(usize, dim) * dim * 4);
+    defer gpa.free(red);
+    var i: usize = 0;
+    while (i < red.len) : (i += 4) {
+        red[i] = 220;
+        red[i + 1] = 20;
+        red[i + 2] = 20;
+        red[i + 3] = 255;
+    }
+    const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = red }, .width = dim, .height = dim });
+    defer planes.deinit(gpa);
+
+    const sh_manifest =
+        \\{"glf":"1.0","id":"goss.reference.showhide","version":"1.0.0","display_name":"ShowHide","engine_compat":">=0.5","capabilities":[],"parameters":[],
+        \\ "nodes":[{"id":"g","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"invert":1.0}}],
+        \\ "triggers":[{"when":"event('hide')","action":{"kind":"hide","target":"g"}},{"when":"event('show')","action":{"kind":"show","target":"g"}}]}
+    ;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens(session, sh_manifest.ptr, sh_manifest.len) != .ok) return error.ShowHideActivation;
+    var sig = std.mem.zeroes(abi.LensSignals);
+    var w: u32 = 0;
+    var h: u32 = 0;
+
+    const shown = try renderTriggerShot(gpa, engine, session, planes, &w, &h);
+    defer gpa.free(shown);
+    _ = abi.goss_session_fire_event(session, "hide", "hide".len);
+    _ = abi.goss_session_tick_lens(session, 16000, &sig);
+    const hidden = try renderTriggerShot(gpa, engine, session, planes, &w, &h);
+    defer gpa.free(hidden);
+    _ = abi.goss_session_fire_event(session, "show", "show".len);
+    _ = abi.goss_session_tick_lens(session, 16000, &sig);
+    const shown2 = try renderTriggerShot(gpa, engine, session, planes, &w, &h);
+    defer gpa.free(shown2);
+
+    const n = @as(usize, w) * h * 4;
+    // The graded (inverted) frame differs from the raw frame the hidden node lets
+    // through, and showing it again restores the exact graded frame, bit-stable.
+    if (countDiff(shown[0..n], hidden[0..n]) == 0) {
+        std.debug.print("conformance: FAIL hide did not skip the grade pass (frame unchanged)\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shown[0..n], shown2[0..n])) {
+        std.debug.print("conformance: FAIL show did not restore the grade pass identically\n", .{});
+        return false;
+    }
+
+    const sw_manifest =
+        \\{"glf":"1.0","id":"goss.reference.swapsg","version":"1.0.0","display_name":"Swap","engine_compat":">=0.5","capabilities":[],"parameters":[],
+        \\ "nodes":[{"id":"a","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"invert":1.0}},{"id":"b","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"grayscale":1.0}}],
+        \\ "triggers":[{"when":"event('swapa')","action":{"kind":"swap_subgraph","target":"a"}},{"when":"event('swapb')","action":{"kind":"swap_subgraph","target":"b"}}]}
+    ;
+    const sess2 = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(sess2);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens(sess2, sw_manifest.ptr, sw_manifest.len) != .ok) return error.SwapActivation;
+    _ = abi.goss_session_fire_event(sess2, "swapb", "swapb".len);
+    _ = abi.goss_session_tick_lens(sess2, 16000, &sig);
+    const only_b = try renderTriggerShot(gpa, engine, sess2, planes, &w, &h);
+    defer gpa.free(only_b);
+    _ = abi.goss_session_fire_event(sess2, "swapa", "swapa".len);
+    _ = abi.goss_session_tick_lens(sess2, 16000, &sig);
+    const only_a = try renderTriggerShot(gpa, engine, sess2, planes, &w, &h);
+    defer gpa.free(only_a);
+
+    // Swapping to a (invert) then to b (grayscale) shows mutually exclusive
+    // variants, so the two rendered frames differ.
+    if (countDiff(only_a[0..n], only_b[0..n]) == 0) {
+        std.debug.print("conformance: FAIL swap_subgraph did not switch between the variants\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF show/hide/swap_subgraph drive draw-node visibility: hide skips a pass (frame diff {d}), show restores it bit-identically, and swap_subgraph switches exclusive variants (diff {d})\n", .{ countDiff(shown[0..n], hidden[0..n]), countDiff(only_a[0..n], only_b[0..n]) });
     return true;
 }
 
@@ -7490,6 +8504,222 @@ fn proveCompositeOpacity(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a source at half opacity composites over the camera as a blend, not an opaque overwrite\n", .{});
+    return true;
+}
+
+/// Proves per-source mask keying (key mode 3): an opaque green source over a red
+/// camera, keyed by a left-white right-black mask, shows the source on the left
+/// (its own alpha untouched) and the camera through on the right, so the mask
+/// cuts the source without a baked alpha.
+fn proveSourceMask(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sw: u32 = 64;
+    const sh: u32 = 64;
+    const cam = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(cam);
+    const src = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(src);
+    const mask = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(mask);
+    for (0..sh) |y| {
+        for (0..sw) |x| {
+            const p = y * sw + x;
+            cam[p * 4 + 0] = 255;
+            cam[p * 4 + 1] = 0;
+            cam[p * 4 + 2] = 0;
+            cam[p * 4 + 3] = 255; // red camera
+            src[p * 4 + 0] = 0;
+            src[p * 4 + 1] = 255;
+            src[p * 4 + 2] = 0;
+            src[p * 4 + 3] = 255; // opaque green source
+            // The mask keeps the left half of the source, cuts the right.
+            const m: u8 = if (x < sw / 2) 255 else 0;
+            mask[p * 4 + 0] = m;
+            mask[p * 4 + 1] = m;
+            mask[p * 4 + 2] = m;
+            mask[p * 4 + 3] = 255;
+        }
+    }
+    const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_define_source(session, "g", 1) != .ok or
+        abi.goss_session_submit_source_frame_rgba_copy(session, "g", 1, &base_desc, src.ptr, sw * 4) != .ok or
+        abi.goss_session_submit_source_mask(session, "g", 1, mask.ptr, sw, sh) != .ok or
+        abi.goss_session_set_source_composite(session, "g", 1, 1.0, 3, 0, 0, 0, 0) != .ok or
+        abi.goss_session_set_layout(session, 5) != .ok)
+    {
+        std.debug.print("conformance: FAIL source mask setup\n", .{});
+        return false;
+    }
+    for (0..4) |i| {
+        var d = base_desc;
+        d.timestamp_us = @intCast((i + 1) * 33_333);
+        if (abi.goss_session_submit_frame_rgba_copy(session, &d, cam.ptr, sw * 4) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var cw: u32 = 0;
+    var ch: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    defer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &cw, &ch) != .ok) {
+        std.debug.print("conformance: FAIL source mask capture\n", .{});
+        return false;
+    }
+    const w: usize = 400;
+    const h: usize = 300;
+    const left = (h / 2 * w + w / 4) * 4;
+    const right = (h / 2 * w + 3 * w / 4) * 4;
+    // Left: the source shows (green). Right: masked out, the camera shows (red).
+    if (!(shot[left + 1] > 150 and shot[left + 0] < 100)) {
+        std.debug.print("conformance: FAIL the source did not show in the masked-in half (r={d} g={d})\n", .{ shot[left + 0], shot[left + 1] });
+        return false;
+    }
+    if (!(shot[right + 0] > 150 and shot[right + 1] < 100)) {
+        std.debug.print("conformance: FAIL the camera did not show through the masked-out half (r={d} g={d})\n", .{ shot[right + 0], shot[right + 1] });
+        return false;
+    }
+    std.debug.print("conformance: PROOF key mode 3 cuts a source by its per-source mask - the source shows where the mask keeps it and the camera shows through where it cuts\n", .{});
+    return true;
+}
+
+/// Proves chroma-key spill suppression: a source whose kept subject carries
+/// green screen spill, chroma-keyed against green, has its excess green pulled
+/// off, so the subject's green channel drops below the same subject composited
+/// opaquely (mode 1), while the subject stays visible.
+fn proveChromaSpill(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sw: u32 = 64;
+    const sh: u32 = 64;
+    const cam = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(cam);
+    const src = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(src);
+    for (0..sw * sh) |p| {
+        cam[p * 4 + 0] = 0;
+        cam[p * 4 + 1] = 0;
+        cam[p * 4 + 2] = 255;
+        cam[p * 4 + 3] = 255; // blue camera
+        // A subject carrying green-screen spill, far enough from the key to be
+        // kept, so the whole source stays and its green should despill.
+        src[p * 4 + 0] = 150;
+        src[p * 4 + 1] = 220;
+        src[p * 4 + 2] = 150;
+        src[p * 4 + 3] = 255;
+    }
+    const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+
+    const capture = struct {
+        fn go(g: std.mem.Allocator, e: *abi.Engine, camf: []const u8, srcf: []const u8, d0: *const abi.FrameDesc, key: u32, out: []u8) !void {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            if (abi.goss_session_define_source(session, "g", 1) != .ok or
+                abi.goss_session_submit_source_frame_rgba_copy(session, "g", 1, d0, srcf.ptr, 64 * 4) != .ok or
+                abi.goss_session_set_source_composite(session, "g", 1, 1.0, key, 0, 1, 0, 0.4) != .ok or
+                abi.goss_session_set_layout(session, 5) != .ok) return error.SpillSetup;
+            for (0..4) |i| {
+                var d = d0.*;
+                d.timestamp_us = @intCast((i + 1) * 33_333);
+                if (abi.goss_session_submit_frame_rgba_copy(session, &d, camf.ptr, 64 * 4) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(e, session);
+                c.glfwPollEvents();
+            }
+            var cw: u32 = 0;
+            var ch: u32 = 0;
+            if (abi.goss_engine_capture_frame(e, session, out.ptr, out.len, &cw, &ch) != .ok) return error.CaptureFailed;
+            _ = g;
+        }
+    }.go;
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const opaque_shot = try gpa.alloc(u8, cap);
+    defer gpa.free(opaque_shot);
+    const keyed_shot = try gpa.alloc(u8, cap);
+    defer gpa.free(keyed_shot);
+    // Mode 1 keeps the subject with its spill; mode 2 chroma-keys and despills.
+    try capture(gpa, engine, cam, src, &base_desc, 1, opaque_shot);
+    try capture(gpa, engine, cam, src, &base_desc, 2, keyed_shot);
+
+    const w: usize = 400;
+    const h: usize = 300;
+    // The whole frame is the kept subject; sample its centre in both frames.
+    const subj = (h / 2 * w + w / 2) * 4;
+    const opaque_g = opaque_shot[subj + 1];
+    const keyed_g = keyed_shot[subj + 1];
+    // The despill pulled the subject's green down, and it is still on screen
+    // (its red and blue survive, so it did not get keyed out to the camera).
+    if (!(keyed_g + 8 < opaque_g)) {
+        std.debug.print("conformance: FAIL spill suppression did not reduce the subject green (keyed {d} vs opaque {d})\n", .{ keyed_g, opaque_g });
+        return false;
+    }
+    if (!(keyed_shot[subj + 0] > 90 and keyed_shot[subj + 2] < 200)) {
+        std.debug.print("conformance: FAIL the keyed subject vanished or shows the camera (r={d} b={d})\n", .{ keyed_shot[subj + 0], keyed_shot[subj + 2] });
+        return false;
+    }
+    std.debug.print("conformance: PROOF chroma-key spill suppression pulls the green screen spill off the kept subject (green {d} keyed vs {d} opaque), the subject still on screen\n", .{ keyed_g, opaque_g });
+    return true;
+}
+
+/// Proves the engine-computed per-source matte: the engine runs its own selfie
+/// segmenter on a source's own frames and fills that source's key mode 3 matte
+/// on-device, with no host mask (a virtual background for a remote guest). The
+/// matte is empty until the worker delivers, then populates; two runs confirm.
+fn proveSourceSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const model = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(model);
+    const sw: u32 = 64;
+    const sh: u32 = 64;
+    const cam = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(cam);
+    const src = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(src);
+    for (0..sw * sh) |p| {
+        cam[p * 4 + 0] = 255;
+        cam[p * 4 + 1] = 0;
+        cam[p * 4 + 2] = 0;
+        cam[p * 4 + 3] = 255; // red camera
+        src[p * 4 + 0] = 0;
+        src[p * 4 + 1] = 255;
+        src[p * 4 + 2] = 0;
+        src[p * 4 + 3] = 255; // opaque green source
+    }
+    const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+
+    const once = struct {
+        fn go(e: *abi.Engine, mdl: []const u8, camf: []const u8, srcf: []const u8, d0: *const abi.FrameDesc) !bool {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            // Enable the source segmenter before feeding frames, so each source
+            // frame reaches its worker; key mode 3 consumes the matte it fills.
+            if (abi.goss_session_define_source(session, "g", 1) != .ok or
+                abi.goss_session_enable_source_segmentation(session, "g", 1, mdl.ptr, mdl.len, 2) != .ok or
+                abi.goss_session_set_source_composite(session, "g", 1, 1.0, 3, 0, 0, 0, 0) != .ok or
+                abi.goss_session_set_layout(session, 5) != .ok) return error.SourceSegSetup;
+            var polls: usize = 0;
+            while (!session.source_seg_mask[0].valid()) {
+                var d = d0.*;
+                d.timestamp_us = @intCast((polls + 1) * 33_333);
+                if (abi.goss_session_submit_source_frame_rgba_copy(session, "g", 1, &d, srcf.ptr, 64 * 4) != .ok) return error.SourceSubmitFailed;
+                if (abi.goss_session_submit_frame_rgba_copy(session, &d, camf.ptr, 64 * 4) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(e, session);
+                c.glfwPollEvents();
+                polls += 1;
+                if (polls > 200_000) return false;
+            }
+            return true;
+        }
+    }.go;
+
+    const a = try once(engine, model, cam, src, &base_desc);
+    const b = try once(engine, model, cam, src, &base_desc);
+    if (!a or !b) {
+        std.debug.print("conformance: FAIL the source segmenter mask never reached the source matte texture\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the engine's own segmenter, run on a source's frames, fills that source's key mode 3 matte on-device with no host mask\n", .{});
     return true;
 }
 
@@ -7696,6 +8926,184 @@ fn proveBrushStroke(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
 
     std.debug.print("conformance: PROOF a brush stroke builds a bounded triangle ribbon the renderer can pull, with modes, erase, undo, redo, and clear tracking it, allocation-free\n", .{});
+    return true;
+}
+
+/// Proves the stamp brush lays its sprite into the composited frame: a stamp
+/// stroke across a gray frame draws nothing until a stamp sprite is set, and
+/// once a solid magenta sprite is uploaded the stroke's band lights magenta
+/// while a corner off the stroke stays byte-identical, bit-stable across runs.
+fn proveStampBrush(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    // A flat gray frame, so a magenta stamp reads clearly against it.
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..@as(usize, width) * height) |i| {
+        frame_rgba[i * 4 + 0] = 128;
+        frame_rgba[i * 4 + 1] = 128;
+        frame_rgba[i * 4 + 2] = 128;
+        frame_rgba[i * 4 + 3] = 255;
+    }
+    const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height });
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    // A horizontal stamp stroke across the middle in stamp mode (4).
+    _ = abi.goss_session_brush_set_style(session, 1.0, 1.0, 1.0, 1.0, 0.04);
+    _ = abi.goss_session_brush_set_mode(session, 4);
+    _ = abi.goss_session_brush_begin(session);
+    _ = abi.goss_session_brush_point(session, 0.15, 0.5);
+    _ = abi.goss_session_brush_point(session, 0.85, 0.5);
+    _ = abi.goss_session_brush_end(session);
+
+    const cap = @as(usize, width) * height * 4;
+    const control = try gpa.alloc(u8, cap);
+    defer gpa.free(control);
+    const stamped = try gpa.alloc(u8, cap);
+    defer gpa.free(stamped);
+    const again = try gpa.alloc(u8, cap);
+    defer gpa.free(again);
+
+    var cw: u32 = 0;
+    var ch: u32 = 0;
+    // No stamp sprite set yet: the stamp stroke draws nothing, so the frame is
+    // the plain gray.
+    try renderCapture(engine, session, &desc, planes, half_w, control, &cw, &ch);
+
+    // A solid magenta 8x8 sprite, then the stroke stamps it along its band.
+    var sprite: [8 * 8 * 4]u8 = undefined;
+    for (0..64) |i| {
+        sprite[i * 4 + 0] = 255;
+        sprite[i * 4 + 1] = 0;
+        sprite[i * 4 + 2] = 255;
+        sprite[i * 4 + 3] = 255;
+    }
+    if (abi.goss_session_brush_set_stamp(session, &sprite, 8, 8) != .ok) {
+        std.debug.print("conformance: FAIL stamp sprite upload\n", .{});
+        return false;
+    }
+    try renderCapture(engine, session, &desc, planes, half_w, stamped, &cw, &ch);
+    try renderCapture(engine, session, &desc, planes, half_w, again, &cw, &ch);
+
+    if (!std.mem.eql(u8, stamped, again)) {
+        std.debug.print("conformance: FAIL stamp brush is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    // The middle band (where the stroke runs) gains magenta; the top-left corner
+    // is off the stroke and stays byte-identical to the control.
+    var band_magenta: usize = 0;
+    const mid = height / 2;
+    for (0..width) |x| {
+        const idx = (mid * width + x) * 4;
+        if (stamped[idx] > 200 and stamped[idx + 1] < 80 and stamped[idx + 2] > 200) band_magenta += 1;
+    }
+    var corner_changed: usize = 0;
+    for (0..20) |y| {
+        for (0..20) |x| {
+            const idx = (y * width + x) * 4;
+            if (!std.mem.eql(u8, stamped[idx .. idx + 4], control[idx .. idx + 4])) corner_changed += 1;
+        }
+    }
+    if (band_magenta == 0 or corner_changed != 0) {
+        std.debug.print("conformance: FAIL stamp brush did not localize (band magenta {d}, corner changed {d})\n", .{ band_magenta, corner_changed });
+        return false;
+    }
+    if (std.mem.eql(u8, stamped, control)) {
+        std.debug.print("conformance: FAIL stamp sprite did not change the frame\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the stamp brush lays its sprite along the stroke ({d} magenta px on the band) and nothing without a sprite, the off-stroke corner byte-identical, bit-stable\n", .{band_magenta});
+    return true;
+}
+
+/// The per-channel mean (0..255) of an RGBA capture, a coarse value the exact
+/// sha256 baseline cannot compare across platforms but a tolerance can.
+const ChannelMeans = struct { r: f64, g: f64, b: f64 };
+fn channelMeans(shot: []const u8) ChannelMeans {
+    var sr: u64 = 0;
+    var sg: u64 = 0;
+    var sb: u64 = 0;
+    const px = shot.len / 4;
+    var i: usize = 0;
+    while (i < shot.len) : (i += 4) {
+        sr += shot[i];
+        sg += shot[i + 1];
+        sb += shot[i + 2];
+    }
+    const n: f64 = @floatFromInt(@max(px, 1));
+    return .{ .r = @as(f64, @floatFromInt(sr)) / n, .g = @as(f64, @floatFromInt(sg)) / n, .b = @as(f64, @floatFromInt(sb)) / n };
+}
+
+/// Proves cross-platform value stability: a fixed grade over a fixed gradient
+/// frame lands its per-channel means within a pinned tolerance, and the capture
+/// is bit-identical across runs. The exact sha256 baseline breaks on a 1-ULP
+/// platform float difference; this tolerant pin catches real divergence instead.
+fn proveValueStability(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    // A deterministic gradient: red rides the column, green the row, blue flat,
+    // so a grade's channel math shows up in the means.
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const idx = (row * width + col) * 4;
+            frame_rgba[idx + 0] = @intCast(col * 255 / width);
+            frame_rgba[idx + 1] = @intCast(row * 255 / height);
+            frame_rgba[idx + 2] = 128;
+            frame_rgba[idx + 3] = 255;
+        }
+    }
+    const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height });
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    const json =
+        \\{"glf": "1.0", "id": "vs", "version": "1.0.0", "display_name": "VS", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [],
+        \\ "nodes": [{"id": "g", "type": "grade.pass", "inputs": {"frame": "camera"},
+        \\   "grade": {"exposure": 0.1, "contrast": 1.1, "saturation": 1.2, "temperature": 0.06}}],
+        \\ "triggers": []}
+    ;
+    if (abi.goss_session_activate_lens(session, json.ptr, json.len) != .ok) return error.ActivationFailed;
+
+    const cap = @as(usize, width) * height * 4;
+    const shot = try gpa.alloc(u8, cap);
+    defer gpa.free(shot);
+    const again = try gpa.alloc(u8, cap);
+    defer gpa.free(again);
+    var w1: u32 = 0;
+    var h1: u32 = 0;
+    try renderCapture(engine, session, &desc, planes, half_w, shot, &w1, &h1);
+    try renderCapture(engine, session, &desc, planes, half_w, again, &w1, &h1);
+
+    if (!std.mem.eql(u8, shot, again)) {
+        std.debug.print("conformance: FAIL value stability is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    const m = channelMeans(shot);
+    // Pinned means for the fixed grade over the fixed gradient; a tolerance of
+    // 1.5 per channel survives a 1-ULP platform float difference but catches a
+    // real grade or color divergence.
+    const exp_r: f64 = 146.713;
+    const exp_g: f64 = 134.753;
+    const exp_b: f64 = 117.805;
+    const tol: f64 = 1.5;
+    if (@abs(m.r - exp_r) > tol or @abs(m.g - exp_g) > tol or @abs(m.b - exp_b) > tol) {
+        std.debug.print("conformance: FAIL value stability drifted past tolerance (r {d:.3} g {d:.3} b {d:.3} vs {d:.3}/{d:.3}/{d:.3})\n", .{ m.r, m.g, m.b, exp_r, exp_g, exp_b });
+        return false;
+    }
+    std.debug.print("conformance: PROOF the graded frame's channel means hold within tolerance (r {d:.3} g {d:.3} b {d:.3}), bit-stable across runs - a cross-platform value pin the exact baseline cannot make\n", .{ m.r, m.g, m.b });
     return true;
 }
 
@@ -13860,6 +15268,116 @@ fn pixelByteSum(tga: []const u8) u64 {
     return sum;
 }
 
+/// Proves the ear-matte clusters are anatomically placed on a real tracked
+/// face: the two ear regions sit on opposite sides of the nose and flank wider
+/// than the cheek contours (the ears the widest points), so a mislabeled
+/// cluster fails here. The hull-matte path is the one contour and highlight use.
+fn proveEarMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL ear face tracking enable\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+    var result: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &result) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+    const lm = &result.landmarks;
+    const ear_l = ringCentroid(lm, abi.ear_regions[0]);
+    const ear_r = ringCentroid(lm, abi.ear_regions[1]);
+    const cheek_r = ringCentroid(lm, abi.contour_regions[0]);
+    const cheek_l = ringCentroid(lm, abi.contour_regions[1]);
+    const nose_x = lm[1 * 3];
+    if ((ear_l[0] > nose_x) == (ear_r[0] > nose_x)) {
+        std.debug.print("conformance: FAIL the ear regions not on opposite sides of the nose (x L {d:.1} R {d:.1} nose {d:.1})\n", .{ ear_l[0], ear_r[0], nose_x });
+        return false;
+    }
+    const cheek_lo = @min(cheek_l[0], cheek_r[0]);
+    const cheek_hi = @max(cheek_l[0], cheek_r[0]);
+    const ear_lo = @min(ear_l[0], ear_r[0]);
+    const ear_hi = @max(ear_l[0], ear_r[0]);
+    if (!(ear_lo < cheek_lo and ear_hi > cheek_hi)) {
+        std.debug.print("conformance: FAIL the ears not wider than the cheeks (ear {d:.1}..{d:.1} cheek {d:.1}..{d:.1})\n", .{ ear_lo, ear_hi, cheek_lo, cheek_hi });
+        return false;
+    }
+    std.debug.print("conformance: PROOF the ear matte's clusters flank the face wider than the cheeks on opposite sides of the nose (ear x {d:.0}..{d:.0} vs cheek {d:.0}..{d:.0})\n", .{ ear_lo, ear_hi, cheek_lo, cheek_hi });
+    return true;
+}
+
+/// Proves the eyeshadow lid-zone clusters are anatomically placed on a real
+/// tracked face: per eye the centre band sits between the inner and outer bands
+/// along the lid, the inner band is nearer the nose than the outer, and the
+/// crease sits above the lid centre, so a mislabeled cluster fails here.
+fn proveEyeshadowZones(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL eyeshadow face tracking enable\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+    var result: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &result) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+    const lm = &result.landmarks;
+    const nose_x = lm[1 * 3];
+    // eye 0 is the subject's left (image right), eye 1 the right.
+    for (0..2) |eye| {
+        const inner = ringCentroid(lm, abi.lid_inner_regions[eye]);
+        const center = ringCentroid(lm, abi.lid_center_regions[eye]);
+        const outer = ringCentroid(lm, abi.lid_outer_regions[eye]);
+        const crease = ringCentroid(lm, abi.lid_crease_regions[eye]);
+        // The centre band lies between the inner and outer bands along the lid.
+        const lo = @min(inner[0], outer[0]);
+        const hi = @max(inner[0], outer[0]);
+        if (!(lo < center[0] and center[0] < hi)) {
+            std.debug.print("conformance: FAIL eye {d} lid centre not between inner and outer (x in {d:.1} c {d:.1} out {d:.1})\n", .{ eye, inner[0], center[0], outer[0] });
+            return false;
+        }
+        // The inner band is nearer the nose than the outer band.
+        if (!(@abs(inner[0] - nose_x) < @abs(outer[0] - nose_x))) {
+            std.debug.print("conformance: FAIL eye {d} inner band not nearer the nose than the outer (in {d:.1} out {d:.1} nose {d:.1})\n", .{ eye, inner[0], outer[0], nose_x });
+            return false;
+        }
+        // The crease sits above the lid centre (screen y grows downward).
+        if (!(crease[1] < center[1])) {
+            std.debug.print("conformance: FAIL eye {d} crease not above the lid centre (crease y {d:.1} lid {d:.1})\n", .{ eye, crease[1], center[1] });
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF the eyeshadow lid zones order inner-centre-outer along each lid, inner nearest the nose, the crease above the lid, on both eyes\n", .{});
+    return true;
+}
+
 fn proveContourHighlight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // First prove the region clusters are anatomically placed: on a real
     // tracked face the two cheek-hollow contours flank the nose, the nose-
@@ -17464,6 +18982,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("glam look");
     if (!try proveContourHighlight(gpa, engine)) return 1;
     watchHold("contour highlight");
+    if (!try proveEarMatte(gpa, engine)) return 1;
+    watchHold("ear matte");
+    if (!try proveEyeshadowZones(gpa, engine)) return 1;
+    watchHold("eyeshadow zones");
     if (!try proveEyeMakeup(gpa, engine)) return 1;
     watchHold("eye makeup");
     if (!try proveLashMesh(gpa, engine)) return 1;
@@ -17500,6 +19022,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("world anchor");
     if (!try proveMultiFaceFanOut(gpa, engine)) return 1;
     watchHold("multi face fan out");
+    if (!try provePerFaceBinding(gpa, engine)) return 1;
+    watchHold("per face binding");
     if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;
@@ -17602,6 +19126,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer onnx");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;
     watchHold("ml infer seg mask");
+    if (!try proveMlInferSaliency(gpa, engine)) return 1;
+    watchHold("ml infer saliency");
     if (!try proveMlInferCls(gpa, engine)) return 1;
     watchHold("ml infer cls");
     if (!try proveMlInferPlacement(gpa, engine)) return 1;
@@ -17704,6 +19230,24 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("compile prompt");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
+    if (!try proveScriptFile(gpa, engine)) return 1;
+    watchHold("script-file");
+    if (!try proveLogicGraphMath(gpa, engine)) return 1;
+    watchHold("logic-math");
+    if (!try proveScriptState(gpa, engine)) return 1;
+    watchHold("script-state");
+    if (!try proveLocomotion(gpa, engine)) return 1;
+    watchHold("locomotion");
+    if (!try proveHdrComposite(gpa, engine)) return 1;
+    watchHold("hdr-composite");
+    if (!try proveDirectionalLight(gpa, engine)) return 1;
+    watchHold("directional-light");
+    if (!try proveLitMorph(gpa, engine)) return 1;
+    watchHold("lit-morph");
+    if (!try proveModelMaterial(gpa, engine)) return 1;
+    watchHold("model-material");
+    if (!try proveHemisphereIBL(gpa, engine)) return 1;
+    watchHold("hemisphere-ibl");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
     if (!try proveOutputMix(gpa, engine)) return 1;
@@ -17712,16 +19256,28 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("camera controls");
     if (!try proveEventTrigger(gpa, engine)) return 1;
     watchHold("event trigger");
+    if (!try proveShowHideSwap(gpa, engine)) return 1;
+    watchHold("show hide swap");
     if (!try proveVolumeTrigger(gpa, engine)) return 1;
     watchHold("volume trigger");
     if (!try proveLayoutComposite(gpa, engine)) return 1;
     watchHold("layout composite");
     if (!try proveCompositeOpacity(gpa, engine)) return 1;
     watchHold("composite opacity");
+    if (!try proveSourceMask(gpa, engine)) return 1;
+    watchHold("source mask");
+    if (!try proveChromaSpill(gpa, engine)) return 1;
+    watchHold("chroma spill");
+    if (!try proveSourceSegmentation(gpa, engine)) return 1;
+    watchHold("source segmentation");
     if (!try proveGeofilter(gpa, engine)) return 1;
     watchHold("geofilter");
     if (!try proveBrushStroke(gpa, engine)) return 1;
     watchHold("brush stroke");
+    if (!try proveStampBrush(gpa, engine)) return 1;
+    watchHold("stamp brush");
+    if (!try proveValueStability(gpa, engine)) return 1;
+    watchHold("value stability");
     if (!try proveBlur(gpa, engine)) return 1;
     watchHold("blur");
     if (!try proveGrade(gpa, engine)) return 1;

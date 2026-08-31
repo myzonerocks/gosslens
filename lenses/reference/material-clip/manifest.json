@@ -8,24 +8,26 @@
   "parameters": [],
   "nodes": [
     {"id": "clip", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {},
-     "material": {"output": 16, "nodes": [
+     "material": {"output": 18, "nodes": [
        {"kind": "uv"},
        {"kind": "split", "inputs": [0], "params": [0, 0, 0, 0]},
        {"kind": "split", "inputs": [0], "params": [1, 0, 0, 0]},
-       {"kind": "constant", "type": "float", "params": [0.25, 0, 0, 0]},
-       {"kind": "constant", "type": "float", "params": [0.75, 0, 0, 0]},
-       {"kind": "step", "inputs": [3, 1]},
-       {"kind": "step", "inputs": [4, 1]},
-       {"kind": "subtract", "inputs": [5, 6]},
-       {"kind": "step", "inputs": [3, 2]},
-       {"kind": "step", "inputs": [4, 2]},
-       {"kind": "subtract", "inputs": [8, 9]},
-       {"kind": "multiply", "inputs": [7, 10]},
+       {"kind": "constant", "type": "float", "params": [0.22, 0, 0, 0]},
+       {"kind": "constant", "type": "float", "params": [0.28, 0, 0, 0]},
+       {"kind": "constant", "type": "float", "params": [0.72, 0, 0, 0]},
+       {"kind": "constant", "type": "float", "params": [0.78, 0, 0, 0]},
+       {"kind": "smoothstep", "inputs": [3, 4, 1]},
+       {"kind": "smoothstep", "inputs": [5, 6, 1]},
+       {"kind": "subtract", "inputs": [7, 8]},
+       {"kind": "smoothstep", "inputs": [3, 4, 2]},
+       {"kind": "smoothstep", "inputs": [5, 6, 2]},
+       {"kind": "subtract", "inputs": [10, 11]},
+       {"kind": "multiply", "inputs": [9, 12]},
        {"kind": "texture", "name": "texColor"},
-       {"kind": "sample", "inputs": [12, 0]},
-       {"kind": "combine4", "inputs": [11, 11, 11, 11]},
-       {"kind": "multiply", "inputs": [13, 14]},
-       {"kind": "output", "inputs": [15]}
+       {"kind": "sample", "inputs": [14, 0]},
+       {"kind": "combine4", "inputs": [13, 13, 13, 13]},
+       {"kind": "multiply", "inputs": [15, 16]},
+       {"kind": "output", "inputs": [17]}
      ]}}
   ],
   "triggers": []

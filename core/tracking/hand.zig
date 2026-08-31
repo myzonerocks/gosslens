@@ -50,6 +50,70 @@ pub fn isPinching(landmarks: *const [landmark_count * 3]f32) bool {
     return palm > 0 and pinch < palm * 0.4;
 }
 
+/// The tip and inner joint of each finger, in the thumb-to-pinky order a
+/// custom gesture template lists them; a finger reads extended when its tip
+/// sits farther from the wrist than that inner joint.
+const finger_joints = [5][2]usize{
+    .{ 4, 2 }, // thumb: tip, mcp
+    .{ 8, 6 }, // index: tip, pip
+    .{ 12, 10 }, // middle
+    .{ 16, 14 }, // ring
+    .{ 20, 18 }, // pinky
+};
+
+/// A five-bit mask of which fingers are extended, thumb the low bit through
+/// pinky the high bit. A finger extends when its tip reaches past its inner
+/// joint from the wrist, a scale-free test that holds at any hand size.
+pub fn fingerExtensions(landmarks: *const [landmark_count * 3]f32) u5 {
+    var bits: u5 = 0;
+    for (finger_joints, 0..) |fj, i| {
+        const tip = landmarkDistance(landmarks, fj[0], wrist_idx);
+        const inner = landmarkDistance(landmarks, fj[1], wrist_idx);
+        if (tip > inner) bits |= @as(u5, 1) << @intCast(i);
+    }
+    return bits;
+}
+
+/// A named hand pose a lens declares: `mask` marks the fingers it constrains
+/// and `want` the extension each must hold, so a live hand matches when the
+/// constrained fingers agree; unconstrained fingers are free.
+pub const CustomGesture = struct {
+    mask: u5 = 0,
+    want: u5 = 0,
+
+    pub fn matches(self: CustomGesture, extensions: u5) bool {
+        return (extensions & self.mask) == (self.want & self.mask);
+    }
+};
+
+test "finger extensions read a fist, an open palm, and a two-finger V" {
+    var lm: [landmark_count * 3]f32 = @splat(0);
+    // Place the wrist at the origin and every tip and inner joint along +y at a
+    // set distance, then curl a finger by pulling its tip inside its joint.
+    const setJoint = struct {
+        fn f(l: *[landmark_count * 3]f32, idx: usize, y: f32) void {
+            l[idx * 3] = 0;
+            l[idx * 3 + 1] = y;
+        }
+    }.f;
+    // Open palm: every tip past its inner joint.
+    for (finger_joints) |fj| {
+        setJoint(&lm, fj[1], 1.0);
+        setJoint(&lm, fj[0], 2.0);
+    }
+    try t.expectEqual(@as(u5, 0b11111), fingerExtensions(&lm));
+    // Curl the ring and pinky in (tip inside the joint): a two-finger V.
+    setJoint(&lm, finger_joints[3][0], 0.5);
+    setJoint(&lm, finger_joints[4][0], 0.5);
+    const v = fingerExtensions(&lm);
+    try t.expectEqual(@as(u5, 0b00111), v);
+    // A gesture wanting index+middle up and ring+pinky down matches the V and
+    // not a full open palm; a thumb-any gesture ignores the thumb.
+    const victory = CustomGesture{ .mask = 0b11110, .want = 0b00110 };
+    try t.expect(victory.matches(v));
+    try t.expect(!victory.matches(0b11111));
+}
+
 /// Named attach points on the tracked hand, so a lens can pin content to a
 /// fingertip or the wrist without knowing the mesh indices.
 pub const Joint = enum(u32) {

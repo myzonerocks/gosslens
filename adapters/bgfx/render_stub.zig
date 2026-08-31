@@ -167,6 +167,11 @@ pub const Renderer = struct {
         pub fn deinit(self: *DynamicMask) void {
             self.* = .{};
         }
+
+        pub fn valid(self: DynamicMask) bool {
+            _ = self;
+            return false;
+        }
     };
 
     pub fn createDynamicBgraTexture(width: u16, height: u16) TextureHandle {
@@ -262,10 +267,11 @@ pub const Renderer = struct {
         _ = dh;
     }
 
-    pub fn submitCompositeSource(r: *Renderer, view_id: u16, source_tex: TextureHandle, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16, params: [4]f32, chroma: [4]f32) void {
+    pub fn submitCompositeSource(r: *Renderer, view_id: u16, source_tex: TextureHandle, mask_tex: TextureHandle, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16, params: [4]f32, chroma: [4]f32) void {
         _ = r;
         _ = view_id;
         _ = source_tex;
+        _ = mask_tex;
         _ = target;
         _ = dx;
         _ = dy;
@@ -737,11 +743,36 @@ pub const Renderer = struct {
         vertex_buffer: VertexBufferHandle = .{},
         index_buffer: IndexBufferHandle = .{},
         index_count: u32 = 0,
+        dynamic: bool = false,
+        lit: bool = false,
     };
 
     pub fn createModelMesh(r: *Renderer, positions: []const [3]f32, indices: []const u32) !ModelMesh {
         _ = r;
         _ = positions;
+        _ = indices;
+        return error.RendererUnavailable;
+    }
+
+    pub fn createLitDynamicModelMesh(r: *Renderer, positions: []const [3]f32, normals: []const [3]f32, indices: []const u32) !ModelMesh {
+        _ = r;
+        _ = positions;
+        _ = normals;
+        _ = indices;
+        return error.RendererUnavailable;
+    }
+
+    pub fn updateLitModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32, normals: []const [3]f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
+        _ = normals;
+    }
+
+    pub fn createLitModelMesh(r: *Renderer, positions: []const [3]f32, normals: []const [3]f32, indices: []const u32) !ModelMesh {
+        _ = r;
+        _ = positions;
+        _ = normals;
         _ = indices;
         return error.RendererUnavailable;
     }
@@ -783,6 +814,30 @@ pub const Renderer = struct {
         _ = aspect_ratio;
     }
 
+    pub fn submitLitModel(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [16]f32, material: [8]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = model_matrix;
+        _ = base_color;
+        _ = light;
+        _ = material;
+        _ = aspect_ratio;
+    }
+
+    pub fn drawLitModelMesh(r: *Renderer, mesh_view: u8, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [8]f32, material: [8]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = mesh_view;
+        _ = mesh;
+        _ = model_matrix;
+        _ = base_color;
+        _ = light;
+        _ = material;
+        _ = aspect_ratio;
+    }
+
     pub fn submitParticleMeshes(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, positions: []const f32, scale: f32, base_color: [4]f32, aspect_ratio: f32) void {
         _ = r;
         _ = blit_view;
@@ -812,9 +867,17 @@ pub const Renderer = struct {
         index_buffer: IndexBufferHandle = .{},
         vertex_count: u32 = 0,
         index_count: u32 = 0,
+        lit: bool = false,
     };
 
     pub fn createSkinnedMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !SkinnedMesh {
+        _ = r;
+        _ = vertex_count;
+        _ = indices;
+        return error.RendererUnavailable;
+    }
+
+    pub fn createLitSkinnedMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !SkinnedMesh {
         _ = r;
         _ = vertex_count;
         _ = indices;
@@ -827,6 +890,13 @@ pub const Renderer = struct {
         _ = positions;
     }
 
+    pub fn updateLitSkinnedMesh(r: *Renderer, mesh: SkinnedMesh, positions: []const [3]f32, normals: []const [3]f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
+        _ = normals;
+    }
+
     pub fn destroySkinnedMesh(mesh: SkinnedMesh) void {
         _ = mesh;
     }
@@ -837,6 +907,17 @@ pub const Renderer = struct {
         _ = mesh;
         _ = model_matrix;
         _ = base_color;
+        _ = aspect_ratio;
+    }
+
+    pub fn drawLitSkinnedMesh(r: *Renderer, mesh_view: u8, mesh: SkinnedMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [16]f32, material: [8]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = mesh_view;
+        _ = mesh;
+        _ = model_matrix;
+        _ = base_color;
+        _ = light;
+        _ = material;
         _ = aspect_ratio;
     }
 
@@ -1235,6 +1316,12 @@ pub const Renderer = struct {
     };
 
     pub fn createOffscreenTarget(width: u16, height: u16) !OffscreenTarget {
+        _ = width;
+        _ = height;
+        return error.RendererUnavailable;
+    }
+
+    pub fn createOffscreenTargetHdr(width: u16, height: u16) !OffscreenTarget {
         _ = width;
         _ = height;
         return error.RendererUnavailable;

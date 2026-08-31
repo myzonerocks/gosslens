@@ -127,10 +127,14 @@ fn validateTriggers(gpa: std.mem.Allocator, diags: *manifest.Diagnostics, lens: 
     defer param_names.deinit(gpa);
     for (lens.parameters) |p| try param_names.append(gpa, p.name);
 
+    var gesture_names: std.ArrayList([]const u8) = .empty;
+    defer gesture_names.deinit(gpa);
+    for (lens.gestures) |gd| try gesture_names.append(gpa, gd.name);
+
     var ok = true;
     for (lens.triggers, 0..) |lens_trigger, i| {
         var compile_err: ?trigger.CompileError = null;
-        const expr = trigger.compile(gpa, diags.arena, lens_trigger.when_source, param_names.items, &compile_err) catch |err| switch (err) {
+        const expr = trigger.compile(gpa, diags.arena, lens_trigger.when_source, param_names.items, gesture_names.items, &compile_err) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
         if (expr) |*e| {

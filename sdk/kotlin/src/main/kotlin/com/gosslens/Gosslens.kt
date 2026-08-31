@@ -102,6 +102,7 @@ object Gosslens {
     internal external fun nativeSubmitFaces(session: Long, faces: ByteBuffer, count: Int): Int
     internal external fun nativeFaceCount(session: Long): Int
     internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
+    internal external fun nativeFaceTrackId(session: Long, index: Int): Int
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
@@ -122,6 +123,7 @@ object Gosslens {
     internal external fun nativeDeactivateLens(session: Long)
     internal external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
     internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativeHitTest(session: Long, screenX: Float, screenY: Float, outBuffer: ByteBuffer): Int
     internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
@@ -137,14 +139,20 @@ object Gosslens {
     internal external fun nativeSetLayout(session: Long, arrangement: Int): Int
     internal external fun nativeClearLayout(session: Long): Int
     internal external fun nativeSetSourceComposite(session: Long, nameBuffer: ByteBuffer, nameLen: Int, opacity: Float, keyMode: Int, keyR: Float, keyG: Float, keyB: Float, similarity: Float): Int
+    internal external fun nativeSubmitSourceMask(session: Long, nameBuffer: ByteBuffer, nameLen: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
+    internal external fun nativeEnableSourceSegmentation(session: Long, nameBuffer: ByteBuffer, nameLen: Int, modelBuffer: ByteBuffer, modelLen: Int, threads: Int): Int
     internal external fun nativeDefineScreenShare(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
     internal external fun nativeSubmitLocation(session: Long, latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Int
     internal external fun nativeSetGeofence(session: Long, latitude: Double, longitude: Double, radiusM: Double): Int
     internal external fun nativeClearGeofence(session: Long): Int
     internal external fun nativeSetGeofenceBbox(session: Long, minLat: Double, minLon: Double, maxLat: Double, maxLon: Double): Int
     internal external fun nativeSetGeofencePolygon(session: Long, coordsBuffer: ByteBuffer, vertexCount: Int): Int
+    internal external fun nativeSetNamedGeofence(session: Long, nameBuffer: ByteBuffer, nameLen: Int, latitude: Double, longitude: Double, radiusM: Double): Int
+    internal external fun nativeSetNamedGeofencePolygon(session: Long, nameBuffer: ByteBuffer, nameLen: Int, coordsBuffer: ByteBuffer, vertexCount: Int): Int
+    internal external fun nativeClearNamedGeofences(session: Long): Int
     internal external fun nativeSetGeoAccuracy(session: Long, maxAccuracyM: Float): Int
     internal external fun nativeBrushSetStyle(session: Long, r: Float, g: Float, b: Float, a: Float, width: Float): Int
+    internal external fun nativeBrushSetStamp(session: Long, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeBrushBegin(session: Long): Int
     internal external fun nativeBrushPoint(session: Long, x: Float, y: Float): Int
     internal external fun nativeBrushEnd(session: Long): Int
@@ -185,7 +193,12 @@ object Gosslens {
     internal external fun nativeSubmitFrame(session: Long, plane0: Long, plane1: Long, plane2: Long, planeCount: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, colorStandard: Int, colorRange: Int, timestampUs: Long): Int
     internal external fun nativeSubmitFrameRgbaCopy(session: Long, rgba: ByteBuffer, stride: Int, width: Int, height: Int, pixelFormat: Int, flags: Int, timestampUs: Long): Int
     internal external fun nativeEnableSegmentation(session: Long, modelBuffer: ByteBuffer, modelLen: Int, threads: Int): Int
+    internal external fun nativeAllowModelDigest(session: Long, digestBuffer: ByteBuffer): Int
+    internal external fun nativeClearModelAllowlist(session: Long): Int
     internal external fun nativeDisableSegmentation(session: Long)
+    internal external fun nativeSetSegmentationMask(session: Long, maskBuffer: ByteBuffer, maskLen: Int): Int
+    internal external fun nativeSetSegmentationClassMask(session: Long, channel: Int, maskBuffer: ByteBuffer, maskLen: Int): Int
+    internal external fun nativeSegmentationChannels(session: Long): Int
     internal external fun nativeSetFaceLandmarks(session: Long, pointsBuffer: ByteBuffer, pointCount: Int): Int
     internal external fun nativeSetBeautyLut(session: Long, slot: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeSetBeautyMakeupTexture(session: Long, effect: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
@@ -968,6 +981,46 @@ class GossSession private constructor(
 
     fun disableSegmentation() = Gosslens.nativeDisableSegmentation(handle)
 
+    /** Feeds a subject mask a host tracking module computed (MASK_SIDE squared
+     * floats, row major) as the subject texture the blend and mask channels
+     * sample; an empty array clears it. The producer path for an app that runs
+     * its own segmentation instead of the in-engine worker. */
+    fun setSegmentationMask(mask: FloatArray): Boolean {
+        if (mask.isEmpty()) return Gosslens.nativeSetSegmentationMask(handle, ByteBuffer.allocateDirect(0), 0) == 0
+        val buf = ByteBuffer.allocateDirect(mask.size * 4).order(java.nio.ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(mask)
+        return Gosslens.nativeSetSegmentationMask(handle, buf, mask.size) == 0
+    }
+
+    /** The class channels the active lens samples, as a bitmask over the mask
+     * channels (bit 0 person, bit 1 background, and so on). Upload exactly these
+     * each frame with setSegmentationClassMask; zero wants only the subject. */
+    fun segmentationChannels(): Int = Gosslens.nativeSegmentationChannels(handle)
+
+    /** Uploads one class channel's mask (MASK_SIDE squared floats) as the texture
+     * that channel's passes sample; channel 0 (person) rides setSegmentationMask,
+     * so upload the classes after it. An empty array clears one channel. */
+    fun setSegmentationClassMask(channel: Int, mask: FloatArray): Boolean {
+        if (mask.isEmpty()) return Gosslens.nativeSetSegmentationClassMask(handle, channel, ByteBuffer.allocateDirect(0), 0) == 0
+        val buf = ByteBuffer.allocateDirect(mask.size * 4).order(java.nio.ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(mask)
+        return Gosslens.nativeSetSegmentationClassMask(handle, channel, buf, mask.size) == 0
+    }
+
+    /** Allowlists a bring-your-own model by its 32-byte SHA-256 digest, so a net
+     * whose digest is not listed is refused when a tracker or segmenter is
+     * enabled. With none set, any model loads. Call before enabling the worker. */
+    fun allowModelDigest(digest: ByteArray): Boolean {
+        require(digest.size == 32) { "a model digest is 32 bytes" }
+        val buf = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder())
+        buf.put(digest)
+        buf.rewind()
+        return Gosslens.nativeAllowModelDigest(handle, buf) == 0
+    }
+
+    /** Clears the model allowlist; with none set, any model loads again. */
+    fun clearModelAllowlist(): Boolean = Gosslens.nativeClearModelAllowlist(handle) == 0
+
     /** Feeds one frame's tracked face landmarks in directly (x, y in frame
      * pixels, z in the same scale, three floats per point); an empty array
      * clears them. The web-only path for the landmark-driven beauty effects;
@@ -1061,6 +1114,14 @@ class GossSession private constructor(
         if (Gosslens.nativeFaceResultAt(handle, index, result.buffer) != 0) return false
         result.parse()
         return true
+    }
+
+    /** The stable track id of the index-th face, an integer that stays with the
+     * same person across frames as the submission order shuffles, or null once
+     * index reaches faceCount. */
+    fun faceTrackId(index: Int): Int? {
+        val id = Gosslens.nativeFaceTrackId(handle, index)
+        return if (id < 0) null else id
     }
 
     /** Submits the bodies tracked this frame for the multi-person path, so a
@@ -1278,6 +1339,16 @@ class GossSession private constructor(
         return if (Gosslens.nativeParameterValue(handle, nameBuf, nameBytes.size, outBuf) == 0) outBuf.getFloat(0) else null
     }
 
+    /** Raycasts a normalized screen point (0..1, origin top-left) against the
+     * tracked ground plane, returning the world hit position as [x, y, z], or
+     * null until world tracking is live and the ray meets the plane. A
+     * tap-to-place lens polls this and drops an anchor at the hit. */
+    fun hitTest(screenX: Float, screenY: Float): FloatArray? {
+        val outBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
+        return if (Gosslens.nativeHitTest(handle, screenX, screenY, outBuf) == 0)
+            floatArrayOf(outBuf.getFloat(0), outBuf.getFloat(4), outBuf.getFloat(8)) else null
+    }
+
     /** Pulls the next block of mixed lens audio into a direct [out] buffer
      * (frames interleaved s16) that play_sound triggers produced, for the app
      * to route to platform audio out. */
@@ -1395,6 +1466,21 @@ class GossSession private constructor(
         return Gosslens.nativeSetSourceComposite(handle, buf, n, opacity, keyMode, keyR, keyG, keyB, similarity) == 0
     }
 
+    /** Uploads a per-source matte for key mode 3 (red channel is the mask), so an
+     * opaque guest is keyed to a subject without a baked alpha. */
+    fun submitSourceMask(name: String, rgba: ByteBuffer, width: Int, height: Int): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeSubmitSourceMask(handle, buf, n, rgba, width, height) == 0
+    }
+
+    /** Runs the engine's own segmenter on a source's frames so its key mode 3 matte is computed
+     * on-device (a virtual background for a remote guest). The model is the selfie/hair net
+     * enableSegmentation takes; an empty model tears the source segmenter down. */
+    fun enableSourceSegmentation(name: String, model: ByteBuffer, threads: Int): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeEnableSourceSegmentation(handle, buf, n, model, model.remaining(), threads) == 0
+    }
+
     /** Defines a screen-share source whose frame letterboxes to fit its cell instead of stretching. */
     fun defineScreenShare(name: String): Boolean {
         val (buf, n) = nameBuf(name)
@@ -1423,12 +1509,45 @@ class GossSession private constructor(
         return Gosslens.nativeSetGeofencePolygon(handle, buffer, vertices.size) == 0
     }
 
+    /** Adds a named circular geofence, so a lens fires geo.in_region("name") for
+     * its own place among several; re-adding a name replaces its region. */
+    fun setNamedGeofence(name: String, latitude: Double, longitude: Double, radiusM: Double): Boolean {
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
+        buffer.put(bytes)
+        return Gosslens.nativeSetNamedGeofence(handle, buffer, bytes.size, latitude, longitude, radiusM) == 0
+    }
+
+    /** Adds a named polygon geofence (a ring of (lat, lon) pairs, three or more),
+     * the non-circular counterpart of setNamedGeofence; re-adding a name replaces it. */
+    fun setNamedGeofencePolygon(name: String, vertices: List<Pair<Double, Double>>): Boolean {
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        val nameBuf = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
+        nameBuf.put(bytes)
+        val coords = ByteBuffer.allocateDirect(vertices.size * 2 * 8).order(ByteOrder.nativeOrder())
+        val doubles = coords.asDoubleBuffer()
+        for (v in vertices) { doubles.put(v.first); doubles.put(v.second) }
+        return Gosslens.nativeSetNamedGeofencePolygon(handle, nameBuf, bytes.size, coords, vertices.size) == 0
+    }
+
+    /** Clears every named geofence; the default geofence is untouched. */
+    fun clearNamedGeofences(): Boolean = Gosslens.nativeClearNamedGeofences(handle) == 0
+
     /** Sets the worst fix accuracy (meters) that still counts as inside a region; zero clears the gate. */
     fun setGeoAccuracy(maxAccuracyM: Float): Boolean = Gosslens.nativeSetGeoAccuracy(handle, maxAccuracyM) == 0
 
     /** Sets the color and half-width (normalized units) the next stroke opens with. */
     fun setBrushStyle(r: Float, g: Float, b: Float, a: Float, width: Float): Boolean =
         Gosslens.nativeBrushSetStyle(handle, r, g, b, a, width) == 0
+
+    /** Uploads the RGBA sprite a stamp-mode stroke (brush mode 4) lays along its
+     * length, an emoji or icon the host rasterizes. [rgba] is width by height RGBA8. */
+    fun setBrushStamp(rgba: ByteArray, width: Int, height: Int): Boolean {
+        val buf = ByteBuffer.allocateDirect(rgba.size).order(ByteOrder.nativeOrder())
+        buf.put(rgba)
+        buf.rewind()
+        return Gosslens.nativeBrushSetStamp(handle, buf, width, height) == 0
+    }
 
     /** Opens a stroke in the current style. A fresh stroke drops the redo stack. */
     fun beginStroke(): Boolean = Gosslens.nativeBrushBegin(handle) == 0

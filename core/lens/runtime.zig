@@ -143,6 +143,9 @@ const effect_slot_count = 6;
 const LensNode = struct {
     graph_index: graph.NodeIndex,
     node_type: NodeType,
+    /// The lens-format node id, a slice into the retained manifest arena, so a
+    /// show/hide/swap_subgraph action can resolve its target to this draw node.
+    node_id: []const u8 = "",
     bindings: [effect_slot_count]?ParamSource = @splat(null),
     /// Set only for .shader_pass, .lut_pass, .blend_pass, and
     /// .model_gltf nodes: the node's own id, which also names the asset
@@ -156,6 +159,11 @@ const LensNode = struct {
     mask_channel: ?u8 = null,
     /// .model_gltf only: the node anchors to the tracked face.
     face_anchor: bool = false,
+    /// .model_gltf face anchor only: which tracked face to bind to, an index
+    /// into the submitted faces. -1 (the default) draws on every face; a
+    /// non-negative index draws only on that one, so a lens decorates two
+    /// faces differently.
+    face_index: i32 = -1,
     /// .model_gltf only: a face-anchored model retargets the tracked expression
     /// onto its morph targets (an avatar of the user's face).
     retarget: bool = false,
@@ -176,6 +184,12 @@ const LensNode = struct {
     /// value is that clip's blend weight; empty plays the first clip.
     /// Slices into the retained manifest arena, not separately owned.
     clip_weights: []const []const u8 = &.{},
+    /// .model_gltf only: a [start, end] sub-range in seconds the node splits
+    /// its clip into, looping within it; null plays the whole clip.
+    clip_range: ?[2]f32 = null,
+    /// .model_gltf only: a navigation path the model walks over time; null
+    /// holds the model at its authored transform. Slices the manifest arena.
+    path: ?manifest.PathField = null,
     /// .model_gltf only: a parameter name per morph target whose live
     /// value is that target's blend weight; empty leaves the mesh
     /// unmorphed. Slices into the retained manifest arena.
@@ -315,6 +329,7 @@ pub const ModelNode = struct {
     /// chain naming its anchor) resolve at draw setup.
     node_id: []const u8,
     face_anchor: bool = false,
+    face_index: i32 = -1,
     retarget: bool = false,
     talk: bool = false,
     body_anchor: bool = false,
@@ -457,6 +472,10 @@ pub const TextNode = struct {
     /// Extrude the glyphs into a rotated 3D block mesh of this depth; 0 keeps
     /// the flat sprite text.
     depth: f32,
+    /// Word-wrap the content to at most this many columns; 0 leaves it as is.
+    wrap: u32 = 0,
+    /// Bow the baseline along an arc (positive up, negative down); 0 is straight.
+    bend: f32 = 0,
 };
 
 pub const VideoNode = struct {
@@ -792,6 +811,12 @@ pub const Lens = struct {
     param_values: []f32,
     ramps: []?animation.Ramp,
     nodes: []LensNode,
+    /// Per-node draw visibility, parallel to nodes: a hide action sets a node's
+    /// slot true so the composite chain skips its draw (the frame passes through),
+    /// show clears it, and swap_subgraph shows its target while hiding the node the
+    /// previous swap made active. swap_active tracks that last-shown node.
+    node_hidden: []bool,
+    swap_active: ?graph.NodeIndex = null,
     /// Every distinct timer('name') this lens's triggers reference,
     /// each name individually owned (not a slice into a compiled
     /// trigger's own arena, so freeing timer_names never depends on
@@ -842,6 +867,7 @@ pub const Lens = struct {
         self.gpa.free(self.param_values);
         self.gpa.free(self.ramps);
         self.gpa.free(self.nodes);
+        self.gpa.free(self.node_hidden);
         for (self.timer_names) |name| self.gpa.free(name);
         self.gpa.free(self.timer_names);
         self.gpa.free(self.timer_elapsed_us);
@@ -1457,7 +1483,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .model_gltf) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .retarget = node.retarget, .talk = node.talk, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles, .control = node.control });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .face_index = node.face_index, .retarget = node.retarget, .talk = node.talk, .body_anchor = node.body_anchor, .skeleton_anchor = node.skeleton_anchor, .world_anchor = node.world_anchor, .physics = node.physics, .cloth = node.cloth, .balloon = node.balloon, .hair = node.hair, .particles = node.particles, .control = node.control });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1567,7 +1593,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .text_2d) continue;
             const tf = node.text orelse manifest.TextField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth, .wrap = tf.wrap, .bend = tf.bend });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1691,6 +1717,19 @@ pub const Lens = struct {
         return node.clip_weights.len > 0;
     }
 
+    /// The [start, end] sub-range a model.gltf node splits its clip into, or
+    /// null to play the whole timeline.
+    pub fn clipRange(self: *const Lens, graph_index: graph.NodeIndex) ?[2]f32 {
+        const node = self.findNode(graph_index) orelse return null;
+        return node.clip_range;
+    }
+
+    /// The navigation path a model.gltf node walks over time, or null to hold it.
+    pub fn navPath(self: *const Lens, graph_index: graph.NodeIndex) ?manifest.PathField {
+        const node = self.findNode(graph_index) orelse return null;
+        return node.path;
+    }
+
     /// The blend weight the model.gltf node at graph_index binds to its
     /// morph target at target_index: the bound parameter's live value, 0
     /// for a target past the bound list or when the node binds none.
@@ -1712,6 +1751,15 @@ pub const Lens = struct {
     pub fn scriptSource(self: *const Lens) ?[]const u8 {
         for (self.manifest.nodes) |node| {
             if (node.script) |src| return src;
+        }
+        return null;
+    }
+
+    /// The bundle-relative script asset a script node names instead of inlining
+    /// its source, so activation loads and compiles it from the bundle.
+    pub fn scriptFile(self: *const Lens) ?[]const u8 {
+        for (self.manifest.nodes) |node| {
+            if (node.script_file) |f| return f;
         }
         return null;
     }
@@ -1764,6 +1812,34 @@ pub const Lens = struct {
         return null;
     }
 
+    /// Whether a draw node is currently hidden by a hide or swap_subgraph action,
+    /// read by the composite chain to skip its draw.
+    pub fn isNodeHidden(self: *const Lens, graph_index: graph.NodeIndex) bool {
+        for (self.nodes, self.node_hidden) |node, hidden| {
+            if (node.graph_index == graph_index) return hidden;
+        }
+        return false;
+    }
+
+    fn setHiddenByName(self: *Lens, name: []const u8, hidden: bool) void {
+        for (self.nodes, self.node_hidden) |node, *slot| {
+            if (std.mem.eql(u8, node.node_id, name)) slot.* = hidden;
+        }
+    }
+
+    fn setHiddenByIndex(self: *Lens, graph_index: graph.NodeIndex, hidden: bool) void {
+        for (self.nodes, self.node_hidden) |node, *slot| {
+            if (node.graph_index == graph_index) slot.* = hidden;
+        }
+    }
+
+    fn nodeIndexByName(self: *const Lens, name: []const u8) ?graph.NodeIndex {
+        for (self.nodes) |node| {
+            if (std.mem.eql(u8, node.node_id, name)) return node.graph_index;
+        }
+        return null;
+    }
+
     fn collectNodeEffects(self: *const Lens, gpa: std.mem.Allocator, out: *std.ArrayList(AppliedEffect), node: LensNode) !void {
         for (node.bindings, 0..) |binding, i| {
             const source = binding orelse continue;
@@ -1800,6 +1876,10 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     defer gpa.free(param_names);
     for (lens_manifest.parameters, 0..) |p, i| param_names[i] = p.name;
 
+    const gesture_names = try gpa.alloc([]const u8, lens_manifest.gestures.len);
+    defer gpa.free(gesture_names);
+    for (lens_manifest.gestures, 0..) |gd, i| gesture_names[i] = gd.name;
+
     const compiled_triggers = try gpa.alloc(trigger.Expression, lens_manifest.triggers.len);
     errdefer gpa.free(compiled_triggers);
     var compiled_count: usize = 0;
@@ -1809,7 +1889,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         var diag_arena = std.heap.ArenaAllocator.init(gpa);
         defer diag_arena.deinit();
         var compile_err: ?trigger.CompileError = null;
-        const expr = trigger.compile(gpa, diag_arena.allocator(), lens_trigger.when_source, param_names, &compile_err) catch |err| switch (err) {
+        const expr = trigger.compile(gpa, diag_arena.allocator(), lens_trigger.when_source, param_names, gesture_names, &compile_err) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
         };
         compiled_triggers[compiled_count] = expr orelse return error.UnknownParameter;
@@ -1827,6 +1907,9 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         if (!isBehaviorNode(node.type)) composite_count += 1;
     }
     const nodes = try gpa.alloc(LensNode, composite_count);
+    const node_hidden = try gpa.alloc(bool, composite_count);
+    @memset(node_hidden, false);
+    errdefer gpa.free(node_hidden);
     errdefer gpa.free(nodes);
     var spliced_count: usize = 0;
     errdefer for (nodes[0..spliced_count]) |n| g.removeNode(n.graph_index);
@@ -1852,12 +1935,14 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         nodes[spliced_count] = .{
             .graph_index = graph_index,
             .node_type = node_type,
+            .node_id = node.id,
             .asset_stem = switch (node_type) {
                 .shader_pass, .lut_pass, .blend_pass, .env_pass, .model_gltf, .mesh_face, .paint_face, .face_swap, .sprite_2d => node.id,
                 else => null,
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
             .face_anchor = node_type == .model_gltf and node.face_anchor,
+            .face_index = node.face_index,
             .retarget = node_type == .model_gltf and node.retarget,
             .talk = node_type == .model_gltf and node.talk,
             .body_anchor = node_type == .model_gltf and node.body_anchor,
@@ -1870,6 +1955,8 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .particles = if (node_type == .model_gltf) node.particles else null,
             .control = if (node_type == .model_gltf) node.control else null,
             .clip_weights = if (node_type == .model_gltf) node.clip_weights else &.{},
+            .clip_range = if (node_type == .model_gltf) node.clip_range else null,
+            .path = if (node_type == .model_gltf) node.path else null,
             .morph_weights = if (node_type == .model_gltf) node.morph_weights else &.{},
             .sprite = if (node_type == .sprite_2d) node.sprite else null,
             .text = if (node_type == .text_2d) node.text else null,
@@ -2017,6 +2104,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .param_values = param_values,
         .ramps = ramps,
         .nodes = nodes,
+        .node_hidden = node_hidden,
         .timer_names = try timer_names.toOwnedSlice(gpa),
         .timer_elapsed_us = timer_elapsed_us,
         .tick_timer_values = tick_timer_values,
@@ -2057,6 +2145,8 @@ fn resolveLogicRef(specs: []const manifest.LogicNodeSpec, ref: []const u8, befor
 /// resolving node refs to indices, signal leaves through the trigger parser,
 /// and param leaves to parameter indices; all storage lives in arena.
 fn compileLogicGraphs(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, lens_manifest: manifest.Manifest, param_names: []const []const u8) error{OutOfMemory}![]CompiledLogicGraph {
+    const gesture_names = try arena.alloc([]const u8, lens_manifest.gestures.len);
+    for (lens_manifest.gestures, 0..) |gd, i| gesture_names[i] = gd.name;
     var out: std.ArrayList(CompiledLogicGraph) = .empty;
     for (lens_manifest.nodes) |node| {
         const spec = node.logic_graph orelse continue;
@@ -2072,7 +2162,7 @@ fn compileLogicGraphs(arena: std.mem.Allocator, diag_arena: std.mem.Allocator, l
             ln.constant = ns.constant;
             if (ln.op == .signal and ns.signal_source.len > 0) {
                 var err: ?trigger.CompileError = null;
-                if (try trigger.compileSignal(arena, diag_arena, ns.signal_source, param_names, &err)) |sig| ln.signal = sig;
+                if (try trigger.compileSignal(arena, diag_arena, ns.signal_source, param_names, gesture_names, &err)) |sig| ln.signal = sig;
             }
             if (ln.op == .param) {
                 for (param_names, 0..) |pn, pi| {
@@ -2181,9 +2271,9 @@ fn clampToParam(p: manifest.Parameter, value: f32) f32 {
 /// frame's trigger pass needs this frame's own elapsed time); ramps and
 /// model playback advance after, so an action that starts one this
 /// frame gets its first real advance now rather than sitting at its
-/// starting value until the next tick. show/hide/swap_subgraph are
-/// still not wired to anything (real remaining work, tracked
-/// separately from this lens's own scope).
+/// starting value until the next tick. show/hide toggle a draw node's
+/// visibility by id and swap_subgraph switches between mutually exclusive
+/// variants, all read by the composite chain to skip a hidden node's draw.
 pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const AppliedEffect {
     lens.elapsed_us +|= real_dt_us;
     for (lens.timer_elapsed_us) |*elapsed| elapsed.* += real_dt_us;
@@ -2302,7 +2392,16 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
                 lens.tick_haptic_count += 1;
             }
         },
-        .show, .hide, .swap_subgraph => {},
+        .show => lens.setHiddenByName(action.target, false),
+        .hide => lens.setHiddenByName(action.target, true),
+        .swap_subgraph => {
+            // Exclusive show: reveal the target and hide whichever node the last
+            // swap made active, so the action switches between mutually exclusive
+            // subgraph variants named by their draw-node ids.
+            if (lens.swap_active) |prev| lens.setHiddenByIndex(prev, true);
+            lens.setHiddenByName(action.target, false);
+            lens.swap_active = lens.nodeIndexByName(action.target);
+        },
     }
 }
 

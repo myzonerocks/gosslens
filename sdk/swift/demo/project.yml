@@ -23,6 +23,9 @@ targets:
       - path: ../../../.models/pose_landmarker_full.task
         buildPhase: resources
         optional: true
+      - path: ../../../.models/selfie_segmenter.tflite
+        buildPhase: resources
+        optional: true
       - path: ../../../.models/corpus/face_frontal_b.jpg
         buildPhase: resources
         optional: true
@@ -35,6 +38,10 @@ targets:
         buildPhase: resources
         optional: true
       - path: ../../../.lens-packages/shader-tint
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: ../../../.lens-packages/background-swap
         type: folder
         buildPhase: resources
         optional: true
