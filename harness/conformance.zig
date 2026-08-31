@@ -12774,7 +12774,94 @@ fn captureBodyWarpShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12
 /// background: a full-frame bulge moves the masked center but leaves a corner
 /// outside the mask byte-identical to the original frame, while an unmasked or
 /// fully-present-class warp matches the no-mask warp. Bit-stable across runs.
-fn proveBodyReshape(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+fn setPoseLm(body: *abi.PoseResult, i: usize, x: f32, y: f32) void {
+    body.landmarks[i * 3 + 0] = x;
+    body.landmarks[i * 3 + 1] = y;
+    body.landmarks[i * 3 + 2] = 0;
+    body.visibilities[i] = 1.0;
+    body.presences[i] = 1.0;
+}
+
+/// Proves the dedicated reshape.body node: a synthetic standing pose sculpts the
+/// figure along its shoulder-to-hip axis, so the rendered frame moves against a
+/// plain render, deterministically, while a body-less render leaves it be.
+fn proveReshapeBody(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const i = (row * @as(usize, width) + col) * 4;
+            frame_rgba[i + 0] = @intCast(col * 255 / (@as(usize, width) - 1));
+            frame_rgba[i + 1] = @intCast(row * 255 / (@as(usize, height) - 1));
+            frame_rgba[i + 2] = 128;
+            frame_rgba[i + 3] = 255;
+        }
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    var body = std.mem.zeroes(abi.PoseResult);
+    body.presence = 1.0;
+    body.landmark_count_out = 33;
+    body.timestamp_us = 1000;
+    setPoseLm(&body, 11, 0.40, 0.30);
+    setPoseLm(&body, 12, 0.60, 0.30);
+    setPoseLm(&body, 23, 0.43, 0.55);
+    setPoseLm(&body, 24, 0.57, 0.55);
+    setPoseLm(&body, 27, 0.45, 0.92);
+    setPoseLm(&body, 28, 0.55, 0.92);
+    setPoseLm(&body, 0, 0.50, 0.15);
+
+    const shot_len = @as(usize, width) * height * 4;
+    const captureOne = struct {
+        fn go(e: *abi.Engine, d: *const abi.FrameDesc, pl: anytype, b: []const abi.PoseResult, dir: ?[]const u8, out: []u8) !void {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            if (dir) |path| {
+                if (abi.goss_session_activate_lens_from_directory(session, path.ptr, path.len) != .ok) return error.ActivationFailed;
+            }
+            var ow: u32 = 0;
+            var oh: u32 = 0;
+            try renderSubmittedBodies(e, session, d, pl, b, out, &ow, &oh);
+        }
+    }.go;
+
+    const reshaped_a = try gpa.alloc(u8, shot_len);
+    defer gpa.free(reshaped_a);
+    try captureOne(engine, &desc, planes, &.{body}, "lenses/reference/reshape-body", reshaped_a);
+    const reshaped_b = try gpa.alloc(u8, shot_len);
+    defer gpa.free(reshaped_b);
+    try captureOne(engine, &desc, planes, &.{body}, "lenses/reference/reshape-body", reshaped_b);
+    if (!std.mem.eql(u8, reshaped_a, reshaped_b)) {
+        std.debug.print("conformance: FAIL reshape.body is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    // A render with no body submitted holds the frame (the readiness gate spares
+    // it), and stands as the identity the reshape moves against.
+    const plain = try gpa.alloc(u8, shot_len);
+    defer gpa.free(plain);
+    try captureOne(engine, &desc, planes, &.{}, "lenses/reference/reshape-body", plain);
+
+    var moved: usize = 0;
+    var i: usize = 0;
+    while (i < shot_len) : (i += 4) {
+        const dr = @abs(@as(i32, reshaped_a[i]) - @as(i32, plain[i]));
+        const dg = @abs(@as(i32, reshaped_a[i + 1]) - @as(i32, plain[i + 1]));
+        if (dr + dg > 12) moved += 1;
+    }
+    if (moved < 200) {
+        std.debug.print("conformance: FAIL reshape.body moved too few pixels ({d})\n", .{moved});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a reshape.body node sculpts the figure along its pose axis: a standing pose moves {d} pixels against a plain render, bit-stable, and a body-less render holds the frame\n", .{moved});
+    return true;
+}
+
+fn proveBodyReshapeMasked(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const cap_w: usize = 400;
     const cap_h: usize = 300;
     const corner: usize = 40;
@@ -19092,7 +19179,8 @@ pub fn main(init_args: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, only, "liquify-symmetry")) {
             if (!try proveLiquifySymmetry(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "body-reshape")) {
-            if (!try proveBodyReshape(gpa, engine)) return 1;
+            if (!try proveBodyReshapeMasked(gpa, engine)) return 1;
+            if (!try proveReshapeBody(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "reshape")) {
             if (!try proveReshapeBank(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "face-transform")) {
@@ -19509,8 +19597,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("warp");
     if (!try proveLiquifySymmetry(gpa, engine)) return 1;
     watchHold("liquify symmetry");
-    if (!try proveBodyReshape(gpa, engine)) return 1;
+    if (!try proveBodyReshapeMasked(gpa, engine)) return 1;
     watchHold("body reshape");
+    if (!try proveReshapeBody(gpa, engine)) return 1;
+    watchHold("reshape body node");
     if (!try proveReshapeBank(gpa, engine)) return 1;
     watchHold("reshape bank");
     if (!try proveFaceTransform(gpa, engine)) return 1;

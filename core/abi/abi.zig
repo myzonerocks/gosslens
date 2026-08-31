@@ -2278,9 +2278,16 @@ fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirro
 
 const body_point_count = render.body_reshape_points_vec4_count * 4;
 
+/// The body a reshape.body warp sculpts around: the first host-submitted body
+/// when any were submitted, otherwise the tracked pose. Null when neither holds.
+fn currentBody(s: *Session) ?pose.Result {
+    if (s.body_count > 0) return s.body_results[0];
+    return currentPose(s);
+}
+
 /// Whether a reshape.body node has a body to sculpt this frame.
 fn bodyPoseReady(s: *Session) bool {
-    return currentPose(s) != null;
+    return currentBody(s) != null;
 }
 
 /// Fills the six pose anchors a reshape.body warp needs - the two shoulders, the
@@ -2288,7 +2295,7 @@ fn bodyPoseReady(s: *Session) bool {
 /// the preview's mirror-and-rotation space so the sculpt lands where the frame
 /// draws. False when no body holds, the same hold-through degradation as the face.
 fn fillBodyPose(s: *Session, rotation: u32, mirror: bool, points: *[body_point_count]f32) bool {
-    const result = currentPose(s) orelse return false;
+    const result = currentBody(s) orelse return false;
     const lm = &result.landmarks;
     const at = struct {
         fn p(l: *const [pose.landmark_count * 3]f32, i: usize, rot: u32, mir: bool) [2]f32 {

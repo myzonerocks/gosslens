@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "display_name": "Reshape Body",
   "engine_compat": ">=0.5",
-  "capabilities": ["pose"],
+  "capabilities": [],
   "parameters": [],
   "nodes": [
     {"id": "sculpt", "type": "reshape.body", "inputs": {"frame": "camera"}, "params": {},
