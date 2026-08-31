@@ -42,6 +42,8 @@ pub const SignalKind = enum {
     hand_pinch,
     body_present,
     foot_present,
+    pet_present,
+    pet_expression,
     bone_angle,
     body_jump,
     body_wave,
@@ -61,8 +63,8 @@ pub const SignalKind = enum {
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .voice_command, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .foot_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
-        .face_blendshape, .world_tracking_state, .audio_level, .audio_beat_count, .flash_risk, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .voice_command, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .foot_present, .pet_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
+        .face_blendshape, .world_tracking_state, .audio_level, .audio_beat_count, .flash_risk, .pet_expression, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
     };
 }
 
@@ -200,6 +202,11 @@ pub const Signals = struct {
     /// True while a foot is tracked, engine-fed at tick from the pose worker's
     /// ankle and foot landmark visibility, so a lens reacts to feet in frame.
     foot_present: bool = false,
+    /// True while a pet is tracked and the pet's expression strength (0..1),
+    /// engine-fed at tick from a bring-your-own pet model's ml.infer outputs
+    /// (the reserved `pet_present`/`pet_expression` parameters).
+    pet_present: bool = false,
+    pet_expression: f64 = 0,
     /// Each tracked bone's current bend angle in radians, engine-fed at tick
     /// from the pose landmarks, or null with no body. A lens compares one by
     /// name (`body.bone_angle('left_elbow') < 1.5`).
@@ -299,6 +306,7 @@ fn readBool(s: Signal, signals: Signals) bool {
         .hand_pinch => signals.hand_pinch,
         .body_present => signals.body_present,
         .foot_present => signals.foot_present,
+        .pet_present => signals.pet_present,
         .body_jump => signals.body_jump,
         .body_wave => signals.body_wave,
         .body_dance => signals.body_dance,
@@ -317,6 +325,7 @@ fn readNumber(s: Signal, signals: Signals) f64 {
         .audio_level => signals.audio_level,
         .audio_beat_count => signals.audio_beat_count,
         .flash_risk => signals.flash_risk,
+        .pet_expression => signals.pet_expression,
         .timer => blk: {
             for (signals.timers) |tv| {
                 if (std.mem.eql(u8, tv.name, s.timer_name)) break :blk tv.seconds;
@@ -788,6 +797,12 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "foot") and std.mem.eql(u8, tail, "present")) {
             return .{ .kind = .foot_present };
         }
+        if (std.mem.eql(u8, head, "pet") and std.mem.eql(u8, tail, "present")) {
+            return .{ .kind = .pet_present };
+        }
+        if (std.mem.eql(u8, head, "pet") and std.mem.eql(u8, tail, "expression")) {
+            return .{ .kind = .pet_expression };
+        }
         if (std.mem.eql(u8, head, "body") and std.mem.eql(u8, tail, "bone_angle")) {
             const name = try self.parseCall();
             const index = pose.boneIndex(name) orelse {
@@ -1039,6 +1054,18 @@ test "foot.present reads the fed foot presence" {
     defer expr.deinit();
     try t.expect(!evaluate(expr.root, .{}));
     try t.expect(evaluate(expr.root, .{ .foot_present = true }));
+}
+
+test "pet.present and pet.expression read the fed pet signals" {
+    var present = try compileOk("pet.present");
+    defer present.deinit();
+    try t.expect(!evaluate(present.root, .{}));
+    try t.expect(evaluate(present.root, .{ .pet_present = true }));
+
+    var happy = try compileOk("pet.expression > 0.6");
+    defer happy.deinit();
+    try t.expect(!evaluate(happy.root, .{ .pet_expression = 0.3 }));
+    try t.expect(evaluate(happy.root, .{ .pet_expression = 0.8 }));
 }
 
 test "touch double tap and long press read the fed edges" {

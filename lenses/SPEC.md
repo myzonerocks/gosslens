@@ -1370,7 +1370,11 @@ onset hops), `audio.beat_count` (a monotonic count of onsets, for syncing to a
   completes), `body.dance` (true while rhythmic whole-body motion lasts),
   `foot.present` (true while an ankle or foot landmark stays visible, so a shoe
   try-on lens reacts to feet in frame; a foot/ankle skeleton anchor places the
-  content),
+  content), `pet.present` (true while a pet is tracked) and `pet.expression` (the
+  pet's expression strength 0..1), both fed from a bring-your-own pet model in an
+  ml.infer node that writes the reserved `pet_present` and `pet_expression`
+  parameters - any OSS, commercial, or custom pet model plugs in and its
+  keypoints drive placement through the ml.infer parameter bindings,
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `device.in_volume` (true while the
   tracked device is inside the lens's `volume` region, see below),

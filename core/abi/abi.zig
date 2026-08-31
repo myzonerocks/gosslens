@@ -15115,6 +15115,13 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     // Each model's latest inference lands in its bound parameters first, so a
     // script may read or override it and the effects see this tick's result.
     pollMlOutputs(s);
+    // A bring-your-own pet model's ml.infer node writes the reserved
+    // pet_present/pet_expression parameters; surface them as first-class pet
+    // signals so a lens reacts to a pet in frame and its expression.
+    if (s.active_lens) |*lens| {
+        if (lens.paramValue("pet_present")) |v| live_signals.pet_present = v >= 0.5;
+        if (lens.paramValue("pet_expression")) |v| live_signals.pet_expression = v;
+    }
     pollAudioInfer(s);
     // The script drives parameters before triggers and ramps read them, so
     // its writes flow into this tick's effects.
