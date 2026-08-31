@@ -8390,6 +8390,51 @@ fn proveMediaLibrary(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves world-mesh anchoring through the ABI: a host submits a pre-scanned
+/// floor mesh, a world-space ray meets it at the surface, a ray that clears it
+/// reports none, and clearing the mesh drops the hit. The geospatial section's
+/// pre-scanned landmark-anchoring proof - pure geometry, no model.
+fn proveWorldMeshAnchor(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    // A floor quad at y=0 spanning x,z in [-2,2], two triangles.
+    const verts = [_]f32{ -2, 0, -2, 2, 0, -2, 2, 0, 2, -2, 0, 2 };
+    const idx = [_]u32{ 0, 1, 2, 0, 2, 3 };
+    if (abi.goss_session_submit_world_mesh(session, &verts, 4, &idx, 6) != .ok) {
+        std.debug.print("conformance: FAIL world mesh submission\n", .{});
+        return false;
+    }
+    // A ray straight down from above the floor meets it at y=0, three units down.
+    const origin = [3]f32{ 0.5, 3, 0.5 };
+    const down = [3]f32{ 0, -1, 0 };
+    var point: [3]f32 = undefined;
+    var dist: f32 = 0;
+    if (abi.goss_session_raycast_world_mesh(session, &origin, &down, &point, &dist) != .ok) {
+        std.debug.print("conformance: FAIL world mesh raycast missed the floor\n", .{});
+        return false;
+    }
+    if (@abs(point[1]) > 1e-4 or @abs(dist - 3) > 1e-4) {
+        std.debug.print("conformance: FAIL world mesh hit at the wrong point y={d} dist={d}\n", .{ point[1], dist });
+        return false;
+    }
+    // A ray that clears the quad reports none rather than a false hit.
+    const off = [3]f32{ 9, 3, 9 };
+    if (abi.goss_session_raycast_world_mesh(session, &off, &down, &point, &dist) == .ok) {
+        std.debug.print("conformance: FAIL world mesh hallucinated a hit off the mesh\n", .{});
+        return false;
+    }
+    // Clearing the mesh makes the same on-surface ray report none.
+    _ = abi.goss_session_submit_world_mesh(session, null, 0, null, 0);
+    if (abi.goss_session_raycast_world_mesh(session, &origin, &down, &point, &dist) == .ok) {
+        std.debug.print("conformance: FAIL world mesh raycast hit after the mesh was cleared\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a world-space ray meets the submitted scanned mesh at the surface, misses off it, and clears\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -20190,6 +20235,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveProvenance(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "media-library")) {
             if (!try proveMediaLibrary(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "world-mesh-anchor")) {
+            if (!try proveWorldMeshAnchor(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -20552,6 +20599,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("provenance");
     if (!try proveMediaLibrary(gpa, engine)) return 1;
     watchHold("media library");
+    if (!try proveWorldMeshAnchor(gpa, engine)) return 1;
+    watchHold("world mesh anchor");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveScriptFile(gpa, engine)) return 1;

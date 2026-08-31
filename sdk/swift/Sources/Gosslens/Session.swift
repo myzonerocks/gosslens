@@ -169,6 +169,31 @@ public final class GossSession: @unchecked Sendable {
         return ok ? out : nil
     }
 
+    /// Submits the device's pre-scanned world mesh (scene reconstruction, a VPS
+    /// scan) in world space: `vertices` are xyz triples and `indices` name three
+    /// vertices per triangle. Passing empty arrays clears the stored mesh.
+    public func submitWorldMesh(vertices: [Float], indices: [UInt32]) {
+        _ = goss_session_submit_world_mesh(handle, vertices, vertices.count / 3, indices, indices.count)
+    }
+
+    /// Casts a world-space ray against the submitted world mesh, returning the
+    /// nearest surface hit position and its ray distance, or nil when no mesh is
+    /// submitted or the ray misses. A tap-to-place lens anchors content there.
+    public func raycastWorldMesh(origin: SIMD3<Float>, direction: SIMD3<Float>) -> (point: SIMD3<Float>, distance: Float)? {
+        var o = origin
+        var d = direction
+        var point = SIMD3<Float>(0, 0, 0)
+        var distance: Float = 0
+        let ok = withUnsafePointer(to: &o) { op in op.withMemoryRebound(to: Float.self, capacity: 3) { ofp in
+            withUnsafePointer(to: &d) { dp in dp.withMemoryRebound(to: Float.self, capacity: 3) { dfp in
+                withUnsafeMutablePointer(to: &point) { pp in pp.withMemoryRebound(to: Float.self, capacity: 3) { pfp in
+                    goss_session_raycast_world_mesh(handle, ofp, dfp, pfp, &distance) == GOSS_OK
+                } }
+            } }
+        } }
+        return ok ? (point, distance) : nil
+    }
+
     /// The stable track id of the index-th face, an integer that stays with the
     /// same person across frames as the submission order shuffles, or nil once
     /// index reaches the face count.

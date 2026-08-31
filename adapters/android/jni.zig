@@ -1048,6 +1048,25 @@ export fn Java_com_gosslens_Gosslens_nativeHitTest(env: *JniEnv, cls: jobject, s
     return @intFromEnum(abi.goss_session_hit_test(sessionFromHandle(session), screen_x, screen_y, out));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitWorldMesh(env: *JniEnv, cls: jobject, session: i64, vertices_buffer: jobject, vertex_count: i32, indices_buffer: jobject, index_count: i32) i32 {
+    _ = cls;
+    const vertices: ?[*]const f32 = if (getDirectBufferAddress(env, vertices_buffer)) |v| @ptrCast(@alignCast(v)) else null;
+    const indices: ?[*]const u32 = if (getDirectBufferAddress(env, indices_buffer)) |i| @ptrCast(@alignCast(i)) else null;
+    return @intFromEnum(abi.goss_session_submit_world_mesh(sessionFromHandle(session), vertices, @intCast(@max(vertex_count, 0)), indices, @intCast(@max(index_count, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeRaycastWorldMesh(env: *JniEnv, cls: jobject, session: i64, origin_buffer: jobject, direction_buffer: jobject, point_buffer: jobject, distance_buffer: jobject) i32 {
+    _ = cls;
+    const origin_bytes = getDirectBufferAddress(env, origin_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const direction_bytes = getDirectBufferAddress(env, direction_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const point_bytes = getDirectBufferAddress(env, point_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const origin: *const [3]f32 = @ptrCast(@alignCast(origin_bytes));
+    const direction: *const [3]f32 = @ptrCast(@alignCast(direction_bytes));
+    const point: *[3]f32 = @ptrCast(@alignCast(point_bytes));
+    const distance: ?*f32 = if (getDirectBufferAddress(env, distance_buffer)) |d| @ptrCast(@alignCast(d)) else null;
+    return @intFromEnum(abi.goss_session_raycast_world_mesh(sessionFromHandle(session), origin, direction, point, distance));
+}
+
 export fn Java_com_gosslens_Gosslens_nativePullAudio(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, frames: i32) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

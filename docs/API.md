@@ -187,6 +187,8 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_submit_audio` | `submitAudio(session, samples, frameCount, sampleRate, channels, timestampUs)`, feeding level and beat triggers always and the recording's audio track where the backend muxes audio | Swift and Kotlin |
 | `goss_session_submit_world` | `submitWorld(session, state, planes, anchors, light)`, feeding the tracking-state trigger and world-anchored content | Swift GossWorldSource on ARKit, the ARCore demo feeder, and the web SDK's GossWebXRWorldSource |
 | `goss_session_hit_test` | `hitTest(session, screenX, screenY)` raycasts a normalized screen point onto the tracked ground plane, returning the world hit position or null until tracking is live and the ray meets the plane | Swift `Session.hitTest`, Kotlin `hitTest`, TS `hitTest` |
+| `goss_session_submit_world_mesh` | `submitWorldMesh(vertices, indices)` submits the device's pre-scanned world mesh (scene reconstruction, a VPS scan) in world space as xyz triples and per-triangle indices; empty clears it | all SDKs |
+| `goss_session_raycast_world_mesh` | `raycastWorldMesh(origin, direction) -> (point, distance)?` casts a world-space ray against the submitted mesh, returning the nearest surface hit or null when no mesh is submitted or the ray misses, so a tap-to-place lens anchors content on scanned geometry | all SDKs |
 
 ### GossSession lifecycle
 

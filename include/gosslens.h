@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 93u
+#define GOSS_ABI_MINOR 95u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -373,6 +373,18 @@ typedef struct goss_capture_guidance {
  * estimate, once per platform frame. Drives the world.tracking_state
  * trigger signal and world-anchored lens content. */
 goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light);
+
+/* Submits the device's pre-scanned world mesh (ARKit/ARCore reconstruction, a
+ * VPS scan) in world space: vertex_count xyz triples and index_count indices,
+ * three per triangle. The engine copies it, and a ray meets it through
+ * goss_session_raycast_world_mesh. An empty submission clears the stored mesh. */
+goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count);
+
+/* Casts a world-space ray (origin and direction) against the submitted world
+ * mesh and writes the nearest surface hit into out_point with its ray distance
+ * into out_distance. GOSS_AGAIN when no mesh is submitted or the ray misses, so
+ * a tap-to-place lens anchors content where the ray meets the scanned geometry. */
+goss_status goss_session_raycast_world_mesh(goss_session *session, const float *origin, const float *direction, float *out_point, float *out_distance);
 
 /* Raycasts a normalized screen point (0..1, origin top-left) against the
  * tracked ground plane and writes the world hit position into out_position

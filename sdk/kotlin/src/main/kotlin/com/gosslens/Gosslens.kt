@@ -139,6 +139,8 @@ object Gosslens {
     internal external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
     internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeHitTest(session: Long, screenX: Float, screenY: Float, outBuffer: ByteBuffer): Int
+    internal external fun nativeSubmitWorldMesh(session: Long, verticesBuffer: ByteBuffer, vertexCount: Int, indicesBuffer: ByteBuffer, indexCount: Int): Int
+    internal external fun nativeRaycastWorldMesh(session: Long, originBuffer: ByteBuffer, directionBuffer: ByteBuffer, pointBuffer: ByteBuffer, distanceBuffer: ByteBuffer): Int
     internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
@@ -1586,6 +1588,35 @@ class GossSession private constructor(
         val outBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
         return if (Gosslens.nativeHitTest(handle, screenX, screenY, outBuf) == 0)
             floatArrayOf(outBuf.getFloat(0), outBuf.getFloat(4), outBuf.getFloat(8)) else null
+    }
+
+    /** One world-mesh raycast hit: the world-space [point] and the ray
+     * [distance] to it. */
+    data class WorldMeshHit(val point: FloatArray, val distance: Float)
+
+    /** Submits the device's pre-scanned world mesh (scene reconstruction, a VPS
+     * scan) in world space: [vertices] are xyz triples and [indices] name three
+     * vertices per triangle. Passing empty arrays clears the stored mesh. */
+    fun submitWorldMesh(vertices: FloatArray, indices: IntArray) {
+        val vBuf = ByteBuffer.allocateDirect(maxOf(vertices.size, 1) * 4).order(ByteOrder.nativeOrder())
+        vBuf.asFloatBuffer().put(vertices)
+        val iBuf = ByteBuffer.allocateDirect(maxOf(indices.size, 1) * 4).order(ByteOrder.nativeOrder())
+        iBuf.asIntBuffer().put(indices)
+        Gosslens.nativeSubmitWorldMesh(handle, vBuf, vertices.size / 3, iBuf, indices.size)
+    }
+
+    /** Casts a world-space ray against the submitted world mesh, returning the
+     * nearest surface hit and its ray distance, or null when no mesh is
+     * submitted or the ray misses. A tap-to-place lens anchors content there. */
+    fun raycastWorldMesh(origin: FloatArray, direction: FloatArray): WorldMeshHit? {
+        val oBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
+        oBuf.asFloatBuffer().put(origin)
+        val dBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
+        dBuf.asFloatBuffer().put(direction)
+        val pBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
+        val distBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeRaycastWorldMesh(handle, oBuf, dBuf, pBuf, distBuf) != 0) return null
+        return WorldMeshHit(floatArrayOf(pBuf.getFloat(0), pBuf.getFloat(4), pBuf.getFloat(8)), distBuf.getFloat(0))
     }
 
     /** Pulls the next block of mixed lens audio into a direct [out] buffer

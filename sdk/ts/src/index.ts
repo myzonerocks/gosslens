@@ -1221,6 +1221,43 @@ export class GossSession {
     return hit;
   }
 
+  /// Submits the device's pre-scanned world mesh (scene reconstruction, a VPS
+  /// scan) in world space: vertices are xyz triples and indices name three
+  /// vertices per triangle. Passing empty arrays clears the stored mesh.
+  submitWorldMesh(vertices: Float32Array, indices: Uint32Array): void {
+    const vPtr = this.mod.ccall("goss_alloc", "number", ["number"], [vertices.length * 4 || 4]) as number;
+    this.mod.HEAPF32.set(vertices, vPtr / 4);
+    const iPtr = this.mod.ccall("goss_alloc", "number", ["number"], [indices.length * 4 || 4]) as number;
+    this.mod.HEAPU32.set(indices, iPtr / 4);
+    const args = ["number", "number", "number", "number", "number"];
+    this.mod.ccall("goss_session_submit_world_mesh", "number", args, [this.handle, vPtr, vertices.length / 3, iPtr, indices.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [vPtr, vertices.length * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [iPtr, indices.length * 4 || 4]);
+  }
+
+  /// Casts a world-space ray against the submitted world mesh, returning the
+  /// nearest surface hit `{ point, distance }`, or null when no mesh is
+  /// submitted or the ray misses. A tap-to-place lens anchors content there.
+  raycastWorldMesh(origin: [number, number, number], direction: [number, number, number]): { point: [number, number, number]; distance: number } | null {
+    const oPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    this.mod.HEAPF32.set(origin, oPtr / 4);
+    const dPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    this.mod.HEAPF32.set(direction, dPtr / 4);
+    const pPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const distPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const args = ["number", "number", "number", "number", "number"];
+    const status = this.mod.ccall("goss_session_raycast_world_mesh", "number", args, [this.handle, oPtr, dPtr, pPtr, distPtr]) as number;
+    const pw = pPtr >> 2;
+    const result = status === 0
+      ? { point: [this.mod.HEAPF32[pw]!, this.mod.HEAPF32[pw + 1]!, this.mod.HEAPF32[pw + 2]!] as [number, number, number], distance: this.mod.HEAPF32[distPtr >> 2]! }
+      : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [oPtr, 12]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [dPtr, 12]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [pPtr, 12]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [distPtr, 4]);
+    return result;
+  }
+
   /// Feeds interleaved f32 PCM into the session's own level and beat
   /// analysis, which drives the audio.level and audio.beat lens triggers.
   /// samples holds frameCount * channels floats; timestampUs is carried for a

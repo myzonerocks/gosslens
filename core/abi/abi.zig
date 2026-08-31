@@ -37,6 +37,7 @@ const formant = @import("formant");
 const fingerprint = @import("fingerprint");
 const comp = @import("layout");
 const geo = @import("geo");
+const world_mesh = @import("world_mesh");
 const font = @import("font");
 const stroke = @import("stroke");
 const wboard = @import("world_board");
@@ -138,6 +139,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_recording_stop(goss_engine *engine)",
     "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
     "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
+    "goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count)",
+    "goss_status goss_session_raycast_world_mesh(goss_session *session, const float *origin, const float *direction, float *out_point, float *out_distance)",
     "goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position)",
     "goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)",
@@ -496,6 +499,10 @@ const WorldStore = struct {
     light: WorldLight = .{ .ambient_intensity = 0, .color_temperature_kelvin = 0 },
     dropped_planes: u32 = 0,
     dropped_anchors: u32 = 0,
+    // A host-submitted world mesh in world space (device scene reconstruction),
+    // owned by the session allocator, for raycast anchoring onto scanned surfaces.
+    mesh_vertices: []const [3]f32 = &.{},
+    mesh_indices: []const u32 = &.{},
 };
 
 const identity16 = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -5021,6 +5028,8 @@ pub fn destroySession(session: *Session) void {
     session.model_body_anchors.deinit(session.engine.gpa);
     session.model_skeleton_anchors.deinit(session.engine.gpa);
     session.model_world_anchors.deinit(session.engine.gpa);
+    if (session.world.mesh_vertices.len > 0) session.engine.gpa.free(session.world.mesh_vertices);
+    if (session.world.mesh_indices.len > 0) session.engine.gpa.free(session.world.mesh_indices);
     if (session.physics_world) |world| world.destroy();
     session.physics_bodies.deinit(session.engine.gpa);
     session.pending_glb_colliders.deinit(session.engine.gpa);
@@ -5854,6 +5863,48 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
     s.world.dropped_anchors +|= @intCast(anchor_count -| max_world_anchors);
     if (light) |l| s.world.light = l.*;
     s.world_engine_fed = true;
+    return .ok;
+}
+
+/// Submits the device's pre-scanned world mesh (ARKit/ARCore reconstruction, a
+/// VPS scan) in world space: vertex_count xyz triples and index_count indices,
+/// three per triangle. The engine copies it, and a ray meets it through
+/// goss_session_raycast_world_mesh. An empty submission clears the stored mesh.
+pub export fn goss_session_submit_world_mesh(session: ?*Session, vertices: ?[*]const f32, vertex_count: usize, indices: ?[*]const u32, index_count: usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (index_count % 3 != 0) return .invalid_argument;
+    if (s.world.mesh_vertices.len > 0) s.engine.gpa.free(s.world.mesh_vertices);
+    if (s.world.mesh_indices.len > 0) s.engine.gpa.free(s.world.mesh_indices);
+    s.world.mesh_vertices = &.{};
+    s.world.mesh_indices = &.{};
+    if (vertex_count == 0 or index_count == 0) return .ok;
+    const v = vertices orelse return .invalid_argument;
+    const idx = indices orelse return .invalid_argument;
+    const verts = s.engine.gpa.alloc([3]f32, vertex_count) catch return .out_of_memory;
+    for (0..vertex_count) |i| verts[i] = .{ v[i * 3], v[i * 3 + 1], v[i * 3 + 2] };
+    const inds = s.engine.gpa.alloc(u32, index_count) catch {
+        s.engine.gpa.free(verts);
+        return .out_of_memory;
+    };
+    @memcpy(inds, idx[0..index_count]);
+    s.world.mesh_vertices = verts;
+    s.world.mesh_indices = inds;
+    return .ok;
+}
+
+/// Casts a world-space ray (origin and direction) against the submitted world
+/// mesh and writes the nearest surface hit into out_point with its ray distance
+/// into out_distance. `.again` when no mesh is submitted or the ray misses, so a
+/// tap-to-place lens anchors content where the ray meets the scanned geometry.
+pub export fn goss_session_raycast_world_mesh(session: ?*Session, origin: ?*const [3]f32, direction: ?*const [3]f32, out_point: ?*[3]f32, out_distance: ?*f32) Status {
+    const s = session orelse return .invalid_argument;
+    const o = origin orelse return .invalid_argument;
+    const d = direction orelse return .invalid_argument;
+    const point_out = out_point orelse return .invalid_argument;
+    if (s.world.mesh_vertices.len == 0) return .again;
+    const hit = world_mesh.raycast(s.world.mesh_vertices, s.world.mesh_indices, o.*, d.*) orelse return .again;
+    point_out.* = hit.point;
+    if (out_distance) |dist| dist.* = hit.distance;
     return .ok;
 }
 
