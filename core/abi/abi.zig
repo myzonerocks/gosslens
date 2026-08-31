@@ -4044,7 +4044,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (anim.loaded != anim.frames) continue;
                     const active_us = if (s.active_lens) |*lens| lens.elapsedUs() else 0;
                     const frame_idx: u64 = @intFromFloat(@as(f64, @floatFromInt(active_us)) / 1_000_000.0 * @as(f64, anim.fps));
-                    sprite_texture = anim.textures[@intCast(frame_idx % anim.frames)];
+                    sprite_texture = anim.textures[anim.frameAt(frame_idx)];
                 } else if (s.sprite_cutouts.get(entry.graph_index)) |co| {
                     // A cutout sprite lifts the live subject keyed by its channel
                     // (or the whole frame, on the ones mask) into a transparent
@@ -10759,6 +10759,23 @@ const SpriteAnim = struct {
     loaders: []?*asset.ImageLoader,
     textures: []render.TextureHandle,
     loaded: u32 = 0,
+    play: manifest.SpritePlay = .loop,
+
+    /// The frame to show at step n under the play mode: forward loops, reverse
+    /// counts down, boomerang ping-pongs forward then back over a 2(N-1) period.
+    fn frameAt(self: SpriteAnim, n: u64) u32 {
+        const count = self.frames;
+        if (count <= 1) return 0;
+        return switch (self.play) {
+            .loop => @intCast(n % count),
+            .reverse => @intCast(count - 1 - (n % count)),
+            .boomerang => blk: {
+                const period: u64 = @as(u64, count - 1) * 2;
+                const p = n % period;
+                break :blk if (p < count) @intCast(p) else @intCast(period - p);
+            },
+        };
+    }
 };
 
 /// A video.texture node's live playback: the streaming decoder, the
@@ -10833,7 +10850,7 @@ fn tryStartGifSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []c
     const avg_cs: f32 = @as(f32, @floatFromInt(total_cs)) / @as(f32, @floatFromInt(n));
     const fps: f32 = if (avg_cs > 0) 100.0 / avg_cs else 12.0;
 
-    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = fps, .loaders = loaders, .textures = textures, .loaded = n }) catch {
+    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = fps, .loaders = loaders, .textures = textures, .loaded = n, .play = sprite.play }) catch {
         if (session.engine.renderer) |*r| for (textures) |tex| r.destroyTexture(tex);
         gpa.free(loaders);
         gpa.free(textures);
@@ -11162,7 +11179,7 @@ fn startSpriteAnim(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
         defer gpa.free(path);
         loaders[i] = asset.ImageLoader.start(gpa, path) catch null;
     }
-    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = sprite.fps, .loaders = loaders, .textures = textures }) catch {
+    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = sprite.fps, .loaders = loaders, .textures = textures, .play = sprite.play }) catch {
         for (loaders) |maybe| if (maybe) |l| l.deinit();
         gpa.free(loaders);
         gpa.free(textures);
@@ -15089,6 +15106,16 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
 }
 
 const t = std.testing;
+
+test "sprite retiming plays frames forward, backward, and boomerang" {
+    const fwd = SpriteAnim{ .frames = 4, .fps = 12, .loaders = &.{}, .textures = &.{}, .play = .loop };
+    for ([_]u32{ 0, 1, 2, 3, 0, 1 }, 0..) |want, n| try t.expectEqual(want, fwd.frameAt(n));
+    const rev = SpriteAnim{ .frames = 4, .fps = 12, .loaders = &.{}, .textures = &.{}, .play = .reverse };
+    for ([_]u32{ 3, 2, 1, 0, 3, 2 }, 0..) |want, n| try t.expectEqual(want, rev.frameAt(n));
+    // Boomerang over 4 frames ping-pongs on a period of 6: 0 1 2 3 2 1 | 0 1 ...
+    const boom = SpriteAnim{ .frames = 4, .fps = 12, .loaders = &.{}, .textures = &.{}, .play = .boomerang };
+    for ([_]u32{ 0, 1, 2, 3, 2, 1, 0, 1 }, 0..) |want, n| try t.expectEqual(want, boom.frameAt(n));
+}
 
 test "face track ids follow position across a submission-order swap" {
     const threshold2: f32 = 0.25 * 0.25;

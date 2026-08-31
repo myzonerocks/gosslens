@@ -888,7 +888,10 @@ the sprite at its screen rect, and the sprite falls back to that rect when no
 face is tracked.
 A `"frames"` count above one makes the sprite animated: it loads
 `assets/<id>_0.png` through `assets/<id>_(frames-1).png` and cycles them at
-`"fps"` off the lens clock. Shipping the image as an animated GIF at
+`"fps"` off the lens clock. A `"play"` retimes the cycle: `"loop"` (the default)
+runs forward, `"reverse"` runs backward, and `"boomerang"` ping-pongs forward
+then back, so `fps` sets the speed and `play` the slow-mo/reverse/boomerang edit.
+Shipping the image as an animated GIF at
 `assets/<id>.gif` instead plays the clip as a video texture: the engine
 decodes its frames and cycles them at the clip's own frame timing, so a
 sticker animates without a param or a frame count. Until its image decodes

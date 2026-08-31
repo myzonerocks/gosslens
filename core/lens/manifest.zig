@@ -849,6 +849,10 @@ pub const SpriteField = struct {
     /// unbounded number of textures.
     frames: u32 = 1,
     fps: f32 = 12.0,
+    /// How an animated sprite retimes its frames: `loop` cycles forward,
+    /// `reverse` cycles backward, and `boomerang` ping-pongs forward then back -
+    /// the slow-mo/reverse/boomerang edit; `fps` sets the speed.
+    play: SpritePlay = .loop,
     /// A segmentation channel that keys the sprite full-frame against the region
     /// it names. Null draws the sprite over the frame at its rect as usual.
     mask_channel: ?u8 = null,
@@ -877,6 +881,10 @@ pub const SpriteField = struct {
 };
 
 pub const SpriteMaskMode = enum { behind, over };
+
+/// How an animated sprite retimes its frames: forward loop, backward, or a
+/// forward-then-back ping-pong (boomerang).
+pub const SpritePlay = enum { loop, reverse, boomerang };
 
 pub const max_sprite_frames = 64;
 
@@ -3234,6 +3242,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     } else try diags.add(path.slice(), "sprite frames must be an integer 1..{d}", .{max_sprite_frames});
                 }
                 if (getField(sv.object, "fps")) |v| field.fps = @floatCast(numberOf(v) orelse field.fps);
+                if (getField(sv.object, "play")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.mem.eql(u8, name, "loop")) field.play = .loop else if (std.mem.eql(u8, name, "reverse")) field.play = .reverse else if (std.mem.eql(u8, name, "boomerang")) field.play = .boomerang else try diags.add(path.slice(), "sprite play is 'loop', 'reverse' or 'boomerang', found '{s}'", .{name});
+                    }
+                }
                 if (getField(sv.object, "mask")) |v| {
                     if (try expectString(diags, path, v)) |name| {
                         if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "sprite mask names an unknown channel '{s}'", .{name});
