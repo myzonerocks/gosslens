@@ -1382,7 +1382,10 @@ named glTF animation clip), `play_sound` (start a voice for the sound at
 the bundle-relative path in `target`, decoded from `sounds/` and mixed into
 the audio the host pulls out, with optional `gain`, `loop`, a linear
 `fade_in_ms`/`fade_out_ms`, and an equal-power stereo `pan` (-1 left to 1 right);
-several fired at once layer on the mixer's voices), `reset_timer` (name a timer
+several fired at once layer on the mixer's voices; a `target` of
+`builtin:<name>` plays an engine-synthesized effect with no bundled file, one of
+`ding`, `chime`, `click`, `pop`, `beep`, `whoosh`, `swoosh`, `applause`,
+`success`, `error`), `reset_timer` (name a timer
 signal back to
 zero), the counter actions `increment_counter`, `reset_counter` and
 `set_counter` (step a named counter that `counter('name')` reads and that

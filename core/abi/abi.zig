@@ -27,6 +27,7 @@ const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
+const sfx = @import("sfx");
 const formant = @import("formant");
 const fingerprint = @import("fingerprint");
 const comp = @import("layout");
@@ -9552,9 +9553,17 @@ fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) vo
         if (trig.action.kind != .play_sound) continue;
         const rel = trig.action.target;
         if (rel.len == 0 or s.sound_ids.contains(rel)) continue;
-        const full = std.fmt.allocPrint(gpa, "{s}/{s}", .{ bundle_path, rel }) catch continue;
-        defer gpa.free(full);
-        const id = mixer.load(full) catch continue;
+        // A "builtin:<name>" target plays an engine-synthesized effect with no
+        // bundled file; anything else loads the sound from the lens bundle.
+        const id = if (std.mem.startsWith(u8, rel, "builtin:")) blk: {
+            const wav = sfx.synth(gpa, rel["builtin:".len..], audio_sample_rate) catch continue;
+            defer gpa.free(wav);
+            break :blk mixer.loadMemory(wav) catch continue;
+        } else blk: {
+            const full = std.fmt.allocPrint(gpa, "{s}/{s}", .{ bundle_path, rel }) catch continue;
+            defer gpa.free(full);
+            break :blk mixer.load(full) catch continue;
+        };
         const key = s.engine.gpa.dupe(u8, rel) catch continue;
         s.sound_ids.put(s.engine.gpa, key, id) catch {
             s.engine.gpa.free(key);

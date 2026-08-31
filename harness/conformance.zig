@@ -8355,6 +8355,44 @@ fn proveAudio(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the built-in SFX library: a play_sound target of "builtin:ding"
+/// synthesizes the effect in-engine with no bundled file, so the mixer pulls a
+/// voice after the trigger where it was silent before.
+fn proveBuiltinSfx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const block: u32 = 512;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/sfx-builtin", ".lens-packages/sfx-builtin".len) != .ok) {
+        std.debug.print("conformance: FAIL built-in sfx lens activation\n", .{});
+        return false;
+    }
+
+    var pre: [block]i16 = undefined;
+    _ = abi.goss_session_pull_audio(session, &pre, block);
+    var pre_energy: u64 = 0;
+    for (pre) |s| pre_energy += @abs(@as(i32, s));
+    if (pre_energy != 0) {
+        std.debug.print("conformance: FAIL built-in sfx audio before the trigger is not silent\n", .{});
+        return false;
+    }
+
+    var present = std.mem.zeroes(abi.LensSignals);
+    present.has_face = true;
+    _ = abi.goss_session_tick_lens(session, 16000, &present);
+    var post: [block]i16 = undefined;
+    _ = abi.goss_session_pull_audio(session, &post, block);
+    var energy: u64 = 0;
+    for (post) |s| energy += @abs(@as(i32, s));
+    if (energy == 0) {
+        std.debug.print("conformance: FAIL a builtin:ding play_sound produced no audio\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a builtin:ding play_sound synthesizes and mixes an effect with no bundled file (energy {d})\n", .{energy});
+    return true;
+}
+
 /// Proves the camera-controls contract through the public ABI: out-of-range
 /// intent is normalized to its valid envelope and read back exactly, with no
 /// hardware and no host dependence.
@@ -19551,6 +19589,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("hemisphere-ibl");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
+    if (!try proveBuiltinSfx(gpa, engine)) return 1;
+    watchHold("builtin sfx");
     if (!try proveOutputMix(gpa, engine)) return 1;
     watchHold("output mix");
     if (!try proveCameraControls(gpa, engine)) return 1;
