@@ -14515,6 +14515,16 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         live_signals.audio_beat = s.audio.beat;
         live_signals.audio_beat_count = @floatFromInt(s.audio.beat_count);
     }
+    // The newest recognized speech, lowercased into a tick-scoped buffer, so a
+    // voice.command trigger fires when its phrase is spoken. Only the text crosses.
+    var voice_lc: [caption_max]u8 = undefined;
+    for (s.audio_workers.items) |aw| {
+        if (!(aw.has_caption or aw.has_translate) or aw.caption_len == 0) continue;
+        const n = @min(aw.caption_len, voice_lc.len);
+        for (aw.caption_buf[0..n], 0..) |ch, i| voice_lc[i] = std.ascii.toLower(ch);
+        live_signals.voice_command_text = voice_lc[0..n];
+        break;
+    }
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
         // The device's world position is the translation column of the pose;

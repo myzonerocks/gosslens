@@ -5937,6 +5937,56 @@ fn proveMusicIdentify(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the voice-command trigger (the voice UI): a captioning audio.infer node
+/// decodes the spoken word, and a voice.command('hi') trigger fires a lens action
+/// when the recognized speech carries the phrase, driving a parameter the harness
+/// reads back. Only the recognized text reaches the trigger, never the audio.
+fn proveVoiceCommand(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxCaptionProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-cmd/assets");
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.voice-command","version":"1.0.0","display_name":"Voice Command","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"fired","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"caption":{"tensor":0,"labels":"labels"}}}],
+        \\ "triggers":[{"when":"voice.command('hi')","action":{"kind":"param_set","target":"fired","to":1.0}}]}
+    ;
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/voice-cmd/manifest.json", .data = manifest_json });
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/voice-cmd/assets/model.onnx", .data = model });
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/voice-cmd/assets/labels.txt", .data = "_\nh\ni" });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/voice-cmd", "zig-out/voice-cmd".len) != .ok) return error.ActivationFailed;
+
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, 0.3);
+    const signals = std.mem.zeroes(abi.LensSignals);
+
+    // The parameter rests at zero until the spoken word fires the trigger.
+    var fired: f32 = -1;
+    if (abi.goss_session_parameter_value(session, "fired", "fired".len, &fired) == .ok and fired != 0) {
+        std.debug.print("conformance: FAIL the voice command fired before any speech (value {d})\n", .{fired});
+        return false;
+    }
+    var polls: usize = 0;
+    while (fired < 0.5) : (polls += 1) {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + polls * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "fired", "fired".len, &fired);
+        if (polls > 100000) {
+            std.debug.print("conformance: FAIL the voice command never fired for the recognized speech\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF a voice.command trigger fires a lens action when its phrase is recognized: the mic decodes 'hi' and the command drives its parameter to {d}, the recognized text the only thing crossing to the trigger\n", .{fired});
+    return true;
+}
+
 /// Proves the diarized caption segment read-back: a captioning audio.infer node's
 /// decoded utterance lands in the segment ring, tagged with the times it spanned
 /// and read back through the segment ABI, its metadata and text separate.
@@ -19287,6 +19337,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("voice transform");
     if (!try proveMusicIdentify(gpa, engine)) return 1;
     watchHold("music identify");
+    if (!try proveVoiceCommand(gpa, engine)) return 1;
+    watchHold("voice command");
     if (!try proveCaptionSegment(gpa, engine)) return 1;
     watchHold("caption segment");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;
