@@ -870,6 +870,10 @@ pub const SpriteField = struct {
     /// bundled image; cutout_softness feathers the matte edge.
     cutout_channel: i32 = -1,
     cutout_softness: f32 = 0.02,
+    /// A cutout with no mask channel draws the whole camera frame at the rect - a
+    /// frame inset for generative outpaint, the real frame placed over a generated
+    /// surround. Set when a cutout block omits its mask.
+    cutout_whole: bool = false,
 };
 
 pub const SpriteMaskMode = enum { behind, over };
@@ -3220,7 +3224,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                             if (try expectString(diags, path, mv)) |name| {
                                 if (maskChannelIndex(name)) |channel| field.cutout_channel = channel else try diags.add(path.slice(), "sprite cutout mask names an unknown channel '{s}'", .{name});
                             }
-                        } else try diags.add(path.slice(), "a sprite cutout needs a mask channel", .{});
+                        } else field.cutout_whole = true;
                         if (getField(cv.object, "softness")) |sfv| field.cutout_softness = std.math.clamp(@as(f32, @floatCast(numberOf(sfv) orelse field.cutout_softness)), 0.001, 0.5);
                     } else try diags.add(path.slice(), "sprite cutout must be an object", .{});
                 }

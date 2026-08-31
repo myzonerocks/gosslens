@@ -904,7 +904,10 @@ names the channel (`person` for the whole subject) and `softness` feathers the
 matte edge. A cutout sprite ships no image asset and composites by its matte
 alpha, so its clear regions show the frame; it takes the same `interaction` and
 `anchor_face`, so the cut subject drags, scales, and can ride the face. With no
-live mask it draws nothing, the standard capability degradation.
+live mask it draws nothing, the standard capability degradation. A cutout block
+with no `mask` (`"cutout": {}`) draws the whole camera frame at the rect, a frame
+inset: a full-frame generative sprite behind it and the inset camera on top
+expands the frame with generated surroundings (outpaint).
 
 A `"mask"` names a segmentation channel and keys the sprite full-frame against
 the region it marks, composited the way `blend.pass` swaps a background. A

@@ -1362,6 +1362,106 @@ fn proveInpaintCoherence(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Renders a lens (or the plain frame when lens_dir is null) and captures it.
+fn renderLensCapture(engine: *abi.Engine, desc: *const abi.FrameDesc, planes: anytype, lens_dir: ?[]const u8, shot: []u8, out_w: *u32, out_h: *u32) !void {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (lens_dir) |dir| {
+        if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    }
+    const half_w = (planes.width + 1) / 2;
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+}
+
+/// Proves generative outpaint composes: a full-frame surround sprite fills the
+/// canvas and a whole-frame cutout draws the camera inset at a centered rect, so
+/// the frame is expanded with surrounding content. Outside the inset the frame
+/// is the surround (not the camera); inside it is the camera.
+fn proveOutpaint(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_out = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_out);
+    const shot_out2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_out2);
+    const shot_sur = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_sur);
+    const shot_cam = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_cam);
+    var wo: u32 = 0;
+    var ho: u32 = 0;
+    var wo2: u32 = 0;
+    var ho2: u32 = 0;
+    var ws: u32 = 0;
+    var hs: u32 = 0;
+    var wcm: u32 = 0;
+    var hcm: u32 = 0;
+    try renderLensCapture(engine, &desc, planes, ".lens-packages/outpaint", shot_out, &wo, &ho);
+    try renderLensCapture(engine, &desc, planes, ".lens-packages/outpaint", shot_out2, &wo2, &ho2);
+    try renderLensCapture(engine, &desc, planes, ".lens-packages/surround-only", shot_sur, &ws, &hs);
+    try renderLensCapture(engine, &desc, planes, null, shot_cam, &wcm, &hcm);
+    if (wo == 0 or wo != ws or ho != hs or wo != wcm or ho != hcm) {
+        std.debug.print("conformance: FAIL outpaint capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_out[0 .. wo * ho * 4], shot_out2[0 .. wo2 * ho2 * 4])) {
+        std.debug.print("conformance: FAIL outpaint is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // The inset rect is the centered half; outside it is the border. The border
+    // must be the surround (outpaint equals surround-only there and differs from
+    // the plain camera), and the inset must carry the camera (outpaint differs
+    // from surround-only there).
+    var border_out_vs_sur: usize = 0;
+    var border_sur_vs_cam: usize = 0;
+    var inset_out_vs_sur: usize = 0;
+    var y: u32 = 0;
+    while (y < ho) : (y += 1) {
+        var x: u32 = 0;
+        while (x < wo) : (x += 1) {
+            const idx = (y * wo + x) * 4;
+            const fx = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(wo));
+            const fy = @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(ho));
+            // The inset rect is the centered half (0.25..0.75). Test strictly
+            // inside it and strictly outside a margin around it, ignoring the
+            // transition ring at the rect edge.
+            const inset = fx >= 0.3 and fx <= 0.7 and fy >= 0.3 and fy <= 0.7;
+            const border = fx < 0.2 or fx > 0.8 or fy < 0.2 or fy > 0.8;
+            const out_ne_sur = !std.mem.eql(u8, shot_out[idx .. idx + 4], shot_sur[idx .. idx + 4]);
+            const sur_ne_cam = !std.mem.eql(u8, shot_sur[idx .. idx + 4], shot_cam[idx .. idx + 4]);
+            if (inset) {
+                if (out_ne_sur) inset_out_vs_sur += 1;
+            } else if (border) {
+                if (out_ne_sur) border_out_vs_sur += 1;
+                if (sur_ne_cam) border_sur_vs_cam += 1;
+            }
+        }
+    }
+    if (border_out_vs_sur != 0 or border_sur_vs_cam == 0 or inset_out_vs_sur == 0) {
+        std.debug.print("conformance: FAIL outpaint did not compose (border drift {d}, surround-vs-camera {d}, inset camera {d})\n", .{ border_out_vs_sur, border_sur_vs_cam, inset_out_vs_sur });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_out[0 .. wo * ho * 4], @intCast(wo), @intCast(ho));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-outpaint.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF generative outpaint composes - the border stays the surround ({d} px differ from the camera) while the camera insets at the center ({d} px), deterministic\n", .{ border_sur_vs_cam, inset_out_vs_sur });
+    return true;
+}
+
 fn proveMultiBodyFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -19854,6 +19954,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveObjectMove(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "inpaint-coherence")) {
             if (!try proveInpaintCoherence(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "outpaint")) {
+            if (!try proveOutpaint(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -19994,6 +20096,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("object move");
     if (!try proveInpaintCoherence(gpa, engine)) return 1;
     watchHold("inpaint coherence");
+    if (!try proveOutpaint(gpa, engine)) return 1;
+    watchHold("outpaint");
     if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;

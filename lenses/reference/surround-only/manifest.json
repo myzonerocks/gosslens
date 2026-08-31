@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.surround-only",
+  "version": "1.0.0",
+  "display_name": "Surround Only",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "surround", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "opacity": 1.0}}
+  ],
+  "triggers": []
+}

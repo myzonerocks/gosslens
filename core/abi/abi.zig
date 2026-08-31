@@ -1414,7 +1414,7 @@ pub const Session = struct {
     /// bundled image, by graph index: the segmentation channel it cuts out and
     /// the matte-edge feather. The frame keyed by it draws at the sprite rect as a
     /// movable, scalable cutout sticker.
-    sprite_cutouts: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { channel: u8, softness: f32 }) = .empty,
+    sprite_cutouts: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { channel: u8, softness: f32, whole: bool }) = .empty,
     /// A text.2d node whose content comes from a live source, by graph index. The
     /// frame path re-rasterizes each when its resolved string changes, so an info
     /// sticker (a clock, a countdown, a host-fed reading) updates in place.
@@ -4050,7 +4050,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // into a transparent target, then draws that at the sprite rect
                     // - a movable auto-subject sticker. It lifts from the original
                     // frame copy, so an upstream inpaint cannot empty the cutout.
-                    const mask_tex = if (co.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[co.channel] orelse r.zero_mask_texture;
+                    // A whole-frame cutout keys on the ones mask, drawing the entire
+                    // frame at the rect (a frame inset for outpaint).
+                    const mask_tex = if (co.whole) r.default_mask_texture else if (co.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[co.channel] orelse r.zero_mask_texture;
                     ensureCutoutSticker(s, width, height) catch continue;
                     const cutout_target = s.cutout_sticker_target orelse continue;
                     const source_tex = if (s.cutout_source_target) |cst| cst.texture else input_texture;
@@ -11043,10 +11045,11 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
         }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
         if (sprite.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, sprite.graph_index, @intCast(sprite.anchor_face)) catch {};
-        // A cutout sprite has no bundled image: it lifts the live subject each
-        // frame, so it registers its channel and skips the image-load paths.
-        if (sprite.cutout_channel >= 0) {
-            session.sprite_cutouts.put(gpa, sprite.graph_index, .{ .channel = @intCast(sprite.cutout_channel), .softness = sprite.cutout_softness }) catch {};
+        // A cutout sprite has no bundled image: it lifts the live subject (or the
+        // whole frame) each frame, so it registers and skips the image-load paths.
+        if (sprite.cutout_channel >= 0 or sprite.cutout_whole) {
+            const channel: u8 = if (sprite.cutout_channel >= 0) @intCast(sprite.cutout_channel) else 0;
+            session.sprite_cutouts.put(gpa, sprite.graph_index, .{ .channel = channel, .softness = sprite.cutout_softness, .whole = sprite.cutout_whole }) catch {};
             continue;
         }
         if (sprite.mask_channel) |channel| {
