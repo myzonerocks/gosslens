@@ -1,12 +1,11 @@
+import com.vanniktech.maven.publish.SonatypeHost
+
 plugins {
     id("com.android.application") version "9.3.0" apply false
     id("com.android.library") version "9.3.0"
     id("org.jlleitschuh.gradle.ktlint") version "12.1.1"
-    `maven-publish`
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
-
-group = "com.myzonerocks"
-version = "0.9.0"
 
 android {
     namespace = "com.gosslens"
@@ -27,24 +26,14 @@ android {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
-
-    publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
-    }
 }
 
-// Publishes the library so it resolves straight from the repository over
-// JitPack for release builds, the counterpart to the Swift package's own
-// git-URL install. A consumer app takes it from the published coordinate;
-// for local work it swaps in an included build of this project instead.
-publishing {
-    publications {
-        register<MavenPublication>("release") {
-            groupId = "com.myzonerocks"
-            artifactId = "gosslens"
-            afterEvaluate { from(components["release"]) }
-        }
-    }
+// Publishes the AAR - the prebuilt .so already inside - to Maven Central through
+// the Sonatype Central Portal, so an Android app adds one coordinate and never
+// runs Zig or the NDK. Coordinates and POM come from gradle.properties; the token
+// and signing key come from the release job. JitPack builds it from a tag instead.
+mavenPublishing {
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
+    signAllPublications()
+    coordinates("io.github.avosa", "gosslens", project.property("VERSION_NAME").toString())
 }

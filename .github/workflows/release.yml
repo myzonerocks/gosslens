@@ -183,16 +183,17 @@ jobs:
       - name: publish to maven central
         if: ${{ env.HAS_MAVEN == 'true' }}
         env:
-          OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
-          OSSRH_PASSWORD: ${{ secrets.OSSRH_PASSWORD }}
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.OSSRH_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.OSSRH_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
         run: |
           set -euo pipefail
-          mkdir -p sdk/kotlin/src/main/jniLibs
-          unzip -o dist/android/gosslens-android-jniLibs.zip -d sdk/kotlin/src/main/jniLibs
+          # Restore the CI-built .so where gradle's jniLibs srcDir expects it, so
+          # the published AAR carries the prebuilt binary.
+          unzip -o dist/android/gosslens-android-jniLibs.zip -d zig-out/android
           cd sdk/kotlin
-          ./gradlew publish -Pversion="${GITHUB_REF_NAME#v}"
+          ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache -PVERSION_NAME="${GITHUB_REF_NAME#v}"
       - name: publish to npm
         if: ${{ env.HAS_NPM == 'true' }}
         env:

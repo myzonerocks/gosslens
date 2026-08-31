@@ -1,8 +1,10 @@
-# Builds com.myzonerocks:gosslens straight from a tagged commit here,
-# the group sdk/kotlin/build.gradle.kts sets. The SDK is that project's
-# own root, so this steps in and publishes to the local Maven repo
-# JitPack serves.
+# Builds io.github.avosa:gosslens from a tagged commit for consumers who resolve
+# it over JitPack. JitPack compiles from source, so unlike the Maven Central AAR
+# (whose .so our CI prebuilds) this builds the native core here first with zig
+# build android, then packages it. Heavier, so Maven Central is recommended.
 jdk:
   - openjdk21
 install:
-  - cd sdk/kotlin && ./gradlew publishToMavenLocal
+  - tools/toolchain-sync
+  - export PATH="$PWD/.local/zig/current:$PATH" && zig build vendor-sync && zig build android
+  - cd sdk/kotlin && ./gradlew publishToMavenLocal -x signMavenPublication
