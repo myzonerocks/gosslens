@@ -877,6 +877,12 @@ so a value flowing into it moves and sizes the sprite. An unbound axis keeps
 its static value. This is how a lens anchors a sprite to something a model
 found: an `ml.infer` node writes a detected box's center or a tracked
 keypoint's position into a parameter, and the sprite bound to it follows.
+An `"anchor_face"` gives the sprite a face-mesh landmark index (0..477): the
+sprite pins its center to that point on the tracked face each frame, so a
+sticker rides the head with no model in the lens - glasses on the eyes, a hat
+over the brow. The authored size holds; a negative index (the default) leaves
+the sprite at its screen rect, and the sprite falls back to that rect when no
+face is tracked.
 A `"frames"` count above one makes the sprite animated: it loads
 `assets/<id>_0.png` through `assets/<id>_(frames-1).png` and cycles them at
 `"fps"` off the lens clock. Shipping the image as an animated GIF at

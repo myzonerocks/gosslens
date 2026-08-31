@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.sticker-face",
+  "version": "1.0.0",
+  "display_name": "Face Sticker",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.3, "y": 0.3, "w": 0.24, "h": 0.24, "opacity": 1.0, "anchor_face": 1}}
+  ],
+  "triggers": []
+}

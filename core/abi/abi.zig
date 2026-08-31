@@ -1381,6 +1381,10 @@ pub const Session = struct {
     /// A sprite.2d node's live interaction transform, when it declares one, so
     /// the recognized gestures drag and scale it and a tap on it fires an event.
     sprite_interactions: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteInteraction) = .empty,
+    /// A sprite.2d node's face-mesh anchor landmark, when it declares one, so the
+    /// sprite pins its center to that point on the tracked face each frame - a
+    /// sticker that follows the head (glasses on the eyes, a hat over the brow).
+    sprite_anchor_faces: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
     /// A sprite.2d node's segmentation key, when it declares one: the channel
     /// and whether the sprite fills behind that region (greenscreen) or over it
     /// (a restyle). The generative background and full-face restyle ride this.
@@ -2281,6 +2285,26 @@ fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirro
         contour[at * 2 + 1] = out[1];
     }
     return true;
+}
+
+/// The screen position (0..1) of face-mesh landmark `idx` on the tracked face,
+/// mapped the same way anchored draws map content: the landmark's image-space
+/// coordinate turned and mirrored into the display frame. Null with no face.
+fn faceAnchorScreen(s: *Session, idx: u32, width: u16, height: u16, rotation: u32, mirror: bool) ?[2]f32 {
+    var result: face.Result = undefined;
+    var flat: ?*const [face.landmark_count * 3]f32 = null;
+    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+        flat = &s.face_results[0].landmarks;
+    } else if (s.face_tracking) |worker| {
+        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+            flat = &result.landmarks;
+        }
+    }
+    const src = flat orelse return null;
+    if (idx >= face.landmark_count) return null;
+    const u = src[idx * 3] / @as(f32, @floatFromInt(width));
+    const v = src[idx * 3 + 1] / @as(f32, @floatFromInt(height));
+    return face106.transformPoint(u, v, rotation, mirror);
 }
 
 const body_point_count = render.body_reshape_points_vec4_count * 4;
@@ -3926,6 +3950,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
                 var rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
                 applyPlacementParams(s, entry.graph_index, rect[0..4]);
+                // A face-anchored sprite pins its center to a face landmark, so
+                // the sticker tracks the head; it keeps its authored size and
+                // holds its rect when no face is tracked.
+                if (s.sprite_anchor_faces.get(entry.graph_index)) |anchor| {
+                    if (faceAnchorScreen(s, anchor, width, height, rotation, mirror)) |c| {
+                        rect[0] = c[0] - rect[2] * 0.5;
+                        rect[1] = c[1] - rect[3] * 0.5;
+                    }
+                }
                 // An interactive sprite draws at its dragged and scaled rect,
                 // keeping its own opacity, and turned by any live rotation.
                 var sprite_rotation: f32 = 0;
@@ -4729,6 +4762,7 @@ pub fn destroySession(session: *Session) void {
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
+    session.sprite_anchor_faces.deinit(session.engine.gpa);
     session.sprite_masks.deinit(session.engine.gpa);
     session.sprite_mask_strength_params.deinit(session.engine.gpa);
     session.model_controls.deinit(session.engine.gpa);
@@ -9176,6 +9210,7 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_opacity_params.clearRetainingCapacity();
     session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
+    session.sprite_anchor_faces.clearRetainingCapacity();
     session.sprite_masks.clearRetainingCapacity();
     session.sprite_mask_strength_params.clearRetainingCapacity();
     session.model_controls.clearRetainingCapacity();
@@ -10774,6 +10809,7 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
         }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
+        if (sprite.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, sprite.graph_index, @intCast(sprite.anchor_face)) catch {};
         if (sprite.mask_channel) |channel| {
             session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over, .strength = sprite.mask_strength }) catch {};
             if (sprite.mask_strength_param.len > 0) session.sprite_mask_strength_params.put(gpa, sprite.graph_index, sprite.mask_strength_param) catch {};

@@ -856,11 +856,19 @@ pub const SpriteField = struct {
     /// the frame and 1 is the full restyle; `mask_strength_param` binds it live.
     mask_strength: f32 = 1,
     mask_strength_param: []const u8 = "",
+    /// A face landmark index (0..477) the sprite pins its center to, so a sticker
+    /// tracks the face - glasses on the eyes, a hat above the brow - following the
+    /// head each frame. Negative (default) leaves the sprite at its screen rect.
+    anchor_face: i32 = -1,
 };
 
 pub const SpriteMaskMode = enum { behind, over };
 
 pub const max_sprite_frames = 64;
+
+/// The face-mesh landmark count an `anchor_face` index is bound within; mirrors
+/// the tracker's dense face mesh so a sticker can pin to any point on it.
+pub const face_landmark_count = 478;
 
 pub const TextField = struct {
     /// A text.2d node's inline string, the screen rect it fills (same
@@ -3178,6 +3186,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(sv.object, "h_param")) |v| {
                     if (try expectString(diags, path, v)) |s| field.h_param = try arena.dupe(u8, s);
+                }
+                if (getField(sv.object, "anchor_face")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer < face_landmark_count) {
+                        field.anchor_face = @intCast(v.integer);
+                    } else try diags.add(path.slice(), "sprite anchor_face must be a face landmark index 0..{d}", .{face_landmark_count - 1});
                 }
                 if (getField(sv.object, "frames")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= max_sprite_frames) {
