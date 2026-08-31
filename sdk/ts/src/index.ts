@@ -1807,6 +1807,33 @@ export class GossSession {
     if (valuePtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [valuePtr, valueLen || 1]);
   }
 
+  /// Serializes the active lens's parameter state to a blob a connected lens
+  /// publishes so the cloud syncs it to peers, or null with no lens.
+  snapshotLensState(): Uint8Array | null {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const view = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    let out: Uint8Array | null = null;
+    if ((this.mod.ccall("goss_session_snapshot_lens_state", "number", ["number", "number", "number", "number"], [this.handle, 0, 0, lenPtr]) as number) === 0) {
+      const needed = view();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+      if ((this.mod.ccall("goss_session_snapshot_lens_state", "number", ["number", "number", "number", "number"], [this.handle, outPtr, needed, lenPtr]) as number) === 0) {
+        out = this.mod.HEAPU8.slice(outPtr, outPtr + view());
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    return out;
+  }
+
+  /// Applies a peer's lens-state blob to the active lens, clamping each value
+  /// into its parameter so two runtimes on the same lens converge.
+  applyLensState(blob: Uint8Array): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [blob.length || 1]) as number;
+    this.mod.HEAPU8.set(blob, ptr);
+    this.mod.ccall("goss_session_apply_lens_state", "number", ["number", "number", "number"], [this.handle, ptr, blob.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, blob.length || 1]);
+  }
+
   /// Captures the current viewpoint (the last submitted world pose and depth) into
   /// a guided scan, back-projecting the depth into a deterministic gaussian
   /// reconstruction, and returns the scan's coverage so the app can steer the user

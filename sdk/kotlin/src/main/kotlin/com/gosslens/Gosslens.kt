@@ -115,6 +115,8 @@ object Gosslens {
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
     internal external fun nativeSubmitOrientation(session: Long, gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Int
     internal external fun nativeSetInfo(session: Long, keyBuffer: ByteBuffer, keyLen: Int, valueBuffer: ByteBuffer?, valueLen: Int): Int
+    internal external fun nativeSnapshotLensState(session: Long, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeApplyLensState(session: Long, blobBuffer: ByteBuffer, blobLen: Int): Int
     internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
     internal external fun nativeCaptionSegment(session: Long, index: Int, out: ByteBuffer): Int
     internal external fun nativeCaptionSegmentText(session: Long, index: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
@@ -1287,6 +1289,30 @@ class GossSession private constructor(
         valueBuffer.put(valueBytes)
         valueBuffer.rewind()
         return Gosslens.nativeSetInfo(handle, keyBuffer, keyBytes.size, valueBuffer, valueBytes.size) == 0
+    }
+
+    /** Serializes the active lens's parameter state to a blob a connected lens
+     * publishes so the cloud syncs it to peers, or null with no lens. */
+    fun snapshotLensState(): ByteArray? {
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeSnapshotLensState(handle, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        if (Gosslens.nativeSnapshotLensState(handle, out, needed.toLong(), len) != 0) return null
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return result
+    }
+
+    /** Applies a peer's lens-state blob to the active lens, clamping each value
+     * into its parameter so two runtimes on the same lens converge. */
+    fun applyLensState(blob: ByteArray): Boolean {
+        val blobBuffer = ByteBuffer.allocateDirect(maxOf(blob.size, 1))
+        blobBuffer.put(blob)
+        blobBuffer.rewind()
+        return Gosslens.nativeApplyLensState(handle, blobBuffer, blob.size) == 0
     }
 
     /** Captures the current viewpoint (the last submitted world pose and depth)

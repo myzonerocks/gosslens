@@ -684,6 +684,23 @@ export fn Java_com_gosslens_Gosslens_nativeSetInfo(env: *JniEnv, cls: jobject, s
     return @intFromEnum(abi.goss_session_set_info(sessionFromHandle(session), key, @intCast(@max(key_len, 0)), value, @intCast(@max(value_len, 0))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSnapshotLensState(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, out_capacity: i64, len_buffer: jobject) i32 {
+    _ = cls;
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_len: *align(1) u64 = @ptrCast(len_bytes);
+    const out: ?[*]u8 = getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_session_snapshot_lens_state(sessionFromHandle(session), out, @intCast(@max(out_capacity, 0)), &written);
+    out_len.* = written;
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeApplyLensState(env: *JniEnv, cls: jobject, session: i64, blob_buffer: jobject, blob_len: i32) i32 {
+    _ = cls;
+    const blob = getDirectBufferAddress(env, blob_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_apply_lens_state(sessionFromHandle(session), blob, @intCast(@max(blob_len, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeCaptureView(env: *JniEnv, cls: jobject, session: i64, guidance_buffer: jobject) i32 {
     _ = cls;
     const guidance = getDirectBufferAddress(env, guidance_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

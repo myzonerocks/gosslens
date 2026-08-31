@@ -1846,6 +1846,30 @@ pub const Lens = struct {
         return self.param_values[i];
     }
 
+    /// Serializes the lens parameter values into `out` (a little-endian u32 count
+    /// then that many f32s) and returns the byte length, so a peer syncs this
+    /// lens's shared state. `out` too small writes nothing and reports the size.
+    pub fn snapshotState(self: *const Lens, out: []u8) usize {
+        const need = 4 + self.param_values.len * 4;
+        if (out.len < need) return need;
+        std.mem.writeInt(u32, out[0..4], @intCast(self.param_values.len), .little);
+        for (self.param_values, 0..) |v, i| std.mem.writeInt(u32, out[4 + i * 4 ..][0..4], @bitCast(v), .little);
+        return need;
+    }
+
+    /// Applies a peer's snapshot: each value is clamped into its parameter and
+    /// set, so two runtimes with the same lens converge on one shared state. A
+    /// short or over-long blob applies only the parameters it covers.
+    pub fn applyState(self: *Lens, bytes: []const u8) void {
+        if (bytes.len < 4) return;
+        const n = std.mem.readInt(u32, bytes[0..4], .little);
+        const count = @min(@min(n, self.param_values.len), (bytes.len - 4) / 4);
+        for (0..count) |i| {
+            const bits = std.mem.readInt(u32, bytes[4 + i * 4 ..][0..4], .little);
+            self.param_values[i] = clampToParam(self.manifest.parameters[i], @bitCast(bits));
+        }
+    }
+
     /// The bundle-relative sound paths a play_sound trigger fired on the last
     /// tick, for the host to start on its mixer.
     pub fn firedSounds(self: *const Lens) []const SoundEvent {
@@ -2536,6 +2560,37 @@ test "a param bound to a node reports its default as the initial effect value" {
     try t.expectEqual(@as(usize, 1), effects.len);
     try t.expectEqual(EffectSlot.thin_face, effects[0].effect);
     try t.expectEqual(@as(f32, 0.0), effects[0].value);
+}
+
+test "lens state snapshots and applies for a shared connected lens" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+    const lens_manifest = try parseTestManifest(t.allocator, clip_weight_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    lens.setParam("walk", 0.25);
+    lens.setParam("run", 0.75);
+    var buf: [64]u8 = undefined;
+    const n = lens.snapshotState(&buf);
+    try t.expectEqual(@as(usize, 4 + 2 * 4), n);
+
+    // A peer overwrote its params; applying the snapshot converges them back.
+    lens.setParam("walk", 0.9);
+    lens.setParam("run", 0.1);
+    lens.applyState(buf[0..n]);
+    try t.expectEqual(@as(f32, 0.25), lens.paramValue("walk").?);
+    try t.expectEqual(@as(f32, 0.75), lens.paramValue("run").?);
+
+    // An out-of-range value in a blob is clamped into the parameter on apply.
+    std.mem.writeInt(u32, buf[4..8], @bitCast(@as(f32, 9.0)), .little);
+    lens.applyState(buf[0..n]);
+    try t.expectEqual(@as(f32, 1.0), lens.paramValue("walk").?);
+
+    // A probe with a too-small buffer reports the needed size, writing nothing.
+    var tiny: [2]u8 = undefined;
+    try t.expectEqual(n, lens.snapshotState(&tiny));
 }
 
 const clip_weight_manifest =

@@ -237,6 +237,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)",
     "goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)",
     "goss_status goss_session_set_info(goss_session *session, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len)",
+    "goss_status goss_session_snapshot_lens_state(goss_session *session, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_session_apply_lens_state(goss_session *session, const uint8_t *blob, size_t blob_len)",
     "goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance)",
     "goss_status goss_session_reset_capture(goss_session *session)",
     "goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
@@ -8028,6 +8030,30 @@ pub export fn goss_session_set_info(session: ?*Session, key: ?[*]const u8, key_l
         gpa.free(val_copy);
         return .out_of_memory;
     };
+    return .ok;
+}
+
+/// Serializes the active lens's parameter state into out_buf (a count then the
+/// values) with the byte length in out_len; .again with no lens. A connected
+/// lens publishes this blob so the cloud syncs it to peers - the deterministic
+/// tick plus the applied state is the shared state. Probe with a null out_buf.
+pub export fn goss_session_snapshot_lens_state(session: ?*Session, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .again;
+    const buf: []u8 = if (out_buf) |b| b[0..out_cap] else &.{};
+    out_len_ptr.* = lens.snapshotState(buf);
+    return .ok;
+}
+
+/// Applies a peer's lens-state blob to the active lens: each value is clamped
+/// into its parameter, so two runtimes on the same lens converge. .again with no
+/// lens. The cloud delivers the blob; a short or over-long one applies what fits.
+pub export fn goss_session_apply_lens_state(session: ?*Session, blob: ?[*]const u8, blob_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const b = blob orelse return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .again;
+    lens.applyState(b[0..blob_len]);
     return .ok;
 }
 

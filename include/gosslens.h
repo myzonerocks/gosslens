@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 86u
+#define GOSS_ABI_MINOR 88u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -624,6 +624,17 @@ goss_status goss_session_submit_orientation(goss_session *session, float gravity
  * (a time, a place, a sensor reading). A null or empty value clears the key.
  * Keys and values are copied, so the caller keeps ownership of its buffers. */
 goss_status goss_session_set_info(goss_session *session, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len);
+
+/* Serializes the active lens's parameter state into out_buf (a count then the
+ * values) with the byte length in out_len; GOSS_AGAIN with no lens. A connected
+ * lens publishes this blob for the cloud to sync to peers; the deterministic tick
+ * plus the applied state is the shared state. A NULL out_buf reports the size. */
+goss_status goss_session_snapshot_lens_state(goss_session *session, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Applies a peer's lens-state blob to the active lens: each value is clamped into
+ * its parameter so two runtimes on the same lens converge. GOSS_AGAIN with no
+ * lens. A short or over-long blob applies only the parameters it covers. */
+goss_status goss_session_apply_lens_state(goss_session *session, const uint8_t *blob, size_t blob_len);
 
 /* Captures the current viewpoint (the last submitted world pose and depth) into a
  * guided scan: marks the yaw target it covers, back-projects the depth into
