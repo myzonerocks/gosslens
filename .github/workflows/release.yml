@@ -1,0 +1,195 @@
+name: release
+
+# A vX.Y.Z tag cross-compiles the core per target, gates each slice, and attaches
+# the prebuilt binaries to the GitHub Release so an app developer never installs
+# Zig: a jniLibs zip, a checksummed XCFramework for SwiftPM, and the .wasm in an
+# npm tarball. Registry pushes are guarded by secrets; a tag always yields assets.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: vendor sync
+        run: zig build vendor-sync
+      - name: build android libraries
+        run: zig build android
+      # 16 KB page alignment is a hard Play gate: an unaligned .so fails to mmap
+      # on a 16 KB-page device. Fail the release unless every LOAD segment aligns
+      # to at least 2**14, and confirm only the goss_* entrypoints are exported.
+      - name: alignment and symbol gates
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+          for so in zig-out/android/*/libgosslens.so; do
+            found=1
+            echo "== $so =="
+            align=$(llvm-objdump -p "$so" | awk '/LOAD/ {print $NF; exit}')
+            echo "LOAD align: $align"
+            case "$align" in
+              2\*\*14|2\*\*15|2\*\*16) : ;;
+              *) echo "FAIL: $so LOAD alignment $align is below 2**14 (16 KB)"; exit 1 ;;
+            esac
+            # Informational: the exported set should be goss_* only once the build
+            # hides default visibility. Surfaced, not gated, so a wider set never
+            # blocks a release before that pass lands.
+            extra=$(nm -D --defined-only "$so" | awk '{print $NF}' | grep -vE '^(goss_|__|_init$|_fini$)' || true)
+            [ -n "$extra" ] && { echo "note: $so exports beyond goss_*:"; echo "$extra" | head; } || true
+          done
+          [ "$found" = 1 ] || { echo "FAIL: no libgosslens.so was built"; exit 1; }
+      - name: package jniLibs
+        run: |
+          set -euo pipefail
+          ( cd zig-out/android && zip -r "$GITHUB_WORKSPACE/gosslens-android-jniLibs.zip" . -i '*/libgosslens.so' )
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: gosslens-android-jniLibs.zip
+          if-no-files-found: error
+
+  apple:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: vendor sync
+        run: zig build vendor-sync
+      - name: build apple slices
+        run: |
+          zig build ios
+          zig build ios-simulator
+      # Device and simulator are different platforms to Apple and cannot share
+      # one universal binary. A known Zig bug has mis-tagged the simulator slice
+      # as device, so surface the platform load command before packaging.
+      - name: platform load-command gate
+        run: |
+          set -euo pipefail
+          for a in zig-out/ios/libgosslens.a zig-out/ios-simulator/libgosslens.a; do
+            [ -e "$a" ] || { echo "FAIL: missing $a"; exit 1; }
+            echo "== $a =="
+            vtool -show "$a" 2>/dev/null | grep -iE "platform|minos" || true
+          done
+      # The engine ships as many static archives; merge each platform's archives
+      # into one static library, then wrap the two platforms in an XCFramework
+      # with the header and a module map so Swift can `import`.
+      - name: assemble xcframework
+        run: |
+          set -euo pipefail
+          mkdir -p headers
+          cp include/gosslens.h headers/
+          printf 'module CGosslens {\n  header "gosslens.h"\n  export *\n}\n' > headers/module.modulemap
+          libtool -static -o device.a zig-out/ios/*.a
+          libtool -static -o sim.a zig-out/ios-simulator/*.a
+          xcodebuild -create-xcframework \
+            -library device.a -headers headers \
+            -library sim.a -headers headers \
+            -output GosslensKit.xcframework
+          zip -ry GosslensKit.xcframework.zip GosslensKit.xcframework
+          swift package compute-checksum GosslensKit.xcframework.zip > GosslensKit.checksum.txt
+          cat GosslensKit.checksum.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple
+          path: |
+            GosslensKit.xcframework.zip
+            GosslensKit.checksum.txt
+          if-no-files-found: error
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: vendor sync
+        run: zig build vendor-sync
+      - name: build wasm core
+        run: zig build wasm
+      - uses: oven-sh/setup-bun@v2
+      - name: assemble npm package
+        run: |
+          set -euo pipefail
+          cp zig-out/wasm/gosslens.wasm sdk/ts/
+          cd sdk/ts
+          bun install
+          bun run build
+          bun pm pack --destination "$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: "*.tgz"
+          if-no-files-found: error
+
+  publish:
+    needs: [android, apple, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Secrets are not readable in step `if:`, so surface their presence through
+    # job env the steps can test.
+    env:
+      HAS_MAVEN: ${{ secrets.OSSRH_USERNAME != '' }}
+      HAS_NPM: ${{ secrets.NPM_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: attach assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/android/gosslens-android-jniLibs.zip \
+            dist/apple/GosslensKit.xcframework.zip \
+            dist/web/*.tgz \
+            --title "${GITHUB_REF_NAME}" --notes "$notes"
+      # Registry pushes need credentials, so they run only when the secrets are
+      # set. Without them the Release still carries every installable binary.
+      - name: publish to maven central
+        if: ${{ env.HAS_MAVEN == 'true' }}
+        env:
+          OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+          OSSRH_PASSWORD: ${{ secrets.OSSRH_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p sdk/kotlin/src/main/jniLibs
+          unzip -o dist/android/gosslens-android-jniLibs.zip -d sdk/kotlin/src/main/jniLibs
+          cd sdk/kotlin
+          ./gradlew publish -Pversion="${GITHUB_REF_NAME#v}"
+      - name: publish to npm
+        if: ${{ env.HAS_NPM == 'true' }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          npm publish --access public --provenance dist/web/*.tgz
