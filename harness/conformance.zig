@@ -1144,6 +1144,117 @@ fn proveCutoutSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves object move with background fill composes: an inpaint.pass removes the
+/// subject and fills where it was, and a cutout sprite redraws it at a new rect.
+/// The cutout lifts from the original frame, so the upstream inpaint does not
+/// empty it - the subject's old region fills while it reappears at the rect.
+fn proveObjectMove(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const rgba = corpus.frame.pixels.rgba8;
+    const cw = corpus.frame.width;
+    const ch = corpus.frame.height;
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_move = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_move);
+    const shot_move2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_move2);
+    const shot_plain = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_plain);
+    var wm: u32 = 0;
+    var hm: u32 = 0;
+    var wm2: u32 = 0;
+    var hm2: u32 = 0;
+    var wp: u32 = 0;
+    var hp: u32 = 0;
+
+    // With the subject mask: the inpaint fills where the subject was and the
+    // cutout redraws it at the right rect.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/object-move", ".lens-packages/object-move".len) != .ok) return error.ActivationFailed;
+        if (abi.goss_session_submit_segmentation_image(session, rgba.ptr, cw, ch) != .ok) return error.SubmitSegImageFailed;
+        var polls: usize = 0;
+        while (session.segmentation_texture == null) {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            polls += 1;
+            if (polls > 1_000_000) return error.MaskNeverProduced;
+        }
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_move.ptr, shot_move.len, &wm, &hm) != .ok) return error.CaptureFailed;
+        for (0..3) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_move2.ptr, shot_move2.len, &wm2, &hm2) != .ok) return error.CaptureFailed;
+    }
+    // No subject mask: the inpaint holds the frame through and the cutout is
+    // transparent, so the frame passes through untouched.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/object-move", ".lens-packages/object-move".len) != .ok) return error.ActivationFailed;
+        for (0..10) |_| {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_plain.ptr, shot_plain.len, &wp, &hp) != .ok) return error.CaptureFailed;
+    }
+    if (wm == 0 or wm != wp or hm != hp or wm != wm2 or hm != hm2) {
+        std.debug.print("conformance: FAIL object-move capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_move[0 .. wm * hm * 4], shot_move2[0 .. wm * hm * 4])) {
+        std.debug.print("conformance: FAIL object-move is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // The inpaint fills the subject's original region (a change on the left,
+    // where the subject stood) and the cutout redraws it at the right rect (a
+    // change on the right). Both being non-empty proves the two composed and the
+    // cutout survived the upstream removal.
+    var left_changed: usize = 0;
+    var right_changed: usize = 0;
+    var y: u32 = 0;
+    while (y < hm) : (y += 1) {
+        var x: u32 = 0;
+        while (x < wm) : (x += 1) {
+            const idx = (y * wm + x) * 4;
+            if (!std.mem.eql(u8, shot_move[idx .. idx + 4], shot_plain[idx .. idx + 4])) {
+                if (x < wm / 2) left_changed += 1 else right_changed += 1;
+            }
+        }
+    }
+    if (left_changed == 0 or right_changed == 0) {
+        std.debug.print("conformance: FAIL object-move did not compose (inpaint left {d}, cutout right {d})\n", .{ left_changed, right_changed });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_move[0 .. wm * hm * 4], @intCast(wm), @intCast(hm));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-object-move.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF object move composes inpaint and cutout - the subject's region filled ({d} px left) while it redrew at a new rect ({d} px right), deterministic\n", .{ left_changed, right_changed });
+    return true;
+}
+
 fn proveMultiBodyFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -19632,6 +19743,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveInfoSticker(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "cutout-sticker")) {
             if (!try proveCutoutSticker(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "object-move")) {
+            if (!try proveObjectMove(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -19768,6 +19881,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("info sticker");
     if (!try proveCutoutSticker(gpa, engine)) return 1;
     watchHold("cutout sticker");
+    if (!try proveObjectMove(gpa, engine)) return 1;
+    watchHold("object move");
     if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;

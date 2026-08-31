@@ -960,6 +960,13 @@ pub const Session = struct {
     cutout_sticker_target: ?render.Renderer.OffscreenTarget = null,
     cutout_sticker_w: u16 = 0,
     cutout_sticker_h: u16 = 0,
+    /// The camera frame copied here at chain start when a cutout sprite is
+    /// present, so the cutout lifts the subject from the original frame no matter
+    /// what upstream passes did to the chain - an object-move lens can inpaint the
+    /// subject out of its place and still cut it out to draw at a new rect.
+    cutout_source_target: ?render.Renderer.OffscreenTarget = null,
+    cutout_source_w: u16 = 0,
+    cutout_source_h: u16 = 0,
     /// cutout.pass nodes by graph index: their background color (rgb) and edge
     /// softness. The face matte keys the frame through, the rest goes flat color.
     cutout_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1817,6 +1824,18 @@ fn ensureCutoutSticker(s: *Session, width: u16, height: u16) !void {
     s.cutout_sticker_target = try render.Renderer.createOffscreenTarget(width, height);
     s.cutout_sticker_w = width;
     s.cutout_sticker_h = height;
+}
+
+/// (Re)creates the target the camera frame is copied into at chain start for a
+/// cutout sprite, so the cutout lifts from the original frame however the chain
+/// edits it afterward. Sized the same lazy way the other session targets are.
+fn ensureCutoutSource(s: *Session, width: u16, height: u16) !void {
+    if (s.cutout_source_w == width and s.cutout_source_h == height and s.cutout_source_target != null) return;
+    if (s.cutout_source_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.cutout_source_target = null;
+    s.cutout_source_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.cutout_source_w = width;
+    s.cutout_source_h = height;
 }
 
 /// (Re)creates the session-owned target a matte.hair source refines the
@@ -2744,6 +2763,20 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             next_view_id += 1;
             r.tile = null;
             render.Renderer.setViewTarget(seed_view, oft, width, height);
+            r.submitShaderPass(seed_view, r.passthroughProgram(), targets[0].texture, r.default_mask_texture);
+        }
+    }
+
+    // A cutout sprite lifts the subject from the original frame, so copy it here
+    // before any pass edits the chain - an object-move lens inpaints the subject
+    // out of place yet still cuts it from this copy to draw at a new rect.
+    if (s.sprite_cutouts.count() > 0) {
+        ensureCutoutSource(s, width, height) catch {};
+        if (s.cutout_source_target) |cst| {
+            const seed_view = next_view_id;
+            next_view_id += 1;
+            r.tile = null;
+            render.Renderer.setViewTarget(seed_view, cst, width, height);
             r.submitShaderPass(seed_view, r.passthroughProgram(), targets[0].texture, r.default_mask_texture);
         }
     }
@@ -3944,15 +3977,18 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 } else if (s.sprite_cutouts.get(entry.graph_index)) |co| {
                     // A cutout sprite lifts the live subject keyed by its channel
                     // into a transparent-background target, then draws that at the
-                    // sprite rect - a movable, scalable auto-subject sticker.
+                    // sprite rect - a movable, scalable auto-subject sticker. It
+                    // lifts from the original-frame copy, so an upstream inpaint
+                    // that removed the subject cannot empty the cutout.
                     const mask_tex = if (co.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[co.channel] orelse r.zero_mask_texture;
                     ensureCutoutSticker(s, width, height) catch continue;
                     const cutout_target = s.cutout_sticker_target orelse continue;
+                    const source_tex = if (s.cutout_source_target) |cst| cst.texture else input_texture;
                     const cutout_view = next_view_id;
                     next_view_id += 1;
                     r.tile = null;
                     render.Renderer.setViewTarget(cutout_view, cutout_target, width, height);
-                    r.submitCutoutSticker(cutout_view, input_texture, mask_tex, co.softness);
+                    r.submitCutoutSticker(cutout_view, source_tex, mask_tex, co.softness);
                     sprite_texture = cutout_target.texture;
                 } else {
                     sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
@@ -4880,6 +4916,7 @@ pub fn destroySession(session: *Session) void {
     if (session.occluder_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.splat_scene_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.cutout_sticker_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.cutout_source_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
