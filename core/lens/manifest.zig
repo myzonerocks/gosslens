@@ -1415,13 +1415,15 @@ pub const Action = struct {
     curve: Curve = .linear,
     stiffness: f32 = 0,
     damping: f32 = 0,
-    /// play_sound only: the voice's gain (default 1), whether it loops, and a
-    /// linear fade in and out in milliseconds (0 for a hard start or stop). A
-    /// looping voice ignores the fade out.
+    /// play_sound only: the voice's gain (default 1), whether it loops, a linear
+    /// fade in and out in milliseconds (0 for a hard start or stop, a looping
+    /// voice ignoring the fade out), and an equal-power stereo pan (-1 left to 1
+    /// right, 0 centred).
     sound_gain: f32 = 1,
     sound_loop: bool = false,
     fade_in_ms: u32 = 0,
     fade_out_ms: u32 = 0,
+    pan: f32 = 0,
 };
 
 pub const Trigger = struct {
@@ -4449,6 +4451,7 @@ fn parseAction(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, 
         const n = numberOf(v) orelse 0;
         action.fade_out_ms = if (n >= 0 and n <= max_duration_ms) @intFromFloat(n) else 0;
     }
+    if (getField(object, "pan")) |v| action.pan = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse 0)), -1, 1);
     return action;
 }
 

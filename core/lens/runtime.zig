@@ -800,6 +800,7 @@ pub const SoundEvent = struct {
     loop: bool = false,
     fade_in_ms: u32 = 0,
     fade_out_ms: u32 = 0,
+    pan: f32 = 0,
 };
 
 /// A compiled logic.graph node: the evaluatable graph, the parameter its output
@@ -2390,6 +2391,7 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
                     .loop = action.sound_loop,
                     .fade_in_ms = action.fade_in_ms,
                     .fade_out_ms = action.fade_out_ms,
+                    .pan = action.pan,
                 };
                 lens.tick_sound_count += 1;
             }

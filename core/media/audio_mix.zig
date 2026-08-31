@@ -89,6 +89,26 @@ pub fn combine(lens_mono: []const i16, mic: ?[]const f32, out: []i16, frame_coun
     }
 }
 
+/// Like combine, but the lens sound is stereo (interleaved L, R per frame), so a
+/// panned play_sound lands left in channel 0 and right in channel 1 of a stereo
+/// track; a mono track takes their average, and a channel past the second takes
+/// it too. The mic is summed per channel exactly as combine does.
+pub fn combineStereo(lens_stereo: []const i16, mic: ?[]const f32, out: []i16, frame_count: u32, channels: u32) void {
+    var i: u32 = 0;
+    while (i < frame_count) : (i += 1) {
+        const l = lens_stereo[i * 2];
+        const r = lens_stereo[i * 2 + 1];
+        const mid: i16 = @intCast(@divTrunc(@as(i32, l) + @as(i32, r), 2));
+        var c: u32 = 0;
+        while (c < channels) : (c += 1) {
+            const idx = i * channels + c;
+            const mic_s16: i16 = if (mic) |m| micToS16(m[idx]) else 0;
+            const lens_c: i16 = if (channels == 1) mid else if (c == 0) l else if (c == 1) r else mid;
+            out[idx] = satAddS16(mic_s16, lens_c);
+        }
+    }
+}
+
 const t = std.testing;
 
 const SliceSource = struct {

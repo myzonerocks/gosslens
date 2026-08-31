@@ -1367,9 +1367,10 @@ sits farther from the wrist than its inner joint, a scale-free test.
 curve primitives in 6.3), `param_set` (immediate), `play_animation` (a
 named glTF animation clip), `play_sound` (start a voice for the sound at
 the bundle-relative path in `target`, decoded from `sounds/` and mixed into
-the audio the host pulls out, with optional `gain`, `loop`, and a linear
-`fade_in_ms`/`fade_out_ms`; several fired at once layer on the mixer's voices),
-`reset_timer` (name a timer signal back to
+the audio the host pulls out, with optional `gain`, `loop`, a linear
+`fade_in_ms`/`fade_out_ms`, and an equal-power stereo `pan` (-1 left to 1 right);
+several fired at once layer on the mixer's voices), `reset_timer` (name a timer
+signal back to
 zero), the counter actions `increment_counter`, `reset_counter` and
 `set_counter` (step a named counter that `counter('name')` reads and that
 persists across ticks, so a no-code lens keeps a score or a step index with no

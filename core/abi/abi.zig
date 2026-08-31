@@ -9425,6 +9425,10 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
 
 const audio_sample_rate: u32 = 48000;
 const audio_channels: u32 = 1;
+/// The lens sound mixer renders stereo so a play_sound can pan across the field;
+/// pull_audio downmixes it back to its mono contract, while mix_output_audio can
+/// place the left and right into a stereo call or live track.
+const sound_mixer_channels: u32 = 2;
 /// The delay-line length a voice.transform pitch shifter sweeps over, per channel.
 const voice_delay_len: usize = 1024;
 
@@ -9452,7 +9456,7 @@ fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) vo
         }
     }
     if (!has_sound) return;
-    var mixer = audio_playback.Mixer.create(audio_sample_rate, audio_channels) catch return;
+    var mixer = audio_playback.Mixer.create(audio_sample_rate, sound_mixer_channels) catch return;
     for (lens.manifest.triggers) |trig| {
         if (trig.action.kind != .play_sound) continue;
         const rel = trig.action.target;
@@ -9478,7 +9482,7 @@ fn playFiredSounds(s: *Session) void {
         if (s.sound_ids.get(ev.path)) |id| {
             const fade_in = @as(u64, ev.fade_in_ms) * audio_sample_rate / 1000;
             const fade_out = @as(u64, ev.fade_out_ms) * audio_sample_rate / 1000;
-            mixer.playFade(id, ev.loop, ev.gain, fade_in, fade_out);
+            mixer.playPan(id, ev.loop, ev.gain, fade_in, fade_out, ev.pan);
         }
     }
 }
@@ -9594,8 +9598,26 @@ pub export fn goss_session_set_dubbing(session: ?*Session, enabled: u32) Status 
 pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: u32) Status {
     const s = session orelse return .invalid_argument;
     const data = out orelse return .invalid_argument;
-    const buf = data[0 .. frames * audio_channels];
-    if (s.audio_mixer) |*mixer| mixer.pull(buf, frames) else @memset(buf, 0);
+    const mono = data[0 .. frames * audio_channels];
+    const mixer = if (s.audio_mixer) |*m| m else {
+        @memset(mono, 0);
+        return .ok;
+    };
+    // The mixer renders stereo for panning; pull_audio keeps its mono contract by
+    // averaging the two channels a chunk at a time (no per-frame allocation).
+    var chunk: [1024]i16 = undefined;
+    const per: u32 = @intCast(chunk.len / sound_mixer_channels);
+    var done: u32 = 0;
+    while (done < frames) {
+        const n = @min(per, frames - done);
+        mixer.pull(chunk[0 .. n * sound_mixer_channels], n);
+        for (0..n) |i| {
+            const l: i32 = chunk[i * 2];
+            const r: i32 = chunk[i * 2 + 1];
+            mono[done + i] = @intCast(@divTrunc(l + r, 2));
+        }
+        done += n;
+    }
     return .ok;
 }
 
@@ -9614,31 +9636,38 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
     const ratio = @as(f64, @floatFromInt(audio_sample_rate)) / @as(f64, @floatFromInt(sample_rate));
     const MixCtx = struct {
         m: *audio_playback.Mixer,
+        // The mixer is stereo; the mono resampler pulls the downmix of a frame.
         fn pull(self: *@This()) i16 {
-            var one: [audio_channels]i16 = .{0};
-            self.m.pull(&one, 1);
-            return one[0];
+            var frame: [sound_mixer_channels]i16 = @splat(0);
+            self.m.pull(&frame, 1);
+            return @intCast(@divTrunc(@as(i32, frame[0]) + @as(i32, frame[1]), 2));
         }
     };
 
-    // The lens mixer is 48 kHz mono. Resample its stream to the outgoing rate a
-    // bounded chunk at a time, then sum with the mic. A missing mixer (no lens
-    // sound) mixes silence, so the outgoing track is the mic alone.
+    // The lens mixer renders 48 kHz stereo. At the outgoing rate the stereo pull
+    // carries the pan straight through; at a different rate the mono resampler
+    // pulls the downmix and it plays centred. Bounded chunks, no allocation; a
+    // missing mixer mixes silence so the outgoing track is the mic alone.
     var lens_chunk: [1024]i16 = undefined;
+    var mono_chunk: [512]i16 = undefined;
     var enhanced_buf: [1024 * 8]f32 = undefined;
     var done: u32 = 0;
     while (done < frame_count) {
-        const n = @min(@as(u32, lens_chunk.len), frame_count - done);
-        const lens = lens_chunk[0..n];
+        const n = @min(@as(u32, mono_chunk.len), frame_count - done);
+        const lens_stereo = lens_chunk[0 .. n * sound_mixer_channels];
         if (s.audio_mixer) |*mixer| {
             if (sample_rate == audio_sample_rate) {
-                mixer.pull(lens, n);
+                mixer.pull(lens_stereo, n);
             } else {
                 var ctx = MixCtx{ .m = mixer };
-                s.mix_resampler.process(ratio, lens, &ctx, MixCtx.pull);
+                s.mix_resampler.process(ratio, mono_chunk[0..n], &ctx, MixCtx.pull);
+                for (0..n) |i| {
+                    lens_stereo[i * 2] = mono_chunk[i];
+                    lens_stereo[i * 2 + 1] = mono_chunk[i];
+                }
             }
         } else {
-            @memset(lens, 0);
+            @memset(lens_stereo, 0);
         }
         const base = @as(usize, done) * channels;
         const span = @as(usize, n) * channels;
@@ -9655,7 +9684,7 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
             if (s.voice_pitch != 1) voiceTransformMic(s, enhanced_buf[0..span], n, channels);
             break :blk enhanced_buf[0..span];
         };
-        audio_mix.combine(lens, mic_chunk, out_slice[base .. base + span], n, channels);
+        audio_mix.combineStereo(lens_stereo, mic_chunk, out_slice[base .. base + span], n, channels);
         done += n;
     }
     return .ok;
@@ -11713,7 +11742,7 @@ fn speakPcm(s: *Session, pcm: []const f32, rate: u32) void {
         std.mem.writeInt(i16, wav[44 + i * 2 ..][0..2], @intFromFloat(v * 32767.0), .little);
     }
     if (s.audio_mixer == null) {
-        s.audio_mixer = audio_playback.Mixer.create(audio_sample_rate, audio_channels) catch return;
+        s.audio_mixer = audio_playback.Mixer.create(audio_sample_rate, sound_mixer_channels) catch return;
         s.mix_resampler.reset();
     }
     const mixer = &s.audio_mixer.?;
