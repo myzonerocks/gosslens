@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 84u
+#define GOSS_ABI_MINOR 85u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -956,6 +956,13 @@ goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt
  * returns GOSS_OK; GOSS_AGAIN when no row carries a checksum-valid symbol. Purely
  * algorithmic and deterministic, no model. */
 goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits);
+
+/* Scans a width*height 8-bit luminance frame for a QR code (versions 1-4, level
+ * L, byte mode) and writes its decoded payload into out_buf with the length in
+ * out_len, returning GOSS_OK; GOSS_AGAIN when no QR decodes. Reed-Solomon error
+ * correction, algorithmic and deterministic, no model. A NULL out_buf reports
+ * the length only. */
+goss_status goss_engine_scan_qr(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_buf, size_t out_cap, size_t *out_len);
 
 /* Graph thread. Unsplices the active lens and frees everything its
  * activation allocated. Accepts no active lens and does nothing. */

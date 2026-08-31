@@ -12,6 +12,7 @@
 const std = @import("std");
 const abi = @import("abi");
 const barcode = @import("barcode");
+const qr = @import("qr");
 const sampler = @import("sampler");
 const image_adapter = @import("image");
 const png = @import("png");
@@ -8254,6 +8255,40 @@ fn proveScanBarcode(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF on-device barcode scan decodes an EAN-13 from a luminance frame and reports none on a blank frame\n", .{});
+    return true;
+}
+
+/// Proves on-device QR scanning: a known payload encoded to a QR and rendered
+/// into a luminance frame is decoded back through goss_engine_scan_qr, and a
+/// blank frame reports none - a real algorithmic recognition op, no model.
+fn proveScanQr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const payload = "https://goss.rocks/unlock/studio-42";
+    var mat: qr.Matrix = undefined;
+    try qr.encode(payload, 2, &mat);
+    const scale = 6;
+    const quiet = 4 * scale;
+    const dim = quiet * 2 + mat.size * scale;
+    const frame = try gpa.alloc(u8, dim * dim);
+    defer gpa.free(frame);
+    qr.render(&mat, scale, quiet, frame, dim);
+    var out: [512]u8 = undefined;
+    var written: usize = 0;
+    if (abi.goss_engine_scan_qr(engine, frame.ptr, @intCast(dim), @intCast(dim), &out, out.len, &written) != .ok) {
+        std.debug.print("conformance: FAIL QR scan did not decode the rendered code\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, payload, out[0..written])) {
+        std.debug.print("conformance: FAIL QR scan decoded the wrong payload\n", .{});
+        return false;
+    }
+    @memset(frame, 255);
+    var blank: [512]u8 = undefined;
+    var blank_len: usize = 0;
+    if (abi.goss_engine_scan_qr(engine, frame.ptr, @intCast(dim), @intCast(dim), &blank, blank.len, &blank_len) == .ok) {
+        std.debug.print("conformance: FAIL QR scan hallucinated a payload on a blank frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF on-device QR scan decodes a payload from a luminance frame ({d} bytes) and reports none on a blank frame\n", .{written});
     return true;
 }
 
@@ -20051,6 +20086,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveGenerateSong(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "scan-barcode")) {
             if (!try proveScanBarcode(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "scan-qr")) {
+            if (!try proveScanQr(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -20407,6 +20444,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("generate song");
     if (!try proveScanBarcode(gpa, engine)) return 1;
     watchHold("scan barcode");
+    if (!try proveScanQr(gpa, engine)) return 1;
+    watchHold("scan qr");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveScriptFile(gpa, engine)) return 1;

@@ -273,6 +273,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("sfx", sfxModule(b, target, optimize));
     abi_module.addImport("music", musicModule(b, target, optimize));
     abi_module.addImport("barcode", barcodeModule(b, target, optimize));
+    abi_module.addImport("qr", qrModule(b, target, optimize));
     abi_module.addImport("flash", flashModule(b, target, optimize));
     const fft_abi_module = fftModule(b, target, optimize);
     abi_module.addImport("formant", formantModule(b, target, optimize, fft_abi_module));
@@ -428,6 +429,7 @@ pub fn build(b: *std.Build) void {
     const sfx_tests = b.addTest(.{ .root_module = sfxModule(b, target, optimize) });
     const music_tests = b.addTest(.{ .root_module = musicModule(b, target, optimize) });
     const barcode_tests = b.addTest(.{ .root_module = barcodeModule(b, target, optimize) });
+    const qr_tests = b.addTest(.{ .root_module = qrModule(b, target, optimize) });
     const flash_tests = b.addTest(.{ .root_module = flashModule(b, target, optimize) });
     const fft_tests = b.addTest(.{ .root_module = fftModule(b, target, optimize) });
     const formant_tests = b.addTest(.{ .root_module = formantModule(b, target, optimize, fftModule(b, target, optimize)) });
@@ -483,6 +485,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(sfx_tests).step);
     test_step.dependOn(&b.addRunArtifact(music_tests).step);
     test_step.dependOn(&b.addRunArtifact(barcode_tests).step);
+    test_step.dependOn(&b.addRunArtifact(qr_tests).step);
     test_step.dependOn(&b.addRunArtifact(flash_tests).step);
     test_step.dependOn(&b.addRunArtifact(fft_tests).step);
     test_step.dependOn(&b.addRunArtifact(formant_tests).step);
@@ -847,6 +850,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("sfx", sfxModule(b, target, optimize));
         abi_tracking_module.addImport("music", musicModule(b, target, optimize));
         abi_tracking_module.addImport("barcode", barcodeModule(b, target, optimize));
+        abi_tracking_module.addImport("qr", qrModule(b, target, optimize));
         abi_tracking_module.addImport("flash", flashModule(b, target, optimize));
         const fft_abi_tracking_module = fftModule(b, target, optimize);
         abi_tracking_module.addImport("formant", formantModule(b, target, optimize, fft_abi_tracking_module));
@@ -1079,6 +1083,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("sfx", sfxModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("music", musicModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("barcode", barcodeModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("qr", qrModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("flash", flashModule(b, wasm_target, .ReleaseSmall));
     const fft_abi_wasm = fftModule(b, wasm_target, .ReleaseSmall);
     abi_wasm.addImport("formant", formantModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
@@ -1280,6 +1285,7 @@ pub fn build(b: *std.Build) void {
         });
         const conformance_png_module = pngModule(b, target, optimize);
         const conformance_barcode_module = barcodeModule(b, target, optimize);
+        const conformance_qr_module = qrModule(b, target, optimize);
         const conformance_jpeg_module = jpegModule(b, target, optimize);
         const conformance_color_module = colorModule(b, target, optimize);
         abi_conformance_module.addImport("png", conformance_png_module);
@@ -1294,6 +1300,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("sfx", sfxModule(b, target, optimize));
         abi_conformance_module.addImport("music", musicModule(b, target, optimize));
         abi_conformance_module.addImport("barcode", conformance_barcode_module);
+        abi_conformance_module.addImport("qr", conformance_qr_module);
         abi_conformance_module.addImport("flash", flashModule(b, target, optimize));
         const fft_abi_conformance_module = fftModule(b, target, optimize);
         abi_conformance_module.addImport("formant", formantModule(b, target, optimize, fft_abi_conformance_module));
@@ -1445,6 +1452,7 @@ pub fn build(b: *std.Build) void {
         conformance_module.addImport("jpeg", conformance_jpeg_module);
         conformance_module.addImport("color", conformance_color_module);
         conformance_module.addImport("barcode", conformance_barcode_module);
+        conformance_module.addImport("qr", conformance_qr_module);
         // The hostile-input tripwire drives the untrusted parsers directly.
         conformance_module.addImport("manifest", lens_manifest_module);
         conformance_module.addImport("material", material_module);
@@ -1680,6 +1688,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("sfx", sfxModule(b, android_target, optimize));
     abi_android.addImport("music", musicModule(b, android_target, optimize));
     abi_android.addImport("barcode", barcodeModule(b, android_target, optimize));
+    abi_android.addImport("qr", qrModule(b, android_target, optimize));
     abi_android.addImport("flash", flashModule(b, android_target, optimize));
     const fft_abi_android = fftModule(b, android_target, optimize);
     abi_android.addImport("formant", formantModule(b, android_target, optimize, fft_abi_android));
@@ -1971,6 +1980,10 @@ fn musicModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 fn barcodeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/media/barcode.zig"), .target = target, .optimize = optimize });
+}
+
+fn qrModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/qr.zig"), .target = target, .optimize = optimize });
 }
 
 fn fftModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -3891,6 +3904,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("sfx", sfxModule(b, ios_target, optimize));
     abi_ios.addImport("music", musicModule(b, ios_target, optimize));
     abi_ios.addImport("barcode", barcodeModule(b, ios_target, optimize));
+    abi_ios.addImport("qr", qrModule(b, ios_target, optimize));
     abi_ios.addImport("flash", flashModule(b, ios_target, optimize));
     const fft_abi_ios = fftModule(b, ios_target, optimize);
     abi_ios.addImport("formant", formantModule(b, ios_target, optimize, fft_abi_ios));
@@ -4533,6 +4547,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("sfx", sfxModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("music", musicModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("barcode", barcodeModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("qr", qrModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("flash", flashModule(b, em_target, .ReleaseSmall));
     const fft_abi_em = fftModule(b, em_target, .ReleaseSmall);
     abi_em.addImport("formant", formantModule(b, em_target, .ReleaseSmall, fft_abi_em));

@@ -580,6 +580,29 @@ export class GossEngine {
     return digits;
   }
 
+  /// Scans a width*height 8-bit luminance frame for a QR code and returns its
+  /// decoded payload bytes, or null when no QR decodes. Reed-Solomon error
+  /// correction, algorithmic and deterministic, no model.
+  scanQR(luminance: Uint8Array, width: number, height: number): Uint8Array | null {
+    const lumPtr = this.mod.ccall("goss_alloc", "number", ["number"], [luminance.length || 1]) as number;
+    this.mod.HEAPU8.set(luminance, lumPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const view = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number", "number"];
+    const probe = this.mod.ccall("goss_engine_scan_qr", "number", args, [this.handle, lumPtr, width, height, 0, 0, lenPtr]) as number;
+    let out: Uint8Array | null = null;
+    if (probe === 0) {
+      const needed = view();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+      const fill = this.mod.ccall("goss_engine_scan_qr", "number", args, [this.handle, lumPtr, width, height, outPtr, needed, lenPtr]) as number;
+      if (fill === 0) out = this.mod.HEAPU8.slice(outPtr, outPtr + view());
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lumPtr, luminance.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    return out;
+  }
+
   /// Fingerprints a reference recording and registers it under trackId in the
   /// engine's on-device music catalog. Samples are interleaved f32; re-adding a
   /// trackId layers more landmarks in.

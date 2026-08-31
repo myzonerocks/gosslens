@@ -30,6 +30,7 @@ const audio_mix = @import("audio_mix");
 const sfx = @import("sfx");
 const music = @import("music");
 const barcode = @import("barcode");
+const qr = @import("qr");
 const flash = @import("flash");
 const formant = @import("formant");
 const fingerprint = @import("fingerprint");
@@ -261,6 +262,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits)",
+    "goss_status goss_engine_scan_qr(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
@@ -9960,6 +9962,25 @@ pub export fn goss_engine_scan_barcode(engine: ?*Engine, luminance: ?[*]const u8
         }
     }
     return .again;
+}
+
+/// Scans a luminance frame for a QR code (versions 1-4, level L, byte mode),
+/// writing its decoded payload into out_buf and its length into out_len; .again
+/// when no QR decodes. Algorithmic and deterministic with Reed-Solomon error
+/// correction, no model, so a lens reads a scan-to-unlock code with nothing gated.
+pub export fn goss_engine_scan_qr(engine: ?*Engine, luminance: ?[*]const u8, width: u32, height: u32, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    _ = engine;
+    const lum = luminance orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    var payload: [512]u8 = undefined;
+    const cap = @min(out_cap, payload.len);
+    const len = qr.scan(lum[0 .. @as(usize, width) * height], width, height, payload[0..payload.len]) orelse return .again;
+    out_len_ptr.* = len;
+    if (out_buf) |buf| {
+        if (cap >= len) @memcpy(buf[0..len], payload[0..len]);
+    }
+    return .ok;
 }
 
 /// Fingerprints a reference recording and registers it under track_id in the

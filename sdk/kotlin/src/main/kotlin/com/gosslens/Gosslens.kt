@@ -33,6 +33,7 @@ object Gosslens {
     internal external fun nativeCompilePrompt(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
     internal external fun nativeGenerateSong(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, sampleRate: Int, seed: Int, bars: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
     internal external fun nativeScanBarcode(engine: Long, lumBuffer: ByteBuffer, width: Int, height: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativeScanQr(engine: Long, lumBuffer: ByteBuffer, width: Int, height: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
     internal external fun nativeMusicAddReference(engine: Long, trackId: Int, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeMusicClearReferences(engine: Long)
     internal external fun nativeMusicIdentify(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int, outBuffer: ByteBuffer): Int
@@ -506,6 +507,25 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         val out = ByteBuffer.allocateDirect(13)
         if (Gosslens.nativeScanBarcode(handle, lumBuffer, width, height, out) != 0) return null
         val result = ByteArray(13)
+        out.get(result)
+        return result
+    }
+
+    /** Scans a width*height 8-bit luminance frame for a QR code and returns its
+     * decoded payload bytes, or null when no QR decodes. Reed-Solomon error
+     * correction, algorithmic and deterministic, no model. */
+    fun scanQR(luminance: ByteArray, width: Int, height: Int): ByteArray? {
+        val lumBuffer = ByteBuffer.allocateDirect(maxOf(luminance.size, 1))
+        lumBuffer.put(luminance)
+        lumBuffer.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeScanQr(handle, lumBuffer, width, height, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        if (Gosslens.nativeScanQr(handle, lumBuffer, width, height, out, needed.toLong(), len) != 0) return null
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
         out.get(result)
         return result
     }

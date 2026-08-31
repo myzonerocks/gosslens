@@ -101,6 +101,18 @@ public final class GossEngine: @unchecked Sendable {
         return ok ? out : nil
     }
 
+    /// Scans a width*height 8-bit luminance frame for a QR code and returns its
+    /// decoded payload bytes, or nil when no QR decodes. Reed-Solomon error
+    /// correction, algorithmic and deterministic, no model.
+    public func scanQR(luminance: [UInt8], width: UInt32, height: UInt32) -> [UInt8]? {
+        var needed: Int = 0
+        if goss_engine_scan_qr(handle, luminance, width, height, nil, 0, &needed) != GOSS_OK { return nil }
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        if goss_engine_scan_qr(handle, luminance, width, height, &out, out.count, &written) != GOSS_OK { return nil }
+        return Array(out[0..<written])
+    }
+
     /// Fingerprints a reference recording and registers it under `trackID` in the
     /// engine's on-device music catalog. Samples are interleaved f32.
     public func addMusicReference(trackID: UInt32, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws {

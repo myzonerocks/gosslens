@@ -147,6 +147,18 @@ export fn Java_com_gosslens_Gosslens_nativeScanBarcode(env: *JniEnv, cls: jobjec
     return @intFromEnum(abi.goss_engine_scan_barcode(engineFromHandle(engine), @ptrCast(lum), @intCast(@max(width, 0)), @intCast(@max(height, 0)), @ptrCast(out)));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeScanQr(env: *JniEnv, cls: jobject, engine: i64, lum_buffer: jobject, width: i32, height: i32, out_buffer: jobject, out_capacity: i64, len_buffer: jobject) i32 {
+    _ = cls;
+    const lum = getDirectBufferAddress(env, lum_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_len: *align(1) u64 = @ptrCast(len_bytes);
+    const out: ?[*]u8 = getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_engine_scan_qr(engineFromHandle(engine), @ptrCast(lum), @intCast(@max(width, 0)), @intCast(@max(height, 0)), out, @intCast(@max(out_capacity, 0)), &written);
+    out_len.* = written;
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeMusicAddReference(env: *JniEnv, cls: jobject, engine: i64, track_id: i32, samples_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32) i32 {
     _ = cls;
     const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
