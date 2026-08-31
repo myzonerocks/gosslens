@@ -27,7 +27,7 @@ pub const Landmark = struct { hash: u32, t: u32 };
 
 /// The best track a query agreed with: its id, how many landmarks lined up at one
 /// offset, and that offset in hops. `votes` is the confidence signal.
-pub const Match = struct { id: u32, votes: u32, offset: i32 };
+pub const Match = struct { id: u32, votes: u32, offset: i64 };
 
 const Peak = struct { t: u32, bin: u16 };
 
@@ -204,7 +204,9 @@ pub const Database = struct {
         const items = self.entries.items;
         if (items.len == 0 or query.len == 0) return null;
 
-        const Key = struct { track: u32, offset: i32 };
+        // Frame indices widen to i64 before the subtraction, so the offset can
+        // never overflow or trip a narrowing cast on a caller's frame count.
+        const Key = struct { track: u32, offset: i64 };
         var votes = std.AutoHashMap(Key, u32).init(self.gpa);
         defer votes.deinit();
 
@@ -218,7 +220,7 @@ pub const Database = struct {
             }
             var k = lo;
             while (k < items.len and items[k].hash == q.hash) : (k += 1) {
-                const off = @as(i32, @intCast(items[k].t)) - @as(i32, @intCast(q.t));
+                const off = @as(i64, items[k].t) - @as(i64, q.t);
                 const key = Key{ .track = items[k].track, .offset = off };
                 const gop = try votes.getOrPut(key);
                 gop.value_ptr.* = (if (gop.found_existing) gop.value_ptr.* else 0) + 1;
@@ -323,7 +325,7 @@ test "a query snippet identifies its source track over a decoy" {
     try t.expectEqual(@as(u32, 1), m.?.id);
     // The snippet began two seconds in, so the winning offset is near that lag in
     // hops (2 s * 11025 / 512 hops), positive because the reference leads.
-    const expected: i32 = @intCast(start / hop);
+    const expected: i64 = @intCast(start / hop);
     try t.expect(@abs(m.?.offset - expected) <= 2);
 }
 
