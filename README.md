@@ -75,3 +75,9 @@ holds one public operation contract across Swift, Kotlin, and TypeScript.
 
 Participation in the project is covered by
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+## License
+
+Gosslens is licensed under the Apache License 2.0. See [LICENSE.md](LICENSE.md).
+Third-party components retain their own licenses, recorded per component under
+`third_party/` and summarized in [NOTICE.md](NOTICE.md).

@@ -1,4 +1,11 @@
-# Third-Party Notices
+# Notices
+
+Gosslens
+Copyright 2026 Webster Avosa, MyZoneRocks
+
+Licensed under the Apache License, Version 2.0. See [LICENSE.md](LICENSE.md).
+
+## Third-Party Notices
 
 Gosslens includes and depends on third-party software.
 
@@ -66,7 +73,7 @@ The Zig compiler is also part of the Gosslens development toolchain and is
 provided under its own license.
 
 A component appearing in this repository does not place its code under the
-Gosslens proprietary license. Its upstream license continues to govern that
+Gosslens Apache-2.0 license. Its upstream license continues to govern that
 component.
 
 Gosslens accepts only dependencies that satisfy the repository's dependency
