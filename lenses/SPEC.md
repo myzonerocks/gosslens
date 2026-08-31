@@ -1407,7 +1407,10 @@ bridge, cupid's bow, and chin), and `lash_line` is the upper lash-line band
 each eye's upper lid arc rises into. Four more mark the retouch regions:
 `under_eye` the band below each eye, `nasolabial` the smile-line fold, `sclera`
 the eye-white inside the eye contour with the iris punched out, and `t_zone` the
-forehead and nose bridge. A makeup or retouch lens keys those directly. One more
+forehead and nose bridge. `ear` marks the strip where each ear joins the face,
+filled from the face-oval silhouette landmarks beside the ears, for an earring
+or an ear tint (the mesh stops at the oval, so it is the ear's join to the face,
+not the whole pinna). A makeup or retouch lens keys those directly. One more
 is derived on the GPU: `hair_matte` is the strand-level hair alpha a `matte.hair`
 source refines from the coarse `hair` class against the camera luma, a soft
 feathered edge a hair effect keys in place of the hard `hair` bit; with no

@@ -14727,6 +14727,57 @@ fn pixelByteSum(tga: []const u8) u64 {
     return sum;
 }
 
+/// Proves the ear-matte clusters are anatomically placed on a real tracked
+/// face: the two ear regions sit on opposite sides of the nose and flank wider
+/// than the cheek contours (the ears the widest points), so a mislabeled
+/// cluster fails here. The hull-matte path is the one contour and highlight use.
+fn proveEarMatte(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        std.debug.print("conformance: FAIL ear face tracking enable\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.TrackFrameFailed;
+    var result: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &result) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+    const lm = &result.landmarks;
+    const ear_l = ringCentroid(lm, abi.ear_regions[0]);
+    const ear_r = ringCentroid(lm, abi.ear_regions[1]);
+    const cheek_r = ringCentroid(lm, abi.contour_regions[0]);
+    const cheek_l = ringCentroid(lm, abi.contour_regions[1]);
+    const nose_x = lm[1 * 3];
+    if ((ear_l[0] > nose_x) == (ear_r[0] > nose_x)) {
+        std.debug.print("conformance: FAIL the ear regions not on opposite sides of the nose (x L {d:.1} R {d:.1} nose {d:.1})\n", .{ ear_l[0], ear_r[0], nose_x });
+        return false;
+    }
+    const cheek_lo = @min(cheek_l[0], cheek_r[0]);
+    const cheek_hi = @max(cheek_l[0], cheek_r[0]);
+    const ear_lo = @min(ear_l[0], ear_r[0]);
+    const ear_hi = @max(ear_l[0], ear_r[0]);
+    if (!(ear_lo < cheek_lo and ear_hi > cheek_hi)) {
+        std.debug.print("conformance: FAIL the ears not wider than the cheeks (ear {d:.1}..{d:.1} cheek {d:.1}..{d:.1})\n", .{ ear_lo, ear_hi, cheek_lo, cheek_hi });
+        return false;
+    }
+    std.debug.print("conformance: PROOF the ear matte's clusters flank the face wider than the cheeks on opposite sides of the nose (ear x {d:.0}..{d:.0} vs cheek {d:.0}..{d:.0})\n", .{ ear_lo, ear_hi, cheek_lo, cheek_hi });
+    return true;
+}
+
 fn proveContourHighlight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // First prove the region clusters are anatomically placed: on a real
     // tracked face the two cheek-hollow contours flank the nose, the nose-
@@ -18331,6 +18382,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("glam look");
     if (!try proveContourHighlight(gpa, engine)) return 1;
     watchHold("contour highlight");
+    if (!try proveEarMatte(gpa, engine)) return 1;
+    watchHold("ear matte");
     if (!try proveEyeMakeup(gpa, engine)) return 1;
     watchHold("eye makeup");
     if (!try proveLashMesh(gpa, engine)) return 1;

@@ -262,6 +262,15 @@ pub const t_zone_regions = [_][]const u16{
     &.{ 168, 6, 197, 195, 5, 122, 351 },
 };
 
+/// Ear regions, each a cluster of face-oval silhouette landmarks beside one ear.
+/// Their convex hulls fill the strip an earring or ear tint anchors to; a matte
+/// unions them, keyed off the tracked face. The mesh stops at the oval, so this
+/// marks the ear's join to the face rather than the whole pinna.
+pub const ear_regions = [_][]const u16{
+    &.{ 234, 227, 137, 177, 132 },
+    &.{ 454, 447, 366, 401, 361 },
+};
+
 /// A stable skin patch for reading skin tone from a reference photo: mid-cheek
 /// and mid-forehead landmarks, clear of the lips, eyes, brows, and hairline, so
 /// a reference-driven foundation samples skin, not a feature. averageLoopColor
