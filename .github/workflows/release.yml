@@ -48,11 +48,12 @@ jobs:
               2\*\*14|2\*\*15|2\*\*16) : ;;
               *) echo "FAIL: $so LOAD alignment $align is below 2**14 (16 KB)"; exit 1 ;;
             esac
-            # Informational: the exported set should be goss_* only once the build
-            # hides default visibility. Surfaced, not gated, so a wider set never
-            # blocks a release before that pass lands.
-            extra=$(nm -D --defined-only "$so" | awk '{print $NF}' | grep -vE '^(goss_|__|_init$|_fini$)' || true)
-            [ -n "$extra" ] && { echo "note: $so exports beyond goss_*:"; echo "$extra" | head; } || true
+            # The ABI entrypoint must be exported for any SDK to bind the slice.
+            nm -D --defined-only "$so" | awk '{print $NF}' | grep -q '^goss_abi_version$' \
+              || { echo "FAIL: $so does not export goss_abi_version"; exit 1; }
+            # Diagnostic: any export beyond goss_*, for tightening the visibility
+            # of the vendored C++ slices in review.
+            nm -D --defined-only "$so" | awk '{print $NF}' | grep -vE '^(goss_|__|_init$|_fini$)' | sed "s#^#note $so exports: #" | head || true
           done
           [ "$found" = 1 ] || { echo "FAIL: no libgosslens.so was built"; exit 1; }
       - name: package jniLibs
