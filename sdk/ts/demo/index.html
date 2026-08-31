@@ -2,39 +2,72 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>gosslens demo</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; }
-  /* Front camera preview mirrors like a mirror would - CSS, not shader
-     math, so it flips the finished frame (preview and its landmark
-     overlay together) without touching how any beauty effect samples
-     or aligns against the underlying, unmirrored texture space. */
-  canvas { width: 100vw; height: 100vh; display: block; transform: scaleX(-1); }
-  #overlay { position: fixed; inset: 0; pointer-events: none; }
-  #status { position: fixed; top: 12px; left: 12px; color: #fff; font: 13px monospace; white-space: pre; }
-  #controls { position: fixed; bottom: 12px; left: 12px; color: #fff; font: 13px monospace; }
+
+  /* Front camera preview mirrors like a mirror: a CSS flip of the finished frame. */
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; transform: scaleX(-1); }
+  #preview { z-index: 0; }
+  #background { z-index: 1; pointer-events: none; }
+  #overlay { z-index: 2; pointer-events: none; }
+
+  #status, #readout {
+    position: fixed; left: calc(12px + env(safe-area-inset-left)); color: #fff;
+    font: 13px monospace; white-space: nowrap; z-index: 3; text-shadow: 0 1px 2px #000;
+  }
+
+  #status { top: calc(12px + env(safe-area-inset-top)); }
+  #readout { top: calc(32px + env(safe-area-inset-top)); }
+
+  #controls {
+    position: fixed; z-index: 3; color: #fff; font: 13px monospace;
+    left: calc(12px + env(safe-area-inset-left)); right: calc(12px + env(safe-area-inset-right));
+    bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+
+  #controls label, #controls .row { white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+  #controls .row { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; }
+  #controls button { font: 13px monospace; }
+  #vbg-note { color: #f7c948; }
+
+  #shot {
+    position: fixed; z-index: 3; right: calc(12px + env(safe-area-inset-right));
+    top: calc(12px + env(safe-area-inset-top)); width: 160px; height: auto; border: 1px solid #fff; display: none;
+  }
 </style>
 </head>
 <body>
 <canvas id="preview" width="1280" height="720"></canvas>
+<canvas id="background" width="1280" height="720"></canvas>
 <canvas id="overlay" width="1280" height="720"></canvas>
 <div id="status">loading</div>
+<div id="readout">face no  id:-  gesture:none  0 fps</div>
+<img id="shot" alt="captured photo">
 <div id="controls">
-  whiten <input id="whiten" type="range" min="0" max="1" step="0.01" value="0">
-  smooth <input id="smooth" type="range" min="0" max="1" step="0.01" value="0">
-  thin face <input id="thin-face" type="range" min="0" max="1" step="0.01" value="0">
-  big eye <input id="big-eye" type="range" min="0" max="0.15" step="0.005" value="0">
-  lipstick <input id="lipstick" type="range" min="0" max="0.5" step="0.01" value="0">
-  blush <input id="blush" type="range" min="0" max="0.5" step="0.01" value="0">
-  <label><input id="flip-camera" type="checkbox" checked> camera upside down</label>
-  <div id="filters" style="margin-top:6px">
+  <div class="row">
+    <label>smooth <input id="smooth" type="range" min="0" max="1" step="0.01" value="0"></label>
+    <label>whiten <input id="whiten" type="range" min="0" max="1" step="0.01" value="0"></label>
+    <label>thin face <input id="thin-face" type="range" min="0" max="1" step="0.01" value="0"></label>
+    <label>big eye <input id="big-eye" type="range" min="0" max="0.15" step="0.005" value="0"></label>
+    <label>lipstick <input id="lipstick" type="range" min="0" max="0.5" step="0.01" value="0"></label>
+    <label>blush <input id="blush" type="range" min="0" max="0.5" step="0.01" value="0"></label>
+  </div>
+  <div class="row">
     filter
     <button id="filter-none" type="button">none</button>
     <button id="filter-blur" type="button">blur</button>
     <button id="filter-grade" type="button">grade</button>
     <button id="filter-bloom" type="button">bloom</button>
     <button id="filter-ember" type="button">ember</button>
+  </div>
+  <div class="row">
+    <button id="capture" type="button">Capture Photo</button>
+    <label><input id="virtual-bg" type="checkbox"> virtual background</label>
+    <span id="vbg-note"></span>
+    <label><input id="show-overlays" type="checkbox" checked> tracking overlay</label>
+    <label><input id="flip-camera" type="checkbox" checked> camera upside down</label>
   </div>
 </div>
 <script type="module" src="dist.js"></script>

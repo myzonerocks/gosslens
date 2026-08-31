@@ -66,8 +66,9 @@ inference runtime link in through the platform builds, `zig build ios`,
 What the host library does run is everything that does not need a graphics
 surface: engine and session lifecycle, the lens runtime (activation and ticking
 against triggers), camera-control and recording-policy intent read back, the
-app-tracked multi-face and multi-body paths, the brush, the geofence signal, the
-degradation policy, and the pure helpers. That is enough to link the library and
+app-tracked multi-face and multi-body paths, the brush, the named-geofence and
+geofence signal, the model-digest allowlist, the multi-source composition state,
+the degradation policy, and the pure helpers. That is enough to link the library and
 exercise the ABI from C without a window, which is what the example does.
 
 ## Example

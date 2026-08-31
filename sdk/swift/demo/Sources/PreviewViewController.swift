@@ -14,8 +14,16 @@ final class PreviewViewController: UIViewController {
     private let log = Logger(subsystem: "com.gosslens.demo", category: "preview")
     private let camera = CameraController()
     private let statusLabel = UILabel()
+    private let trackingLabel = UILabel()
     private let switchCameraButton = UIButton(type: .system)
     private let beautyStack = UIStackView()
+    private let controlsStack = UIStackView()
+    private let lensPicker = UISegmentedControl(items: PostFilter.allCases.map { $0.title })
+    private let overlaysSwitch = UISwitch()
+    private let backgroundSwitch = UISwitch()
+    private let captureButton = UIButton(type: .system)
+    private let noteLabel = UILabel()
+    private let captureThumbnail = UIImageView()
     private let faceLayer = CAShapeLayer()
     private let faceRegionLayer = CAShapeLayer()
     private let handLayer = CAShapeLayer()
@@ -35,6 +43,17 @@ final class PreviewViewController: UIViewController {
     private var fpsWindowStart = CFAbsoluteTimeGetCurrent()
     private var fpsWindowFrames = 0
     private var lastFrameStart = CFAbsoluteTimeGetCurrent()
+    private var lastFps: Double = 0
+    private var lastDegrade: GossDegradeLevel = .full
+
+    // The showcase state the picker and the background toggle both drive:
+    // one active lens at a time, with the segmenter overlaying it when on.
+    private var overlaysVisible = true
+    private var currentFilter: PostFilter = .none
+    private var segmentationOn = false
+    private var beautyAmounts = [Float](repeating: 0, count: 6)
+    private var baselineManifest: Data?
+    private var thumbnailHideItem: DispatchWorkItem?
 
     override func loadView() {
         view = MetalView()
@@ -48,13 +67,50 @@ final class PreviewViewController: UIViewController {
 
         statusLabel.textColor = .white
         statusLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        statusLabel.numberOfLines = 0
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(statusLabel)
+        statusLabel.numberOfLines = 1
+        statusLabel.lineBreakMode = .byTruncatingTail
+
+        trackingLabel.textColor = .white
+        trackingLabel.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        trackingLabel.numberOfLines = 1
+        trackingLabel.lineBreakMode = .byTruncatingTail
+
+        let statusStack = UIStackView(arrangedSubviews: [statusLabel, trackingLabel])
+        statusStack.axis = .vertical
+        statusStack.spacing = 2
+        statusStack.alignment = .leading
+        statusStack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(statusStack)
+
+        switchCameraButton.setImage(UIImage(systemName: "arrow.triangle.2.circlepath.camera"), for: .normal)
+        switchCameraButton.tintColor = .white
+        switchCameraButton.addTarget(self, action: #selector(switchCameraTapped), for: .touchUpInside)
+        switchCameraButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(switchCameraButton)
+
+        captureThumbnail.contentMode = .scaleAspectFill
+        captureThumbnail.clipsToBounds = true
+        captureThumbnail.layer.cornerRadius = 6
+        captureThumbnail.layer.borderWidth = 1
+        captureThumbnail.layer.borderColor = UIColor.white.withAlphaComponent(0.6).cgColor
+        captureThumbnail.isHidden = true
+        captureThumbnail.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(captureThumbnail)
+
         NSLayoutConstraint.activate([
-            statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            statusStack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            statusStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            statusStack.trailingAnchor.constraint(lessThanOrEqualTo: switchCameraButton.leadingAnchor, constant: -8),
+
+            switchCameraButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            switchCameraButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            switchCameraButton.widthAnchor.constraint(equalToConstant: 44),
+            switchCameraButton.heightAnchor.constraint(equalToConstant: 44),
+
+            captureThumbnail.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            captureThumbnail.topAnchor.constraint(equalTo: switchCameraButton.bottomAnchor, constant: 12),
+            captureThumbnail.widthAnchor.constraint(equalToConstant: 72),
+            captureThumbnail.heightAnchor.constraint(equalToConstant: 96),
         ])
 
         let version = Gosslens.abiVersion()
@@ -70,18 +126,6 @@ final class PreviewViewController: UIViewController {
         camera.onStateChange = { [weak self] state in
             self?.statusLabel.text = "capture \(state.rawValue)"
         }
-
-        switchCameraButton.setImage(UIImage(systemName: "arrow.triangle.2.circlepath.camera"), for: .normal)
-        switchCameraButton.tintColor = .white
-        switchCameraButton.addTarget(self, action: #selector(switchCameraTapped), for: .touchUpInside)
-        switchCameraButton.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(switchCameraButton)
-        NSLayoutConstraint.activate([
-            switchCameraButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
-            switchCameraButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            switchCameraButton.widthAnchor.constraint(equalToConstant: 44),
-            switchCameraButton.heightAnchor.constraint(equalToConstant: 44),
-        ])
 
         faceLayer.fillColor = UIColor.white.cgColor
         faceLayer.strokeColor = nil
@@ -102,6 +146,7 @@ final class PreviewViewController: UIViewController {
         view.layer.addSublayer(poseLayer)
 
         setupBeautyControls()
+        setupShowcaseControls()
     }
 
     // Each slider reaches setBeauty directly; the effect shows up in the
@@ -141,12 +186,224 @@ final class PreviewViewController: UIViewController {
         }
     }
 
+    // The lens filter picker, the overlay and virtual-background toggles, and
+    // the capture button, stacked just above the beauty sliders. The
+    // background toggle starts disabled with a note when the selfie model is
+    // not bundled, so the segmentation showcase degrades instead of crashing.
+    private func setupShowcaseControls() {
+        lensPicker.selectedSegmentIndex = currentFilter.rawValue
+        lensPicker.selectedSegmentTintColor = UIColor.white.withAlphaComponent(0.25)
+        lensPicker.setTitleTextAttributes([.foregroundColor: UIColor.white], for: .normal)
+        lensPicker.setTitleTextAttributes([.foregroundColor: UIColor.white], for: .selected)
+        lensPicker.addTarget(self, action: #selector(lensFilterChanged), for: .valueChanged)
+
+        overlaysSwitch.isOn = overlaysVisible
+        overlaysSwitch.onTintColor = .systemTeal
+        overlaysSwitch.addTarget(self, action: #selector(overlaysToggled), for: .valueChanged)
+        let overlaysRow = labeledSwitchRow(title: "overlays", control: overlaysSwitch)
+
+        backgroundSwitch.isOn = false
+        backgroundSwitch.onTintColor = .systemTeal
+        backgroundSwitch.addTarget(self, action: #selector(virtualBackgroundToggled), for: .valueChanged)
+        let backgroundRow = labeledSwitchRow(title: "background", control: backgroundSwitch)
+
+        let toggleRow = UIStackView(arrangedSubviews: [overlaysRow, backgroundRow])
+        toggleRow.axis = .horizontal
+        toggleRow.distribution = .fillEqually
+        toggleRow.spacing = 12
+
+        captureButton.setTitle("Capture", for: .normal)
+        captureButton.setTitleColor(.white, for: .normal)
+        captureButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+        captureButton.backgroundColor = UIColor.white.withAlphaComponent(0.18)
+        captureButton.layer.cornerRadius = 8
+        captureButton.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        captureButton.addTarget(self, action: #selector(captureTapped), for: .touchUpInside)
+
+        noteLabel.textColor = UIColor.white.withAlphaComponent(0.7)
+        noteLabel.font = .systemFont(ofSize: 11)
+        noteLabel.numberOfLines = 1
+        noteLabel.lineBreakMode = .byTruncatingTail
+        noteLabel.isHidden = true
+
+        controlsStack.axis = .vertical
+        controlsStack.spacing = 10
+        controlsStack.translatesAutoresizingMaskIntoConstraints = false
+        controlsStack.addArrangedSubview(lensPicker)
+        controlsStack.addArrangedSubview(toggleRow)
+        controlsStack.addArrangedSubview(captureButton)
+        controlsStack.addArrangedSubview(noteLabel)
+        view.addSubview(controlsStack)
+        NSLayoutConstraint.activate([
+            controlsStack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            controlsStack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            controlsStack.bottomAnchor.constraint(equalTo: beautyStack.topAnchor, constant: -12),
+        ])
+
+        if !virtualBackgroundAvailable {
+            backgroundSwitch.isEnabled = false
+            showNote("background needs the selfie model")
+        }
+    }
+
+    private func labeledSwitchRow(title: String, control: UISwitch) -> UIStackView {
+        let label = UILabel()
+        label.text = title
+        label.textColor = .white
+        label.font = .systemFont(ofSize: 13)
+        label.lineBreakMode = .byTruncatingTail
+        let row = UIStackView(arrangedSubviews: [label, control])
+        row.axis = .horizontal
+        row.spacing = 8
+        row.alignment = .center
+        return row
+    }
+
+    // The in-engine selfie segmenter is a raw .tflite the app bundles itself,
+    // not part of the engine archive; without it the virtual background stays
+    // off and the toggle disables rather than failing at runtime.
+    private var virtualBackgroundAvailable: Bool {
+        Bundle.main.url(forResource: "selfie_segmenter", withExtension: "tflite") != nil
+    }
+
     @objc private func beautySliderChanged(_ slider: UISlider) {
+        beautyAmounts[slider.tag] = slider.value
         try? session?.setBeauty(effect: Int32(slider.tag), amount: slider.value)
     }
 
     @objc private func switchCameraTapped() {
         camera.switchCamera()
+    }
+
+    @objc private func overlaysToggled() {
+        overlaysVisible = overlaysSwitch.isOn
+        faceLayer.isHidden = !overlaysVisible
+        faceRegionLayer.isHidden = !overlaysVisible
+        handLayer.isHidden = !overlaysVisible
+        poseLayer.isHidden = !overlaysVisible
+    }
+
+    @objc private func lensFilterChanged() {
+        currentFilter = PostFilter(rawValue: lensPicker.selectedSegmentIndex) ?? .none
+        applyActiveLens()
+    }
+
+    // Stands the selfie segmenter up on the camera and lets the
+    // background-swap lens key the person over a replaced background.
+    // A segmenter that reports unsupported at runtime turns the toggle
+    // back off and disables it, so the toggle never leaves a half state.
+    @objc private func virtualBackgroundToggled() {
+        guard let session else { return }
+        if backgroundSwitch.isOn {
+            guard let url = Bundle.main.url(forResource: "selfie_segmenter", withExtension: "tflite"),
+                  let model = try? Data(contentsOf: url)
+            else {
+                backgroundSwitch.isOn = false
+                backgroundSwitch.isEnabled = false
+                showNote("background needs the selfie model")
+                return
+            }
+            do {
+                try session.enableSegmentation(model: model, threads: 0)
+                segmentationOn = true
+                showNote(nil)
+            } catch {
+                backgroundSwitch.isOn = false
+                backgroundSwitch.isEnabled = false
+                segmentationOn = false
+                showNote("segmenter unavailable here")
+                log.info("segmentation enable failed: \(String(describing: error))")
+            }
+        } else {
+            session.disableSegmentation()
+            segmentationOn = false
+        }
+        applyActiveLens()
+    }
+
+    // Captures the composited frame the renderer just presented as a PNG,
+    // writes it into the app documents directory, and shows a thumbnail. The
+    // bytes are deterministic, so the same composite gives the same file.
+    @objc private func captureTapped() {
+        guard let engine, let session else { return }
+        do {
+            let (png, width, height) = try engine.capturePhoto(session: session)
+            guard !png.isEmpty else {
+                showNote("nothing to capture yet")
+                return
+            }
+            let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let url = documents.appendingPathComponent("gosslens-\(Int(Date().timeIntervalSince1970)).png")
+            try Data(png).write(to: url)
+            log.info("captured \(width)x\(height) png at \(url.path, privacy: .public)")
+            showNote("saved to documents")
+            if let image = UIImage(data: Data(png)) {
+                showCaptureThumbnail(image)
+            }
+        } catch {
+            showNote("capture failed")
+            log.info("capture failed: \(String(describing: error))")
+        }
+    }
+
+    private func showCaptureThumbnail(_ image: UIImage) {
+        thumbnailHideItem?.cancel()
+        captureThumbnail.image = image
+        captureThumbnail.isHidden = false
+        captureThumbnail.alpha = 1
+        let hide = DispatchWorkItem { [weak self] in
+            UIView.animate(withDuration: 0.3) { self?.captureThumbnail.alpha = 0 } completion: { _ in
+                self?.captureThumbnail.isHidden = true
+            }
+        }
+        thumbnailHideItem = hide
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: hide)
+    }
+
+    private func showNote(_ text: String?) {
+        noteLabel.text = text
+        noteLabel.isHidden = (text == nil)
+    }
+
+    // Resolves the one active lens from the current showcase state: the
+    // segmentation background wins while it is on, otherwise the picked
+    // post lens rides. Beauty is re-applied after every swap, since a fresh
+    // lens can reset the beauty chain to its own defaults.
+    private func applyActiveLens() {
+        guard let session else { return }
+        if segmentationOn, virtualBackgroundAvailable,
+           let manifestURL = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "background-swap") {
+            do {
+                try session.activateLensFromDirectory(bundlePath: manifestURL.deletingLastPathComponent().path)
+            } catch {
+                log.info("background lens activate failed: \(String(describing: error))")
+            }
+        } else if let manifest = currentFilter.manifestData {
+            do {
+                try session.activateLens(manifestJson: manifest)
+            } catch {
+                log.info("filter lens activate failed: \(String(describing: error))")
+            }
+        } else if let baseline = baselineManifestData() {
+            try? session.activateLens(manifestJson: baseline)
+        }
+        reapplyBeauty()
+    }
+
+    private func baselineManifestData() -> Data? {
+        if let cached = baselineManifest { return cached }
+        guard let url = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "beauty-baseline"),
+              let data = try? Data(contentsOf: url)
+        else { return nil }
+        baselineManifest = data
+        return data
+    }
+
+    private func reapplyBeauty() {
+        guard let session else { return }
+        for effect in 0 ..< beautyAmounts.count {
+            try? session.setBeauty(effect: Int32(effect), amount: beautyAmounts[effect])
+        }
     }
 
     private var conformanceStarted = false
@@ -212,29 +469,39 @@ final class PreviewViewController: UIViewController {
         let frameTimeUs = UInt32(max(0, (start - lastFrameStart) * 1_000_000))
         lastFrameStart = start
 
-        session.reportFrame(frameTimeUs: frameTimeUs, thermal: ProcessInfo.processInfo.thermalState.gossThermal)
+        lastDegrade = session.reportFrame(frameTimeUs: frameTimeUs, thermal: ProcessInfo.processInfo.thermalState.gossThermal)
         drawFaceOverlay()
         drawHandOverlay()
         drawPoseOverlay()
         tickLens(dtUs: frameTimeUs)
+        updateTrackingReadout()
         guard (try? engine.renderFrame(session: session)) != nil else { return }
         renderedFrames += 1
         fpsWindowFrames += 1
 
         let now = CFAbsoluteTimeGetCurrent()
         if now - fpsWindowStart >= 2.0 {
-            let fps = Double(fpsWindowFrames) / (now - fpsWindowStart)
-            log.info("fps \(String(format: "%.1f", fps)) rendered \(self.renderedFrames) submitted \(self.camera.submittedFrames) state \(self.camera.state.rawValue)")
-            statusLabel.text = String(format: "capture %@  %.1f fps", camera.state.rawValue, fps)
+            lastFps = Double(fpsWindowFrames) / (now - fpsWindowStart)
+            log.info("fps \(String(format: "%.1f", self.lastFps)) rendered \(self.renderedFrames) submitted \(self.camera.submittedFrames) state \(self.camera.state.rawValue)")
+            statusLabel.text = String(format: "capture %@  %.1f fps  degrade:%@", camera.state.rawValue, lastFps, lastDegrade.shortLabel)
             fpsWindowStart = now
             fpsWindowFrames = 0
         }
     }
 
+    // The one-line tracking readout: whether a face is present, its stable
+    // track id, the canned gesture the first hand shows, and the frame rate.
+    private func updateTrackingReadout() {
+        let hasFace = trackedFace.presence >= 0.5 && trackedFace.landmarkCount > 0
+        let id = session?.faceTrackId(index: 0).map { String($0) } ?? "-"
+        let gesture = trackedHands.handCount > 0 ? trackedHands.gestures[0].shortLabel : "none"
+        trackingLabel.text = String(format: "face %@  id:%@  gesture:%@  %.0f fps", hasFace ? "yes" : "no", id, gesture, lastFps)
+    }
+
     /// Landmarks arrive in sensor pixels; the sensor sits one quarter turn
     /// from portrait, the same turn the preview applies.
     private func drawFaceOverlay() {
-        guard let session, (try? session.faceResult(trackedFace)) != nil else { return }
+        guard overlaysVisible, let session, (try? session.faceResult(trackedFace)) != nil else { return }
         guard trackedFace.frameSerial != lastFaceSerial else { return }
         lastFaceSerial = trackedFace.frameSerial
         guard trackedFace.landmarkCount > 0, trackedFace.presence >= 0.5 else {
@@ -280,7 +547,7 @@ final class PreviewViewController: UIViewController {
     /// The same sensor-to-screen mapping the face overlay uses; hands
     /// ride the same camera pose.
     private func drawHandOverlay() {
-        guard let session, (try? session.handResult(trackedHands)) != nil else { return }
+        guard overlaysVisible, let session, (try? session.handResult(trackedHands)) != nil else { return }
         guard trackedHands.frameSerial != lastHandSerial else { return }
         lastHandSerial = trackedHands.frameSerial
         guard trackedHands.handCount > 0 else {
@@ -313,7 +580,7 @@ final class PreviewViewController: UIViewController {
     /// The same sensor-to-screen mapping as the other overlays; only
     /// confidently visible joints draw.
     private func drawPoseOverlay() {
-        guard let session, (try? session.poseResult(trackedPose)) != nil else { return }
+        guard overlaysVisible, let session, (try? session.poseResult(trackedPose)) != nil else { return }
         guard trackedPose.frameSerial != lastPoseSerial else { return }
         lastPoseSerial = trackedPose.frameSerial
         guard trackedPose.landmarkCount > 0, trackedPose.presence >= 0.5 else {
@@ -374,6 +641,33 @@ private extension ProcessInfo.ThermalState {
         case .serious: return .serious
         case .critical: return .critical
         @unknown default: return .critical
+        }
+    }
+}
+
+private extension GossDegradeLevel {
+    var shortLabel: String {
+        switch self {
+        case .full: return "full"
+        case .reducedMlCadence: return "ml-cadence"
+        case .segmentationOff: return "seg-off"
+        case .beautySimplified: return "beauty-lite"
+        case .passthrough: return "passthrough"
+        }
+    }
+}
+
+private extension GossGesture {
+    var shortLabel: String {
+        switch self {
+        case .none: return "none"
+        case .closedFist: return "fist"
+        case .openPalm: return "palm"
+        case .pointingUp: return "point"
+        case .thumbDown: return "thumb-down"
+        case .thumbUp: return "thumb-up"
+        case .victory: return "victory"
+        case .iLoveYou: return "iloveyou"
         }
     }
 }

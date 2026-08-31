@@ -23,11 +23,17 @@ class FaceOverlayView(context: Context) : View(context) {
     val latestFaceResult: GossFaceResult get() = result
     val hasFaceResult: Boolean get() = hasResult
 
+    /** Whether a face is currently tracked, for the readout line. */
+    val facePresent: Boolean get() = hasResult && result.presence >= 0.5f && result.landmarkCount > 0
+
     private val hands = GossHandResult()
     private var lastHandSerial = 0L
 
     /** Read by MainActivity to drive the lens's hands-present signal. */
     val handCount: Int get() = hands.handCount
+
+    /** The canned gesture class of the first tracked hand, NONE with no hand. */
+    val handGesture: Int get() = if (hands.handCount > 0) hands.gestures[0] else com.gosslens.Gosslens.GESTURE_NONE
 
     private val body = GossPoseResult()
     private var lastPoseSerial = 0L
