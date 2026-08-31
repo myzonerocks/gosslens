@@ -956,6 +956,13 @@ export fn Java_com_gosslens_Gosslens_nativeSetSourceComposite(env: *JniEnv, cls:
     return @intFromEnum(abi.goss_session_set_source_composite(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), opacity, @intCast(@max(key_mode, 0)), key_r, key_g, key_b, similarity));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitSourceMask(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, rgba_buffer: jobject, width: i32, height: i32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const rgba = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_submit_source_mask(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), rgba, @intCast(@max(width, 0)), @intCast(@max(height, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeDefineScreenShare(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32) i32 {
     _ = cls;
     const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

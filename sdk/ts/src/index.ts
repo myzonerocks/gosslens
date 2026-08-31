@@ -1204,6 +1204,16 @@ export class GossSession {
       this.mod.ccall("goss_session_set_source_composite", "number", ["number", "number", "number", "number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, opacity, keyMode, chroma[0], chroma[1], chroma[2], similarity]));
   }
 
+  /// Uploads a per-source matte for key mode 3 (the red channel is the mask), so
+  /// an opaque guest is keyed to a subject without a baked alpha.
+  submitSourceMask(name: string, rgba: Uint8Array | Uint8ClampedArray, width: number, height: number): void {
+    const rgbaPtr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]) as number;
+    this.mod.HEAPU8.set(rgba, rgbaPtr);
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_submit_source_mask", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, rgbaPtr, width, height]));
+    this.mod.ccall("goss_free", null, ["number", "number"], [rgbaPtr, rgba.length]);
+  }
+
   /// Defines a screen-share source whose frame letterboxes to fit its cell.
   defineScreenShare(name: string): void {
     this.withName(name, (ptr, len) =>

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 75u
+#define GOSS_ABI_MINOR 76u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -803,9 +803,15 @@ goss_status goss_session_clear_layout(goss_session *session);
 /* arrangement 5 overlay stacks the sources full-frame over each other. A source
  * composites with a per-source blend: opacity, key_mode 1 mattes from the
  * source alpha, key_mode 2 chroma-keys against (key_r,key_g,key_b) by color
- * distance with a similarity threshold; the name "camera" addresses the base.
+ * distance with a similarity threshold, key_mode 3 keys by a supplied per-source
+ * mask (submit_source_mask); the name "camera" addresses the base (no mode 3).
  * A screen-share source letterboxes to fit its cell instead of stretching. */
 goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity);
+/* Uploads a per-source matte for key_mode 3: an RGBA image whose red channel is
+ * the mask (1 keeps the source, 0 cuts it), resampled to the source's cell, so
+ * an opaque guest is keyed to a subject without a baked alpha. The bytes are
+ * copied; the camera and an unknown source are rejected. */
+goss_status goss_session_submit_source_mask(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *rgba, uint32_t width, uint32_t height);
 goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len);
 
 /* Graph thread. Geofilters: location-gated overlay lenses. set_geofence sets a

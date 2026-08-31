@@ -2056,12 +2056,15 @@ pub const Renderer = struct {
     /// program: opacity, a matte, or a chroma-key from `params` (opacity, key
     /// mode, similarity, softness) and `chroma`, alpha-blended over what the
     /// target already holds. No clear, so the sources below it stay.
-    pub fn submitCompositeSource(r: *Renderer, view_id: c.bgfx_view_id_t, source_tex: c.bgfx_texture_handle_t, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16, params: [4]f32, chroma: [4]f32) void {
+    pub fn submitCompositeSource(r: *Renderer, view_id: c.bgfx_view_id_t, source_tex: c.bgfx_texture_handle_t, mask_tex: c.bgfx_texture_handle_t, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16, params: [4]f32, chroma: [4]f32) void {
         c.bgfx_set_view_frame_buffer(view_id, target.framebuffer);
         c.bgfx_set_view_rect(view_id, @intCast(dx), @intCast(dy), dw, dh);
         c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, source_tex, std.math.maxInt(u32));
+        // Key mode 3 samples this per-source matte; other modes ignore it, but
+        // the sampler must be bound because the shader declares it.
+        c.bgfx_set_texture(2, r.tex_mask, mask_tex, std.math.maxInt(u32));
         c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
         c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
         const blend = blendFunc(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA);

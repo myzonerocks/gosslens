@@ -139,6 +139,7 @@ object Gosslens {
     internal external fun nativeSetLayout(session: Long, arrangement: Int): Int
     internal external fun nativeClearLayout(session: Long): Int
     internal external fun nativeSetSourceComposite(session: Long, nameBuffer: ByteBuffer, nameLen: Int, opacity: Float, keyMode: Int, keyR: Float, keyG: Float, keyB: Float, similarity: Float): Int
+    internal external fun nativeSubmitSourceMask(session: Long, nameBuffer: ByteBuffer, nameLen: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeDefineScreenShare(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
     internal external fun nativeSubmitLocation(session: Long, latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Int
     internal external fun nativeSetGeofence(session: Long, latitude: Double, longitude: Double, radiusM: Double): Int
@@ -1432,6 +1433,13 @@ class GossSession private constructor(
     fun setSourceComposite(name: String, opacity: Float = 1f, keyMode: Int = 0, keyR: Float = 0f, keyG: Float = 0f, keyB: Float = 0f, similarity: Float = 0f): Boolean {
         val (buf, n) = nameBuf(name)
         return Gosslens.nativeSetSourceComposite(handle, buf, n, opacity, keyMode, keyR, keyG, keyB, similarity) == 0
+    }
+
+    /** Uploads a per-source matte for key mode 3 (red channel is the mask), so an
+     * opaque guest is keyed to a subject without a baked alpha. */
+    fun submitSourceMask(name: String, rgba: ByteBuffer, width: Int, height: Int): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeSubmitSourceMask(handle, buf, n, rgba, width, height) == 0
     }
 
     /** Defines a screen-share source whose frame letterboxes to fit its cell instead of stretching. */

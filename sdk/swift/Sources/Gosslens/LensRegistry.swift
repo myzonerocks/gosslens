@@ -222,6 +222,17 @@ extension GossSession {
         }
     }
 
+    /// Uploads a per-source matte for key mode 3 (red channel is the mask): an
+    /// opaque guest is keyed to a subject without a baked alpha.
+    public func submitSourceMask(_ name: String, rgba: [UInt8], width: UInt32, height: UInt32) throws {
+        var nameBytes = Array(name.utf8)
+        try nameBytes.withUnsafeMutableBufferPointer { nb in
+            try rgba.withUnsafeBufferPointer { rb in
+                try checked(goss_session_submit_source_mask(handle, nb.baseAddress, nb.count, rb.baseAddress, width, height))
+            }
+        }
+    }
+
     /// Defines a screen-share source: its frame letterboxes to fit its cell
     /// instead of stretching.
     public func defineScreenShare(_ name: String) throws {

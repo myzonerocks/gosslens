@@ -8336,6 +8336,84 @@ fn proveCompositeOpacity(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves per-source mask keying (key mode 3): an opaque green source over a red
+/// camera, keyed by a left-white right-black mask, shows the source on the left
+/// (its own alpha untouched) and the camera through on the right, so the mask
+/// cuts the source without a baked alpha.
+fn proveSourceMask(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sw: u32 = 64;
+    const sh: u32 = 64;
+    const cam = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(cam);
+    const src = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(src);
+    const mask = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(mask);
+    for (0..sh) |y| {
+        for (0..sw) |x| {
+            const p = y * sw + x;
+            cam[p * 4 + 0] = 255;
+            cam[p * 4 + 1] = 0;
+            cam[p * 4 + 2] = 0;
+            cam[p * 4 + 3] = 255; // red camera
+            src[p * 4 + 0] = 0;
+            src[p * 4 + 1] = 255;
+            src[p * 4 + 2] = 0;
+            src[p * 4 + 3] = 255; // opaque green source
+            // The mask keeps the left half of the source, cuts the right.
+            const m: u8 = if (x < sw / 2) 255 else 0;
+            mask[p * 4 + 0] = m;
+            mask[p * 4 + 1] = m;
+            mask[p * 4 + 2] = m;
+            mask[p * 4 + 3] = 255;
+        }
+    }
+    const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_define_source(session, "g", 1) != .ok or
+        abi.goss_session_submit_source_frame_rgba_copy(session, "g", 1, &base_desc, src.ptr, sw * 4) != .ok or
+        abi.goss_session_submit_source_mask(session, "g", 1, mask.ptr, sw, sh) != .ok or
+        abi.goss_session_set_source_composite(session, "g", 1, 1.0, 3, 0, 0, 0, 0) != .ok or
+        abi.goss_session_set_layout(session, 5) != .ok)
+    {
+        std.debug.print("conformance: FAIL source mask setup\n", .{});
+        return false;
+    }
+    for (0..4) |i| {
+        var d = base_desc;
+        d.timestamp_us = @intCast((i + 1) * 33_333);
+        if (abi.goss_session_submit_frame_rgba_copy(session, &d, cam.ptr, sw * 4) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    var cw: u32 = 0;
+    var ch: u32 = 0;
+    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+    defer gpa.free(shot);
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &cw, &ch) != .ok) {
+        std.debug.print("conformance: FAIL source mask capture\n", .{});
+        return false;
+    }
+    const w: usize = 400;
+    const h: usize = 300;
+    const left = (h / 2 * w + w / 4) * 4;
+    const right = (h / 2 * w + 3 * w / 4) * 4;
+    // Left: the source shows (green). Right: masked out, the camera shows (red).
+    if (!(shot[left + 1] > 150 and shot[left + 0] < 100)) {
+        std.debug.print("conformance: FAIL the source did not show in the masked-in half (r={d} g={d})\n", .{ shot[left + 0], shot[left + 1] });
+        return false;
+    }
+    if (!(shot[right + 0] > 150 and shot[right + 1] < 100)) {
+        std.debug.print("conformance: FAIL the camera did not show through the masked-out half (r={d} g={d})\n", .{ shot[right + 0], shot[right + 1] });
+        return false;
+    }
+    std.debug.print("conformance: PROOF key mode 3 cuts a source by its per-source mask - the source shows where the mask keeps it and the camera shows through where it cuts\n", .{});
+    return true;
+}
+
 /// Proves geofilters through the public ABI: a lens with a geo.in_region trigger
 /// fires its action when a submitted location is inside the geofence, not when
 /// it is outside, deterministically, with the location computed on-device and
@@ -18871,6 +18949,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("layout composite");
     if (!try proveCompositeOpacity(gpa, engine)) return 1;
     watchHold("composite opacity");
+    if (!try proveSourceMask(gpa, engine)) return 1;
+    watchHold("source mask");
     if (!try proveGeofilter(gpa, engine)) return 1;
     watchHold("geofilter");
     if (!try proveBrushStroke(gpa, engine)) return 1;

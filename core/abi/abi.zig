@@ -154,6 +154,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement)",
     "goss_status goss_session_clear_layout(goss_session *session)",
     "goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity)",
+    "goss_status goss_session_submit_source_mask(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *rgba, uint32_t width, uint32_t height)",
     "goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us)",
     "goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m)",
@@ -1064,11 +1065,15 @@ pub const Session = struct {
     source_tex: [comp.max_sources]render.Renderer.PersistentTexture = @splat(.{}),
     source_dims: [comp.max_sources][2]u16 = @splat(.{ 0, 0 }),
     source_has_frame: [comp.max_sources]bool = @splat(false),
+    /// A per-source matte the host supplies for key mode 3, so an opaque guest
+    /// (a screen share, an opaque video) is cut to a mask without touching its
+    /// own alpha. Null until submitted; key mode 3 with none shows the source.
+    source_mask_tex: [comp.max_sources]?render.TextureHandle = @splat(null),
     source_count: u8 = 0,
     /// Per-source composite blend the layout draws with: opacity, key mode
-    /// (0 none, 1 matte from the source alpha, 2 chroma-key), the chroma key
-    /// color and its match softness, and whether the source letterboxes to fit
-    /// its cell (a screen share) rather than filling it.
+    /// (0 none, 1 matte from the source alpha, 2 chroma-key, 3 a supplied
+    /// per-source mask), the chroma key color and its match softness, and
+    /// whether the source letterboxes to fit its cell rather than filling it.
     source_opacity: [comp.max_sources]f32 = @splat(1),
     source_key: [comp.max_sources]u8 = @splat(0),
     source_chroma: [comp.max_sources][4]f32 = @splat(.{ 0, 0, 0, 0 }),
@@ -4710,7 +4715,10 @@ pub fn destroySession(session: *Session) void {
         session.preview_bgra.deinit();
         session.preview_y.deinit();
         session.preview_uv.deinit();
-        for (0..session.source_count) |i| session.source_tex[i].deinit();
+        for (0..session.source_count) |i| {
+            session.source_tex[i].deinit();
+            if (session.source_mask_tex[i]) |tex| r.destroyTexture(tex);
+        }
         if (session.brush_stamp_texture) |tex| r.destroyTexture(tex);
     }
     session.engine.gpa.destroy(session);
@@ -6033,6 +6041,7 @@ pub export fn goss_session_define_source(session: ?*Session, name: ?[*]const u8,
     s.source_tex[slot] = .{};
     s.source_dims[slot] = .{ 0, 0 };
     s.source_has_frame[slot] = false;
+    s.source_mask_tex[slot] = null;
     s.source_opacity[slot] = 1;
     s.source_key[slot] = 0;
     s.source_chroma[slot] = .{ 0, 0, 0, 0 };
@@ -6053,24 +6062,42 @@ pub export fn goss_session_define_screen_share(session: ?*Session, name: ?[*]con
 }
 
 /// Sets a source's composite blend for the layout: opacity in [0,1], key mode
-/// (0 none, 1 matte from the source alpha, 2 chroma-key), the chroma key color,
-/// and a match similarity. The name "camera" addresses the live camera base.
+/// (0 none, 1 matte from the source alpha, 2 chroma-key, 3 a supplied per-source
+/// mask), the chroma key color, and a match similarity. The name "camera"
+/// addresses the live camera base; mode 3 is source-only.
 pub export fn goss_session_set_source_composite(session: ?*Session, name: ?[*]const u8, name_len: usize, opacity: f32, key_mode: u32, key_r: f32, key_g: f32, key_b: f32, similarity: f32) Status {
     const s = session orelse return .invalid_argument;
     const nm = name orelse return .invalid_argument;
     const op = std.math.clamp(opacity, 0, 1);
-    const key: u8 = @intCast(@min(key_mode, 2));
     const sim = if (similarity > 0) similarity else 0;
     if (std.mem.eql(u8, nm[0..name_len], "camera")) {
         s.camera_opacity = op;
-        s.camera_key = key;
+        s.camera_key = @intCast(@min(key_mode, 2)); // the camera has no source mask
         s.camera_chroma = .{ key_r, key_g, key_b, sim };
         return .ok;
     }
     const idx = findSource(s, nm[0..name_len]) orelse return .again;
     s.source_opacity[idx] = op;
-    s.source_key[idx] = key;
+    s.source_key[idx] = @intCast(@min(key_mode, 3));
     s.source_chroma[idx] = .{ key_r, key_g, key_b, sim };
+    return .ok;
+}
+
+/// Uploads a per-source matte for key mode 3: an RGBA image whose red channel is
+/// the mask (1 keeps the source, 0 cuts it), resampled to the source's cell, so
+/// an opaque guest is keyed to a subject without a baked alpha. Replaces any
+/// prior mask; camera or an unknown source is rejected.
+pub export fn goss_session_submit_source_mask(session: ?*Session, name: ?[*]const u8, name_len: usize, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    const bytes = rgba orelse return .invalid_argument;
+    if (!validDims(width, height)) return .invalid_argument;
+    if (std.mem.eql(u8, nm[0..name_len], "camera")) return .invalid_argument;
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    const texture = render.Renderer.createStaticTexture(@intCast(width), @intCast(height), bytes[0 .. @as(usize, width) * height * 4]);
+    if (s.source_mask_tex[idx]) |old| r.destroyTexture(old);
+    s.source_mask_tex[idx] = texture;
     return .ok;
 }
 
@@ -6081,6 +6108,9 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
     const n = name orelse return .invalid_argument;
     const idx = findSource(s, n[0..name_len]) orelse return .again;
     s.source_tex[idx].deinit();
+    if (s.source_mask_tex[idx]) |old| {
+        if (s.engine.renderer) |*r| r.destroyTexture(old);
+    }
     var i: u8 = idx;
     while (i + 1 < s.source_count) : (i += 1) {
         s.source_names[i] = s.source_names[i + 1];
@@ -6088,6 +6118,7 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
         s.source_tex[i] = s.source_tex[i + 1];
         s.source_dims[i] = s.source_dims[i + 1];
         s.source_has_frame[i] = s.source_has_frame[i + 1];
+        s.source_mask_tex[i] = s.source_mask_tex[i + 1];
         s.source_opacity[i] = s.source_opacity[i + 1];
         s.source_key[i] = s.source_key[i + 1];
         s.source_chroma[i] = s.source_chroma[i + 1];
@@ -6096,6 +6127,7 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
     }
     s.source_count -= 1;
     s.source_tex[s.source_count] = .{}; // its handle moved down; do not deinit here
+    s.source_mask_tex[s.source_count] = null; // moved down; do not destroy here
     s.source_has_frame[s.source_count] = false;
     s.source_opacity[s.source_count] = 1;
     s.source_key[s.source_count] = 0;
@@ -6196,7 +6228,7 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
                 view += 1;
                 const params = [4]f32{ s.camera_opacity, @floatFromInt(s.camera_key), s.camera_chroma[3], s.camera_softness };
                 const chroma = [4]f32{ s.camera_chroma[0], s.camera_chroma[1], s.camera_chroma[2], 0 };
-                r.submitCompositeSource(view, scratch.texture, targets0, dx, dy, dw, dh, params, chroma);
+                r.submitCompositeSource(view, scratch.texture, r.default_mask_texture, targets0, dx, dy, dw, dh, params, chroma);
                 view += 1;
             }
         } else {
@@ -6219,7 +6251,8 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
             } else {
                 const params = [4]f32{ s.source_opacity[src], @floatFromInt(s.source_key[src]), s.source_chroma[src][3], s.source_softness[src] };
                 const chroma = [4]f32{ s.source_chroma[src][0], s.source_chroma[src][1], s.source_chroma[src][2], 0 };
-                r.submitCompositeSource(view, s.source_tex[src].handle, targets0, cx, cy, cw, ch, params, chroma);
+                const source_mask = s.source_mask_tex[src] orelse r.default_mask_texture;
+                r.submitCompositeSource(view, s.source_tex[src].handle, source_mask, targets0, cx, cy, cw, ch, params, chroma);
             }
             view += 1;
         }
