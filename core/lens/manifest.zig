@@ -1156,12 +1156,10 @@ pub const AudioEnhanceField = struct {
     dereverb_ms: f32 = 30,
 };
 
-/// A voice.transform node's real-time voice change, all in the output mix:
-/// `pitch` (0.5..2, default 1) shifts the mic pitch keeping duration, above 1
-/// higher; `formant` (0.5..2, default 1) scales the vocal-tract envelope alone,
-/// above 1 smaller (set formant to 1/pitch for a natural, character-keeping
-/// shift); `robot` (carrier Hz, 0 off) ring-modulates the voice for a robotic
-/// timbre, a full voice conversion on top of the pitch and formant.
+/// A voice.transform node's real-time voice change in the output mix: `pitch`
+/// (0.5..2) shifts the mic pitch keeping duration, `formant` (0.5..2) scales the
+/// vocal-tract envelope alone (1/pitch keeps the speaker's character), and `robot`
+/// (carrier Hz, 0 off) ring-modulates it for a robotic voice conversion.
 pub const VoiceTransformField = struct {
     pitch: f32 = 1,
     formant: f32 = 1,
