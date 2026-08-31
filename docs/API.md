@@ -151,6 +151,9 @@ file must move together.
 | `goss_engine_resize` | `resize(width, height)` | all SDKs |
 | `goss_engine_render_frame` | `renderFrame(session)` | all SDKs |
 | `goss_compile_prompt` | `compilePrompt(prompt)`, compiling a text prompt into a GLF lens manifest on device with a probe call for the length then a fill call; the result is inspectable GLF passed straight to `activateLens`, needing no assets | all SDKs |
+| `goss_engine_music_add_reference` | `addMusicReference(trackId, samples, frameCount, sampleRate, channels)`, fingerprinting a reference recording and registering it under `trackId` in the engine's on-device music catalog; model-free, and re-adding a `trackId` layers more landmarks in | all SDKs |
+| `goss_engine_music_clear_references` | `clearMusicReferences()`, emptying the music catalog | all SDKs |
+| `goss_engine_music_identify` | `identifyMusic(samples, frameCount, sampleRate, channels, minVotes)`, fingerprinting a captured snippet and matching it against the catalog; returns the best track and its landmark-agreement vote count (a `MusicMatch`), or nothing below `minVotes`, so a few seconds of noisy audio still identifies | all SDKs |
 
 ### CaptureOutput
 

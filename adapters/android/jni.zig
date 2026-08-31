@@ -128,6 +128,33 @@ export fn Java_com_gosslens_Gosslens_nativeCompilePrompt(env: *JniEnv, cls: jobj
     return @intFromEnum(status);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeMusicAddReference(env: *JniEnv, cls: jobject, engine: i64, track_id: i32, samples_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32) i32 {
+    _ = cls;
+    const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_engine_music_add_reference(engineFromHandle(engine), @bitCast(track_id), @ptrCast(@alignCast(samples)), @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMusicClearReferences(env: *JniEnv, cls: jobject, engine: i64) void {
+    _ = env;
+    _ = cls;
+    abi.goss_engine_music_clear_references(engineFromHandle(engine));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMusicIdentify(env: *JniEnv, cls: jobject, engine: i64, samples_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32, min_votes: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: *[2]u32 = @ptrCast(@alignCast(out_bytes));
+    var track_id: u32 = 0;
+    var votes: u32 = 0;
+    const rc = abi.goss_engine_music_identify(engineFromHandle(engine), @ptrCast(@alignCast(samples)), @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0)), @intCast(@max(min_votes, 0)), &track_id, &votes);
+    if (rc == .ok) {
+        out[0] = track_id;
+        out[1] = votes;
+    }
+    return @intFromEnum(rc);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSetDubbing(env: *JniEnv, cls: jobject, session: i64, enabled: i32) i32 {
     _ = env;
     _ = cls;

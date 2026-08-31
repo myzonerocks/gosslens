@@ -270,7 +270,9 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("photo", photoModule(b, target, optimize));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
     abi_module.addImport("audio_mix", audioMixModule(b, target, optimize));
-    abi_module.addImport("formant", formantModule(b, target, optimize));
+    const fft_abi_module = fftModule(b, target, optimize);
+    abi_module.addImport("formant", formantModule(b, target, optimize, fft_abi_module));
+    abi_module.addImport("fingerprint", fingerprintModule(b, target, optimize, fft_abi_module));
     abi_module.addImport("layout", compositeLayoutModule(b, target, optimize));
     abi_module.addImport("geo", geoModule(b, target, optimize));
     abi_module.addImport("font", fontModule(b, target, optimize));
@@ -419,7 +421,9 @@ pub fn build(b: *std.Build) void {
     const color_tests = b.addTest(.{ .root_module = colorModule(b, target, optimize) });
     const audio_analysis_tests = b.addTest(.{ .root_module = audioAnalysisModule(b, target, optimize) });
     const audio_mix_tests = b.addTest(.{ .root_module = audioMixModule(b, target, optimize) });
-    const formant_tests = b.addTest(.{ .root_module = formantModule(b, target, optimize) });
+    const fft_tests = b.addTest(.{ .root_module = fftModule(b, target, optimize) });
+    const formant_tests = b.addTest(.{ .root_module = formantModule(b, target, optimize, fftModule(b, target, optimize)) });
+    const fingerprint_tests = b.addTest(.{ .root_module = fingerprintModule(b, target, optimize, fftModule(b, target, optimize)) });
     const composite_layout_tests = b.addTest(.{ .root_module = compositeLayoutModule(b, target, optimize) });
     const geo_tests = b.addTest(.{ .root_module = geoModule(b, target, optimize) });
     const font_tests = b.addTest(.{ .root_module = fontModule(b, target, optimize) });
@@ -468,7 +472,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(color_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_analysis_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_mix_tests).step);
+    test_step.dependOn(&b.addRunArtifact(fft_tests).step);
     test_step.dependOn(&b.addRunArtifact(formant_tests).step);
+    test_step.dependOn(&b.addRunArtifact(fingerprint_tests).step);
     test_step.dependOn(&b.addRunArtifact(composite_layout_tests).step);
     test_step.dependOn(&b.addRunArtifact(geo_tests).step);
     test_step.dependOn(&b.addRunArtifact(font_tests).step);
@@ -826,7 +832,9 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_tracking_module.addImport("audio_mix", audioMixModule(b, target, optimize));
-        abi_tracking_module.addImport("formant", formantModule(b, target, optimize));
+        const fft_abi_tracking_module = fftModule(b, target, optimize);
+        abi_tracking_module.addImport("formant", formantModule(b, target, optimize, fft_abi_tracking_module));
+        abi_tracking_module.addImport("fingerprint", fingerprintModule(b, target, optimize, fft_abi_tracking_module));
         abi_tracking_module.addImport("layout", compositeLayoutModule(b, target, optimize));
         abi_tracking_module.addImport("geo", geoModule(b, target, optimize));
         abi_tracking_module.addImport("font", fontModule(b, target, optimize));
@@ -1052,7 +1060,9 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("formant", formantModule(b, wasm_target, .ReleaseSmall));
+    const fft_abi_wasm = fftModule(b, wasm_target, .ReleaseSmall);
+    abi_wasm.addImport("formant", formantModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
+    abi_wasm.addImport("fingerprint", fingerprintModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
     abi_wasm.addImport("layout", compositeLayoutModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("geo", geoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("font", fontModule(b, wasm_target, .ReleaseSmall));
@@ -1260,7 +1270,9 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_conformance_module.addImport("audio_mix", audioMixModule(b, target, optimize));
-        abi_conformance_module.addImport("formant", formantModule(b, target, optimize));
+        const fft_abi_conformance_module = fftModule(b, target, optimize);
+        abi_conformance_module.addImport("formant", formantModule(b, target, optimize, fft_abi_conformance_module));
+        abi_conformance_module.addImport("fingerprint", fingerprintModule(b, target, optimize, fft_abi_conformance_module));
         abi_conformance_module.addImport("layout", compositeLayoutModule(b, target, optimize));
         abi_conformance_module.addImport("geo", geoModule(b, target, optimize));
         abi_conformance_module.addImport("font", fontModule(b, target, optimize));
@@ -1639,7 +1651,9 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
-    abi_android.addImport("formant", formantModule(b, android_target, optimize));
+    const fft_abi_android = fftModule(b, android_target, optimize);
+    abi_android.addImport("formant", formantModule(b, android_target, optimize, fft_abi_android));
+    abi_android.addImport("fingerprint", fingerprintModule(b, android_target, optimize, fft_abi_android));
     abi_android.addImport("layout", compositeLayoutModule(b, android_target, optimize));
     abi_android.addImport("geo", geoModule(b, android_target, optimize));
     abi_android.addImport("font", fontModule(b, android_target, optimize));
@@ -1913,8 +1927,20 @@ fn audioMixModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     return b.createModule(.{ .root_source_file = b.path("core/media/audio_mix.zig"), .target = target, .optimize = optimize });
 }
 
-fn formantModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("core/media/formant.zig"), .target = target, .optimize = optimize });
+fn fftModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/fft.zig"), .target = target, .optimize = optimize });
+}
+
+fn formantModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, fft_m: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("core/media/formant.zig"), .target = target, .optimize = optimize });
+    m.addImport("fft", fft_m);
+    return m;
+}
+
+fn fingerprintModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, fft_m: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("core/media/fingerprint.zig"), .target = target, .optimize = optimize });
+    m.addImport("fft", fft_m);
+    return m;
 }
 
 fn compositeLayoutModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -3816,7 +3842,9 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     abi_ios.addImport("audio_mix", audioMixModule(b, ios_target, optimize));
-    abi_ios.addImport("formant", formantModule(b, ios_target, optimize));
+    const fft_abi_ios = fftModule(b, ios_target, optimize);
+    abi_ios.addImport("formant", formantModule(b, ios_target, optimize, fft_abi_ios));
+    abi_ios.addImport("fingerprint", fingerprintModule(b, ios_target, optimize, fft_abi_ios));
     abi_ios.addImport("layout", compositeLayoutModule(b, ios_target, optimize));
     abi_ios.addImport("geo", geoModule(b, ios_target, optimize));
     abi_ios.addImport("font", fontModule(b, ios_target, optimize));
@@ -4452,7 +4480,9 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_mix", audioMixModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("formant", formantModule(b, em_target, .ReleaseSmall));
+    const fft_abi_em = fftModule(b, em_target, .ReleaseSmall);
+    abi_em.addImport("formant", formantModule(b, em_target, .ReleaseSmall, fft_abi_em));
+    abi_em.addImport("fingerprint", fingerprintModule(b, em_target, .ReleaseSmall, fft_abi_em));
     abi_em.addImport("layout", compositeLayoutModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("geo", geoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("font", fontModule(b, em_target, .ReleaseSmall));

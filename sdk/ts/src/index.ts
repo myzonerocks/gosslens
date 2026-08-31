@@ -424,6 +424,12 @@ export class Gosslens {
   }
 }
 
+/// The best track a music snippet matched: its id and how many landmarks agreed.
+export interface MusicMatch {
+  trackId: number;
+  votes: number;
+}
+
 /// Render-surface lifecycle: create/resize/render/read back. Confined
 /// to the one canvas it was created against, matching GossSession/GossEngine's
 /// single-thread confinement on every other SDK.
@@ -536,6 +542,51 @@ export class GossEngine {
     this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
     this.mod.ccall("goss_free", null, ["number", "number"], [promptPtr, bytes.length || 1]);
     return json;
+  }
+
+  /// Fingerprints a reference recording and registers it under trackId in the
+  /// engine's on-device music catalog. Samples are interleaved f32; re-adding a
+  /// trackId layers more landmarks in.
+  addMusicReference(trackId: number, samples: Float32Array, frameCount: number, sampleRate: number, channels: number): boolean {
+    const bytes = samples.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes || 4]) as number;
+    this.mod.HEAPF32.set(samples, ptr >> 2);
+    const status = this.mod.ccall(
+      "goss_engine_music_add_reference",
+      "number",
+      ["number", "number", "number", "number", "number", "number"],
+      [this.handle, trackId >>> 0, ptr, frameCount, sampleRate, channels],
+    );
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes || 4]);
+    return status === 0;
+  }
+
+  /// Empties the engine's music catalog.
+  clearMusicReferences(): void {
+    this.mod.ccall("goss_engine_music_clear_references", null, ["number"], [this.handle]);
+  }
+
+  /// Fingerprints a captured snippet and matches it against the catalog,
+  /// returning the best track and its landmark-agreement vote count, or null
+  /// below minVotes. A few seconds of noisy audio still identifies.
+  identifyMusic(samples: Float32Array, frameCount: number, sampleRate: number, channels: number, minVotes = 5): MusicMatch | null {
+    const bytes = samples.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes || 4]) as number;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    this.mod.HEAPF32.set(samples, ptr >> 2);
+    const status = this.mod.ccall(
+      "goss_engine_music_identify",
+      "number",
+      ["number", "number", "number", "number", "number", "number", "number", "number"],
+      [this.handle, ptr, frameCount, sampleRate, channels, minVotes >>> 0, outPtr, outPtr + 4],
+    );
+    const dv = new DataView(this.mod.HEAPU8.buffer, outPtr, 8);
+    const trackId = dv.getUint32(0, true);
+    const votes = dv.getUint32(4, true);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 8]);
+    if (status !== 0 || votes === 0) return null;
+    return { trackId, votes };
   }
 
   /// Releases the persistent wrap the engine keeps per external live

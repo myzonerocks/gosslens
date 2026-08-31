@@ -3,6 +3,7 @@
 //! smooth envelope (the formants) and the pitch harmonics, warps the envelope,
 //! then resynthesises with the harmonics and phase intact - pure, in-language FFT.
 const std = @import("std");
+const fft_mod = @import("fft");
 
 /// Analysis/synthesis block and hop. A 512-tap block at 48 kHz resolves formants
 /// to ~94 Hz bins with ~11 ms latency; a quarter-block hop gives the Hann pair a
@@ -62,52 +63,9 @@ const wola_norm: f32 = blk: {
     break :blk @floatCast(acc);
 };
 
-/// In-place iterative radix-2 FFT of a power-of-two block. `inverse` runs the
-/// conjugate transform and scales by 1/N, so a forward then inverse is identity.
+/// Runs the shared radix-2 FFT over one block.
 fn fft(re: *[block]f32, im: *[block]f32, inverse: bool) void {
-    // Bit-reversal permutation.
-    var j: usize = 0;
-    for (0..block) |i| {
-        if (i < j) {
-            std.mem.swap(f32, &re[i], &re[j]);
-            std.mem.swap(f32, &im[i], &im[j]);
-        }
-        var m = half;
-        while (m >= 1 and j >= m) : (m >>= 1) j -= m;
-        j += m;
-    }
-    var len: usize = 2;
-    while (len <= block) : (len <<= 1) {
-        const ang = (if (inverse) @as(f32, 2.0) else -2.0) * std.math.pi / @as(f32, @floatFromInt(len));
-        const step_r = @cos(ang);
-        const step_i = @sin(ang);
-        var base: usize = 0;
-        while (base < block) : (base += len) {
-            var wr: f32 = 1;
-            var wi: f32 = 0;
-            const h = len >> 1;
-            for (0..h) |k| {
-                const a = base + k;
-                const b = a + h;
-                const tr = wr * re[b] - wi * im[b];
-                const ti = wr * im[b] + wi * re[b];
-                re[b] = re[a] - tr;
-                im[b] = im[a] - ti;
-                re[a] += tr;
-                im[a] += ti;
-                const nwr = wr * step_r - wi * step_i;
-                wi = wr * step_i + wi * step_r;
-                wr = nwr;
-            }
-        }
-    }
-    if (inverse) {
-        const inv: f32 = 1.0 / @as(f32, @floatFromInt(block));
-        for (0..block) |i| {
-            re[i] *= inv;
-            im[i] *= inv;
-        }
-    }
+    fft_mod.transform(block, re, im, inverse);
 }
 
 /// Resamples the log-envelope's lower half (bins 0..=half) by `ratio`: bin k

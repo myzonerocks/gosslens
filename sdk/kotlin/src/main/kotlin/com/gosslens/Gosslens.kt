@@ -31,6 +31,9 @@ object Gosslens {
     internal external fun nativeSubmitAudio(session: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Int
     internal external fun nativeRenderFrame(engine: Long, session: Long): Int
     internal external fun nativeCompilePrompt(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeMusicAddReference(engine: Long, trackId: Int, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
+    internal external fun nativeMusicClearReferences(engine: Long)
+    internal external fun nativeMusicIdentify(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
     internal external fun nativeSessionDestroy(session: Long)
     internal external fun nativeSubmitFrameCopy(
@@ -316,6 +319,9 @@ object Gosslens {
  * core clamps and defaults exactly as the C config does. */
 data class GossEngineConfig(val texturePoolCapacity: Int, val stagingPoolCapacity: Int)
 
+/** The best track a music snippet matched: its id and how many landmarks agreed. */
+data class MusicMatch(val trackId: Int, val votes: Int)
+
 /** frameBudgetUs is the whole-pipeline frame time the degradation
  * policy holds the session to; zero means the built-in 30 fps budget. */
 data class GossSessionConfig(val frameBudgetUs: Int)
@@ -465,6 +471,28 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         val result = ByteArray(written)
         out.get(result)
         return String(result, Charsets.UTF_8)
+    }
+
+    /** Fingerprints a reference recording and registers it under [trackId] in the
+     * engine's on-device music catalog. Samples are interleaved f32. */
+    fun addMusicReference(trackId: Int, samples: FloatArray, frameCount: Int, sampleRate: Int, channels: Int): Boolean {
+        val buf = ByteBuffer.allocateDirect(maxOf(samples.size, 1) * 4).order(ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(samples)
+        return Gosslens.nativeMusicAddReference(handle, trackId, buf, frameCount, sampleRate, channels) == 0
+    }
+
+    /** Empties the engine's music catalog. */
+    fun clearMusicReferences() = Gosslens.nativeMusicClearReferences(handle)
+
+    /** Fingerprints a captured snippet and matches it against the catalog,
+     * returning the best track and its vote count, or null below [minVotes]. */
+    fun identifyMusic(samples: FloatArray, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int = 5): MusicMatch? {
+        val buf = ByteBuffer.allocateDirect(maxOf(samples.size, 1) * 4).order(ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(samples)
+        val out = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeMusicIdentify(handle, buf, frameCount, sampleRate, channels, minVotes, out) != 0) return null
+        val votes = out.getInt(4)
+        return if (votes == 0) null else MusicMatch(out.getInt(0), votes)
     }
 
     /** Starts recording the session's rendered frames, effects baked

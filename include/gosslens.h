@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 78u
+#define GOSS_ABI_MINOR 81u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -1015,6 +1015,22 @@ goss_status goss_physics_hair_remove(goss_session *session, uint32_t hair_id);
  * retiring a publish surface before the engine goes away. Reports
  * GOSS_INVALID_ARGUMENT for a handle with no live wrap. */
 goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle);
+
+/* Any thread. Fingerprints a reference recording (interleaved f32 at
+ * sample_rate/channels) and registers it under track_id in the engine's
+ * on-device music catalog. Model-free; re-adding a track_id layers more
+ * landmarks in, so a longer reference can be built from several passes. */
+goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels);
+
+/* Any thread. Empties the engine's music catalog. */
+void goss_engine_music_clear_references(goss_engine *engine);
+
+/* Any thread. Fingerprints a captured snippet and matches it against the
+ * catalog, writing the best track id to out_track_id and its landmark-agreement
+ * vote count to out_votes. A vote count of zero means no track met min_votes.
+ * The match is the track and time offset the snippet most agrees on, so a few
+ * seconds of noisy audio still identifies. */
+goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes);
 
 #if !defined(__cplusplus) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(goss_frame_desc) == 32, "goss_frame_desc layout is frozen");

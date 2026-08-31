@@ -5854,6 +5854,89 @@ fn proveVoiceTransform(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Fills a rising-staircase melody: the fundamental steps up every note and its
+/// two harmonics give each time segment a distinct spectral signature, so the
+/// fingerprint carries temporal structure a match can localise.
+fn fillMelody(buf: []f32, sample_rate: u32, base: f32, step: f32, note_len: usize) void {
+    for (buf, 0..) |*v, i| {
+        const seg: f32 = @floatFromInt(i / note_len);
+        const f0 = base + seg * step;
+        const p = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sample_rate));
+        const s = @sin(2.0 * std.math.pi * f0 * p) +
+            0.5 * @sin(2.0 * std.math.pi * 2.0 * f0 * p) +
+            0.3 * @sin(2.0 * std.math.pi * 3.0 * f0 * p);
+        v.* = s / 1.8;
+    }
+}
+
+/// Proves on-device music identification: two reference tracks are fingerprinted
+/// into the engine catalog, and a short, noisy snippet cut from the middle of one
+/// identifies that track over the decoy, while unrelated audio finds no match.
+fn proveMusicIdentify(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sr: u32 = 11025;
+    const note_len = sr / 5;
+    const dur = sr * 5;
+
+    const song = try gpa.alloc(f32, dur);
+    defer gpa.free(song);
+    fillMelody(song, sr, 200, 40, note_len);
+    const decoy = try gpa.alloc(f32, dur);
+    defer gpa.free(decoy);
+    fillMelody(decoy, sr, 190, 33, note_len);
+
+    abi.goss_engine_music_clear_references(engine);
+    if (abi.goss_engine_music_add_reference(engine, 1, song.ptr, dur, sr, 1) != .ok) {
+        std.debug.print("conformance: FAIL the reference track could not be registered\n", .{});
+        return false;
+    }
+    if (abi.goss_engine_music_add_reference(engine, 2, decoy.ptr, dur, sr, 1) != .ok) {
+        std.debug.print("conformance: FAIL the decoy track could not be registered\n", .{});
+        return false;
+    }
+
+    // A two-second snippet from the middle of track 1, with mild noise added.
+    const start = sr * 2;
+    const snip_len = sr * 2;
+    const snippet = try gpa.alloc(f32, snip_len);
+    defer gpa.free(snippet);
+    var seed: u32 = 0x9e3779b9;
+    for (snippet, 0..) |*v, i| {
+        seed = seed *% 1664525 +% 1013904223;
+        const noise = (@as(f32, @floatFromInt(seed >> 16)) / 32768.0 - 1.0) * 0.05;
+        v.* = song[start + i] + noise;
+    }
+
+    var track_id: u32 = 0;
+    var votes: u32 = 0;
+    if (abi.goss_engine_music_identify(engine, snippet.ptr, snip_len, sr, 1, 5, &track_id, &votes) != .ok) {
+        std.debug.print("conformance: FAIL identify returned an error\n", .{});
+        return false;
+    }
+    if (!(track_id == 1 and votes >= 5)) {
+        std.debug.print("conformance: FAIL the snippet did not identify its source track (id {d}, votes {d})\n", .{ track_id, votes });
+        return false;
+    }
+
+    // A control: unrelated audio (broadband noise) must not cross the threshold.
+    const other = try gpa.alloc(f32, snip_len);
+    defer gpa.free(other);
+    for (other) |*v| {
+        seed = seed *% 1664525 +% 1013904223;
+        v.* = @as(f32, @floatFromInt(seed >> 16)) / 32768.0 - 1.0;
+    }
+    var other_id: u32 = 0;
+    var other_votes: u32 = 0;
+    _ = abi.goss_engine_music_identify(engine, other.ptr, snip_len, sr, 1, 5, &other_id, &other_votes);
+    if (other_votes != 0) {
+        std.debug.print("conformance: FAIL unrelated audio matched a track (id {d}, votes {d})\n", .{ other_id, other_votes });
+        return false;
+    }
+
+    abi.goss_engine_music_clear_references(engine);
+    std.debug.print("conformance: PROOF an on-device fingerprint identifies a track: a two-second noisy snippet from the middle of a registered melody matches it over a decoy with {d} landmark votes, while unrelated audio stays below threshold\n", .{votes});
+    return true;
+}
+
 /// Proves the diarized caption segment read-back: a captioning audio.infer node's
 /// decoded utterance lands in the segment ring, tagged with the times it spanned
 /// and read back through the segment ABI, its metadata and text separate.
@@ -19202,6 +19285,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("dereverb");
     if (!try proveVoiceTransform(gpa, engine)) return 1;
     watchHold("voice transform");
+    if (!try proveMusicIdentify(gpa, engine)) return 1;
+    watchHold("music identify");
     if (!try proveCaptionSegment(gpa, engine)) return 1;
     watchHold("caption segment");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;

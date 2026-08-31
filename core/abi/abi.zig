@@ -28,6 +28,7 @@ const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
 const formant = @import("formant");
+const fingerprint = @import("fingerprint");
 const comp = @import("layout");
 const geo = @import("geo");
 const font = @import("font");
@@ -253,6 +254,9 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
     "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
     "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
+    "void goss_engine_music_clear_references(goss_engine *engine)",
+    "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -458,6 +462,11 @@ pub const Engine = struct {
     /// (Android's JNI layer) owns storing and releasing it; the core only
     /// carries the slot.
     attached_window: ?*anyopaque = null,
+    /// The music-identification catalog: fingerprints of the tracks a host has
+    /// registered, queried by a captured snippet. Engine-wide, not per session,
+    /// so one catalog serves every session. Initialised at create, freed at
+    /// destroy.
+    music_db: fingerprint.Database = undefined,
 };
 
 const WorldStore = struct {
@@ -1629,6 +1638,7 @@ pub fn createEngine(gpa: std.mem.Allocator, config: EngineConfig) error{OutOfMem
         .texture_pool_capacity = clampCapacity(config.texture_pool_capacity, default_texture_pool_capacity),
         .staging_pool_capacity = clampCapacity(config.staging_pool_capacity, default_staging_pool_capacity),
     };
+    engine.music_db = fingerprint.Database.init(gpa);
     return engine;
 }
 
@@ -1661,6 +1671,7 @@ pub fn destroyEngine(engine: *Engine) void {
     }
     engine.live_output_slots.deinit(engine.gpa);
     if (engine.capture_convert.len > 0) engine.gpa.free(engine.capture_convert);
+    engine.music_db.deinit();
     if (engine.renderer) |*r| r.deinit();
     engine.texture_pool.deinit();
     engine.staging_pool.deinit();
@@ -9542,6 +9553,43 @@ pub export fn goss_compile_prompt(engine: ?*Engine, prompt: ?[*]const u8, prompt
     if (out_buf) |buf| {
         if (out_cap >= json.len) @memcpy(buf[0..json.len], json);
     }
+    return .ok;
+}
+
+/// Fingerprints a reference recording and registers it under track_id in the
+/// engine's music catalog, so a later snippet can identify it. Model-free and
+/// on-device; re-adding a track_id layers more landmarks in.
+pub export fn goss_engine_music_add_reference(engine: ?*Engine, track_id: u32, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const src = samples orelse return .invalid_argument;
+    if (frame_count == 0 or channels == 0) return .invalid_argument;
+    const buf = src[0 .. @as(usize, frame_count) * channels];
+    const marks = fingerprint.fingerprint(e.gpa, buf, frame_count, sample_rate, channels) catch return .out_of_memory;
+    defer e.gpa.free(marks);
+    e.music_db.add(track_id, marks) catch return .out_of_memory;
+    return .ok;
+}
+
+/// Empties the engine's music catalog.
+pub export fn goss_engine_music_clear_references(engine: ?*Engine) void {
+    const e = engine orelse return;
+    e.music_db.clear();
+}
+
+/// Fingerprints a captured snippet and matches it against the catalog. Writes the
+/// best track id and its landmark-agreement vote count; a vote count of zero means
+/// no track met min_votes. The match is the track and time offset the snippet's
+/// landmarks most agree on, so a few seconds of noisy audio still identifies.
+pub export fn goss_engine_music_identify(engine: ?*Engine, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, min_votes: u32, out_track_id: ?*u32, out_votes: ?*u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const src = samples orelse return .invalid_argument;
+    if (frame_count == 0 or channels == 0) return .invalid_argument;
+    const buf = src[0 .. @as(usize, frame_count) * channels];
+    const q = fingerprint.fingerprint(e.gpa, buf, frame_count, sample_rate, channels) catch return .out_of_memory;
+    defer e.gpa.free(q);
+    const hit = e.music_db.match(q, min_votes) catch return .out_of_memory;
+    if (out_track_id) |p| p.* = if (hit) |h| h.id else 0;
+    if (out_votes) |p| p.* = if (hit) |h| h.votes else 0;
     return .ok;
 }
 
