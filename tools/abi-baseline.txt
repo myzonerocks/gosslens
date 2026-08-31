@@ -1,4 +1,4 @@
-abi 0.77
+abi 0.78
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -155,6 +155,7 @@ fn goss_status goss_session_clear_geofence(goss_session *session)
 fn goss_status goss_session_set_geofence_bbox(goss_session *session, double min_lat, double min_lon, double max_lat, double max_lon)
 fn goss_status goss_session_set_geofence_polygon(goss_session *session, const double *coords, size_t vertex_count)
 fn goss_status goss_session_set_named_geofence(goss_session *session, const uint8_t *name, size_t name_len, double latitude, double longitude, double radius_m)
+fn goss_status goss_session_set_named_geofence_polygon(goss_session *session, const uint8_t *name, size_t name_len, const double *coords, size_t vertex_count)
 fn goss_status goss_session_clear_named_geofences(goss_session *session)
 fn goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m)
 fn goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)

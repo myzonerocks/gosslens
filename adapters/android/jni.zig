@@ -1054,6 +1054,14 @@ export fn Java_com_gosslens_Gosslens_nativeSetNamedGeofence(env: *JniEnv, cls: j
     return @intFromEnum(abi.goss_session_set_named_geofence(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), latitude, longitude, radius_m));
 }
 
+/// name_buffer is the region name; coords_buffer is vertex_count (lat, lon) f64 pairs.
+export fn Java_com_gosslens_Gosslens_nativeSetNamedGeofencePolygon(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, coords_buffer: jobject, vertex_count: i32) i32 {
+    _ = cls;
+    const name: [*]const u8 = @ptrCast(getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument));
+    const coords: [*]const f64 = @ptrCast(@alignCast(getDirectBufferAddress(env, coords_buffer) orelse return @intFromEnum(abi.Status.invalid_argument)));
+    return @intFromEnum(abi.goss_session_set_named_geofence_polygon(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), coords, @intCast(@max(vertex_count, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeClearNamedGeofences(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;

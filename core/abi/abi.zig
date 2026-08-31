@@ -163,6 +163,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_set_geofence_bbox(goss_session *session, double min_lat, double min_lon, double max_lat, double max_lon)",
     "goss_status goss_session_set_geofence_polygon(goss_session *session, const double *coords, size_t vertex_count)",
     "goss_status goss_session_set_named_geofence(goss_session *session, const uint8_t *name, size_t name_len, double latitude, double longitude, double radius_m)",
+    "goss_status goss_session_set_named_geofence_polygon(goss_session *session, const uint8_t *name, size_t name_len, const double *coords, size_t vertex_count)",
     "goss_status goss_session_clear_named_geofences(goss_session *session)",
     "goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accuracy_m)",
     "goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)",
@@ -6465,6 +6466,24 @@ pub export fn goss_session_clear_geofence(session: ?*Session) Status {
     return .ok;
 }
 
+/// Stores a region under a name, replacing a same-named one in place, else
+/// appending if the store has room; the name is copied into its fixed buffer.
+fn putNamedGeofence(s: *Session, name_slice: []const u8, region: GeoRegion) Status {
+    for (s.named_geofences[0..s.named_geofence_count]) |*ng| {
+        if (std.mem.eql(u8, ng.name(), name_slice)) {
+            ng.region = region;
+            return .ok;
+        }
+    }
+    if (s.named_geofence_count >= max_named_geofences) return .pool_exhausted;
+    var ng: NamedGeofence = .{ .region = region };
+    @memcpy(ng.name_buf[0..name_slice.len], name_slice);
+    ng.name_len = @intCast(name_slice.len);
+    s.named_geofences[s.named_geofence_count] = ng;
+    s.named_geofence_count += 1;
+    return .ok;
+}
+
 /// Adds a named circular geofence, so a lens fires `geo.in_region('name')` for
 /// its own place among several the host has set (distinct from the single
 /// default geofence). Re-adding a name replaces its region; the store holds up
@@ -6474,22 +6493,28 @@ pub export fn goss_session_set_named_geofence(session: ?*Session, name: ?[*]cons
     const name_ptr = name orelse return .invalid_argument;
     if (name_len == 0 or name_len > max_geofence_name) return .invalid_argument;
     if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180 or !(radius_m > 0)) return .invalid_argument;
-    const name_slice = name_ptr[0..name_len];
-    const region: GeoRegion = .{ .circle = .{ .lat = latitude, .lon = longitude, .radius_m = radius_m } };
-    // Replace a same-named region in place, else append if there is room.
-    for (s.named_geofences[0..s.named_geofence_count]) |*ng| {
-        if (std.mem.eql(u8, ng.name(), name_slice)) {
-            ng.region = region;
-            return .ok;
-        }
+    return putNamedGeofence(s, name_ptr[0..name_len], .{ .circle = .{ .lat = latitude, .lon = longitude, .radius_m = radius_m } });
+}
+
+/// Adds a named polygon geofence: the region is a ring of three to
+/// max_polygon_verts `(lat, lon)` pairs, so `geo.in_region('name')` fires for a
+/// non-circular place among several. The counterpart of the default polygon
+/// geofence; the name is copied and re-adding a name replaces its region.
+pub export fn goss_session_set_named_geofence_polygon(session: ?*Session, name: ?[*]const u8, name_len: usize, coords: ?[*]const f64, vertex_count: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const name_ptr = name orelse return .invalid_argument;
+    const src = coords orelse return .invalid_argument;
+    if (name_len == 0 or name_len > max_geofence_name) return .invalid_argument;
+    if (vertex_count < 3 or vertex_count > geo.max_polygon_verts) return .invalid_argument;
+    var poly: @FieldType(GeoRegion, "polygon") = .{ .verts = undefined, .count = vertex_count };
+    var i: usize = 0;
+    while (i < vertex_count) : (i += 1) {
+        const lat = src[i * 2];
+        const lon = src[i * 2 + 1];
+        if (lat < -90 or lat > 90 or lon < -180 or lon > 180) return .invalid_argument;
+        poly.verts[i] = .{ lat, lon };
     }
-    if (s.named_geofence_count >= max_named_geofences) return .pool_exhausted;
-    var ng: NamedGeofence = .{ .region = region };
-    @memcpy(ng.name_buf[0..name_len], name_slice);
-    ng.name_len = @intCast(name_len);
-    s.named_geofences[s.named_geofence_count] = ng;
-    s.named_geofence_count += 1;
-    return .ok;
+    return putNamedGeofence(s, name_ptr[0..name_len], .{ .polygon = poly });
 }
 
 /// Clears every named geofence; the default geofence is untouched.
@@ -15050,6 +15075,36 @@ test "a named geofence fires geo.in_region by name only inside its own region" {
 
     // A fix at downtown's center lights its region, firing the trigger.
     _ = goss_session_submit_location(session, 40.0, -74.0, 5.0, 2000);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
+    try t.expectEqual(@as(f32, 1.0), session.active_lens.?.param_values[0]);
+}
+
+test "a named polygon geofence fires geo.in_region only inside its ring" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const manifest_json =
+        \\{"glf": "1.0", "id": "g", "version": "1.0.0", "display_name": "G", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "grade", "type": "grade.pass", "inputs": {"frame": "camera"}, "params": {}}],
+        \\ "triggers": [{"when": "geo.in_region('zone')", "action": {"kind": "param_set", "target": "intensity", "to": 1.0}}]}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len));
+
+    // A square ring (lat, lon) covering [0,2] x [0,2].
+    const verts = [_]f64{ 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0 };
+    try t.expectEqual(Status.ok, goss_session_set_named_geofence_polygon(session, "zone", 4, &verts, 4));
+
+    var signals = std.mem.zeroes(LensSignals);
+    // A fix outside the ring leaves the parameter at its default.
+    _ = goss_session_submit_location(session, 5.0, 5.0, 5.0, 1000);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
+    try t.expectEqual(@as(f32, 0.0), session.active_lens.?.param_values[0]);
+
+    // A fix inside the ring fires the trigger.
+    _ = goss_session_submit_location(session, 1.0, 1.0, 5.0, 2000);
     try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
     try t.expectEqual(@as(f32, 1.0), session.active_lens.?.param_values[0]);
 }

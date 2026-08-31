@@ -295,6 +295,21 @@ extension GossSession {
         }
     }
 
+    /// Adds a polygon region by name (a ring of `[latitude, longitude]` pairs,
+    /// three or more), the non-circular counterpart of `setNamedGeofence`, so a
+    /// lens fires `geo.in_region('name')` for a non-circular place.
+    public func setNamedGeofencePolygon(_ name: String, vertices: [(latitude: Double, longitude: Double)]) throws {
+        var nameBytes = Array(name.utf8)
+        var coords = [Double]()
+        coords.reserveCapacity(vertices.count * 2)
+        for v in vertices { coords.append(v.latitude); coords.append(v.longitude) }
+        try nameBytes.withUnsafeMutableBufferPointer { nb in
+            try coords.withUnsafeBufferPointer { cb in
+                try checked(goss_session_set_named_geofence_polygon(handle, nb.baseAddress, nb.count, cb.baseAddress, vertices.count))
+            }
+        }
+    }
+
     /// Empties the named-region set; the default geofence is untouched.
     public func clearNamedGeofences() throws {
         try checked(goss_session_clear_named_geofences(handle))

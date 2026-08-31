@@ -148,6 +148,7 @@ object Gosslens {
     internal external fun nativeSetGeofenceBbox(session: Long, minLat: Double, minLon: Double, maxLat: Double, maxLon: Double): Int
     internal external fun nativeSetGeofencePolygon(session: Long, coordsBuffer: ByteBuffer, vertexCount: Int): Int
     internal external fun nativeSetNamedGeofence(session: Long, nameBuffer: ByteBuffer, nameLen: Int, latitude: Double, longitude: Double, radiusM: Double): Int
+    internal external fun nativeSetNamedGeofencePolygon(session: Long, nameBuffer: ByteBuffer, nameLen: Int, coordsBuffer: ByteBuffer, vertexCount: Int): Int
     internal external fun nativeClearNamedGeofences(session: Long): Int
     internal external fun nativeSetGeoAccuracy(session: Long, maxAccuracyM: Float): Int
     internal external fun nativeBrushSetStyle(session: Long, r: Float, g: Float, b: Float, a: Float, width: Float): Int
@@ -1515,6 +1516,18 @@ class GossSession private constructor(
         val buffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
         buffer.put(bytes)
         return Gosslens.nativeSetNamedGeofence(handle, buffer, bytes.size, latitude, longitude, radiusM) == 0
+    }
+
+    /** Adds a named polygon geofence (a ring of (lat, lon) pairs, three or more),
+     * the non-circular counterpart of setNamedGeofence; re-adding a name replaces it. */
+    fun setNamedGeofencePolygon(name: String, vertices: List<Pair<Double, Double>>): Boolean {
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        val nameBuf = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
+        nameBuf.put(bytes)
+        val coords = ByteBuffer.allocateDirect(vertices.size * 2 * 8).order(ByteOrder.nativeOrder())
+        val doubles = coords.asDoubleBuffer()
+        for (v in vertices) { doubles.put(v.first); doubles.put(v.second) }
+        return Gosslens.nativeSetNamedGeofencePolygon(handle, nameBuf, bytes.size, coords, vertices.size) == 0
     }
 
     /** Clears every named geofence; the default geofence is untouched. */

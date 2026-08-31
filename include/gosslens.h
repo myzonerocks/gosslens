@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 77u
+#define GOSS_ABI_MINOR 78u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -839,6 +839,10 @@ goss_status goss_session_set_geo_accuracy(goss_session *session, float max_accur
  * replaces its region; the name is copied. clear_named_geofences empties the
  * set and leaves the default geofence untouched. */
 goss_status goss_session_set_named_geofence(goss_session *session, const uint8_t *name, size_t name_len, double latitude, double longitude, double radius_m);
+/* A named polygon geofence: the region is a ring of three or more (lat, lon)
+ * pairs, the non-circular counterpart of set_geofence_polygon for named
+ * regions. Re-adding a name replaces its region; the name is copied. */
+goss_status goss_session_set_named_geofence_polygon(goss_session *session, const uint8_t *name, size_t name_len, const double *coords, size_t vertex_count);
 goss_status goss_session_clear_named_geofences(goss_session *session);
 
 /* Brush board. The engine owns stroke state and the undo/redo stacks; the app

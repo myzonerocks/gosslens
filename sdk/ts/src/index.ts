@@ -1300,6 +1300,26 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
   }
 
+  /// Adds a named polygon geofence (a ring of [latitude, longitude] pairs, three
+  /// or more), the non-circular counterpart of setNamedGeofence; re-adding a name
+  /// replaces its region.
+  setNamedGeofencePolygon(name: string, vertices: [number, number][]): void {
+    const nameBytes = new TextEncoder().encode(name);
+    if (nameBytes.length === 0) return;
+    const namePtr = this.mod.ccall("goss_alloc", "number", ["number"], [nameBytes.length]) as number;
+    this.mod.HEAPU8.set(nameBytes, namePtr);
+    const coordBytes = vertices.length * 2 * 8;
+    const coordPtr = this.mod.ccall("goss_alloc", "number", ["number"], [coordBytes]) as number;
+    const base = coordPtr >> 3;
+    for (let i = 0; i < vertices.length; i += 1) {
+      this.mod.HEAPF64[base + i * 2] = vertices[i]![0];
+      this.mod.HEAPF64[base + i * 2 + 1] = vertices[i]![1];
+    }
+    this.mod.ccall("goss_session_set_named_geofence_polygon", "number", ["number", "number", "number", "number", "number"], [this.handle, namePtr, nameBytes.length, coordPtr, vertices.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [namePtr, nameBytes.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [coordPtr, coordBytes]);
+  }
+
   /// Clears every named geofence; the default geofence is untouched.
   clearNamedGeofences(): void {
     this.mod.ccall("goss_session_clear_named_geofences", "number", ["number"], [this.handle]);
