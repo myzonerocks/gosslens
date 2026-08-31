@@ -8393,7 +8393,78 @@ fn proveBuiltinSfx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-/// Proves the camera-controls contract through the public ABI: out-of-range
+/// Feeds a session solid-luma NV12 frames, ticking each, so a caller can drive
+/// the flash detector with a strobe or a steady grey and read the result back.
+fn runFlashSequence(engine: *abi.Engine, session: *abi.Session, luma: []const u8, y: []u8, uv: []const u8, wpx: u32, hpx: u32) void {
+    const half_w = (wpx + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    for (luma, 0..) |lv, i| {
+        @memset(y, lv);
+        const desc: abi.FrameDesc = .{ .width = wpx, .height = hpx, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast(1000 + i * 33_333) };
+        _ = abi.goss_session_submit_frame_copy(session, &desc, y.ptr, wpx, uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    }
+}
+
+/// Proves the photosensitivity gate: a black-white strobe drives the engine's
+/// safety.flash_risk past the general-flash threshold so a lens trigger warns,
+/// while a steady grey holds it clear.
+fn proveFlashDetection(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const y_size = @as(usize, width) * height;
+    const half_w = (width + 1) / 2;
+    const half_h = (height + 1) / 2;
+    const y = try gpa.alloc(u8, y_size);
+    defer gpa.free(y);
+    const uv = try gpa.alloc(u8, @as(usize, half_w) * half_h * 2);
+    defer gpa.free(uv);
+    @memset(uv, 128);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/flash-warn");
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.flash-warn","version":"1.0.0","display_name":"Flash Warn","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"warned","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[],
+        \\ "triggers":[{"when":"safety.flash_risk > 0.5","action":{"kind":"param_set","target":"warned","to":1.0}}]}
+    ;
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/flash-warn/manifest.json", .data = manifest_json });
+
+    // A strobe alternating black and white every frame.
+    var strobe: [40]u8 = undefined;
+    for (&strobe, 0..) |*v, i| v.* = if (i % 2 == 0) @as(u8, 0) else 255;
+
+    const flashing = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(flashing);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(flashing, "zig-out/flash-warn", "zig-out/flash-warn".len) != .ok) return error.ActivationFailed;
+    runFlashSequence(engine, flashing, &strobe, y, uv, width, height);
+    var warned: f32 = 0;
+    _ = abi.goss_session_parameter_value(flashing, "warned", "warned".len, &warned);
+    if (warned < 0.5) {
+        std.debug.print("conformance: FAIL a black-white strobe did not raise the flash risk (warned {d})\n", .{warned});
+        return false;
+    }
+
+    // A steady grey holds the risk clear, so the warning never fires.
+    var steady: [40]u8 = undefined;
+    @memset(&steady, 128);
+    const calm = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(calm);
+    if (abi.goss_session_activate_lens_from_directory(calm, "zig-out/flash-warn", "zig-out/flash-warn".len) != .ok) return error.ActivationFailed;
+    runFlashSequence(engine, calm, &steady, y, uv, width, height);
+    var calm_warned: f32 = 0;
+    _ = abi.goss_session_parameter_value(calm, "warned", "warned".len, &calm_warned);
+    if (calm_warned != 0) {
+        std.debug.print("conformance: FAIL a steady frame raised the flash risk (warned {d})\n", .{calm_warned});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the photosensitivity gate raises safety.flash_risk on a black-white strobe so a lens warns, and holds clear on a steady frame\n", .{});
+    return true;
+}
+
+///Proves the camera-controls contract through the public ABI: out-of-range
 /// intent is normalized to its valid envelope and read back exactly, with no
 /// hardware and no host dependence.
 fn proveCameraControls(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
@@ -19591,6 +19662,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("audio");
     if (!try proveBuiltinSfx(gpa, engine)) return 1;
     watchHold("builtin sfx");
+    if (!try proveFlashDetection(gpa, engine)) return 1;
+    watchHold("flash detection");
     if (!try proveOutputMix(gpa, engine)) return 1;
     watchHold("output mix");
     if (!try proveCameraControls(gpa, engine)) return 1;

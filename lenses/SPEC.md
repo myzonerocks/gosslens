@@ -1310,7 +1310,10 @@ small closed grammar, parsed once at load time into a typed expression tree
   while a tracked hand's thumb and index tips are closed together),
   `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
 onset hops), `audio.beat_count` (a monotonic count of onsets, for syncing to a
-  beat number), `voice.command('phrase')` (true for the tick the on-device
+  beat number), `safety.flash_risk` (0..1, the engine's photosensitivity risk
+  from the frame's light-dark flashing rate over the last second, so a lens gates
+  or softens a strobing effect when `safety.flash_risk > 0.5`),
+  `voice.command('phrase')` (true for the tick the on-device
   captioner's recognized speech carries the phrase, a case-insensitive substring
   match, so a spoken word drives a lens; the audio never leaves the engine, only
   the recognized text reaches the trigger, and it needs a captioning audio.infer

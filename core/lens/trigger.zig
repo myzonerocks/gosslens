@@ -20,6 +20,7 @@ pub const SignalKind = enum {
     world_tracking_state,
     audio_level,
     audio_beat_count,
+    flash_risk,
     voice_command,
     timer,
     tap,
@@ -60,7 +61,7 @@ pub const SignalKind = enum {
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
         .face_present, .hands_present, .tap, .audio_beat, .event, .voice_command, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
-        .face_blendshape, .world_tracking_state, .audio_level, .audio_beat_count, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
+        .face_blendshape, .world_tracking_state, .audio_level, .audio_beat_count, .flash_risk, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
     };
 }
 
@@ -129,6 +130,10 @@ pub const Signals = struct {
     audio_level: f64 = 0,
     audio_beat: bool = false,
     audio_beat_count: f64 = 0,
+    /// The engine's photosensitivity risk (0..1) from the frame's flashing rate,
+    /// engine-fed at tick, so a lens softens or gates a strobing effect when
+    /// `safety.flash_risk > 0.5`. Zero when the frame is steady.
+    flash_risk: f64 = 0,
     tap: bool = false,
     blendshapes: ?*const [face.blendshape_count]f32 = null,
     params: []const f64 = &.{},
@@ -306,6 +311,7 @@ fn readNumber(s: Signal, signals: Signals) f64 {
         .world_tracking_state => signals.world_tracking_state,
         .audio_level => signals.audio_level,
         .audio_beat_count => signals.audio_beat_count,
+        .flash_risk => signals.flash_risk,
         .timer => blk: {
             for (signals.timers) |tv| {
                 if (std.mem.eql(u8, tv.name, s.timer_name)) break :blk tv.seconds;
@@ -736,6 +742,9 @@ const Parser = struct {
         }
         if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "beat_count")) {
             return .{ .kind = .audio_beat_count };
+        }
+        if (std.mem.eql(u8, head, "safety") and std.mem.eql(u8, tail, "flash_risk")) {
+            return .{ .kind = .flash_risk };
         }
         if (std.mem.eql(u8, head, "voice") and std.mem.eql(u8, tail, "command")) {
             // The phrase is lowered once here so the tick match is case-insensitive.

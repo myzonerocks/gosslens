@@ -28,6 +28,7 @@ const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
 const sfx = @import("sfx");
+const flash = @import("flash");
 const formant = @import("formant");
 const fingerprint = @import("fingerprint");
 const comp = @import("layout");
@@ -1322,6 +1323,11 @@ pub const Session = struct {
     auto_frame_cy: f32 = 0.5,
     auto_frame_scale: f32 = 1,
     auto_frame_valid: bool = false,
+    /// The photosensitivity flash detector, fed each submitted frame's mean
+    /// luminance, and the risk (0..1) it last reported for the safety.flash_risk
+    /// trigger signal.
+    flash_detector: flash.Detector = .{},
+    flash_risk: f32 = 0,
     /// A monotonic sequence stamped on each submitted exposure so a bracket-source
     /// temporal.fuse ring keeps every distinct exposure rather than deduping them.
     bracket_seq: i64 = 0,
@@ -7093,6 +7099,7 @@ pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const F
         .conversion = math.color.yuvToRgb(standard, range),
     } } };
     fillFrameThumbNv12(s, y_ptr, y_stride, uv_ptr, uv_stride, d.width, d.height, math.color.yuvToRgb(standard, range));
+    s.flash_risk = feedFlashDetector(s, y_ptr, y_stride, d.width, d.height, d.timestamp_us);
     updateStabilization(s);
     s.copied_frames += 1;
     return .ok;
@@ -7987,6 +7994,27 @@ const default_ml_worker_budget: u32 = 8;
 /// planes at a thumb_side grid and converting each with the frame's color map.
 /// Bounded and CPU-only, so an auto-enhance pass has whole-frame statistics
 /// without a GPU readback.
+/// Subsamples the submitted Y (luma) plane to a mean in 0..1 and feeds it to the
+/// photosensitivity flash detector, returning the risk for this frame. Reads a
+/// fixed 32x32 grid so the per-frame cost is bounded and allocation-free.
+fn feedFlashDetector(s: *Session, y: [*]const u8, y_stride: u32, width: u32, height: u32, timestamp_us: i64) f32 {
+    const step_x = @max(width / 32, 1);
+    const step_y = @max(height / 32, 1);
+    var sum: u64 = 0;
+    var count: u64 = 0;
+    var yy: u32 = 0;
+    while (yy < height) : (yy += step_y) {
+        const row = y + yy * y_stride;
+        var xx: u32 = 0;
+        while (xx < width) : (xx += step_x) {
+            sum += row[xx];
+            count += 1;
+        }
+    }
+    const mean: f32 = if (count > 0) @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(count)) / 255.0 else 0;
+    return s.flash_detector.push(mean, timestamp_us);
+}
+
 fn fillFrameThumbNv12(s: *Session, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32, width: u32, height: u32, conv: math.color.Conversion) void {
     for (0..thumb_side) |ty| {
         const sy = (ty * height) / thumb_side;
@@ -14550,6 +14578,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     live_signals.camera_zoom = @max(s.camera_controls.zoom_factor, 1);
     live_signals.camera_focus = s.cam_focus_pulse;
     live_signals.camera_exposure = s.cam_exposure_pulse;
+    live_signals.flash_risk = s.flash_risk;
     // Screen gestures ride the touch stream the host fed since the last tick;
     // the recognizer resolves them here so only completed gestures and the
     // pointer position reach the lens, never the raw touches.
