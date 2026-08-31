@@ -8166,6 +8166,51 @@ fn proveCompilePrompt(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Renders a song for `prompt` through the ABI into an owned WAV buffer.
+fn composeSong(gpa: std.mem.Allocator, engine: *abi.Engine, prompt: []const u8) ![]u8 {
+    var needed: usize = 0;
+    if (abi.goss_engine_generate_song(engine, prompt.ptr, prompt.len, 48000, 0, 4, null, 0, &needed) != .ok or needed == 0) return error.NoLength;
+    const buf = try gpa.alloc(u8, needed);
+    errdefer gpa.free(buf);
+    var written: usize = 0;
+    if (abi.goss_engine_generate_song(engine, prompt.ptr, prompt.len, 48000, 0, 4, buf.ptr, buf.len, &written) != .ok or written != needed) return error.FillFailed;
+    return buf;
+}
+
+/// Proves on-device generative music: goss_engine_generate_song composes a
+/// coherent track from a prompt into a well-formed, non-silent WAV, the same
+/// prompt renders bit-identically, and a different prompt renders a different
+/// track - all on device with no model and no network.
+fn proveGenerateSong(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const a = try composeSong(gpa, engine, "an upbeat happy dance track");
+    defer gpa.free(a);
+    const a2 = try composeSong(gpa, engine, "an upbeat happy dance track");
+    defer gpa.free(a2);
+    const sad = try composeSong(gpa, engine, "a sad slow melancholy song");
+    defer gpa.free(sad);
+    if (a.len <= 44 or !std.mem.eql(u8, a[0..4], "RIFF") or !std.mem.eql(u8, a[8..12], "WAVE")) {
+        std.debug.print("conformance: FAIL generated song is not a well-formed WAV\n", .{});
+        return false;
+    }
+    var energy: u64 = 0;
+    var i: usize = 44;
+    while (i + 1 < a.len) : (i += 2) energy += @abs(@as(i64, std.mem.readInt(i16, a[i..][0..2], .little)));
+    if (energy == 0) {
+        std.debug.print("conformance: FAIL generated song is silent\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, a, a2)) {
+        std.debug.print("conformance: FAIL generated song is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (a.len == sad.len and std.mem.eql(u8, a, sad)) {
+        std.debug.print("conformance: FAIL two different prompts rendered the same song\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF on-device generative music composes a non-silent track from a prompt ({d} bytes), bit-identical on a repeat and different for a different prompt\n", .{a.len});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -19956,6 +20001,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveInpaintCoherence(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "outpaint")) {
             if (!try proveOutpaint(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "generate-song")) {
+            if (!try proveGenerateSong(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -20308,6 +20355,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;
     watchHold("compile prompt");
+    if (!try proveGenerateSong(gpa, engine)) return 1;
+    watchHold("generate song");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveScriptFile(gpa, engine)) return 1;

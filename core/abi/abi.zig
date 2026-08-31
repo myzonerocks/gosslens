@@ -28,6 +28,7 @@ const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
 const sfx = @import("sfx");
+const music = @import("music");
 const flash = @import("flash");
 const formant = @import("formant");
 const fingerprint = @import("fingerprint");
@@ -257,6 +258,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
     "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
     "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
@@ -9909,6 +9911,28 @@ pub export fn goss_compile_prompt(engine: ?*Engine, prompt: ?[*]const u8, prompt
     out_len_ptr.* = json.len;
     if (out_buf) |buf| {
         if (out_cap >= json.len) @memcpy(buf[0..json.len], json);
+    }
+    return .ok;
+}
+
+/// Composes an on-device generative-music track from a prompt into a mono 16-bit
+/// WAV. Probe with a null out_buf, then fill; a non-zero seed varies the take,
+/// bars 0 the default length. Deterministic, no model; a bundled model feeds the
+/// same WAV path.
+pub export fn goss_engine_generate_song(engine: ?*Engine, prompt: ?[*]const u8, prompt_len: usize, sample_rate: u32, seed: u32, bars: u32, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const e = engine orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (prompt == null and prompt_len != 0) return .invalid_argument;
+    if (sample_rate == 0) return .invalid_argument;
+    const text: []const u8 = if (prompt) |p| p[0..prompt_len] else &.{};
+    var params = music.paramsFromPrompt(text);
+    if (seed != 0) params.seed = seed;
+    if (bars != 0) params.bars = bars;
+    const wav = music.synth(e.gpa, params, sample_rate) catch return .out_of_memory;
+    defer e.gpa.free(wav);
+    out_len_ptr.* = wav.len;
+    if (out_buf) |buf| {
+        if (out_cap >= wav.len) @memcpy(buf[0..wav.len], wav);
     }
     return .ok;
 }

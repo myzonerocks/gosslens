@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 82u
+#define GOSS_ABI_MINOR 83u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -944,6 +944,12 @@ goss_status goss_session_activate_lens_from_directory(goss_session *session, con
  * out_cap) reports the length only, so the caller sizes a buffer and calls
  * again, then inspects, saves, or activates the result with no assets needed. */
 goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Composes an on-device generative-music track from a text prompt into a mono
+ * 16-bit WAV in out_buf, its length in out_len; a NULL out_buf reports the
+ * length only. A non-zero seed varies the take, bars 0 the default length.
+ * Deterministic, no model; an external model feeds the same WAV path. */
+goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len);
 
 /* Graph thread. Unsplices the active lens and frees everything its
  * activation allocated. Accepts no active lens and does nothing. */

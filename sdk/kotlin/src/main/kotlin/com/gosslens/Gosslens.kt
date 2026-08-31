@@ -31,6 +31,7 @@ object Gosslens {
     internal external fun nativeSubmitAudio(session: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Int
     internal external fun nativeRenderFrame(engine: Long, session: Long): Int
     internal external fun nativeCompilePrompt(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeGenerateSong(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, sampleRate: Int, seed: Int, bars: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
     internal external fun nativeMusicAddReference(engine: Long, trackId: Int, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeMusicClearReferences(engine: Long)
     internal external fun nativeMusicIdentify(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int, outBuffer: ByteBuffer): Int
@@ -472,6 +473,26 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         val result = ByteArray(written)
         out.get(result)
         return String(result, Charsets.UTF_8)
+    }
+
+    /** Composes an on-device generative-music track from a text prompt and
+     * returns it as a mono 16-bit WAV. A non-zero seed varies the take; bars 0
+     * uses the default length. Deterministic, no model and no network. */
+    fun generateSong(prompt: String, sampleRate: Int = 48000, seed: Int = 0, bars: Int = 0): ByteArray {
+        val bytes = prompt.toByteArray(Charsets.UTF_8)
+        val promptBuffer = ByteBuffer.allocateDirect(maxOf(bytes.size, 1))
+        promptBuffer.put(bytes)
+        promptBuffer.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        Gosslens.nativeGenerateSong(handle, promptBuffer, bytes.size, sampleRate, seed, bars, probe, 0L, len)
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        Gosslens.nativeGenerateSong(handle, promptBuffer, bytes.size, sampleRate, seed, bars, out, needed.toLong(), len)
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return result
     }
 
     /** Fingerprints a reference recording and registers it under [trackId] in the

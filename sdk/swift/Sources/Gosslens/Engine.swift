@@ -79,6 +79,19 @@ public final class GossEngine: @unchecked Sendable {
         return String(decoding: out[0..<written], as: UTF8.self)
     }
 
+    /// Composes an on-device generative-music track from a text prompt and
+    /// returns it as a mono 16-bit WAV. A non-zero seed varies the take; bars 0
+    /// uses the default length. Deterministic, no model and no network.
+    public func generateSong(_ prompt: String, sampleRate: UInt32 = 48000, seed: UInt32 = 0, bars: UInt32 = 0) throws -> [UInt8] {
+        let bytes = Array(prompt.utf8)
+        var needed: Int = 0
+        try checked(goss_engine_generate_song(handle, bytes, bytes.count, sampleRate, seed, bars, nil, 0, &needed))
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        try checked(goss_engine_generate_song(handle, bytes, bytes.count, sampleRate, seed, bars, &out, out.count, &written))
+        return Array(out[0..<written])
+    }
+
     /// Fingerprints a reference recording and registers it under `trackID` in the
     /// engine's on-device music catalog. Samples are interleaved f32.
     public func addMusicReference(trackID: UInt32, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws {

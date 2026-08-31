@@ -544,6 +544,28 @@ export class GossEngine {
     return json;
   }
 
+  /// Composes an on-device generative-music track from a text prompt and returns
+  /// it as a mono 16-bit WAV. A non-zero seed varies the take; bars 0 uses the
+  /// default length. Deterministic, no model and no network.
+  generateSong(prompt: string, sampleRate = 48000, seed = 0, bars = 0): Uint8Array {
+    const bytes = new TextEncoder().encode(prompt);
+    const promptPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length || 1]) as number;
+    this.mod.HEAPU8.set(bytes, promptPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const view = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number", "number"];
+    this.mod.ccall("goss_engine_generate_song", "number", args, [this.handle, promptPtr, bytes.length, sampleRate, seed, bars, 0, 0, lenPtr]);
+    const needed = view();
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+    this.mod.ccall("goss_engine_generate_song", "number", args, [this.handle, promptPtr, bytes.length, sampleRate, seed, bars, outPtr, needed, lenPtr]);
+    const written = view();
+    const wav = this.mod.HEAPU8.slice(outPtr, outPtr + written);
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [promptPtr, bytes.length || 1]);
+    return wav;
+  }
+
   /// Fingerprints a reference recording and registers it under trackId in the
   /// engine's on-device music catalog. Samples are interleaved f32; re-adding a
   /// trackId layers more landmarks in.
