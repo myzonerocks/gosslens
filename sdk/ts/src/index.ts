@@ -236,6 +236,7 @@ interface EngineModule {
   HEAPU8: Uint8Array;
   HEAP16: Int16Array;
   HEAP32: Int32Array;
+  HEAPU32: Uint32Array;
   HEAPF32: Float32Array;
   HEAPF64: Float64Array;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
@@ -1823,6 +1824,22 @@ export class GossSession {
     const out: [number, number, number] = [this.mod.HEAPF32[w], this.mod.HEAPF32[w + 1], this.mod.HEAPF32[w + 2]];
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
     return out;
+  }
+
+  /// Runs the in-engine segmenter on the camera frames: model is any square RGB
+  /// segmenter (portrait or a multi-class scene net, up to 32 classes), read for
+  /// its own tensor dimensions; threads is the worker count. A build with no
+  /// inference stack returns unsupported and setSegmentationMask is used instead.
+  enableSegmentation(model: Uint8Array, threads: number): void {
+    const modelPtr = model.length > 0 ? (this.mod.ccall("goss_alloc", "number", ["number"], [model.length]) as number) : 0;
+    if (modelPtr) this.mod.HEAPU8.set(model, modelPtr);
+    this.mod.ccall("goss_session_enable_segmentation", "number", ["number", "number", "number", "number"], [this.handle, modelPtr, model.length, threads]);
+    if (modelPtr) this.mod.ccall("goss_free", null, ["number", "number"], [modelPtr, model.length]);
+  }
+
+  /// Tears the in-engine segmenter down; the subject and class channels go empty.
+  disableSegmentation(): void {
+    this.mod.ccall("goss_session_disable_segmentation", "number", ["number"], [this.handle]);
   }
 
   /// Feeds a segmentation mask (GOSS_SEGMENTATION_MASK_SIDE squared floats,

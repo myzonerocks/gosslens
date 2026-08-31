@@ -239,22 +239,21 @@ file must move together.
 
 ### Segmentation
 
-`goss_session_enable_segmentation` exists at the ABI level, but its public
-parameter contract is not frozen yet. **No SDK may invent and ship a public
-`enableSegmentation(...)` signature until this section is updated with the
-complete parameter list.**
-
-The in-engine core reads each model's own tensor dimensions, so the bytes
-handed to it can be any square RGB segmenter with any output resolution and
-up to 32 classes. It resamples the model's native mask onto the canonical
+The in-engine segmenter runs a model on the camera frames. The contract is
+`enableSegmentation(model, threads)`: the model bytes are any square RGB
+segmenter, the thread count is the worker parallelism. The core reads each
+model's own tensor dimensions, so the bytes can carry any output resolution and
+up to 32 classes; it resamples the model's native mask onto the canonical
 `mask_side x mask_side` grid, covering the portrait segmenters and scene
-segmenters like the 21-class deeplab model alike. `segmentationChannels()`
-then reports the loaded model's class count.
+segmenters like the 21-class deeplab model alike. `segmentationChannels()` then
+reports the loaded model's class count. A build with no inference stack (the web
+wasm engine by default) returns `unsupported`, and the web producer path
+(`setSegmentationMask`) supplies masks from its own tracking module instead.
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_session_enable_segmentation` | `enableSegmentation(...)` (reserved, parameters not yet frozen) | pending contract |
-| `goss_session_disable_segmentation` | `disableSegmentation()` | all SDKs once exposed |
+| `goss_session_enable_segmentation` | `enableSegmentation(model, threads)`, runs the in-engine segmenter on the camera frames | all SDKs (web returns `unsupported` without an inference stack) |
+| `goss_session_disable_segmentation` | `disableSegmentation()`, tears the segmenter down | all SDKs |
 | `goss_session_allow_model_digest` / `_clear_model_allowlist` | `allowModelDigest(digest)` / `clearModelAllowlist()`, allowlist a bring-your-own model by its 32-byte SHA-256 so an unlisted net is refused at enable time; none set admits any model | all SDKs |
 
 ### Beauty
