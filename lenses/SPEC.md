@@ -1423,7 +1423,11 @@ feathered edge a hair effect keys in place of the hard `hair` bit; with no
 `matte.hair` source in the lens it serves the zero mask. Three name the scene
 around the subject: `sky`, `ground`, and `building` come from a scene-parse
 segmentation model. No such model is wired in yet, so a lens may key these today
-and they serve the zero mask until one fills the scene slot. The
+and they serve the zero mask until one fills the scene slot. `saliency` is the
+main-subject matte: no built-in saliency model ships, so a lens fills it with
+its own net through an `ml.infer` node's `mask` binding (the same author-
+segmenter path the `person` channel accepts), keyed like any other channel;
+empty until the model runs. The
 shader reads the channel through `SAMPLER2D(s_texMask, 2)` beside the frame's
 own `s_texColor`. When a named channel has no live data (segmentation
 disabled, a single-class model without it, or no face or hand tracked for a

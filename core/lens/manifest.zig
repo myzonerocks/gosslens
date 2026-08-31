@@ -69,6 +69,7 @@ pub const mask_channels = [_][]const u8{
     "highlight", "lash_line", "under_eye", "nasolabial", "sclera",
     "t_zone",  "hair_matte", "sky",     "ground",    "building",
     "ear",     "lid_inner",  "lid_center", "lid_outer", "lid_crease",
+    "saliency",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -127,6 +128,10 @@ pub const lid_inner_channel = 26;
 pub const lid_center_channel = 27;
 pub const lid_outer_channel = 28;
 pub const lid_crease_channel = 29;
+/// The main-subject (saliency) matte. No built-in saliency model ships, so a
+/// lens fills it with its own net through an ml.infer node's mask binding, the
+/// same author-segmenter path the person channel accepts; empty until then.
+pub const saliency_channel = 30;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {
@@ -5592,7 +5597,8 @@ test "scene classes append at the frozen mask-channel tail" {
     try t.expectEqual(lid_center_channel, maskChannelIndex("lid_center").?);
     try t.expectEqual(lid_outer_channel, maskChannelIndex("lid_outer").?);
     try t.expectEqual(lid_crease_channel, maskChannelIndex("lid_crease").?);
-    try t.expectEqual(@as(usize, 30), mask_channels.len);
+    try t.expectEqual(saliency_channel, maskChannelIndex("saliency").?);
+    try t.expectEqual(@as(usize, 31), mask_channels.len);
 }
 
 /// The on-device prompt-to-lens compiler: it turns a short text prompt into a

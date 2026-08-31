@@ -3079,6 +3079,75 @@ fn proveMlInferSegMask(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+fn writeOnnxSaliencyLens(dir: []const u8, model: []const u8) !void {
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.ml-saliency","version":"1.0.0","display_name":"BYO Saliency","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{"id":"sal","type":"ml.infer","params":{},
+        \\   "ml":{"model":"model.onnx","outputs":[],"mask":{"tensor":0,"channel":"saliency"}}}],
+        \\ "triggers":[]}
+    ;
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Runs the saliency bundle once and reports whether the author model's mask
+/// reached the saliency class texture, feeding a frame and rendering until it
+/// appears the way the subject-mask proof waits on its channel.
+fn runMlSaliencyOnce(engine: *abi.Engine, planes: Nv12Copy) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/ml-infer-saliency", "zig-out/ml-infer-saliency".len) != .ok) {
+        std.debug.print("conformance: FAIL byo-ml saliency activation\n", .{});
+        return error.MlSaliencyActivationFailed;
+    }
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlSaliencyTrackFailed;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.MlSaliencySubmitFailed;
+    var polls: usize = 0;
+    while (session.segmentation_class_textures[lens_manifest.saliency_channel] == null) {
+        _ = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+        std.Thread.yield() catch {};
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 200_000) return false;
+    }
+    return true;
+}
+
+/// Proves the saliency matte: with no built-in saliency model, an author's own
+/// net bound as a mask through the ml.infer node fills the dedicated saliency
+/// channel (the main-subject matte), distinct from the person channel, on two
+/// runs. The channel is empty until inference, then populates.
+fn proveMlInferSaliency(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxSegProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-infer-saliency/assets");
+    try writeOnnxSaliencyLens("zig-out/ml-infer-saliency", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const a = try runMlSaliencyOnce(engine, person);
+    const b = try runMlSaliencyOnce(engine, person);
+    if (!a or !b) {
+        std.debug.print("conformance: FAIL the author saliency mask never reached the saliency channel\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF an author saliency net bound as a mask fills the dedicated saliency channel through the ml.infer node\n", .{});
+    return true;
+}
+
 /// Emits an ONNX classifier over three classes: channel means from a global
 /// average pool, then a bias that makes the winner class the largest logit, so
 /// the argmax is a known class regardless of the frame.
@@ -18670,6 +18739,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer onnx");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;
     watchHold("ml infer seg mask");
+    if (!try proveMlInferSaliency(gpa, engine)) return 1;
+    watchHold("ml infer saliency");
     if (!try proveMlInferCls(gpa, engine)) return 1;
     watchHold("ml infer cls");
     if (!try proveMlInferPlacement(gpa, engine)) return 1;
