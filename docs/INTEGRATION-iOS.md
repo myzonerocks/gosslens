@@ -30,22 +30,45 @@ explicitly. Nothing is missing; the app links and runs.
 
 ## Add the package
 
-Point SwiftPM at the repository, either as a local path while you develop or
-as a git dependency:
+### Released package (recommended)
 
-    .package(path: "../gosslens")
-    .package(url: "https://github.com/myzonerocks/gosslens", branch: "main")
+Each release attaches a prebuilt `GosslensKit.xcframework` and pins
+`Package.swift` to it, so you add one SwiftPM dependency and `import Gosslens`
+with no Zig and no build step:
+
+```swift
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.9.0")
+```
+
+> [!TIP]
+> The XCFramework carries the merged static engine and the C ABI module, and its
+> checksum is pinned per release, so SwiftPM verifies the download. Nothing to
+> link by hand.
+
+### Local development (source target)
+
+To build against your own checkout, run the two slice builds first:
+
+```sh
+zig build ios
+zig build ios-simulator
+```
+
+then point SwiftPM at the local path and set the two search paths on your app
+target so it finds each slice's archives:
+
+```swift
+.package(path: "../gosslens")
+```
+
+```text
+LIBRARY_SEARCH_PATHS[sdk=iphoneos*]        = .../gosslens/zig-out/ios
+LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = .../gosslens/zig-out/ios-simulator
+```
 
 The `Gosslens` product carries the whole `-l` list and the frameworks it needs
-in its own linker settings, so you do not copy them by hand. It cannot know
-where you put `zig-out`, so set the two search paths on your app target, one
-per slice:
-
-    LIBRARY_SEARCH_PATHS[sdk=iphoneos*]        = .../gosslens/zig-out/ios
-    LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = .../gosslens/zig-out/ios-simulator
-
-That is the whole build setup. The header comes from the package's C module,
-so there is nothing else to wire.
+in its own linker settings, and the header comes from the package's C module, so
+there is nothing else to wire.
 
 ## The render loop
 

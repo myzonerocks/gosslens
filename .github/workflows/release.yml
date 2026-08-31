@@ -124,7 +124,7 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: toolchain
@@ -133,21 +133,35 @@ jobs:
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
         run: zig build vendor-sync
-      - name: build wasm core
-        run: zig build wasm
       - uses: oven-sh/setup-bun@v2
-      - name: assemble npm package
+      - name: pack the js wrapper
         run: |
           set -euo pipefail
-          cp zig-out/wasm/gosslens.wasm sdk/ts/
           cd sdk/ts
           bun install
           bun run build
           bun pm pack --destination "$GITHUB_WORKSPACE"
+      # The web engine the wrapper drives is the emscripten build a consumer
+      # hosts next to their app. Best effort: it needs the emscripten SDK, so a
+      # missing EMSDK never blocks the wrapper publish or the rest of the release.
+      - name: build the web engine (best effort)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          zig build wasm-emscripten
+          zig build wasm-emscripten-webgpu
+          zig build tracking-wasm
+          mkdir -p web-engine/webgpu
+          cp zig-out/wasm-emscripten/gosslens_web.js zig-out/wasm-emscripten/gosslens_web.wasm web-engine/
+          cp zig-out/wasm-emscripten-webgpu/gosslens_web.js zig-out/wasm-emscripten-webgpu/gosslens_web.wasm web-engine/webgpu/
+          cp zig-out/wasm/gosslens_tracking.wasm web-engine/
+          ( cd web-engine && zip -r "$GITHUB_WORKSPACE/gosslens-web-engine.zip" . )
       - uses: actions/upload-artifact@v4
         with:
           name: web
-          path: "*.tgz"
+          path: |
+            *.tgz
+            gosslens-web-engine.zip
           if-no-files-found: error
 
   publish:
@@ -173,11 +187,9 @@ jobs:
         run: |
           set -euo pipefail
           notes="SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
-          gh release create "${GITHUB_REF_NAME}" \
-            dist/android/gosslens-android-jniLibs.zip \
-            dist/apple/GosslensKit.xcframework.zip \
-            dist/web/*.tgz \
-            --title "${GITHUB_REF_NAME}" --notes "$notes"
+          assets=(dist/android/gosslens-android-jniLibs.zip dist/apple/GosslensKit.xcframework.zip dist/web/*.tgz)
+          [ -f dist/web/gosslens-web-engine.zip ] && assets+=(dist/web/gosslens-web-engine.zip)
+          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --title "${GITHUB_REF_NAME}" --notes "$notes"
       # Pin SwiftPM to the XCFramework this release just published, so Swift
       # consumers get the prebuilt engine with no Zig. Best effort: if main is
       # protected the push is skipped and the values are printed to pin by hand.
