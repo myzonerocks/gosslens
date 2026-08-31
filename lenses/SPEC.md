@@ -1300,7 +1300,8 @@ small closed grammar, parsed once at load time into a typed expression tree
   below; an unknown name is a compile error), `hands.pinch` (true
   while a tracked hand's thumb and index tips are closed together),
   `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
-onset hops), `camera.zoom` (the camera zoom factor, one at rest),
+onset hops), `audio.beat_count` (a monotonic count of onsets, for syncing to a
+  beat number), `camera.zoom` (the camera zoom factor, one at rest),
   `camera.focus`, `camera.exposure` (true for one tick after the app changes
   focus or exposure), `gaze.x` (horizontal eye gaze, roughly -1 to 1,
   positive toward the subject's left), `gaze.y` (vertical, positive up),

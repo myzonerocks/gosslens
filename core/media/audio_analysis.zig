@@ -15,6 +15,10 @@ pub const Analysis = struct {
     /// True exactly on hops whose energy jumps well above the recent
     /// average - a beat-ish onset pulse for triggers.
     beat: bool = false,
+    /// Monotonic count of onsets seen, incremented on every beat, so a lens can
+    /// sync to a beat number (every fourth beat, say), not just the pulse. Wraps
+    /// at the u32 ceiling, far beyond any session's beat count.
+    beat_count: u32 = 0,
     /// Voiced (low-band) and unvoiced (high-band) energy in [0, 1], split by a
     /// one-pole low-pass, so a vowel reads high on low and a fricative on high.
     band_low: f32 = 0,
@@ -106,6 +110,7 @@ pub const Analysis = struct {
         const average = sum / analysis.history.len;
         if (analysis.history_filled and energy > average * onset_ratio and rms > 0.02) {
             analysis.beat = true;
+            analysis.beat_count +%= 1;
         }
         analysis.history[analysis.history_at] = energy;
         analysis.history_at = (analysis.history_at + 1) % analysis.history.len;
@@ -137,6 +142,33 @@ test "a loud burst after quiet raises the level and fires a beat" {
     analysis.feed(&burst, 1);
     try t.expect(analysis.beat);
     try t.expect(analysis.level > level_before);
+}
+
+test "the beat count increments once per detected onset" {
+    var analysis: Analysis = .{};
+    var quiet: [hop_size]f32 = undefined;
+    for (&quiet, 0..) |*s, i| s.* = 0.03 * @sin(@as(f32, @floatFromInt(i)) * 0.2);
+    var burst: [hop_size]f32 = undefined;
+    for (&burst, 0..) |*s, i| s.* = 0.8 * @sin(@as(f32, @floatFromInt(i)) * 0.3);
+
+    for (0..44) |_| analysis.feed(&quiet, 1);
+    try t.expectEqual(@as(u32, 0), analysis.beat_count);
+
+    // The first burst is an onset: the count ticks to one.
+    analysis.feed(&burst, 1);
+    try t.expect(analysis.beat);
+    try t.expectEqual(@as(u32, 1), analysis.beat_count);
+
+    // Quiet lets the running average fall back, so a second burst is a new onset.
+    for (0..44) |_| analysis.feed(&quiet, 1);
+    analysis.feed(&burst, 1);
+    try t.expect(analysis.beat);
+    try t.expectEqual(@as(u32, 2), analysis.beat_count);
+
+    // A quiet hop is no onset, so the count holds where it was.
+    analysis.feed(&quiet, 1);
+    try t.expect(!analysis.beat);
+    try t.expectEqual(@as(u32, 2), analysis.beat_count);
 }
 
 test "the jaw opens on voiced audio, less on unvoiced, and closes on silence" {

@@ -14391,6 +14391,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (s.audio_engine_fed) {
         live_signals.audio_level = s.audio.level;
         live_signals.audio_beat = s.audio.beat;
+        live_signals.audio_beat_count = @floatFromInt(s.audio.beat_count);
     }
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
