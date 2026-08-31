@@ -1169,8 +1169,12 @@ The `formant` ratio scales the vocal-tract envelope on its own through a short
 cepstral analysis that separates the formants from the pitch harmonics, warps the
 envelope, and resynthesises with the harmonics untouched, so the voice sounds
 larger below 1 and smaller above 1 without its pitch moving. Set formant to
-1/pitch for a natural higher or lower voice that keeps the speaker's character. A
-ratio of one on both is a passthrough. It needs no model.
+1/pitch for a natural higher or lower voice that keeps the speaker's character.
+The `robot` field (a carrier frequency in Hz, 0 to 2000, default 0 off) ring
+modulates the shaped voice by a sine at that rate, folding it into carrier-plus-
+and-minus sidebands for a robotic conversion on top of the pitch and formant. A
+ratio of one on pitch and formant with robot off is a passthrough. It needs no
+model.
 
 An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
 that binds a whole output tensor as a segmentation mask. The tensor is read as

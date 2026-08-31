@@ -5786,6 +5786,35 @@ fn writeVoiceLens(dir: []const u8, pitch: f32) !void {
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
 }
 
+fn writeVoiceRobotLens(dir: []const u8, hz: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.voice-robot","version":"1.0.0","display_name":"Voice Robot","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"vox","type":"voice.transform","params":{{}},"voice":{{"robot":{d:.1}}}}}],
+        \\ "triggers":[]}}
+    , .{hz});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// The Goertzel power of a single frequency in an s16 track, for checking where a
+/// tone's energy sits after a spectral effect without a full transform.
+fn goertzelPower(track: []const i16, sample_rate: u32, freq: f32) f64 {
+    const w = 2.0 * std.math.pi * @as(f64, freq) / @as(f64, @floatFromInt(sample_rate));
+    const coeff = 2.0 * @cos(w);
+    var s1: f64 = 0;
+    var s2: f64 = 0;
+    for (track) |v| {
+        const s0 = @as(f64, @floatFromInt(v)) + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    return s1 * s1 + s2 * s2 - coeff * s1 * s2;
+}
+
 /// Counts the hysteresis-gated zero crossings over the latter half of an i16
 /// track (past the delay-line fill), a proxy for its fundamental frequency: a
 /// crossing counts only when the signal swings fully from below -thresh to above
@@ -5984,6 +6013,51 @@ fn proveVoiceCommand(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         }
     }
     std.debug.print("conformance: PROOF a voice.command trigger fires a lens action when its phrase is recognized: the mic decodes 'hi' and the command drives its parameter to {d}, the recognized text the only thing crossing to the trigger\n", .{fired});
+    return true;
+}
+
+/// Proves the robot voice conversion: a voice.transform robot carrier ring-
+/// modulates the outgoing microphone, so a pure tone's energy leaves its own
+/// frequency and reappears at the carrier plus and minus the tone, the classic
+/// robotic timbre, while a control with no robot keeps the tone where it was.
+fn proveVoiceRobot(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sample_rate: u32 = 48000;
+    const n: usize = 9600;
+    const tone: f32 = 300;
+    const carrier: f32 = 500;
+    const mic = try gpa.alloc(f32, n);
+    defer gpa.free(mic);
+    for (0..n) |i| {
+        const ti = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sample_rate));
+        mic[i] = 0.5 * @sin(2.0 * std.math.pi * tone * ti);
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-1");
+    try writeVoiceLens("zig-out/voice-1", 1.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-robot");
+    try writeVoiceRobotLens("zig-out/voice-robot", carrier);
+
+    const dry = try captureMixOutput(gpa, engine, "zig-out/voice-1", mic, sample_rate);
+    defer gpa.free(dry);
+    const robot = try captureMixOutput(gpa, engine, "zig-out/voice-robot", mic, sample_rate);
+    defer gpa.free(robot);
+
+    const dry_tone = goertzelPower(dry, sample_rate, tone);
+    const robot_tone = goertzelPower(robot, sample_rate, tone);
+    const robot_lower = goertzelPower(robot, sample_rate, carrier - tone);
+    const robot_upper = goertzelPower(robot, sample_rate, carrier + tone);
+
+    // The tone all but leaves its own frequency under ring modulation.
+    if (!(dry_tone > 0 and robot_tone < dry_tone * 0.05)) {
+        std.debug.print("conformance: FAIL the robot did not move the tone off its frequency (dry {e}, robot {e})\n", .{ dry_tone, robot_tone });
+        return false;
+    }
+    // ...and lands in both sidebands, each far above the residual at the tone.
+    if (!(robot_lower > robot_tone * 10 and robot_upper > robot_tone * 10)) {
+        std.debug.print("conformance: FAIL the robot sidebands did not appear (lower {e}, upper {e}, residual {e})\n", .{ robot_lower, robot_upper, robot_tone });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a voice.transform robot ring-modulates the mic into a robotic voice: a 300 Hz tone collapses at its own frequency and reappears at the carrier's 200 and 800 Hz sidebands, while a no-robot control holds the tone in place\n", .{});
     return true;
 }
 
@@ -19339,6 +19413,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("music identify");
     if (!try proveVoiceCommand(gpa, engine)) return 1;
     watchHold("voice command");
+    if (!try proveVoiceRobot(gpa, engine)) return 1;
+    watchHold("voice robot");
     if (!try proveCaptionSegment(gpa, engine)) return 1;
     watchHold("caption segment");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;

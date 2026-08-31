@@ -1156,13 +1156,16 @@ pub const AudioEnhanceField = struct {
     dereverb_ms: f32 = 30,
 };
 
-/// A voice.transform node's real-time voice change, both in the output mix:
+/// A voice.transform node's real-time voice change, all in the output mix:
 /// `pitch` (0.5..2, default 1) shifts the mic pitch keeping duration, above 1
 /// higher; `formant` (0.5..2, default 1) scales the vocal-tract envelope alone,
-/// above 1 smaller. Set formant to 1/pitch for a natural, character-keeping shift.
+/// above 1 smaller (set formant to 1/pitch for a natural, character-keeping
+/// shift); `robot` (carrier Hz, 0 off) ring-modulates the voice for a robotic
+/// timbre, a full voice conversion on top of the pitch and formant.
 pub const VoiceTransformField = struct {
     pitch: f32 = 1,
     formant: f32 = 1,
+    robot: f32 = 0,
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -3781,6 +3784,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (vv == .object) {
                     if (getField(vv.object, "pitch")) |v| field.pitch = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.pitch)), 0.5, 2);
                     if (getField(vv.object, "formant")) |v| field.formant = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.formant)), 0.5, 2);
+                    if (getField(vv.object, "robot")) |v| field.robot = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.robot)), 0, 2000);
                 }
             }
             voice_transform_field = field;

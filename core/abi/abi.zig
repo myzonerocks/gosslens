@@ -769,6 +769,11 @@ pub const Session = struct {
     /// STFT state is one Channel per mic channel, allocated on first use.
     voice_formant: f32 = 1,
     voice_formant_chans: []formant.Channel = &.{},
+    /// An active voice.transform node's robot carrier (Hz, 0 off): the mic is
+    /// ring-modulated by a sine at this rate for a robotic voice conversion, its
+    /// phase carried across chunks so the carrier stays continuous.
+    voice_robot: f32 = 0,
+    voice_robot_phase: f32 = 0,
     /// The diffusion restyle workers an active lens's diffusion nodes drive,
     /// each drawing its decoded frame through a sprite; built from the bundle at
     /// activation, fed the camera frame, uploaded to their sprite each render.
@@ -9011,6 +9016,8 @@ fn destroyBlendState(session: *Session) void {
     session.voice_pitch = 1;
     session.voice_formant = 1;
     for (session.voice_formant_chans) |*ch| ch.reset();
+    session.voice_robot = 0;
+    session.voice_robot_phase = 0;
     session.wants_person_mask = false;
     session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
@@ -9734,7 +9741,7 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
         // neither the raw mic passes straight through.
         const mic_chunk: ?[]const f32 = blk: {
             const raw = if (mic_slice) |m| m[base .. base + span] else break :blk null;
-            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1 and s.voice_formant == 1 and s.audio_echo_strength <= 0 and s.audio_dereverb_strength <= 0) break :blk raw;
+            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1 and s.voice_formant == 1 and s.voice_robot == 0 and s.audio_echo_strength <= 0 and s.audio_dereverb_strength <= 0) break :blk raw;
             @memcpy(enhanced_buf[0..span], raw);
             if (s.audio_enhance_strength > 0) enhanceMic(s, enhanced_buf[0..span], n, channels);
             if (s.audio_dereverb_strength > 0) dereverbMic(s, enhanced_buf[0..span], n, channels, sample_rate);
@@ -9744,6 +9751,9 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
             // it with 1/pitch yields a natural, character-preserving pitch change.
             if (s.voice_formant != 1) formantShiftMic(s, enhanced_buf[0..span], n, channels);
             if (s.voice_pitch != 1) voiceTransformMic(s, enhanced_buf[0..span], n, channels);
+            // Robot last: ring-modulating the shaped voice overlays the metallic
+            // carrier for a full character conversion.
+            if (s.voice_robot > 0) robotizeMic(s, enhanced_buf[0..span], n, channels, sample_rate);
             break :blk enhanced_buf[0..span];
         };
         audio_mix.combineStereo(lens_stereo, mic_chunk, out_slice[base .. base + span], n, channels);
@@ -11387,6 +11397,8 @@ fn resolveAudioEnhance(session: *Session) void {
     session.voice_phase = 0;
     session.voice_formant = 1;
     for (session.voice_formant_chans) |*ch| ch.reset();
+    session.voice_robot = 0;
+    session.voice_robot_phase = 0;
     const lens = if (session.active_lens) |*l| l else return;
     for (lens.manifest.nodes) |node| {
         if (node.audio_enhance) |ae| {
@@ -11403,6 +11415,7 @@ fn resolveAudioEnhance(session: *Session) void {
         if (node.voice_transform) |vt| {
             session.voice_pitch = vt.pitch;
             session.voice_formant = vt.formant;
+            session.voice_robot = vt.robot;
         }
     }
 }
@@ -11559,6 +11572,24 @@ fn formantShiftMic(session: *Session, mic: []f32, frame_count: u32, channels: u3
             mic[idx] = formant.processSample(&session.voice_formant_chans[ci], mic[idx], ratio);
         }
     }
+}
+
+/// Ring-modulates one interleaved output chunk's microphone in place: every
+/// channel is multiplied by a shared sine carrier at the session's robot rate,
+/// folding the voice into carrier-plus-and-minus sidebands for a robotic timbre.
+/// The carrier phase carries across chunks so it never clicks at a boundary.
+fn robotizeMic(session: *Session, mic: []f32, frame_count: u32, channels: u32, sample_rate: u32) void {
+    const hz = session.voice_robot;
+    if (hz <= 0 or sample_rate == 0) return;
+    const step = 2.0 * std.math.pi * hz / @as(f32, @floatFromInt(sample_rate));
+    var phase = session.voice_robot_phase;
+    for (0..frame_count) |f| {
+        const carrier = @sin(phase);
+        for (0..channels) |c| mic[f * channels + c] *= carrier;
+        phase += step;
+        if (phase >= 2.0 * std.math.pi) phase -= 2.0 * std.math.pi;
+    }
+    session.voice_robot_phase = phase;
 }
 
 /// One linearly-interpolated delay-line tap `delay` samples behind the write head.
