@@ -50,6 +50,14 @@ pub const DecodedAnimation = struct {
         _ = elapsed_seconds;
         return math.Mat4.identity;
     }
+
+    pub fn sampleRangeComponents(anim: *const DecodedAnimation, elapsed_seconds: f32, start: f32, end: f32) Components {
+        _ = anim;
+        _ = elapsed_seconds;
+        _ = start;
+        _ = end;
+        return .{};
+    }
 };
 
 pub const DecodedSkin = struct {
@@ -64,6 +72,9 @@ pub const DecodedModel = struct {
     positions: [][3]f32,
     indices: []u32,
     base_color: [4]f32,
+    metallic: f32 = 0,
+    roughness: f32 = 1,
+    emissive: [3]f32 = .{ 0, 0, 0 },
     animations: []DecodedAnimation,
     skin: ?DecodedSkin = null,
     morph_targets: []const []const [3]f32 = &.{},

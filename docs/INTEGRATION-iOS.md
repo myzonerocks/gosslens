@@ -212,12 +212,13 @@ A lens's passes name the region they act on by one of sixteen mask channels:
 `person`, `background`, `hair`, `body_skin`, `face_skin`, `clothes`, `others`,
 `head`, `hand`, `lips`, `eyes`, `brows`, `iris`, `teeth`, `contour`, and
 `highlight`. The `person` channel and the multiclass channels - `background`,
-`hair`, `body_skin`, `face_skin`, `clothes`, `others` - ride an image segmenter,
-whose public enable signature is still being frozen. `head`, `hand`, the fine
+`hair`, `body_skin`, `face_skin`, `clothes`, `others` - ride an image segmenter
+you stand up with `enableSegmentation(model:threads:)`: the model is any square
+RGB segmenter's bytes and the thread count its worker parallelism, and
+`disableSegmentation` tears it down. `head`, `hand`, the fine
 face parts (`lips`, `eyes`, `brows`, `iris`, `teeth`), `contour`, and `highlight`
 ride the face and hand trackers instead, so they resolve from the workers you
-already enabled with no extra model; until the segmenter enable lands, lean on
-those for the parts you paint.
+already enabled with no extra model.
 
 For a gallery still rather than a camera frame, `submitSegmentationImage` runs
 one host-provided RGBA image through the running segmenter, so a saved photo

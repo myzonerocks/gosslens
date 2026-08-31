@@ -222,6 +222,30 @@ extension GossSession {
         }
     }
 
+    /// Uploads a per-source matte for key mode 3 (red channel is the mask): an
+    /// opaque guest is keyed to a subject without a baked alpha.
+    public func submitSourceMask(_ name: String, rgba: [UInt8], width: UInt32, height: UInt32) throws {
+        var nameBytes = Array(name.utf8)
+        try nameBytes.withUnsafeMutableBufferPointer { nb in
+            try rgba.withUnsafeBufferPointer { rb in
+                try checked(goss_session_submit_source_mask(handle, nb.baseAddress, nb.count, rb.baseAddress, width, height))
+            }
+        }
+    }
+
+    /// Runs the engine's own segmenter on a source's frames so its key mode 3
+    /// matte is computed on-device (a virtual background for a remote guest).
+    /// The model is the selfie/hair net enableSegmentation takes; an empty model
+    /// tears the source segmenter down.
+    public func enableSourceSegmentation(_ name: String, model: Data, threads: Int32) throws {
+        var nameBytes = Array(name.utf8)
+        try nameBytes.withUnsafeMutableBufferPointer { nb in
+            try model.withUnsafeBytes { mb in
+                try checked(goss_session_enable_source_segmentation(handle, nb.baseAddress, nb.count, mb.bindMemory(to: UInt8.self).baseAddress, mb.count, threads))
+            }
+        }
+    }
+
     /// Defines a screen-share source: its frame letterboxes to fit its cell
     /// instead of stretching.
     public func defineScreenShare(_ name: String) throws {
@@ -261,6 +285,36 @@ extension GossSession {
         }
     }
 
+    /// Adds a circular region by name alongside the default geofence, so a lens
+    /// can watch several places at once with `geo.in_region('name')`; re-adding a
+    /// name replaces its region. Up to the engine's named-region cap.
+    public func setNamedGeofence(_ name: String, latitude: Double, longitude: Double, radiusM: Double) throws {
+        var nameBytes = Array(name.utf8)
+        try nameBytes.withUnsafeMutableBufferPointer { nb in
+            try checked(goss_session_set_named_geofence(handle, nb.baseAddress, nb.count, latitude, longitude, radiusM))
+        }
+    }
+
+    /// Adds a polygon region by name (a ring of `[latitude, longitude]` pairs,
+    /// three or more), the non-circular counterpart of `setNamedGeofence`, so a
+    /// lens fires `geo.in_region('name')` for a non-circular place.
+    public func setNamedGeofencePolygon(_ name: String, vertices: [(latitude: Double, longitude: Double)]) throws {
+        var nameBytes = Array(name.utf8)
+        var coords = [Double]()
+        coords.reserveCapacity(vertices.count * 2)
+        for v in vertices { coords.append(v.latitude); coords.append(v.longitude) }
+        try nameBytes.withUnsafeMutableBufferPointer { nb in
+            try coords.withUnsafeBufferPointer { cb in
+                try checked(goss_session_set_named_geofence_polygon(handle, nb.baseAddress, nb.count, cb.baseAddress, vertices.count))
+            }
+        }
+    }
+
+    /// Empties the named-region set; the default geofence is untouched.
+    public func clearNamedGeofences() throws {
+        try checked(goss_session_clear_named_geofences(handle))
+    }
+
     /// Sets the worst fix accuracy (meters) that still counts as inside a region;
     /// zero clears the gate.
     public func setGeoAccuracy(maxAccuracyM: Float) throws {
@@ -270,6 +324,14 @@ extension GossSession {
     /// Sets the color and half-width (normalized units) the next stroke opens with.
     public func setBrushStyle(red: Float, green: Float, blue: Float, alpha: Float, width: Float) throws {
         try checked(goss_session_brush_set_style(handle, red, green, blue, alpha, width))
+    }
+
+    /// Uploads the RGBA sprite a stamp-mode stroke lays along its length, an
+    /// emoji or icon the host rasterizes. The bytes are copied.
+    public func setBrushStamp(rgba: [UInt8], width: Int, height: Int) throws {
+        try rgba.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_brush_set_stamp(handle, buffer.baseAddress, UInt32(width), UInt32(height)))
+        }
     }
 
     /// Opens a stroke in the current style. A fresh stroke drops the redo stack.

@@ -151,8 +151,12 @@ A `model.gltf` node may add `"anchor": "face"`, pinning the model to the
 tracked head: the runtime fits the canonical face's metric geometry to
 the live landmarks and poses the model with that transform, so model
 space is the canonical face's centimeter space (origin between the eyes,
-x toward the subject's left, y up, z out of the face). Without a tracked
-face the node draws nothing, the standard capability degradation.
+x toward the subject's left, y up, z out of the face). The runtime draws
+one instance per submitted face, so a face-anchored model fans out across
+every tracked head. A node may add `"face_index": n` to bind to just one of
+them (`0` is the first submitted face), so a lens decorates two faces with
+different models; the default, drawing on every face, is `-1`. Without a
+tracked face the node draws nothing, the standard capability degradation.
 `"anchor": "body"` pins the model to every tracked body: the runtime places
 one instance at each submitted body's torso, scaled by torso length and
 rolled by its tilt, so a body-anchored model fans out across a crowd (or
@@ -172,6 +176,27 @@ projection; while tracking is anything but full, the node draws
 nothing. `anchor` is rejected on every other node type, and `"face"`,
 `"body"`, `"skeleton"`, and `"world"` are the only anchors GLF 1.0 defines.
 
+A lens may declare a top-level `"light"` to shade its `model.gltf` nodes with a
+single directional light: `{"direction": [x, y, z], "color": [r, g, b],
+"intensity": n, "ambient": a, "sky": [r,g,b], "ground": [r,g,b]}`. `direction`
+is the world direction the light travels, `intensity` scales the diffuse term,
+and `ambient` lifts the faces turned away from the light off pure black. `sky`
+and `ground` tint that ambient by the surface normal's up-component (a
+hemisphere image-based-lighting approximation: `ambient * mix(ground, sky, up)`);
+both default to white, so the ambient stays a flat lift unless a lens sets them. With a light set, a static model
+draws through the lit program (its per-vertex normals shade a Lambert diffuse
+against the light); with none it stays flat unlit exactly as before, so lighting
+is opt-in. A morphing or skinned mesh lights too: it recomputes its vertex
+normals from the deformed positions each frame and re-uploads them with the
+positions through a lit dynamic buffer, so the shading tracks the deformation.
+
+The lit program reads the glTF material's PBR factors: the metallic factor
+scales a Blinn-Phong specular highlight whose tightness follows the roughness
+factor and whose tint runs from white (dielectric) toward the base color
+(metal), and the emissive factor adds self-illumination on top, so a material
+glows independent of the light. A material-less mesh takes the glTF defaults
+(dielectric, fully rough, no emission), shading as a plain matte surface.
+
 A `model.gltf` node may add `"clip_weights"`: an array of parameter names,
 one per animation clip in the order the glTF declares them. Each frame the
 runtime samples every clip at the node's playback time and blends their
@@ -180,7 +205,25 @@ scale and a weighted nlerp of rotation, so a lens crossfades between
 animations by moving the weights. Ramp them with `param_ramp` (6.3) for an
 eased transition. Each name must be a declared parameter, a clip past the
 list weighs nothing, and with no `clip_weights` the node plays its first
-clip unchanged.
+clip unchanged. Driving these weights from one speed input builds a locomotion
+controller: a `logic.graph` (or a script) smoothsteps a speed signal into a
+normalized idle-walk-run crossfade, and the model blends the clips by it, so a
+1D blend space is a matter of how the weights are wired, not a separate node.
+
+A `model.gltf` node may add `"clip_range": [start, end]` (seconds) to split a
+longer clip into a sub-range it plays and loops instead of the whole timeline,
+the "animation clip" a lens carves out of an authored animation. The node's
+playback time maps into the range (`start + (elapsed mod (end - start))`), so
+the mesh cycles only that segment; with no `clip_range` it plays the full clip,
+and a reversed or empty range is ignored. It applies to every clip the node
+blends, so a split composes with `clip_weights`.
+
+A `model.gltf` node may add `"path": {"points": [[x,y,z], ...], "duration",
+"loop"}` to walk the model along a navigation path: over `duration` seconds it
+moves from waypoint to waypoint at a constant time per segment, interpolating
+linearly between them, then loops back to the start or holds at the last point.
+The path translates the model's animated pose, so a walking clip can play while
+the path drives where the model goes; fewer than two points leaves it in place.
 
 A `model.gltf` node may add `"morph_weights"`: an array of parameter names,
 one per morph target (blendshape) in the order the glTF declares them. Each
@@ -188,7 +231,10 @@ frame the runtime deforms the mesh by the weighted sum of those targets'
 per-vertex deltas, the weights taken from the named parameters' live values,
 so ramping a weight opens a blendshape (a smile, a blink). Each name must be
 a declared parameter, a target past the list contributes nothing, and with
-no `morph_weights` the mesh draws unmorphed.
+no `morph_weights` the mesh draws unmorphed. A skinned mesh morphs too: the
+runtime deforms the rest pose by the morph weights first and then skins that
+morphed rest by the body joints, so a body avatar's blendshapes move under its
+skinning rather than being lost to the bind pose.
 
 A face-anchored `model.gltf` node may add `"retarget": true` to turn the mesh
 into an avatar of the user's face: each morph target whose glTF name matches an
@@ -305,7 +351,8 @@ other fields then override, so `{"preset": "fire"}` is a finished flame and
   `"vortex"` (orbital swirl), `"floor"` (a height particles bounce off),
   `"bounce"` (0..1, how much speed a floor or collider bounce keeps),
   `"colliders": [[x, y, z, radius], ...]` (up to sixteen spheres particles
-  bounce off, kept outside each), `"box_colliders": [[x, y, z, hx, hy, hz],
+  bounce off, kept outside each; an `sph` fluid flows around these same
+  spheres as circle obstacles in its plane), `"box_colliders": [[x, y, z, hx, hy, hz],
   ...]` (up to sixteen axis-aligned boxes they bounce off), `"plane_colliders":
   [[nx, ny, nz, d], ...]` (up to sixteen infinite planes - walls, ramps, slides
   - they bounce off), and `"oneshot"` (emit once and die out rather than
@@ -359,6 +406,15 @@ channels, such as `teeth`, `sclera`, or `face_skin`), scoping the grade to that
 region: the graded result blends over the original by the channel's soft mask,
 so a whitening grade lands on the teeth or a skin-tone lift on the face while the
 rest of the frame is untouched. With no `mask` the whole frame is graded.
+
+A lens may set a top-level `"hdr": true` to composite in high dynamic range.
+The color chain's intermediate targets then carry half-float precision (16-bit
+float where the backend can render it, 8-bit where it cannot, so the lens still
+runs) and grade passes keep values above 1.0 through the chain instead of
+clamping each pass, so a bright grade survives an intermediate and only the
+final present clamps to the display. It is off by default because half-float
+targets cost more bandwidth and memory every frame, a cost a lens opts into
+only when it needs the range; a plain lens composites in 8-bit exactly as before.
 
 A `"bloom.pass"` node is a glow post-effect. It carries a `"bloom":
 {"threshold", "intensity"}` block: it extracts the frame's highlights - what
@@ -880,6 +936,14 @@ The text block also styles the glyphs: `"gradient"` (an rgb the glyphs fade
 toward at their base, the top staying the main color), `"shadow"` (a soft
 drop shadow), `"stroke"` (an rgb outline), and `"depth"` (a value above zero
 extrudes the glyphs into a rotated 3D block mesh rather than flat sprite text).
+A `"wrap"` (a column count above zero) word-wraps long `content` onto several
+lines to that many monospace columns before rasterizing, breaking at spaces
+where a word fits and hard-breaking a word longer than a line, so a caption
+flows to the rect's proportions instead of stretching thin; the author's own
+newlines are kept, and no `wrap` leaves the content as written. A `"bend"` (a
+value in -1 to 1) bows the baseline along an arc: the middle glyphs lift above
+the ends for a positive value and drop below for a negative one, so a lens
+curves a banner; 0 keeps the baseline straight.
 
 A `"video.texture"` node plays an MP4 clip over the frame like a sprite. It
 ships its clip as `assets/<source>.mp4` and carries a `"video": {"source",
@@ -936,8 +1000,12 @@ for the camera base's blend. The app still supplies the source media; the lens
 only arranges it. The node configures the composite at the head of the chain, so
 it never draws as a chain pass, and the arrangement clears when the lens changes.
 
-A `"script"` node carries an inline `"source"` string of JavaScript that
-defines a global `update(lens)` function. It draws nothing and never joins
+A `"script"` node carries JavaScript that defines a global `update(lens)`
+function, either inline as a `"source"` string or, for a script too large to
+sit in the manifest comfortably, as `"file": "<name>.js"` naming a bundled
+`assets/<name>.js` the host loads and compiles at activation. The two forms
+are mutually exclusive and produce the same lens; a node needs exactly one. It
+draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
 and ramps, exposing the current signals as `lens.signals.<name>` (read) and
 the lens parameters as `lens.params.<name>` (read and write). The signal
@@ -969,8 +1037,15 @@ node has an `"id"` and an `"op"`: a leaf reads the world with `signal` (its
 or `param` (its `"param"` names a parameter), or is a `const` with a `"value"`.
 The rest combine earlier nodes: `add`, `sub`, `mul`, `div`, `min`, `max`,
 `clamp`, `lerp`, `gt`, `lt`, `eq`, `and`, `or`, `not`, and `select` (a ? b : c).
-An input `"a"`, `"b"` or `"c"` is either a number literal or the id of an
-earlier node, so a graph reads only what comes before it. `"output"` names the
+The math-transform and vector nodes extend that set: `neg`, `abs`, `floor`,
+`ceil`, `round`, `trunc`, `frac`, `sign`, and `sqrt` transform a single input;
+`mod` is `a - b*floor(a/b)` like the shader `mod`; `hypot` is the magnitude
+`sqrt(a*a + b*b)` of a two-component vector; `step` yields 1 when `b >= a`; and
+`smoothstep` ramps 0..1 across the edges `a`..`b` at `c`. Each is built from
+exact operations so a logic graph stays bit-identical across platforms, the
+same determinism guarantee a trigger or a script gives. An input `"a"`, `"b"`
+or `"c"` is either a number literal or the id of an earlier node, so a graph
+reads only what comes before it. `"output"` names the
 node whose value flows to `"output_param"` each tick, evaluated before the
 triggers so they read its fresh value. The graph is pure and deterministic, so
 a logic-driven lens stays conformance bit-stable like a trigger or a script.
@@ -1215,7 +1290,8 @@ small closed grammar, parsed once at load time into a typed expression tree
 - Signal reads: `face.blendshape('name')`, `face.present`, `hands.present`,
   `hands.gesture('name')` (true while a tracked hand shows the named canned
   gesture: None, Closed_Fist, Open_Palm, Pointing_Up, Thumb_Down, Thumb_Up,
-  Victory, ILoveYou; an unknown name is a compile error), `hands.pinch` (true
+  Victory, ILoveYou, or a custom gesture the lens declares in `gestures`, see
+  below; an unknown name is a compile error), `hands.pinch` (true
   while a tracked hand's thumb and index tips are closed together),
   `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
 onset hops), `camera.zoom` (the camera zoom factor, one at rest),
@@ -1233,7 +1309,9 @@ onset hops), `camera.zoom` (the camera zoom factor, one at rest),
   completes), `body.dance` (true while rhythmic whole-body motion lasts),
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `device.in_volume` (true while the
-  tracked device is inside the lens's `volume` region, see below), `tap`,
+  tracked device is inside the lens's `volume` region, see below),
+  `hand.in_region` (true while a tracked hand's index fingertip is inside the
+  lens's `region2d` rectangle, see below), `tap`,
   `touch.doubleTap` / `touch.longPress` (true for one tick when the screen
   gesture completes), `touch.swipe('left')` (true for one tick on a swipe in
   the named direction: left, right, up, down), `touch.drag` (true while one
@@ -1258,6 +1336,24 @@ engine tests the submitted device pose against it on-device each tick and only
 the inside/outside boolean reaches the lens; the pose itself never crosses the
 ABI. With no world tracking or no volume declared, the signal reads false.
 
+A `hand.in_region` signal reads a top-level `"region2d"` rectangle on the
+manifest: `{"x": x, "y": y, "w": w, "h": h}`, all in the normalized frame (0
+to 1 from the top left). The engine tests a tracked hand's index fingertip
+against it on-device each tick and only the inside/outside boolean reaches the
+lens; the landmarks never cross the ABI. Any tracked hand inside sets it. With
+no hand tracking or no region declared, the signal reads false. Unlike the
+world `volume`, this is a flat screen zone, so it needs no world tracking or
+metric depth, only the 2D landmarks.
+
+A lens may declare custom hand gestures beyond the canned classes in a
+top-level `"gestures"` array (up to sixteen): each is `{"name": "rock",
+"fingers": [t, i, m, r, p]}`, a name and five finger states in thumb, index,
+middle, ring, pinky order, each `"up"` (extended), `"down"` (curled), or
+`"any"` (unconstrained). The engine reads each tracked hand's finger poses and
+`hands.gesture('rock')` fires while a hand matches the constrained fingers, the
+same grammar the canned gestures use. A finger reads extended when its tip
+sits farther from the wrist than its inner joint, a scale-free test.
+
 ### 6.2 Actions
 
 `param_ramp` (animate a parameter to a target over a duration, one of the
@@ -1271,13 +1367,13 @@ persists across ticks, so a no-code lens keeps a score or a step index with no
 script; `set_counter` writes `to`), and `haptic` (buzz the device: `target`
 names the style, one of light, medium, heavy, soft, rigid, success, warning,
 failure, and `to` is a 0..1 intensity hint the host drains through
-`goss_session_pull_haptic`). Reserved, accepted by the validator but not yet executed by the
-runtime: `show` / `hide` (a node by id) and `swap_subgraph` (splice a
-different set of this lens's own nodes in place of a named group -
-edit-time, deferred to the next frame boundary so it never tears a
-frame). A 1.0 runtime treats the reserved actions as no-ops; a lens
-must not depend on them until a spec revision moves them out of this
-paragraph.
+`goss_session_pull_haptic`). `show` / `hide` toggle a draw node's visibility by
+its id: a hidden node's pass is skipped in the composite chain so the frame
+passes through it, and `show` restores it. `swap_subgraph` switches between
+mutually exclusive variants named by their draw-node ids: it shows its target and
+hides whichever node the previous swap on this lens made active, so a trigger
+flips the lens between alternate draws. The change takes effect the tick the
+action fires.
 
 ### 6.3 Parameter animation
 
@@ -1316,14 +1412,24 @@ bridge, cupid's bow, and chin), and `lash_line` is the upper lash-line band
 each eye's upper lid arc rises into. Four more mark the retouch regions:
 `under_eye` the band below each eye, `nasolabial` the smile-line fold, `sclera`
 the eye-white inside the eye contour with the iris punched out, and `t_zone` the
-forehead and nose bridge. A makeup or retouch lens keys those directly. One more
+forehead and nose bridge. `ear` marks the strip where each ear joins the face,
+filled from the face-oval silhouette landmarks beside the ears, for an earring
+or an ear tint (the mesh stops at the oval, so it is the ear's join to the face,
+not the whole pinna). `lid_inner`, `lid_center`, and `lid_outer` are the three
+eyeshadow bands across the upper lid (inner corner, centre, outer corner), and
+`lid_crease` the fold above, each unioning both eyes, so a lens gradients
+eyeshadow across the lid. A makeup or retouch lens keys those directly. One more
 is derived on the GPU: `hair_matte` is the strand-level hair alpha a `matte.hair`
 source refines from the coarse `hair` class against the camera luma, a soft
 feathered edge a hair effect keys in place of the hard `hair` bit; with no
 `matte.hair` source in the lens it serves the zero mask. Three name the scene
 around the subject: `sky`, `ground`, and `building` come from a scene-parse
 segmentation model. No such model is wired in yet, so a lens may key these today
-and they serve the zero mask until one fills the scene slot. The
+and they serve the zero mask until one fills the scene slot. `saliency` is the
+main-subject matte: no built-in saliency model ships, so a lens fills it with
+its own net through an `ml.infer` node's `mask` binding (the same author-
+segmenter path the `person` channel accepts), keyed like any other channel;
+empty until the model runs. The
 shader reads the channel through `SAMPLER2D(s_texMask, 2)` beside the frame's
 own `s_texColor`. When a named channel has no live data (segmentation
 disabled, a single-class model without it, or no face or hand tracked for a

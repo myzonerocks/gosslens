@@ -8,6 +8,11 @@
 const std = @import("std");
 const material = @import("material");
 
+/// The highest tracked-face count a face_index binding may name, mirroring the
+/// tracker's own face cap; kept as a local constant so the lens-format parser
+/// stays independent of the tracking layer.
+const max_faces_bound = 4;
+
 pub const max_manifest_bytes = 256 * 1024;
 pub const max_json_depth = 32;
 pub const max_parameters = 256;
@@ -63,6 +68,8 @@ pub const mask_channels = [_][]const u8{
     "eyes",    "brows",      "iris",    "teeth",     "contour",
     "highlight", "lash_line", "under_eye", "nasolabial", "sclera",
     "t_zone",  "hair_matte", "sky",     "ground",    "building",
+    "ear",     "lid_inner",  "lid_center", "lid_outer", "lid_crease",
+    "saliency",
 };
 
 /// mask_channels[1..model_class_end] are the selfie_multiclass model outputs
@@ -110,6 +117,21 @@ pub const hair_matte_channel = 21;
 pub const sky_channel = 22;
 pub const ground_channel = 23;
 pub const building_channel = 24;
+/// The ear-join strip on each side, filled from the face-oval silhouette
+/// landmarks beside the ears; an earring or ear tint keys it. Rides the face
+/// landmarks, not a segmenter.
+pub const ear_channel = 25;
+/// The eyeshadow lid zones: three bands across the upper lid (inner corner,
+/// centre, outer corner) and the crease above, so a lens gradients eyeshadow.
+/// Each unions both eyes; all ride the eye and brow landmarks, not a segmenter.
+pub const lid_inner_channel = 26;
+pub const lid_center_channel = 27;
+pub const lid_outer_channel = 28;
+pub const lid_crease_channel = 29;
+/// The main-subject (saliency) matte. No built-in saliency model ships, so a
+/// lens fills it with its own net through an ml.infer node's mask binding, the
+/// same author-segmenter path the person channel accepts; empty until then.
+pub const saliency_channel = 30;
 
 pub fn maskChannelIndex(name: []const u8) ?u8 {
     for (mask_channels, 0..) |candidate, i| {
@@ -849,6 +871,14 @@ pub const TextField = struct {
     /// Extrude the glyphs into a rotated 3D block mesh of this depth (in the
     /// normalized text space); 0 keeps the flat 2D sprite text.
     depth: f32 = 0,
+    /// Word-wrap the content to at most this many monospace columns per line
+    /// so a long string flows onto several lines instead of stretching thin;
+    /// 0 leaves the content as authored.
+    wrap: u32 = 0,
+    /// Bow the baseline along an arc: the middle glyphs lift above the ends for
+    /// a positive value and drop below for a negative one, so a lens curves a
+    /// banner. Clamped to -1..1 (a full text-height bow); 0 keeps it straight.
+    bend: f32 = 0,
 };
 
 pub const VideoField = struct {
@@ -1183,6 +1213,10 @@ pub const Node = struct {
     mask_channel: ?u8 = null,
     /// True when a model.gltf node anchors to the tracked face.
     face_anchor: bool = false,
+    /// Which tracked face a face-anchored model.gltf binds to: -1 (the default)
+    /// draws on every submitted face, a non-negative index draws only on that
+    /// one, so a lens can decorate two faces with different models.
+    face_index: i32 = -1,
     /// True when a face-anchored model.gltf retargets the tracked expression:
     /// each morph target named for an ARKit blendshape is driven by that live
     /// blendshape, turning the mesh into an avatar of the user's face.
@@ -1232,6 +1266,13 @@ pub const Node = struct {
     /// order, whose live value is that target's blend weight. Empty leaves
     /// the mesh unmorphed. A target past this list contributes nothing.
     morph_weights: []const []const u8 = &.{},
+    /// model.gltf only: a start and end time in seconds that splits a longer
+    /// clip into a sub-range the node plays and loops instead of the whole
+    /// timeline. Null plays the full clip; an empty or reversed range is ignored.
+    clip_range: ?[2]f32 = null,
+    /// model.gltf only: a navigation path the model walks over time; null holds
+    /// the model at its authored transform.
+    path: ?PathField = null,
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
     /// Set only on a dehaze.pass node: its dark-channel dehaze strength.
@@ -1330,6 +1371,10 @@ pub const Node = struct {
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
+    /// A bundle-relative script asset (assets/<file>) a "script" node runs
+    /// instead of an inline source, loaded at activation. Mutually exclusive
+    /// with `script`; null when the node inlines its source.
+    script_file: ?[]const u8 = null,
 };
 
 pub const ActionKind = enum {
@@ -1405,6 +1450,58 @@ pub const Volume = struct {
     half: [3]f32 = .{ 0, 0, 0 },
 };
 
+/// A lens-level trigger rectangle in the normalized frame (0..1 from the top
+/// left), tested against a tracked hand's index fingertip each tick to feed
+/// the hand.in_region signal - a "point at this screen zone" trigger. No world
+/// tracking or metric depth, so it fires from the 2D landmarks alone.
+pub const Region2d = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+
+    pub fn contains(self: Region2d, px: f32, py: f32) bool {
+        return px >= self.x and px <= self.x + self.w and
+            py >= self.y and py <= self.y + self.h;
+    }
+};
+
+/// A named hand pose a lens declares beyond the canned classifier gestures.
+/// `mask` marks the fingers it constrains (thumb the low bit through pinky the
+/// high bit) and `want` the extension each must hold; a live hand matches when
+/// the constrained fingers agree, so `hand.gesture('name')` fires on it.
+pub const GestureDef = struct {
+    name: []const u8,
+    mask: u5 = 0,
+    want: u5 = 0,
+};
+
+/// The most custom gestures a lens may declare, a bit each in the tick's
+/// matched-gesture mask.
+pub const max_custom_gestures = 16;
+
+/// A directional light a lens declares to shade its model.gltf nodes:
+/// `direction` (world travel), `intensity` (diffuse scale) and `ambient` (a
+/// lift for faces turned away). `sky` and `ground` tint the ambient by the
+/// normal's up-component, a hemisphere IBL approximation; both default white.
+pub const Light = struct {
+    direction: [3]f32 = .{ 0, 0, -1 },
+    color: [3]f32 = .{ 1, 1, 1 },
+    intensity: f32 = 1,
+    ambient: f32 = 0.1,
+    sky: [3]f32 = .{ 1, 1, 1 },
+    ground: [3]f32 = .{ 1, 1, 1 },
+};
+
+/// A model.gltf node's navigation path: the model walks its waypoints in order
+/// over `duration` seconds, interpolating linearly between them, then loops or
+/// holds at the last point. Fewer than two points leaves the model in place.
+pub const PathField = struct {
+    points: []const [3]f32 = &.{},
+    duration: f32 = 1,
+    loop: bool = true,
+};
+
 pub const Manifest = struct {
     arena: std.heap.ArenaAllocator,
     glf_minor: u16,
@@ -1417,6 +1514,16 @@ pub const Manifest = struct {
     nodes: []const Node,
     triggers: []const Trigger,
     volume: ?Volume = null,
+    region2d: ?Region2d = null,
+    gestures: []const GestureDef = &.{},
+    /// Opt-in high-dynamic-range compositing: the color chain's intermediate
+    /// targets carry half-float precision (16F where the backend renders it,
+    /// 8-bit otherwise) and grade passes keep values above 1.0 through the
+    /// chain, clamped only at the final present. Off by default.
+    hdr: bool = false,
+    /// An optional directional light. With one set, model.gltf nodes render
+    /// through the lit program; with none they stay flat unlit as before.
+    light: ?Light = null,
 
     pub fn deinit(self: *Manifest) void {
         self.arena.deinit();
@@ -1550,6 +1657,49 @@ fn expectArray(diags: *Diagnostics, path: *PathStack, value: ?std.json.Value) er
             break :blk null;
         },
     };
+}
+
+/// Parses one custom-gesture object: a `name` and a five-entry `fingers` array
+/// in thumb, index, middle, ring, pinky order, each `up`, `down`, or `any`. Up
+/// and down constrain that finger's extension; any leaves it free. Returns
+/// error.Invalid with a diagnostic recorded, so the caller drops just this one.
+fn parseGesture(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, value: std.json.Value) error{ OutOfMemory, Invalid }!GestureDef {
+    if (value != .object) {
+        try diags.add(path.slice(), "a gesture must be an object", .{});
+        return error.Invalid;
+    }
+    const obj = value.object;
+    const name = (try expectString(diags, path, getField(obj, "name"))) orelse return error.Invalid;
+    var gd = GestureDef{ .name = try arena.dupe(u8, name) };
+    const fingers = getField(obj, "fingers") orelse {
+        try diags.add(path.slice(), "a gesture needs a five-entry fingers array", .{});
+        return error.Invalid;
+    };
+    if (fingers != .array or fingers.array.items.len != 5) {
+        try diags.add(path.slice(), "fingers is five states: thumb, index, middle, ring, pinky", .{});
+        return error.Invalid;
+    }
+    for (fingers.array.items, 0..) |fv, fi| {
+        if (fv != .string) {
+            try diags.add(path.slice(), "each finger is 'up', 'down', or 'any'", .{});
+            return error.Invalid;
+        }
+        const bit = @as(u5, 1) << @intCast(fi);
+        if (std.mem.eql(u8, fv.string, "up")) {
+            gd.mask |= bit;
+            gd.want |= bit;
+        } else if (std.mem.eql(u8, fv.string, "down")) {
+            gd.mask |= bit;
+        } else if (!std.mem.eql(u8, fv.string, "any")) {
+            try diags.add(path.slice(), "each finger is 'up', 'down', or 'any'", .{});
+            return error.Invalid;
+        }
+    }
+    if (gd.mask == 0) {
+        try diags.add(path.slice(), "a gesture must constrain at least one finger", .{});
+        return error.Invalid;
+    }
+    return gd;
 }
 
 /// A layout.composite arrangement name to its ABI integer (0 custom by default).
@@ -3078,6 +3228,12 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     if (v == .bool) field.shadow = v.bool;
                 }
                 if (getField(tv.object, "depth")) |v| field.depth = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.depth)));
+                if (getField(tv.object, "wrap")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer <= 512) field.wrap = @intCast(v.integer);
+                }
+                if (getField(tv.object, "bend")) |v| {
+                    if (numberOf(v)) |n| field.bend = std.math.clamp(@as(f32, @floatCast(n)), -1.0, 1.0);
+                }
                 text_field = field;
             }
             path.pop(tmark);
@@ -3490,6 +3646,17 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(anchor_mark);
         }
+        var face_index: i32 = -1;
+        if (getField(object, "face_index")) |fiv| {
+            if (!face_anchor) {
+                try diags.add(path.slice(), "face_index needs a face anchor", .{});
+            } else if (numberOf(fiv)) |n| {
+                const idx = @as(i32, @intFromFloat(@round(n)));
+                if (idx < 0 or idx >= max_faces_bound) {
+                    try diags.add(path.slice(), "face_index must be 0..{d}", .{max_faces_bound - 1});
+                } else face_index = idx;
+            } else try diags.add(path.slice(), "face_index must be a number", .{});
+        }
         var retarget = false;
         if (getField(object, "retarget")) |rv| {
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -3620,6 +3787,56 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         const clip_weights = try parseWeightNames(arena, diags, path, object, node_type, "clip_weights");
         const morph_weights = try parseWeightNames(arena, diags, path, object, node_type, "morph_weights");
 
+        var clip_range: ?[2]f32 = null;
+        if (getField(object, "clip_range")) |cr| {
+            const cr_mark = path.push("clip_range");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "clip_range is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (cr == .array and cr.array.items.len == 2) {
+                clip_range = .{
+                    @floatCast(numberOf(cr.array.items[0]) orelse 0),
+                    @floatCast(numberOf(cr.array.items[1]) orelse 0),
+                };
+            } else {
+                try diags.add(path.slice(), "clip_range must be two numbers [start, end]", .{});
+            }
+            path.pop(cr_mark);
+        }
+
+        var path_field: ?PathField = null;
+        if (getField(object, "path")) |pv| {
+            const p_mark = path.push("path");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "path is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (pv != .object) {
+                try diags.add(path.slice(), "path must be an object", .{});
+            } else {
+                var pf: PathField = .{};
+                if (getField(pv.object, "points")) |pts_v| {
+                    if (pts_v == .array and pts_v.array.items.len >= 1) {
+                        const pts = try arena.alloc([3]f32, pts_v.array.items.len);
+                        var ok = true;
+                        for (pts_v.array.items, 0..) |pt_v, pi| {
+                            if (!readVec3(pt_v, &pts[pi])) {
+                                try diags.add(path.slice(), "path point must be three numbers", .{});
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if (ok) pf.points = pts;
+                    } else {
+                        try diags.add(path.slice(), "path points must be an array of [x, y, z]", .{});
+                    }
+                }
+                if (getField(pv.object, "duration")) |v| pf.duration = @max(0.001, @as(f32, @floatCast(numberOf(v) orelse pf.duration)));
+                if (getField(pv.object, "loop")) |v| {
+                    if (v == .bool) pf.loop = v.bool;
+                }
+                path_field = pf;
+            }
+            path.pop(p_mark);
+        }
+
         var mask_channel: ?u8 = null;
         if (getField(object, "mask")) |mask_value| {
             const mask_mark = path.push("mask");
@@ -3636,14 +3853,19 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         }
 
         var script_source: ?[]const u8 = null;
+        var script_file: ?[]const u8 = null;
         if (std.mem.eql(u8, node_type, "script")) {
             const src_mark = path.push("source");
             if (getField(object, "source")) |src_value| {
                 if (try expectString(diags, path, src_value)) |src| {
                     script_source = try arena.dupe(u8, src);
                 }
+            } else if (getField(object, "file")) |file_value| {
+                if (try expectString(diags, path, file_value)) |f| {
+                    script_file = try arena.dupe(u8, f);
+                }
             } else {
-                try diags.add(path.slice(), "a script node needs a source", .{});
+                try diags.add(path.slice(), "a script node needs a source or a file", .{});
             }
             path.pop(src_mark);
         }
@@ -3655,6 +3877,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .params = try params.toOwnedSlice(arena),
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
+            .face_index = face_index,
             .retarget = retarget,
             .talk = talk,
             .control = model_control,
@@ -3675,6 +3898,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .hair = hair_field,
             .particles = particle_field,
             .clip_weights = clip_weights,
+            .clip_range = clip_range,
+            .path = path_field,
             .morph_weights = morph_weights,
             .grade = grade_field,
             .dehaze = dehaze_field,
@@ -3718,6 +3943,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .text = text_field,
             .video = video_field,
             .script = script_source,
+            .script_file = script_file,
         });
     }
     return try out.toOwnedSlice(arena);
@@ -4338,6 +4564,37 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
         }
         path.pop(mark);
     }
+    if (getField(root, "hdr")) |hv| {
+        if (hv == .bool) manifest.hdr = hv.bool else {
+            const mark = path.push("hdr");
+            try diags.add(path.slice(), "hdr must be a boolean", .{});
+            path.pop(mark);
+        }
+    }
+    if (getField(root, "light")) |lv| {
+        const mark = path.push("light");
+        if (lv != .object) {
+            try diags.add(path.slice(), "light must be an object", .{});
+        } else {
+            var light: Light = .{};
+            if (getField(lv.object, "direction")) |d| {
+                if (!readVec3(d, &light.direction)) try diags.add(path.slice(), "light direction must be three numbers", .{});
+            }
+            if (getField(lv.object, "color")) |col| {
+                if (!readVec3(col, &light.color)) try diags.add(path.slice(), "light color must be three numbers", .{});
+            }
+            if (getField(lv.object, "intensity")) |v| light.intensity = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse light.intensity)), 0.0, 64.0);
+            if (getField(lv.object, "ambient")) |v| light.ambient = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse light.ambient)), 0.0, 1.0);
+            if (getField(lv.object, "sky")) |v| {
+                if (!readVec3(v, &light.sky)) try diags.add(path.slice(), "light sky must be three numbers", .{});
+            }
+            if (getField(lv.object, "ground")) |v| {
+                if (!readVec3(v, &light.ground)) try diags.add(path.slice(), "light ground must be three numbers", .{});
+            }
+            manifest.light = light;
+        }
+        path.pop(mark);
+    }
     if (getField(root, "volume")) |vv| {
         const mark = path.push("volume");
         if (vv != .object) {
@@ -4358,6 +4615,50 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
             } else {
                 manifest.volume = vol;
             }
+        }
+        path.pop(mark);
+    }
+
+    if (getField(root, "region2d")) |rv| {
+        const mark = path.push("region2d");
+        if (rv != .object) {
+            try diags.add(path.slice(), "region2d must be an object", .{});
+        } else {
+            var reg: Region2d = .{};
+            reg.x = std.math.clamp(@as(f32, @floatCast(numberOf(getField(rv.object, "x") orelse .null) orelse 0)), 0.0, 1.0);
+            reg.y = std.math.clamp(@as(f32, @floatCast(numberOf(getField(rv.object, "y") orelse .null) orelse 0)), 0.0, 1.0);
+            reg.w = std.math.clamp(@as(f32, @floatCast(numberOf(getField(rv.object, "w") orelse .null) orelse 0)), 0.0, 1.0);
+            reg.h = std.math.clamp(@as(f32, @floatCast(numberOf(getField(rv.object, "h") orelse .null) orelse 0)), 0.0, 1.0);
+            if (reg.w <= 0 or reg.h <= 0) {
+                try diags.add(path.slice(), "region2d needs a positive w and h", .{});
+            } else {
+                manifest.region2d = reg;
+            }
+        }
+        path.pop(mark);
+    }
+
+    if (getField(root, "gestures")) |gv| {
+        const mark = path.push("gestures");
+        if (gv != .array) {
+            try diags.add(path.slice(), "gestures must be an array", .{});
+        } else if (gv.array.items.len > max_custom_gestures) {
+            try diags.add(path.slice(), "at most {d} custom gestures", .{max_custom_gestures});
+        } else {
+            var list = try arena.alloc(GestureDef, gv.array.items.len);
+            var n: usize = 0;
+            for (gv.array.items, 0..) |item, gi| {
+                const gmark = path.pushIndex(gi);
+                if (parseGesture(diags, &path, arena, item)) |gd| {
+                    list[n] = gd;
+                    n += 1;
+                } else |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Invalid => {},
+                }
+                path.pop(gmark);
+            }
+            manifest.gestures = list[0..n];
         }
         path.pop(mark);
     }
@@ -5288,7 +5589,16 @@ test "scene classes append at the frozen mask-channel tail" {
     try t.expectEqual(sky_channel, maskChannelIndex("sky").?);
     try t.expectEqual(ground_channel, maskChannelIndex("ground").?);
     try t.expectEqual(building_channel, maskChannelIndex("building").?);
-    try t.expectEqual(@as(usize, 25), mask_channels.len);
+    // The ear-join and eyeshadow lid-zone channels extend the tail past the
+    // scene slot; existing numbers are untouched.
+    try t.expectEqual(@as(?u8, 25), maskChannelIndex("ear"));
+    try t.expectEqual(ear_channel, maskChannelIndex("ear").?);
+    try t.expectEqual(lid_inner_channel, maskChannelIndex("lid_inner").?);
+    try t.expectEqual(lid_center_channel, maskChannelIndex("lid_center").?);
+    try t.expectEqual(lid_outer_channel, maskChannelIndex("lid_outer").?);
+    try t.expectEqual(lid_crease_channel, maskChannelIndex("lid_crease").?);
+    try t.expectEqual(saliency_channel, maskChannelIndex("saliency").?);
+    try t.expectEqual(@as(usize, 31), mask_channels.len);
 }
 
 /// The on-device prompt-to-lens compiler: it turns a short text prompt into a
@@ -5484,4 +5794,103 @@ test "prompt output parses as a valid lens" {
     var parsed = try parseOk(json);
     defer parsed.deinit();
     try std.testing.expect(parsed.nodes.len >= 2);
+}
+
+test "a 2D trigger region contains its interior and excludes the outside" {
+    const reg: Region2d = .{ .x = 0.6, .y = 0.0, .w = 0.4, .h = 0.4 };
+    // A fingertip in the top-right quadrant is inside; the edges count.
+    try t.expect(reg.contains(0.8, 0.2));
+    try t.expect(reg.contains(0.6, 0.0));
+    try t.expect(reg.contains(1.0, 0.4));
+    // Just outside on either axis is out, and the far corner is well clear.
+    try t.expect(!reg.contains(0.59, 0.2));
+    try t.expect(!reg.contains(0.8, 0.41));
+    try t.expect(!reg.contains(0.1, 0.9));
+}
+
+test "a lens declaring a region2d parses it and rejects a zero-size one" {
+    const with_region =
+        \\{"glf": "1.0", "id": "r", "version": "1.0.0", "display_name": "Region",
+        \\ "engine_compat": ">=0.5", "capabilities": [], "parameters": [],
+        \\ "region2d": {"x": 0.6, "y": 0.1, "w": 0.3, "h": 0.3},
+        \\ "nodes": [], "triggers": []}
+    ;
+    var parsed = try parseOk(with_region);
+    defer parsed.deinit();
+    try t.expect(parsed.region2d != null);
+    try t.expectEqual(@as(f32, 0.6), parsed.region2d.?.x);
+    try t.expectEqual(@as(f32, 0.3), parsed.region2d.?.w);
+
+    const zero_region =
+        \\{"glf": "1.0", "id": "r", "version": "1.0.0", "display_name": "Region",
+        \\ "engine_compat": ">=0.5", "capabilities": [], "parameters": [],
+        \\ "region2d": {"x": 0.6, "y": 0.1, "w": 0.0, "h": 0.3},
+        \\ "nodes": [], "triggers": []}
+    ;
+    var result = try parseFails(zero_region);
+    defer result.deinit();
+    try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "positive w and h") != null);
+}
+
+test "a face-anchored model binds to a face index and rejects a bad one" {
+    const bound =
+        \\{"glf": "1.0", "id": "f", "version": "1.0.0", "display_name": "Face",
+        \\ "engine_compat": ">=0.5", "capabilities": ["face"], "parameters": [],
+        \\ "nodes": [{"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"},
+        \\   "params": {}, "anchor": "face", "face_index": 1}], "triggers": []}
+    ;
+    var parsed = try parseOk(bound);
+    defer parsed.deinit();
+    try t.expectEqual(@as(i32, 1), parsed.nodes[0].face_index);
+
+    // Absent face_index defaults to -1 (every face).
+    const unbound =
+        \\{"glf": "1.0", "id": "f", "version": "1.0.0", "display_name": "Face",
+        \\ "engine_compat": ">=0.5", "capabilities": ["face"], "parameters": [],
+        \\ "nodes": [{"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"},
+        \\   "params": {}, "anchor": "face"}], "triggers": []}
+    ;
+    var parsed2 = try parseOk(unbound);
+    defer parsed2.deinit();
+    try t.expectEqual(@as(i32, -1), parsed2.nodes[0].face_index);
+
+    // An index past the tracker cap fails closed.
+    const past =
+        \\{"glf": "1.0", "id": "f", "version": "1.0.0", "display_name": "Face",
+        \\ "engine_compat": ">=0.5", "capabilities": ["face"], "parameters": [],
+        \\ "nodes": [{"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"},
+        \\   "params": {}, "anchor": "face", "face_index": 9}], "triggers": []}
+    ;
+    var result = try parseFails(past);
+    defer result.deinit();
+    try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "face_index must be") != null);
+}
+
+test "a lens declares custom hand gestures and rejects malformed ones" {
+    const good =
+        \\{"glf": "1.0", "id": "g", "version": "1.0.0", "display_name": "Gest",
+        \\ "engine_compat": ">=0.5", "capabilities": ["hands"], "parameters": [],
+        \\ "gestures": [{"name": "rock", "fingers": ["up", "down", "down", "down", "up"]},
+        \\   {"name": "point", "fingers": ["any", "up", "down", "down", "down"]}],
+        \\ "nodes": [], "triggers": []}
+    ;
+    var parsed = try parseOk(good);
+    defer parsed.deinit();
+    try t.expectEqual(@as(usize, 2), parsed.gestures.len);
+    try t.expectEqualStrings("rock", parsed.gestures[0].name);
+    // thumb up + pinky up: bits 0 and 4 set in both mask and want.
+    try t.expectEqual(@as(u5, 0b10001), parsed.gestures[0].want);
+    try t.expectEqual(@as(u5, 0b11111), parsed.gestures[0].mask);
+    // "any" leaves the thumb unconstrained: bit 0 out of the mask.
+    try t.expectEqual(@as(u5, 0b11110), parsed.gestures[1].mask);
+
+    const bad_len =
+        \\{"glf": "1.0", "id": "g", "version": "1.0.0", "display_name": "Gest",
+        \\ "engine_compat": ">=0.5", "capabilities": ["hands"], "parameters": [],
+        \\ "gestures": [{"name": "rock", "fingers": ["up", "down"]}],
+        \\ "nodes": [], "triggers": []}
+    ;
+    var result = try parseFails(bad_len);
+    defer result.deinit();
+    try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "five states") != null);
 }

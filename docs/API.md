@@ -154,6 +154,13 @@ file must move together.
 
 ### CaptureOutput
 
+Recording and screenshot write to a native encoder or a filesystem path, which a
+browser sandbox does not have, so the web SDK serves the same capability through
+browser-native methods rather than these symbols: `captureFrame()` returns a PNG
+data URL (the screenshot), and `captureStream()` drives a `MediaRecorder` off the
+composited canvas with the engine-normalized recording policy (the recording). So
+the capability is present on all three platforms; only the mechanism differs.
+
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_engine_request_screenshot` | `requestScreenshot(path)` | debug/test where supported |
@@ -168,6 +175,7 @@ file must move together.
 | `goss_engine_recording_stop` | `stopRecording()`, flushing in-flight frames and finalizing the file | same |
 | `goss_session_submit_audio` | `submitAudio(session, samples, frameCount, sampleRate, channels, timestampUs)`, feeding level and beat triggers always and the recording's audio track where the backend muxes audio | Swift and Kotlin |
 | `goss_session_submit_world` | `submitWorld(session, state, planes, anchors, light)`, feeding the tracking-state trigger and world-anchored content | Swift GossWorldSource on ARKit, the ARCore demo feeder, and the web SDK's GossWebXRWorldSource |
+| `goss_session_hit_test` | `hitTest(session, screenX, screenY)` raycasts a normalized screen point onto the tracked ground plane, returning the world hit position or null until tracking is live and the ray meets the plane | Swift `Session.hitTest`, Kotlin `hitTest`, TS `hitTest` |
 
 ### GossSession lifecycle
 
@@ -194,6 +202,13 @@ file must move together.
 
 ### Face tracking
 
+All three SDKs expose the in-engine tracking, beauty, and result-readback ops
+below (the "native tracking path" rows). On web they call the same symbols and
+return `unsupported` unless the wasm build carries the inference stack; a web app
+without it feeds tracking through the producer path (`submitFaces`,
+`setSegmentationMask`) instead. So the surface is 1:1 across Swift, Kotlin, and
+TS; only the underlying worker differs by build.
+
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_session_enable_face_tracking` | `enableFaceTracking(taskBundle, threads)` | native tracking path |
@@ -215,6 +230,7 @@ file must move together.
 | `goss_session_submit_faces` | `submitFaces(faces, count)`, submits the faces tracked this frame for the multi-face path; count past `GOSS_FACE_MAX` clamps, zero clears back to the single tracker, and a face-anchored model fans out to every submitted face | native tracking path |
 | `goss_session_face_count` | `faceCount()`, how many faces the last `submitFaces` kept, zero to `GOSS_FACE_MAX`; zero also means no multi-face path this frame | native tracking path |
 | `goss_session_face_result_at` | `faceResultAt(index, result)`, reads the index-th submitted face; a caller loops zero to the count to visit every face | native tracking path |
+| `goss_session_face_track_id` | `faceTrackId(index)`, the stable id of the index-th face, kept with the same person across frames as the submission order shuffles | native tracking path |
 | `goss_session_submit_bodies` | `submitBodies(bodies, count)`, submits the bodies tracked this frame for the multi-person path; count past `GOSS_BODY_MAX` clamps, zero clears the path, and a body below the tracked presence or with no landmarks drops | native tracking path |
 | `goss_session_body_count` | `bodyCount()`, how many bodies the last `submitBodies` kept, zero to `GOSS_BODY_MAX` | native tracking path |
 | `goss_session_body_result_at` | `bodyResultAt(index, result)`, reads the index-th submitted body; a caller loops zero to the count to visit every body | native tracking path |
@@ -231,28 +247,28 @@ file must move together.
 | `goss_session_set_makeup_reference` | `setMakeupReference(rgba, width, height, landmarks)`, samples a reference photo's makeup color per face part: lips, eyes, brows, and a cheek-and-forehead skin patch (the caller passes the reference face's 478 landmarks), so a `tint.pass` with `"source": "reference"` paints the live face in that color and a foundation over `face_skin` matches the reference's skin tone; empty landmarks clears it | native + web makeup |
 | `goss_session_face_region` | `faceRegion(region, outXyz)`, the newest tracked face's named attach point (x, y in frame pixels, z in the same scale) so a lens pins content to the forehead, glabella, nose tip, chin, an eye, a cheek, an ear, or the mouth centre/corner; see the `GOSS_FACE_REGION_*` points | native tracking path |
 | `goss_session_set_face_landmarks` | `setFaceLandmarks(points)`; web adds `sourceWidth, sourceHeight` since its analysis resolution is decoupled from the rendered frame's | Web analysis-producer path |
-| `goss_session_set_segmentation_mask` | `setSegmentationMask(mask)`, a mask_side x mask_side float mask the web tracking module produced, uploaded as the subject texture | Web analysis-producer path |
-| `goss_session_segmentation_channels` | `segmentationChannels()`, a bitmask over the mask channels the active lens samples | Web analysis-producer path |
-| `goss_session_set_segmentation_class_mask` | `setSegmentationClassMask(channel, mask)`, one class channel's mask uploaded as the texture that channel's passes sample | Web analysis-producer path |
+| `goss_session_set_segmentation_mask` | `setSegmentationMask(mask)`, a mask_side x mask_side float mask a host tracking module produced, uploaded as the subject texture | all SDKs (host-produced masks) |
+| `goss_session_segmentation_channels` | `segmentationChannels()`, a bitmask over the mask channels the active lens samples | all SDKs |
+| `goss_session_set_segmentation_class_mask` | `setSegmentationClassMask(channel, mask)`, one class channel's mask uploaded as the texture that channel's passes sample | all SDKs |
 
 ### Segmentation
 
-`goss_session_enable_segmentation` exists at the ABI level, but its public
-parameter contract is not frozen yet. **No SDK may invent and ship a public
-`enableSegmentation(...)` signature until this section is updated with the
-complete parameter list.**
-
-The in-engine core reads each model's own tensor dimensions, so the bytes
-handed to it can be any square RGB segmenter with any output resolution and
-up to 32 classes. It resamples the model's native mask onto the canonical
+The in-engine segmenter runs a model on the camera frames. The contract is
+`enableSegmentation(model, threads)`: the model bytes are any square RGB
+segmenter, the thread count is the worker parallelism. The core reads each
+model's own tensor dimensions, so the bytes can carry any output resolution and
+up to 32 classes; it resamples the model's native mask onto the canonical
 `mask_side x mask_side` grid, covering the portrait segmenters and scene
-segmenters like the 21-class deeplab model alike. `segmentationChannels()`
-then reports the loaded model's class count.
+segmenters like the 21-class deeplab model alike. `segmentationChannels()` then
+reports the loaded model's class count. A build with no inference stack (the web
+wasm engine by default) returns `unsupported`, and the web producer path
+(`setSegmentationMask`) supplies masks from its own tracking module instead.
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_session_enable_segmentation` | `enableSegmentation(...)` (reserved, parameters not yet frozen) | pending contract |
-| `goss_session_disable_segmentation` | `disableSegmentation()` | all SDKs once exposed |
+| `goss_session_enable_segmentation` | `enableSegmentation(model, threads)`, runs the in-engine segmenter on the camera frames | all SDKs (web returns `unsupported` without an inference stack) |
+| `goss_session_disable_segmentation` | `disableSegmentation()`, tears the segmenter down | all SDKs |
+| `goss_session_allow_model_digest` / `_clear_model_allowlist` | `allowModelDigest(digest)` / `clearModelAllowlist()`, allowlist a bring-your-own model by its 32-byte SHA-256 so an unlisted net is refused at enable time; none set admits any model | all SDKs |
 
 ### Beauty
 
@@ -283,11 +299,15 @@ then reports the loaded model's class count.
 | `goss_session_define_source` / `_remove_source` | `defineSource(name)` / `removeSource(name)`, register or drop a named RGBA source for multi-source composition; the camera is the implicit source 0 | all SDKs |
 | `goss_session_submit_source_frame_rgba_copy` | `submitSourceFrame(name, rgba, ...)`, uploads one RGBA/BGRA frame into a named source's own texture | all SDKs |
 | `goss_session_set_layout` / `_clear_layout` | `setLayout(arrangement)` / `clearLayout()`, composites the camera and named sources side-by-side, top-bottom, picture-in-picture, or in a grid (Duet, Stitch, live grids); clear returns to a single camera | all SDKs |
-| `goss_session_set_source_composite` | `setSourceComposite(name, opacity, keyMode, keyR, keyG, keyB, similarity)`, a per-source blend: opacity, `keyMode` 1 mattes from source alpha, 2 chroma-keys against (keyR,keyG,keyB) within a similarity threshold; the name "camera" addresses the base | all SDKs |
+| `goss_session_set_source_composite` | `setSourceComposite(name, opacity, keyMode, keyR, keyG, keyB, similarity)`, a per-source blend: opacity, `keyMode` 1 mattes from source alpha, 2 chroma-keys against (keyR,keyG,keyB) within a similarity threshold, 3 keys by a supplied per-source mask; the name "camera" addresses the base | all SDKs |
+| `goss_session_submit_source_mask` | `submitSourceMask(name, rgba, width, height)`, uploads a per-source matte for `keyMode` 3 (the red channel is the mask), so an opaque guest is keyed to a subject without a baked alpha | all SDKs |
+| `goss_session_enable_source_segmentation` | `enableSourceSegmentation(name, model, threads)`, runs the engine's own segmenter on a source's frames so its `keyMode` 3 matte is computed on-device (a virtual background for a remote guest); the model is the selfie/hair net `enableSegmentation` takes and an empty model tears it down | all SDKs |
 | `goss_session_define_screen_share` | `defineScreenShare(name)`, a source that letterboxes to fit its cell instead of stretching | all SDKs |
 | `goss_session_submit_location` | `submitLocation(lat, lon, accuracy, ts)`, feeds a location fix; the engine computes `geo.in_region` on-device and the location never crosses back over the ABI | all SDKs |
 | `goss_session_set_geofence` / `_clear_geofence` | `setGeofence(lat, lon, radius)` / `clearGeofence()`, sets the circle a geofilter lens is active within, derived by the app from the lens's intended place | all SDKs |
 | `goss_session_set_geofence_bbox` / `_set_geofence_polygon` | `setGeofenceBbox(minLat, minLon, maxLat, maxLon)` / `setGeofencePolygon(coords, vertexCount)`, an axis-aligned box or a polygon ring (three to 64 lat/lon vertices) the geofilter lens is active within | all SDKs |
+| `goss_session_set_named_geofence` / `_clear_named_geofences` | `setNamedGeofence(name, lat, lon, radius)` / `clearNamedGeofences()`, named circular regions alongside the default one, so a lens fires `geo.in_region('name')` for its own place among several | all SDKs |
+| `goss_session_set_named_geofence_polygon` | `setNamedGeofencePolygon(name, vertices)`, a named region that is a ring of `(lat, lon)` pairs (three or more), the non-circular counterpart for named regions | all SDKs |
 | `goss_session_set_geo_accuracy` | `setGeoAccuracy(maxAccuracyM)`, refuses a fix vaguer than this so a lens does not fire on an uncertain location; zero clears the gate | all SDKs |
 | `goss_session_parameter_value` | `parameterValue(name)`, reads a live lens parameter by name, including whatever a script node last wrote | all SDKs |
 | `goss_session_pull_audio` | `pullAudio(out, frames)`, the next block of mixed lens audio (interleaved s16) a play_sound trigger produced, for the SDK to route to platform audio out; silence when no lens sound is active | all SDKs |
@@ -319,7 +339,8 @@ ribbon for the renderer to draw.
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_session_brush_set_style` | `brushSetStyle(r, g, b, a, width)`, colour and width for the next stroke | all SDKs |
-| `goss_session_brush_set_mode` | `brushSetMode(mode)`, preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon (additive) | all SDKs |
+| `goss_session_brush_set_mode` | `brushSetMode(mode)`, preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon (additive), 4 stamp | all SDKs |
+| `goss_session_brush_set_stamp` | `setBrushStamp(rgba, width, height)`, the RGBA sprite a stamp-mode stroke lays along its length (an emoji or icon the host rasterizes) | all SDKs |
 | `goss_session_brush_begin` / `_point` / `_end` | `brushBegin()` / `brushPoint(x, y)` / `brushEnd()`, a stroke in normalized screen space | all SDKs |
 | `goss_session_brush_undo` / `_redo` / `_clear` | `brushUndo()` / `brushRedo()` / `brushClear()`, the stroke stacks | all SDKs |
 | `goss_session_brush_erase_at` | `brushEraseAt(x, y, radius)`, removes committed strokes within radius of a point (refused mid-stroke), returning the count | all SDKs |

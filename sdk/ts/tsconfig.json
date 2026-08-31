@@ -1,11 +1,19 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ES2022",
+    "module": "ESNext",
     "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
+    "types": ["bun"],
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": ".",
     "strict": true,
-    "noEmit": true,
-    "lib": ["ES2022", "DOM"]
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "demo"]
+  "include": ["src", "test"]
 }

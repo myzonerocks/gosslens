@@ -507,6 +507,15 @@ pub const DecodedAnimation = struct {
     pub fn sample(anim: *const DecodedAnimation, elapsed_seconds: f32) math.Mat4 {
         return anim.sampleComponents(elapsed_seconds).toMatrix();
     }
+
+    /// Samples only the [start, end] sub-range of the clip, looping within it -
+    /// the "animation split" that plays a named segment of a longer timeline.
+    /// A reversed or empty range falls back to holding the start pose.
+    pub fn sampleRangeComponents(anim: *const DecodedAnimation, elapsed_seconds: f32, start: f32, end: f32) Components {
+        const span = end - start;
+        if (span <= 0) return anim.sampleComponents(start);
+        return anim.sampleComponents(start + @mod(elapsed_seconds, span));
+    }
 };
 
 /// Finds the keyframe pair bracketing t and the interpolation factor
@@ -566,6 +575,13 @@ pub const DecodedModel = struct {
     /// baseColorImageIndex), and deliberately not consumed here yet -
     /// no node type samples one.
     base_color: [4]f32,
+    /// The metallic-roughness and emissive PBR factors, consumed by the lit
+    /// model shader when the lens declares a light. Defaults are the glTF
+    /// defaults (dielectric, fully rough, no emission) so a material-less mesh
+    /// shades as a plain matte surface.
+    metallic: f32 = 0,
+    roughness: f32 = 1,
+    emissive: [3]f32 = .{ 0, 0, 0 },
     /// Every animation clip that drives this mesh's node, in glTF order,
     /// keeping only clips that carry at least one channel on the node.
     /// Empty when the asset has no animation. The mixer blends these by
@@ -613,9 +629,17 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
     if (try prim.readIndices(indices) != index_count) return error.MalformedAsset;
 
     var base_color: [4]f32 = .{ 1, 1, 1, 1 };
+    var metallic: f32 = 0;
+    var roughness: f32 = 1;
+    var emissive: [3]f32 = .{ 0, 0, 0 };
     if (prim.materialIndex(&asset)) |mat_index| {
         const mat = asset.material(mat_index);
-        if (mat.raw.has_pbr_metallic_roughness != 0) base_color = mat.raw.pbr_metallic_roughness.base_color_factor;
+        if (mat.raw.has_pbr_metallic_roughness != 0) {
+            base_color = mat.raw.pbr_metallic_roughness.base_color_factor;
+            metallic = mat.raw.pbr_metallic_roughness.metallic_factor;
+            roughness = mat.raw.pbr_metallic_roughness.roughness_factor;
+        }
+        emissive = mat.raw.emissive_factor;
     }
 
     var target_node: ?Node = null;
@@ -685,7 +709,7 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         gpa.free(owned_morph_targets);
     }
     const owned_morph_names = try morph_names.toOwnedSlice(gpa);
-    return .{ .positions = positions, .indices = indices, .base_color = base_color, .animations = owned_animations, .skin = decoded_skin, .morph_targets = owned_morph_targets, .morph_names = owned_morph_names };
+    return .{ .positions = positions, .indices = indices, .base_color = base_color, .metallic = metallic, .roughness = roughness, .emissive = emissive, .animations = owned_animations, .skin = decoded_skin, .morph_targets = owned_morph_targets, .morph_names = owned_morph_names };
 }
 
 /// Reads a glTF skin into owned arrays. A vertex joint index past the
@@ -1084,6 +1108,62 @@ test "the committed trigger-anim reference asset parses with real geometry, anim
     const mat_idx = prim.materialIndex(&asset).?;
     const mat = asset.material(mat_idx);
     try t.expectEqual([4]f32{ 1, 0.35, 0.1, 1 }, mat.raw.pbr_metallic_roughness.base_color_factor);
+}
+
+test "decodes a material's metallic, roughness and emissive factors" {
+    const gpa = t.allocator;
+    // One triangle: three vec3 positions (36 bytes) then three u16 indices.
+    var buf: [42]u8 = undefined;
+    const pos = [_]f32{ 0, 0, 0, 1, 0, 0, 0, 1, 0 };
+    @memcpy(buf[0..36], std.mem.sliceAsBytes(&pos));
+    const idx = [_]u16{ 0, 1, 2 };
+    @memcpy(buf[36..42], std.mem.sliceAsBytes(&idx));
+    var b64: [64]u8 = undefined;
+    const enc = std.base64.standard.Encoder.encode(&b64, &buf);
+    const json = try std.fmt.allocPrint(gpa,
+        "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0}}]," ++
+        "\"meshes\":[{{\"primitives\":[{{\"attributes\":{{\"POSITION\":0}},\"indices\":1,\"material\":0}}]}}]," ++
+        "\"materials\":[{{\"pbrMetallicRoughness\":{{\"baseColorFactor\":[0.5,0.5,0.5,1.0],\"metallicFactor\":0.25,\"roughnessFactor\":0.75}},\"emissiveFactor\":[0.5,0.1,0.0]}}]," ++
+        "\"accessors\":[{{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"min\":[0,0,0],\"max\":[1,1,0]}},{{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}}]," ++
+        "\"bufferViews\":[{{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36}},{{\"buffer\":0,\"byteOffset\":36,\"byteLength\":6}}]," ++
+        "\"buffers\":[{{\"byteLength\":42,\"uri\":\"data:application/octet-stream;base64,{s}\"}}]}}", .{enc});
+    defer gpa.free(json);
+    const decoded = try decodeModel(gpa, json);
+    defer freeDecodedModel(gpa, decoded);
+    try t.expectEqual(@as(usize, 3), decoded.positions.len);
+    try t.expectApproxEqAbs(@as(f32, 0.25), decoded.metallic, 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.75), decoded.roughness, 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.5), decoded.emissive[0], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.1), decoded.emissive[1], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.0), decoded.emissive[2], 1e-6);
+}
+
+test "animation splitting samples a looping sub-range of a clip" {
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, "lenses/reference/trigger-anim/assets/clip.glb", t.allocator, .limited(1 << 20));
+    defer t.allocator.free(bytes);
+    const decoded = try decodeModel(t.allocator, bytes);
+    defer freeDecodedModel(t.allocator, decoded);
+    try t.expect(decoded.animations.len >= 1);
+    const anim = &decoded.animations[0];
+    try t.expect(anim.duration_seconds > 0);
+    const start = anim.duration_seconds * 0.25;
+    const end = anim.duration_seconds * 0.75;
+
+    // The range's origin holds the clip's pose at `start`, not the pose at 0.
+    const range_origin = anim.sampleRangeComponents(0, start, end);
+    const clip_at_start = anim.sampleComponents(start);
+    const clip_at_zero = anim.sampleComponents(0);
+    inline for (0..4) |k| try t.expectApproxEqAbs(clip_at_start.rotation.v[k], range_origin.rotation.v[k], 1e-6);
+
+    // And it is genuinely a sub-range: the clip's pose at `start` differs from
+    // its pose at time zero, so the split is not the whole timeline.
+    var diff: f32 = 0;
+    inline for (0..4) |k| diff += @abs(clip_at_start.rotation.v[k] - clip_at_zero.rotation.v[k]);
+    try t.expect(diff > 1e-3);
+
+    // The sub-range loops: an elapsed of the full span wraps back to the origin.
+    const wrapped = anim.sampleRangeComponents(end - start, start, end);
+    inline for (0..4) |k| try t.expectApproxEqAbs(range_origin.rotation.v[k], wrapped.rotation.v[k], 1e-6);
 }
 
 test "no animations is the common, valid case" {

@@ -57,6 +57,15 @@ val syncReferenceLens = tasks.register<Copy>("syncReferenceLens") {
 }
 tasks.named("preBuild") { dependsOn(syncReferenceLens) }
 
+// The selfie segmenter model the virtual-background toggle stands up in the
+// engine, synced from the fetched model set. When the file is missing the
+// demo disables the toggle at runtime instead of failing.
+val syncSegmenter = tasks.register<Copy>("syncSegmenter") {
+    from(rootProject.projectDir.resolve("../../.models/selfie_segmenter.tflite"))
+    into(layout.projectDirectory.dir("src/main/assets"))
+}
+tasks.named("preBuild") { dependsOn(syncSegmenter) }
+
 // Row 8's conformance corpus frame, synced from the fetched model set -
 // ConformanceRunner feeds this through the real ABI in place of live
 // capture, behind the GossConformance intent extra a normal launch
