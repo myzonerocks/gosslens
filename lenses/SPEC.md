@@ -1365,6 +1365,9 @@ onset hops), `audio.beat_count` (a monotonic count of onsets, for syncing to a
   pi straight, and zero with no body, so gate with `body.present`),
   `body.jump` / `body.wave` (true for one tick when a hop or a raised-hand wave
   completes), `body.dance` (true while rhythmic whole-body motion lasts),
+  `foot.present` (true while an ankle or foot landmark stays visible, so a shoe
+  try-on lens reacts to feet in frame; a foot/ankle skeleton anchor places the
+  content),
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `device.in_volume` (true while the
   tracked device is inside the lens's `volume` region, see below),

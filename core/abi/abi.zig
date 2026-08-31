@@ -4047,11 +4047,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     sprite_texture = anim.textures[@intCast(frame_idx % anim.frames)];
                 } else if (s.sprite_cutouts.get(entry.graph_index)) |co| {
                     // A cutout sprite lifts the live subject keyed by its channel
-                    // into a transparent target, then draws that at the sprite rect
-                    // - a movable auto-subject sticker. It lifts from the original
-                    // frame copy, so an upstream inpaint cannot empty the cutout.
-                    // A whole-frame cutout keys on the ones mask, drawing the entire
-                    // frame at the rect (a frame inset for outpaint).
+                    // (or the whole frame, on the ones mask) into a transparent
+                    // target drawn at the sprite rect. It lifts from the original
+                    // frame copy, so an upstream inpaint cannot empty it.
                     const mask_tex = if (co.whole) r.default_mask_texture else if (co.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[co.channel] orelse r.zero_mask_texture;
                     ensureCutoutSticker(s, width, height) catch continue;
                     const cutout_target = s.cutout_sticker_target orelse continue;
@@ -15002,6 +15000,14 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     s.body_clock_us += @as(i64, dt_us);
     if (currentPose(s)) |body| {
         live_signals.body_present = true;
+        // Feet are present when an ankle or foot landmark stays visible, so a
+        // shoe try-on lens reacts to feet in frame.
+        for ([_]usize{ 27, 28, 31, 32 }) |li| {
+            if (li < body.visibilities.len and body.visibilities[li] > 0.5) {
+                live_signals.foot_present = true;
+                break;
+            }
+        }
         pose.fillBoneAngles(&body.landmarks, &s.bone_angles);
         live_signals.bone_angles = &s.bone_angles;
         if (bodySampleFrom(&body.landmarks, s.body_clock_us)) |sample| {

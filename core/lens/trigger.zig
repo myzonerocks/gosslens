@@ -41,6 +41,7 @@ pub const SignalKind = enum {
     hand_custom_gesture,
     hand_pinch,
     body_present,
+    foot_present,
     bone_angle,
     body_jump,
     body_wave,
@@ -60,7 +61,7 @@ pub const SignalKind = enum {
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .voice_command, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .voice_command, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .foot_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
         .face_blendshape, .world_tracking_state, .audio_level, .audio_beat_count, .flash_risk, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
     };
 }
@@ -196,6 +197,9 @@ pub const Signals = struct {
     hand_pinch: bool = false,
     /// True while a body is tracked, engine-fed at tick from the pose worker.
     body_present: bool = false,
+    /// True while a foot is tracked, engine-fed at tick from the pose worker's
+    /// ankle and foot landmark visibility, so a lens reacts to feet in frame.
+    foot_present: bool = false,
     /// Each tracked bone's current bend angle in radians, engine-fed at tick
     /// from the pose landmarks, or null with no body. A lens compares one by
     /// name (`body.bone_angle('left_elbow') < 1.5`).
@@ -294,6 +298,7 @@ fn readBool(s: Signal, signals: Signals) bool {
         .hand_custom_gesture => (signals.hand_custom_gestures >> @intCast(s.gesture_index)) & 1 != 0,
         .hand_pinch => signals.hand_pinch,
         .body_present => signals.body_present,
+        .foot_present => signals.foot_present,
         .body_jump => signals.body_jump,
         .body_wave => signals.body_wave,
         .body_dance => signals.body_dance,
@@ -780,6 +785,9 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "body") and std.mem.eql(u8, tail, "present")) {
             return .{ .kind = .body_present };
         }
+        if (std.mem.eql(u8, head, "foot") and std.mem.eql(u8, tail, "present")) {
+            return .{ .kind = .foot_present };
+        }
         if (std.mem.eql(u8, head, "body") and std.mem.eql(u8, tail, "bone_angle")) {
             const name = try self.parseCall();
             const index = pose.boneIndex(name) orelse {
@@ -1024,6 +1032,13 @@ test "body.present reads the fed pose presence" {
     defer expr.deinit();
     try t.expect(!evaluate(expr.root, .{}));
     try t.expect(evaluate(expr.root, .{ .body_present = true }));
+}
+
+test "foot.present reads the fed foot presence" {
+    var expr = try compileOk("foot.present");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .foot_present = true }));
 }
 
 test "touch double tap and long press read the fed edges" {
