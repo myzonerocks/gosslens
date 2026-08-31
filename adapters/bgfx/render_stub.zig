@@ -743,6 +743,8 @@ pub const Renderer = struct {
         vertex_buffer: VertexBufferHandle = .{},
         index_buffer: IndexBufferHandle = .{},
         index_count: u32 = 0,
+        dynamic: bool = false,
+        lit: bool = false,
     };
 
     pub fn createModelMesh(r: *Renderer, positions: []const [3]f32, indices: []const u32) !ModelMesh {
@@ -750,6 +752,21 @@ pub const Renderer = struct {
         _ = positions;
         _ = indices;
         return error.RendererUnavailable;
+    }
+
+    pub fn createLitDynamicModelMesh(r: *Renderer, positions: []const [3]f32, normals: []const [3]f32, indices: []const u32) !ModelMesh {
+        _ = r;
+        _ = positions;
+        _ = normals;
+        _ = indices;
+        return error.RendererUnavailable;
+    }
+
+    pub fn updateLitModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32, normals: []const [3]f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
+        _ = normals;
     }
 
     pub fn createLitModelMesh(r: *Renderer, positions: []const [3]f32, normals: []const [3]f32, indices: []const u32) !ModelMesh {
@@ -850,9 +867,17 @@ pub const Renderer = struct {
         index_buffer: IndexBufferHandle = .{},
         vertex_count: u32 = 0,
         index_count: u32 = 0,
+        lit: bool = false,
     };
 
     pub fn createSkinnedMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !SkinnedMesh {
+        _ = r;
+        _ = vertex_count;
+        _ = indices;
+        return error.RendererUnavailable;
+    }
+
+    pub fn createLitSkinnedMesh(r: *Renderer, vertex_count: u32, indices: []const u32) !SkinnedMesh {
         _ = r;
         _ = vertex_count;
         _ = indices;
@@ -865,6 +890,13 @@ pub const Renderer = struct {
         _ = positions;
     }
 
+    pub fn updateLitSkinnedMesh(r: *Renderer, mesh: SkinnedMesh, positions: []const [3]f32, normals: []const [3]f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
+        _ = normals;
+    }
+
     pub fn destroySkinnedMesh(mesh: SkinnedMesh) void {
         _ = mesh;
     }
@@ -875,6 +907,17 @@ pub const Renderer = struct {
         _ = mesh;
         _ = model_matrix;
         _ = base_color;
+        _ = aspect_ratio;
+    }
+
+    pub fn drawLitSkinnedMesh(r: *Renderer, mesh_view: u8, mesh: SkinnedMesh, model_matrix: math.Mat4, base_color: [4]f32, light: [16]f32, material: [8]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = mesh_view;
+        _ = mesh;
+        _ = model_matrix;
+        _ = base_color;
+        _ = light;
+        _ = material;
         _ = aspect_ratio;
     }
 

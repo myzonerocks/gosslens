@@ -7747,6 +7747,57 @@ fn proveDirectionalLight(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a lit lens lights a deforming (morph) mesh, not just static ones: the
+/// morph mesh draws through the lit dynamic path, so lighting it renders
+/// differently than the same mesh unlit, deterministically. The skinned path
+/// lights through the same recompute-normals-per-frame mechanism.
+fn proveLitMorph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const morph_glb = std.Io.Dir.cwd().readFileAlloc(harness_io, "lenses/reference/morph-blend/assets/face.glb", gpa, .limited(4 << 20)) catch {
+        std.debug.print("conformance: FAIL could not read the morph glb\n", .{});
+        return false;
+    };
+    defer gpa.free(morph_glb);
+
+    const black = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(black);
+    @memset(black, 0);
+    for (0..black.len / 4) |i| black[i * 4 + 3] = 255;
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = black }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+
+    const lit = try captureLitModel(gpa, engine, "front", planes, morph_glb);
+    defer gpa.free(lit);
+    const flat = try captureLitModel(gpa, engine, "flat", planes, morph_glb);
+    defer gpa.free(flat);
+    const lit_again = try captureLitModel(gpa, engine, "front", planes, morph_glb);
+    defer gpa.free(lit_again);
+
+    if (!std.mem.eql(u8, lit, lit_again)) {
+        std.debug.print("conformance: FAIL lit morph mesh is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, lit, flat)) {
+        std.debug.print("conformance: FAIL a lit morph mesh renders identical to the unlit one - the deforming mesh is not lit\n", .{});
+        return false;
+    }
+    var diverged: u64 = 0;
+    var covered: u64 = 0;
+    var p: usize = 0;
+    while (p + 4 <= flat.len) : (p += 4) {
+        if (flat[p + 1] > 16 or lit[p + 1] > 16) {
+            covered += 1;
+            if (@abs(@as(i32, lit[p + 1]) - @as(i32, flat[p + 1])) > 16) diverged += 1;
+        }
+    }
+    if (covered < 200 or diverged * 8 < covered) {
+        std.debug.print("conformance: FAIL lit and unlit morph mesh barely differ ({d}/{d} px)\n", .{ diverged, covered });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a lit lens shades a morphing mesh through the lit dynamic path: the lit morph mesh diverges from the unlit one over {d} of {d} covered pixels, deterministically\n", .{ diverged, covered });
+    return true;
+}
+
 /// Builds a self-contained glTF (a single camera-facing triangle, its buffer a
 /// base64 data URI) with the given base color and emissive factor, so a proof
 /// can control a model's PBR material exactly. Caller owns the returned bytes.
@@ -19067,6 +19118,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("hdr-composite");
     if (!try proveDirectionalLight(gpa, engine)) return 1;
     watchHold("directional-light");
+    if (!try proveLitMorph(gpa, engine)) return 1;
+    watchHold("lit-morph");
     if (!try proveModelMaterial(gpa, engine)) return 1;
     watchHold("model-material");
     if (!try proveHemisphereIBL(gpa, engine)) return 1;

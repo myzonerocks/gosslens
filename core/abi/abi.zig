@@ -1076,6 +1076,12 @@ pub const Session = struct {
     /// with no host segmenter. Its mask uploads through source_seg_mask.
     source_segmenter: [comp.max_sources]?*segmentation.Segmentation = @splat(null),
     source_seg_mask: [comp.max_sources]render.Renderer.DynamicMask = @splat(.{}),
+    /// Reused conversion scratch for feeding a source's own RGB to its
+    /// segmenter: a tight RGBA repack and the NV12 planes, grown only when a
+    /// source's dimensions grow, so the per-frame feed allocates nothing.
+    source_seg_tight: []u8 = &.{},
+    source_seg_y: []u8 = &.{},
+    source_seg_uv: []u8 = &.{},
     source_count: u8 = 0,
     /// Per-source composite blend the layout draws with: opacity, key mode
     /// (0 none, 1 matte from the source alpha, 2 chroma-key, 3 a supplied
@@ -1388,6 +1394,11 @@ const SkinnedRig = struct {
     skinned: [][3]f32,
     palette: []math.Mat4,
     joint_targets: []JointTarget,
+    /// A lit rig keeps a normal scratch and an index copy so it recomputes and
+    /// re-uploads normals from the skinned positions each frame. Both empty for
+    /// an unlit rig.
+    lit_normals: [][3]f32 = &.{},
+    lit_indices: []const u32 = &.{},
 };
 
 /// The most clips one model node blends in a frame. A model with more
@@ -1413,6 +1424,12 @@ const LoadedModel = struct {
     /// empty for a mesh with no morph targets.
     morph_rest: []const [3]f32 = &.{},
     morph_scratch: [][3]f32 = &.{},
+    /// Scratch for the per-frame vertex normals of a lit deforming mesh, plus a
+    /// kept copy of the triangle indices they recompute from, so a morphed mesh
+    /// re-uploads fresh normals each frame with no frame-path allocation. Both
+    /// empty for a static or unlit mesh.
+    lit_normals: [][3]f32 = &.{},
+    lit_indices: []const u32 = &.{},
     /// One entry per morph target: the face blendshape index it maps to by
     /// name, or -1 when the target has no matching ARKit name. Built once at
     /// load so an avatar drives each morph from the live blendshape array.
@@ -4247,7 +4264,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                                 }
                             }
                             morphPositions(loaded.morph_scratch, loaded.morph_rest, loaded.morph_targets[0..n], weights[0..n]);
-                            r.updateModelMesh(loaded.mesh, loaded.morph_scratch);
+                            if (loaded.lit) {
+                                // Recompute normals from the freshly morphed positions and
+                                // re-upload them with the positions, so the lit shader shades
+                                // the deformed surface instead of a stale rest-pose normal.
+                                computeVertexNormalsInto(loaded.lit_normals, loaded.morph_scratch, loaded.lit_indices);
+                                r.updateLitModelMesh(loaded.mesh, loaded.morph_scratch, loaded.lit_normals);
+                            } else {
+                                r.updateModelMesh(loaded.mesh, loaded.morph_scratch);
+                            }
                         }
                     }
                 }
@@ -4366,9 +4391,18 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             // avatar's blendshapes deform under the skin.
                             const skin_src = if (loaded.morph_scratch.len == rig.rest.len) loaded.morph_scratch else rig.rest;
                             skinPositions(skin_src, rig.skin.vertex_joints, rig.skin.vertex_weights, rig.palette, rig.skinned);
-                            r.updateSkinnedMesh(rig.mesh, rig.skinned);
                             r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
-                            r.drawSkinnedMesh(mesh_view, rig.mesh, pixel_to_world.mul(anchor_full), loaded.base_color, tiledAspect(s, rect_width, rect_height));
+                            if (loaded.lit) {
+                                // Recompute normals from the skinned positions and re-upload
+                                // both, so the lit shader shades the posed surface.
+                                computeVertexNormalsInto(rig.lit_normals, rig.skinned, rig.lit_indices);
+                                r.updateLitSkinnedMesh(rig.mesh, rig.skinned, rig.lit_normals);
+                                const light = if (active_lens) |l| l.manifest.light orelse manifest.Light{} else manifest.Light{};
+                                r.drawLitSkinnedMesh(mesh_view, rig.mesh, pixel_to_world.mul(anchor_full), loaded.base_color, lightParams(light), materialParams(loaded), tiledAspect(s, rect_width, rect_height));
+                            } else {
+                                r.updateSkinnedMesh(rig.mesh, rig.skinned);
+                                r.drawSkinnedMesh(mesh_view, rig.mesh, pixel_to_world.mul(anchor_full), loaded.base_color, tiledAspect(s, rect_width, rect_height));
+                            }
                             if (output) |target| {
                                 input_texture = target.texture;
                                 if (!is_final) next_slot += 1;
@@ -4730,6 +4764,11 @@ pub fn destroySession(session: *Session) void {
         }
         if (session.brush_stamp_texture) |tex| r.destroyTexture(tex);
     }
+    // The source-segmenter conversion scratch is plain host memory, freed
+    // whether or not a renderer was ever attached.
+    if (session.source_seg_tight.len > 0) session.engine.gpa.free(session.source_seg_tight);
+    if (session.source_seg_y.len > 0) session.engine.gpa.free(session.source_seg_y);
+    if (session.source_seg_uv.len > 0) session.engine.gpa.free(session.source_seg_uv);
     session.engine.gpa.destroy(session);
 }
 
@@ -6204,12 +6243,28 @@ pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, nam
 /// Feeds a source's own frame to its segmenter: repacks the (possibly strided,
 /// possibly BGRA) RGBA into tight RGBA, converts to NV12, and submits it. A
 /// best effort - an allocation failure just skips this frame's mask update.
+/// Grows a scratch slice to at least `need` bytes, reusing it otherwise; null
+/// only if a grow ever fails, in which case the caller skips the frame.
+fn growScratch(gpa: std.mem.Allocator, buf: *[]u8, need: usize) ?[]u8 {
+    if (need > buf.len) {
+        const grown = gpa.alloc(u8, need) catch return null;
+        if (buf.len != 0) gpa.free(buf.*);
+        buf.* = grown;
+    }
+    return buf.*[0..need];
+}
+
 fn feedSourceSegmenter(s: *Session, seg: *segmentation.Segmentation, d: *const FrameDesc, rgba_ptr: [*]const u8, stride: u32) void {
     const gpa = s.engine.gpa;
     const w: usize = d.width;
     const h: usize = d.height;
-    const tight = gpa.alloc(u8, w * h * 4) catch return;
-    defer gpa.free(tight);
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    // Reused scratch grown only when a source gets bigger, so a steady source
+    // stream feeds its segmenter with no per-frame allocation.
+    const tight = growScratch(gpa, &s.source_seg_tight, w * h * 4) orelse return;
+    const y_out = growScratch(gpa, &s.source_seg_y, w * h) orelse return;
+    const uv_out = growScratch(gpa, &s.source_seg_uv, half_w * half_h * 2) orelse return;
     const bgra = d.pixel_format == pixel_format_bgra8;
     for (0..h) |row| {
         const srow = rgba_ptr[row * stride ..][0 .. w * 4];
@@ -6225,12 +6280,6 @@ fn feedSourceSegmenter(s: *Session, seg: *segmentation.Segmentation, d: *const F
             @memcpy(drow, srow);
         }
     }
-    const half_w = (w + 1) / 2;
-    const half_h = (h + 1) / 2;
-    const y_out = gpa.alloc(u8, w * h) catch return;
-    defer gpa.free(y_out);
-    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return;
-    defer gpa.free(uv_out);
     const conv = math.color.rgbToYuv(.bt601, .video);
     image.argbToNv12(tight, @intCast(w), @intCast(h), .bt601, .video, y_out, uv_out) catch return;
     segmentation.submitNv12(seg, @intCast(w), @intCast(h), d.timestamp_us, conv, y_out.ptr, @intCast(w), uv_out.ptr, @intCast(half_w * 2));
@@ -9079,6 +9128,8 @@ fn destroyModelState(session: *Session) void {
         gltf.freeMorphTargets(session.engine.gpa, loaded.morph_targets);
         if (loaded.morph_rest.len > 0) session.engine.gpa.free(loaded.morph_rest);
         if (loaded.morph_scratch.len > 0) session.engine.gpa.free(loaded.morph_scratch);
+        if (loaded.lit_normals.len > 0) session.engine.gpa.free(loaded.lit_normals);
+        if (loaded.lit_indices.len > 0) session.engine.gpa.free(loaded.lit_indices);
         if (loaded.morph_to_blendshape.len > 0) session.engine.gpa.free(loaded.morph_to_blendshape);
         if (loaded.rig) |*rig| destroySkinnedRig(session.engine.gpa, rig);
     }
@@ -12788,13 +12839,22 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
 /// vertex falls back to +Z. Deterministic, so a lit lens stays conformance-stable.
 fn computeVertexNormals(gpa: std.mem.Allocator, positions: []const [3]f32, indices: []const u32) ![][3]f32 {
     const normals = try gpa.alloc([3]f32, positions.len);
+    computeVertexNormalsInto(normals, positions, indices);
+    return normals;
+}
+
+/// Area-weighted vertex normals written into a caller-owned buffer, so a
+/// deforming mesh recomputes them each frame with no allocation. `out` is sized
+/// to the vertex count; a vertex with no triangle takes a +Z default.
+fn computeVertexNormalsInto(out: [][3]f32, positions: []const [3]f32, indices: []const u32) void {
+    const normals = out[0..@min(out.len, positions.len)];
     @memset(normals, .{ 0, 0, 0 });
     var i: usize = 0;
     while (i + 3 <= indices.len) : (i += 3) {
         const ia = indices[i];
         const ib = indices[i + 1];
         const ic = indices[i + 2];
-        if (ia >= positions.len or ib >= positions.len or ic >= positions.len) continue;
+        if (ia >= normals.len or ib >= normals.len or ic >= normals.len) continue;
         const pa = positions[ia];
         const pb = positions[ib];
         const pc = positions[ic];
@@ -12821,7 +12881,6 @@ fn computeVertexNormals(gpa: std.mem.Allocator, positions: []const [3]f32, indic
             n.* = .{ 0, 0, 1 };
         }
     }
-    return normals;
 }
 
 /// Turns every .glb load that finished (or failed) since the last
@@ -12852,16 +12911,18 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             // A morphable mesh draws from a dynamic buffer the morph pass
             // re-uploads each frame; a plain mesh uploads once and stays static.
             const has_morph = decoded.morph_targets.len > 0;
-            // A lens with a directional light lights its static meshes: compute
-            // per-vertex normals and upload the lit layout. Morph and skinned
-            // meshes deform per frame, so they stay flat for now; a
-            // normal-compute failure also falls back to flat.
+            // A lens with a directional light lights its meshes by their
+            // per-vertex normals. A morphing or skinned mesh recomputes and
+            // re-uploads its normals each frame from a lit dynamic buffer (its
+            // rig for the skinned path); a normal-compute failure draws flat.
             const light_present = if (session.active_lens) |*l| l.manifest.light != null else false;
-            const want_lit = light_present and !has_morph and decoded.skin == null;
+            const want_lit = light_present;
             const normals: ?[][3]f32 = if (want_lit) (computeVertexNormals(gpa, decoded.positions, decoded.indices) catch null) else null;
             defer if (normals) |n| gpa.free(n);
             const is_lit = normals != null;
-            const mesh = (if (has_morph)
+            const mesh = (if (has_morph and normals != null)
+                r.createLitDynamicModelMesh(decoded.positions, normals.?, decoded.indices)
+            else if (has_morph)
                 r.createDynamicModelMesh(decoded.positions, decoded.indices)
             else if (normals) |n|
                 r.createLitModelMesh(decoded.positions, n, decoded.indices)
@@ -12872,6 +12933,8 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 gltf.freeAnimations(gpa, decoded.animations);
                 if (decoded.skin) |*sk| gltf.freeSkin(gpa, sk);
                 gltf.freeMorphTargets(gpa, decoded.morph_targets);
+                for (decoded.morph_names) |n| gpa.free(n);
+                gpa.free(decoded.morph_names);
                 finished.append(gpa, entry.key_ptr.*) catch {};
                 continue;
             };
@@ -12879,7 +12942,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             // rig takes over the skin and a copy of the bind positions,
             // while the static mesh still uploaded and can drop them.
             const rig: ?SkinnedRig = if (decoded.skin) |sk|
-                (buildSkinnedRig(r, gpa, decoded.positions, decoded.indices, sk) catch null)
+                (buildSkinnedRig(r, gpa, decoded.positions, decoded.indices, sk, is_lit) catch null)
             else
                 null;
             // A morph mesh keeps its rest positions to deform against and a
@@ -12900,6 +12963,15 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
             } else {
                 gpa.free(decoded.positions);
             }
+            // A lit morphing mesh keeps a normal scratch and an index copy so it
+            // recomputes and re-uploads normals each frame; both stay empty
+            // otherwise, and an allocation failure degrades to flat +Z normals.
+            var lit_normals: [][3]f32 = &.{};
+            var lit_indices: []const u32 = &.{};
+            if (has_morph and is_lit) {
+                if (gpa.alloc([3]f32, morph_rest.len)) |ln| lit_normals = ln else |_| {}
+                if (gpa.dupe(u32, decoded.indices)) |li| lit_indices = li else |_| {}
+            }
             gpa.free(decoded.indices);
             // Distil the morph target names into a blendshape index per target
             // (or -1), then drop the names; the table is all the retarget needs.
@@ -12914,6 +12986,8 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 .morph_targets = decoded.morph_targets,
                 .morph_rest = morph_rest,
                 .morph_scratch = morph_scratch,
+                .lit_normals = lit_normals,
+                .lit_indices = lit_indices,
                 .morph_to_blendshape = morph_to_blendshape,
                 .auto_bind_blendshapes = session.model_retargets.contains(entry.key_ptr.*),
                 .audio_talk = session.model_talks.contains(entry.key_ptr.*),
@@ -13630,10 +13704,10 @@ fn boneRotatedPalette(rig: *const SkinnedRig, landmarks: *const [pose.landmark_c
 /// a kept copy of the bind positions, scratch for the skinned output,
 /// the joint palette, and each joint's resolved landmark target. Takes
 /// ownership of the passed skin.
-fn buildSkinnedRig(r: *render.Renderer, gpa: std.mem.Allocator, positions: []const [3]f32, indices: []const u32, skin: gltf.DecodedSkin) !SkinnedRig {
+fn buildSkinnedRig(r: *render.Renderer, gpa: std.mem.Allocator, positions: []const [3]f32, indices: []const u32, skin: gltf.DecodedSkin, lit: bool) !SkinnedRig {
     var owned = skin;
     errdefer gltf.freeSkin(gpa, &owned);
-    const mesh = try r.createSkinnedMesh(@intCast(positions.len), indices);
+    const mesh = if (lit) try r.createLitSkinnedMesh(@intCast(positions.len), indices) else try r.createSkinnedMesh(@intCast(positions.len), indices);
     errdefer render.Renderer.destroySkinnedMesh(mesh);
     const rest = try gpa.dupe([3]f32, positions);
     errdefer gpa.free(rest);
@@ -13644,7 +13718,20 @@ fn buildSkinnedRig(r: *render.Renderer, gpa: std.mem.Allocator, positions: []con
     const joint_targets = try gpa.alloc(JointTarget, owned.joint_count);
     errdefer gpa.free(joint_targets);
     for (joint_targets, owned.joint_names) |*jt, name| jt.* = mapJointTarget(name);
-    return .{ .mesh = mesh, .skin = owned, .rest = rest, .skinned = skinned, .palette = palette, .joint_targets = joint_targets };
+    // A lit rig keeps a normal scratch and an index copy so it re-uploads fresh
+    // normals from the skinned positions each frame; the initial upload seeds
+    // the bind-pose normals so it lights before the first skin.
+    var lit_normals: [][3]f32 = &.{};
+    var lit_indices: []const u32 = &.{};
+    if (lit) {
+        lit_normals = try gpa.alloc([3]f32, positions.len);
+        errdefer gpa.free(lit_normals);
+        lit_indices = try gpa.dupe(u32, indices);
+        errdefer gpa.free(lit_indices);
+        computeVertexNormalsInto(lit_normals, positions, indices);
+        r.updateLitSkinnedMesh(mesh, positions, lit_normals);
+    }
+    return .{ .mesh = mesh, .skin = owned, .rest = rest, .skinned = skinned, .palette = palette, .joint_targets = joint_targets, .lit_normals = lit_normals, .lit_indices = lit_indices };
 }
 
 fn destroySkinnedRig(gpa: std.mem.Allocator, rig: *SkinnedRig) void {
@@ -13654,6 +13741,8 @@ fn destroySkinnedRig(gpa: std.mem.Allocator, rig: *SkinnedRig) void {
     gpa.free(rig.skinned);
     gpa.free(rig.palette);
     gpa.free(rig.joint_targets);
+    if (rig.lit_normals.len > 0) gpa.free(rig.lit_normals);
+    if (rig.lit_indices.len > 0) gpa.free(rig.lit_indices);
 }
 
 test "mapJointTarget covers mixamo and vrm naming" {

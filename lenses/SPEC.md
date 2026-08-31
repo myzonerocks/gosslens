@@ -186,7 +186,9 @@ hemisphere image-based-lighting approximation: `ambient * mix(ground, sky, up)`)
 both default to white, so the ambient stays a flat lift unless a lens sets them. With a light set, a static model
 draws through the lit program (its per-vertex normals shade a Lambert diffuse
 against the light); with none it stays flat unlit exactly as before, so lighting
-is opt-in. Morph and skinned meshes deform per frame and stay flat for now.
+is opt-in. A morphing or skinned mesh lights too: it recomputes its vertex
+normals from the deformed positions each frame and re-uploads them with the
+positions through a lit dynamic buffer, so the shading tracks the deformation.
 
 The lit program reads the glTF material's PBR factors: the metallic factor
 scales a Blinn-Phong specular highlight whose tightness follows the roughness
