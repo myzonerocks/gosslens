@@ -22,6 +22,12 @@ void main()
 	} else if (mode > 1.5) {
 		float d = distance(color.rgb, u_chroma.rgb);
 		a *= smoothstep(u_composite.z, u_composite.z + u_composite.w, d);
+		// Despill: pull the key-hue excess above the pixel's neutral gray back
+		// off, so green/blue-screen spill on the kept subject is removed.
+		vec3 kdir = normalize(u_chroma.rgb + vec3(0.0001, 0.0001, 0.0001));
+		float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+		float excess = max(0.0, dot(color.rgb, kdir) - dot(vec3(luma, luma, luma), kdir));
+		color.rgb = color.rgb - kdir * excess;
 	} else if (mode > 0.5) {
 		a *= color.a;
 	}

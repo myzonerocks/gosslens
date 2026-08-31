@@ -8414,6 +8414,83 @@ fn proveSourceMask(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves chroma-key spill suppression: a source whose kept subject carries
+/// green screen spill, chroma-keyed against green, has its excess green pulled
+/// off, so the subject's green channel drops below the same subject composited
+/// opaquely (mode 1), while the subject stays visible.
+fn proveChromaSpill(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sw: u32 = 64;
+    const sh: u32 = 64;
+    const cam = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(cam);
+    const src = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(src);
+    for (0..sw * sh) |p| {
+        cam[p * 4 + 0] = 0;
+        cam[p * 4 + 1] = 0;
+        cam[p * 4 + 2] = 255;
+        cam[p * 4 + 3] = 255; // blue camera
+        // A subject carrying green-screen spill, far enough from the key to be
+        // kept, so the whole source stays and its green should despill.
+        src[p * 4 + 0] = 150;
+        src[p * 4 + 1] = 220;
+        src[p * 4 + 2] = 150;
+        src[p * 4 + 3] = 255;
+    }
+    const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+
+    const capture = struct {
+        fn go(g: std.mem.Allocator, e: *abi.Engine, camf: []const u8, srcf: []const u8, d0: *const abi.FrameDesc, key: u32, out: []u8) !void {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            if (abi.goss_session_define_source(session, "g", 1) != .ok or
+                abi.goss_session_submit_source_frame_rgba_copy(session, "g", 1, d0, srcf.ptr, 64 * 4) != .ok or
+                abi.goss_session_set_source_composite(session, "g", 1, 1.0, key, 0, 1, 0, 0.4) != .ok or
+                abi.goss_session_set_layout(session, 5) != .ok) return error.SpillSetup;
+            for (0..4) |i| {
+                var d = d0.*;
+                d.timestamp_us = @intCast((i + 1) * 33_333);
+                if (abi.goss_session_submit_frame_rgba_copy(session, &d, camf.ptr, 64 * 4) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(e, session);
+                c.glfwPollEvents();
+            }
+            var cw: u32 = 0;
+            var ch: u32 = 0;
+            if (abi.goss_engine_capture_frame(e, session, out.ptr, out.len, &cw, &ch) != .ok) return error.CaptureFailed;
+            _ = g;
+        }
+    }.go;
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const opaque_shot = try gpa.alloc(u8, cap);
+    defer gpa.free(opaque_shot);
+    const keyed_shot = try gpa.alloc(u8, cap);
+    defer gpa.free(keyed_shot);
+    // Mode 1 keeps the subject with its spill; mode 2 chroma-keys and despills.
+    try capture(gpa, engine, cam, src, &base_desc, 1, opaque_shot);
+    try capture(gpa, engine, cam, src, &base_desc, 2, keyed_shot);
+
+    const w: usize = 400;
+    const h: usize = 300;
+    // The whole frame is the kept subject; sample its centre in both frames.
+    const subj = (h / 2 * w + w / 2) * 4;
+    const opaque_g = opaque_shot[subj + 1];
+    const keyed_g = keyed_shot[subj + 1];
+    // The despill pulled the subject's green down, and it is still on screen
+    // (its red and blue survive, so it did not get keyed out to the camera).
+    if (!(keyed_g + 8 < opaque_g)) {
+        std.debug.print("conformance: FAIL spill suppression did not reduce the subject green (keyed {d} vs opaque {d})\n", .{ keyed_g, opaque_g });
+        return false;
+    }
+    if (!(keyed_shot[subj + 0] > 90 and keyed_shot[subj + 2] < 200)) {
+        std.debug.print("conformance: FAIL the keyed subject vanished or shows the camera (r={d} b={d})\n", .{ keyed_shot[subj + 0], keyed_shot[subj + 2] });
+        return false;
+    }
+    std.debug.print("conformance: PROOF chroma-key spill suppression pulls the green screen spill off the kept subject (green {d} keyed vs {d} opaque), the subject still on screen\n", .{ keyed_g, opaque_g });
+    return true;
+}
+
 /// Proves geofilters through the public ABI: a lens with a geo.in_region trigger
 /// fires its action when a submitted location is inside the geofence, not when
 /// it is outside, deterministically, with the location computed on-device and
@@ -18951,6 +19028,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("composite opacity");
     if (!try proveSourceMask(gpa, engine)) return 1;
     watchHold("source mask");
+    if (!try proveChromaSpill(gpa, engine)) return 1;
+    watchHold("chroma spill");
     if (!try proveGeofilter(gpa, engine)) return 1;
     watchHold("geofilter");
     if (!try proveBrushStroke(gpa, engine)) return 1;
