@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 88u
+#define GOSS_ABI_MINOR 89u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -635,6 +635,12 @@ goss_status goss_session_snapshot_lens_state(goss_session *session, uint8_t *out
  * its parameter so two runtimes on the same lens converge. GOSS_AGAIN with no
  * lens. A short or over-long blob applies only the parameters it covers. */
 goss_status goss_session_apply_lens_state(goss_session *session, const uint8_t *blob, size_t blob_len);
+
+/* Writes a content-provenance manifest for the active lens into out_buf as JSON:
+ * the producer, the lens id, whether the frame is model-generated (a diffusion node)
+ * or edited (any lens node), and the operations that touched it. The host binds
+ * this to a capture per C2PA. GOSS_AGAIN with no lens; a NULL out_buf sizes it. */
+goss_status goss_session_capture_provenance(goss_session *session, uint8_t *out_buf, size_t out_cap, size_t *out_len);
 
 /* Captures the current viewpoint (the last submitted world pose and depth) into a
  * guided scan: marks the yaw target it covers, back-projects the depth into

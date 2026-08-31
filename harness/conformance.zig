@@ -8297,6 +8297,40 @@ fn proveScanQr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the content-provenance manifest: an active lens reports a JSON record
+/// through goss_session_capture_provenance naming the producer, the lens, and the
+/// operations that touched the frame, so a host binds it to a capture per C2PA.
+fn proveProvenance(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
+        std.debug.print("conformance: FAIL provenance lens activation\n", .{});
+        return false;
+    }
+    var needed: usize = 0;
+    if (abi.goss_session_capture_provenance(session, null, 0, &needed) != .ok or needed == 0) {
+        std.debug.print("conformance: FAIL provenance reported no manifest\n", .{});
+        return false;
+    }
+    const buf = try gpa.alloc(u8, needed);
+    defer gpa.free(buf);
+    var written: usize = 0;
+    if (abi.goss_session_capture_provenance(session, buf.ptr, buf.len, &written) != .ok or written != needed) {
+        std.debug.print("conformance: FAIL provenance did not fill the manifest\n", .{});
+        return false;
+    }
+    const json = buf[0..written];
+    // The manifest names gosslens as the producer and lists the operation that
+    // touched the frame, so a verifier can read what was done.
+    if (std.mem.indexOf(u8, json, "\"producer\":\"gosslens\"") == null or std.mem.indexOf(u8, json, "shader.pass") == null) {
+        std.debug.print("conformance: FAIL provenance manifest missing producer or operations: {s}\n", .{json});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the content-provenance manifest names the producer, lens and operations - {s}\n", .{json});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -20093,6 +20127,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveScanBarcode(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "scan-qr")) {
             if (!try proveScanQr(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "provenance")) {
+            if (!try proveProvenance(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -20451,6 +20487,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("scan barcode");
     if (!try proveScanQr(gpa, engine)) return 1;
     watchHold("scan qr");
+    if (!try proveProvenance(gpa, engine)) return 1;
+    watchHold("provenance");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveScriptFile(gpa, engine)) return 1;

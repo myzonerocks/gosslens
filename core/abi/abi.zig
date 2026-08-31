@@ -239,6 +239,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_set_info(goss_session *session, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len)",
     "goss_status goss_session_snapshot_lens_state(goss_session *session, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_session_apply_lens_state(goss_session *session, const uint8_t *blob, size_t blob_len)",
+    "goss_status goss_session_capture_provenance(goss_session *session, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance)",
     "goss_status goss_session_reset_capture(goss_session *session)",
     "goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
@@ -8054,6 +8055,36 @@ pub export fn goss_session_apply_lens_state(session: ?*Session, blob: ?[*]const 
     const b = blob orelse return .invalid_argument;
     const lens = if (s.active_lens) |*l| l else return .again;
     lens.applyState(b[0..blob_len]);
+    return .ok;
+}
+
+/// Writes a content-provenance manifest for the active lens into out_buf as JSON:
+/// the producer, the lens id, whether the frame is model-generated (a diffusion
+/// node) or edited (any lens node), and the operations that touched it. The host
+/// binds this to a capture per C2PA. .again with no lens; probe with a null buf.
+pub export fn goss_session_capture_provenance(session: ?*Session, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .again;
+    var buf: [4096]u8 = undefined;
+    var off: usize = 0;
+    var generated = false;
+    for (lens.manifest.nodes) |node| {
+        if (std.mem.eql(u8, node.type, "diffusion")) generated = true;
+    }
+    const head = std.fmt.bufPrint(buf[off..], "{{\"producer\":\"gosslens\",\"lens\":\"{s}\",\"generated\":{},\"edited\":{},\"operations\":[", .{ lens.manifest.id, generated, lens.manifest.nodes.len > 0 }) catch return .out_of_memory;
+    off += head.len;
+    for (lens.manifest.nodes, 0..) |node, i| {
+        const part = std.fmt.bufPrint(buf[off..], "{s}\"{s}\"", .{ if (i == 0) "" else ",", node.type }) catch return .out_of_memory;
+        off += part.len;
+    }
+    const tail = std.fmt.bufPrint(buf[off..], "]}}", .{}) catch return .out_of_memory;
+    off += tail.len;
+    const json = buf[0..off];
+    out_len_ptr.* = json.len;
+    if (out_buf) |ob| {
+        if (out_cap >= json.len) @memcpy(ob[0..json.len], json);
+    }
     return .ok;
 }
 

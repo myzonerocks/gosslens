@@ -117,6 +117,7 @@ object Gosslens {
     internal external fun nativeSetInfo(session: Long, keyBuffer: ByteBuffer, keyLen: Int, valueBuffer: ByteBuffer?, valueLen: Int): Int
     internal external fun nativeSnapshotLensState(session: Long, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
     internal external fun nativeApplyLensState(session: Long, blobBuffer: ByteBuffer, blobLen: Int): Int
+    internal external fun nativeCaptureProvenance(session: Long, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
     internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
     internal external fun nativeCaptionSegment(session: Long, index: Int, out: ByteBuffer): Int
     internal external fun nativeCaptionSegmentText(session: Long, index: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
@@ -1313,6 +1314,22 @@ class GossSession private constructor(
         blobBuffer.put(blob)
         blobBuffer.rewind()
         return Gosslens.nativeApplyLensState(handle, blobBuffer, blob.size) == 0
+    }
+
+    /** The active lens's content-provenance manifest as JSON (producer, lens,
+     * whether the frame is model-generated or edited, and the operations), for the
+     * host to bind to a capture per C2PA. Null with no active lens. */
+    fun captureProvenance(): String? {
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeCaptureProvenance(handle, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        if (Gosslens.nativeCaptureProvenance(handle, out, needed.toLong(), len) != 0) return null
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return String(result, Charsets.UTF_8)
     }
 
     /** Captures the current viewpoint (the last submitted world pose and depth)

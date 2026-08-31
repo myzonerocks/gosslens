@@ -1834,6 +1834,25 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, blob.length || 1]);
   }
 
+  /// The active lens's content-provenance manifest as JSON (producer, lens,
+  /// whether the frame is model-generated or edited, and the operations), for the
+  /// host to bind to a capture per C2PA. Null with no active lens.
+  captureProvenance(): string | null {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const view = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    let json: string | null = null;
+    if ((this.mod.ccall("goss_session_capture_provenance", "number", ["number", "number", "number", "number"], [this.handle, 0, 0, lenPtr]) as number) === 0) {
+      const needed = view();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+      if ((this.mod.ccall("goss_session_capture_provenance", "number", ["number", "number", "number", "number"], [this.handle, outPtr, needed, lenPtr]) as number) === 0) {
+        json = new TextDecoder().decode(this.mod.HEAPU8.slice(outPtr, outPtr + view()));
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    return json;
+  }
+
   /// Captures the current viewpoint (the last submitted world pose and depth) into
   /// a guided scan, back-projecting the depth into a deterministic gaussian
   /// reconstruction, and returns the scan's coverage so the app can steer the user

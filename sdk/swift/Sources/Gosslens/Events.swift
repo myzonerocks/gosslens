@@ -301,6 +301,18 @@ extension GossSession {
         try checked(goss_session_apply_lens_state(handle, blob, blob.count))
     }
 
+    /// The active lens's content-provenance manifest as JSON (producer, lens,
+    /// whether the frame is model-generated or edited, and the operations), for the
+    /// host to bind to a capture per C2PA. Nil with no active lens.
+    public func captureProvenance() -> String? {
+        var needed: Int = 0
+        if goss_session_capture_provenance(handle, nil, 0, &needed) != GOSS_OK { return nil }
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        if goss_session_capture_provenance(handle, &out, out.count, &written) != GOSS_OK { return nil }
+        return String(decoding: out[0..<written], as: UTF8.self)
+    }
+
     /// Captures the current viewpoint (the last submitted world pose and depth)
     /// into a guided scan, back-projecting the depth into a deterministic gaussian
     /// reconstruction, and returns the scan's coverage so the app can steer the
