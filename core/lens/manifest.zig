@@ -751,6 +751,24 @@ pub const ReshapeField = struct {
     face_overall: f32 = 0,
 };
 
+/// A reshape.body node's per-region body sculpt: each in [-1,1] with 0 the
+/// identity. The warp displaces the body inside its segmentation mask along the
+/// pose axis from the shoulders to the hips, so the background around the body
+/// stays put while the figure is slimmed or lengthened.
+pub const BodyReshapeField = struct {
+    height: f32 = 0,
+    head_size: f32 = 0,
+    neck_length: f32 = 0,
+    shoulder_width: f32 = 0,
+    chest_size: f32 = 0,
+    torso_slim: f32 = 0,
+    waist_slim: f32 = 0,
+    hip_width: f32 = 0,
+    arm_slim: f32 = 0,
+    leg_length: f32 = 0,
+    leg_slim: f32 = 0,
+};
+
 pub const TrailField = struct {
     /// A trail.pass node's echo amount (0..1): how much of the previous
     /// frame blends into this one, so moving content leaves a motion trail.
@@ -1364,6 +1382,8 @@ pub const Node = struct {
     /// Set only on a reshape.bank node: its sixty-six per-region face sculpt
     /// amounts.
     reshape: ?ReshapeField = null,
+    /// Set only on a reshape.body node: its per-region body sculpt amounts.
+    body_reshape: ?BodyReshapeField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -3045,6 +3065,26 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "reshape.bank")) {
             reshape_field = .{};
         }
+        var body_reshape_field: ?BodyReshapeField = null;
+        if (getField(object, "body")) |bv| {
+            const bmark = path.push("body");
+            if (!std.mem.eql(u8, node_type, "reshape.body")) {
+                try diags.add(path.slice(), "body is a reshape.body field, found it on '{s}'", .{node_type});
+            } else if (bv != .object) {
+                try diags.add(path.slice(), "body must be an object", .{});
+            } else {
+                var field: BodyReshapeField = .{};
+                inline for (std.meta.fields(BodyReshapeField)) |f| {
+                    if (getField(bv.object, f.name)) |v| {
+                        @field(field, f.name) = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse @field(field, f.name))), -1.0, 1.0);
+                    }
+                }
+                body_reshape_field = field;
+            }
+            path.pop(bmark);
+        } else if (std.mem.eql(u8, node_type, "reshape.body")) {
+            body_reshape_field = .{};
+        }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
             const tmark = path.push("trail");
@@ -3963,6 +4003,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .edge = edge_field,
             .warp = warp_field,
             .reshape = reshape_field,
+            .body_reshape = body_reshape_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,
