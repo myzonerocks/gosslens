@@ -1214,6 +1214,18 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [rgbaPtr, rgba.length]);
   }
 
+  /// Runs the engine's own segmenter on a source's frames so its key mode 3
+  /// matte is computed on-device (a virtual background for a remote guest). The
+  /// model is the selfie/hair net enableSegmentation takes; an empty model tears
+  /// the source segmenter down.
+  enableSourceSegmentation(name: string, model: Uint8Array, threads: number): void {
+    const modelPtr = model.length > 0 ? (this.mod.ccall("goss_alloc", "number", ["number"], [model.length]) as number) : 0;
+    if (modelPtr) this.mod.HEAPU8.set(model, modelPtr);
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_enable_source_segmentation", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, modelPtr, model.length, threads]));
+    if (modelPtr) this.mod.ccall("goss_free", null, ["number", "number"], [modelPtr, model.length]);
+  }
+
   /// Defines a screen-share source whose frame letterboxes to fit its cell.
   defineScreenShare(name: string): void {
     this.withName(name, (ptr, len) =>

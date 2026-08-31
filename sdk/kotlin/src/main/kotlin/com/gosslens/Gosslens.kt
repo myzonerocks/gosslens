@@ -140,6 +140,7 @@ object Gosslens {
     internal external fun nativeClearLayout(session: Long): Int
     internal external fun nativeSetSourceComposite(session: Long, nameBuffer: ByteBuffer, nameLen: Int, opacity: Float, keyMode: Int, keyR: Float, keyG: Float, keyB: Float, similarity: Float): Int
     internal external fun nativeSubmitSourceMask(session: Long, nameBuffer: ByteBuffer, nameLen: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
+    internal external fun nativeEnableSourceSegmentation(session: Long, nameBuffer: ByteBuffer, nameLen: Int, modelBuffer: ByteBuffer, modelLen: Int, threads: Int): Int
     internal external fun nativeDefineScreenShare(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
     internal external fun nativeSubmitLocation(session: Long, latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Int
     internal external fun nativeSetGeofence(session: Long, latitude: Double, longitude: Double, radiusM: Double): Int
@@ -1440,6 +1441,14 @@ class GossSession private constructor(
     fun submitSourceMask(name: String, rgba: ByteBuffer, width: Int, height: Int): Boolean {
         val (buf, n) = nameBuf(name)
         return Gosslens.nativeSubmitSourceMask(handle, buf, n, rgba, width, height) == 0
+    }
+
+    /** Runs the engine's own segmenter on a source's frames so its key mode 3 matte is computed
+     * on-device (a virtual background for a remote guest). The model is the selfie/hair net
+     * enableSegmentation takes; an empty model tears the source segmenter down. */
+    fun enableSourceSegmentation(name: String, model: ByteBuffer, threads: Int): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeEnableSourceSegmentation(handle, buf, n, model, model.remaining(), threads) == 0
     }
 
     /** Defines a screen-share source whose frame letterboxes to fit its cell instead of stretching. */

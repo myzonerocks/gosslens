@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 76u
+#define GOSS_ABI_MINOR 77u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -812,6 +812,12 @@ goss_status goss_session_set_source_composite(goss_session *session, const uint8
  * an opaque guest is keyed to a subject without a baked alpha. The bytes are
  * copied; the camera and an unknown source are rejected. */
 goss_status goss_session_submit_source_mask(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *rgba, uint32_t width, uint32_t height);
+/* Runs the engine's own segmenter on a named source's frames, so the subject
+ * mask that feeds its key_mode 3 matte is computed on-device with no host
+ * segmenter (a virtual background for a remote guest). model_bytes is the same
+ * selfie/hair model enable_segmentation takes and must pass the digest allow
+ * list when one is set; model_len 0 tears the source segmenter down. */
+goss_status goss_session_enable_source_segmentation(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *model_bytes, size_t model_len, int32_t threads);
 goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len);
 
 /* Graph thread. Geofilters: location-gated overlay lenses. set_geofence sets a

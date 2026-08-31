@@ -1815,6 +1815,11 @@ pub const Renderer = struct {
             if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
             self.* = .{};
         }
+
+        /// True once a mask has been uploaded, so its texture is live.
+        pub fn valid(self: DynamicMask) bool {
+            return self.handle.idx != invalid_handle;
+        }
     };
 
     /// A mutable BGRA texture whose pixels are replaced each frame - a

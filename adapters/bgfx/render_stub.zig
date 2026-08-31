@@ -167,6 +167,11 @@ pub const Renderer = struct {
         pub fn deinit(self: *DynamicMask) void {
             self.* = .{};
         }
+
+        pub fn valid(self: DynamicMask) bool {
+            _ = self;
+            return false;
+        }
     };
 
     pub fn createDynamicBgraTexture(width: u16, height: u16) TextureHandle {

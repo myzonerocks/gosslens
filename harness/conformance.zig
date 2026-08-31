@@ -8491,6 +8491,67 @@ fn proveChromaSpill(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the engine-computed per-source matte: the engine runs its own selfie
+/// segmenter on a source's own frames and fills that source's key mode 3 matte
+/// on-device, with no host mask (a virtual background for a remote guest). The
+/// matte is empty until the worker delivers, then populates; two runs confirm.
+fn proveSourceSegmentation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const model = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(model);
+    const sw: u32 = 64;
+    const sh: u32 = 64;
+    const cam = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(cam);
+    const src = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(src);
+    for (0..sw * sh) |p| {
+        cam[p * 4 + 0] = 255;
+        cam[p * 4 + 1] = 0;
+        cam[p * 4 + 2] = 0;
+        cam[p * 4 + 3] = 255; // red camera
+        src[p * 4 + 0] = 0;
+        src[p * 4 + 1] = 255;
+        src[p * 4 + 2] = 0;
+        src[p * 4 + 3] = 255; // opaque green source
+    }
+    const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+
+    const once = struct {
+        fn go(e: *abi.Engine, mdl: []const u8, camf: []const u8, srcf: []const u8, d0: *const abi.FrameDesc) !bool {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            // Enable the source segmenter before feeding frames, so each source
+            // frame reaches its worker; key mode 3 consumes the matte it fills.
+            if (abi.goss_session_define_source(session, "g", 1) != .ok or
+                abi.goss_session_enable_source_segmentation(session, "g", 1, mdl.ptr, mdl.len, 2) != .ok or
+                abi.goss_session_set_source_composite(session, "g", 1, 1.0, 3, 0, 0, 0, 0) != .ok or
+                abi.goss_session_set_layout(session, 5) != .ok) return error.SourceSegSetup;
+            var polls: usize = 0;
+            while (!session.source_seg_mask[0].valid()) {
+                var d = d0.*;
+                d.timestamp_us = @intCast((polls + 1) * 33_333);
+                if (abi.goss_session_submit_source_frame_rgba_copy(session, "g", 1, &d, srcf.ptr, 64 * 4) != .ok) return error.SourceSubmitFailed;
+                if (abi.goss_session_submit_frame_rgba_copy(session, &d, camf.ptr, 64 * 4) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(e, session);
+                c.glfwPollEvents();
+                polls += 1;
+                if (polls > 200_000) return false;
+            }
+            return true;
+        }
+    }.go;
+
+    const a = try once(engine, model, cam, src, &base_desc);
+    const b = try once(engine, model, cam, src, &base_desc);
+    if (!a or !b) {
+        std.debug.print("conformance: FAIL the source segmenter mask never reached the source matte texture\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the engine's own segmenter, run on a source's frames, fills that source's key mode 3 matte on-device with no host mask\n", .{});
+    return true;
+}
+
 /// Proves geofilters through the public ABI: a lens with a geo.in_region trigger
 /// fires its action when a submitted location is inside the geofence, not when
 /// it is outside, deterministically, with the location computed on-device and
@@ -19030,6 +19091,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("source mask");
     if (!try proveChromaSpill(gpa, engine)) return 1;
     watchHold("chroma spill");
+    if (!try proveSourceSegmentation(gpa, engine)) return 1;
+    watchHold("source segmentation");
     if (!try proveGeofilter(gpa, engine)) return 1;
     watchHold("geofilter");
     if (!try proveBrushStroke(gpa, engine)) return 1;

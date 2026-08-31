@@ -963,6 +963,14 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitSourceMask(env: *JniEnv, cls: j
     return @intFromEnum(abi.goss_session_submit_source_mask(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), rgba, @intCast(@max(width, 0)), @intCast(@max(height, 0))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeEnableSourceSegmentation(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, model_buffer: jobject, model_len: i32, threads: i32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    // model_len 0 tears the segmenter down; its buffer may be empty or null.
+    const model = if (model_len > 0) getDirectBufferAddress(env, model_buffer) else null;
+    return @intFromEnum(abi.goss_session_enable_source_segmentation(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), model, @intCast(@max(model_len, 0)), threads));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeDefineScreenShare(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32) i32 {
     _ = cls;
     const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

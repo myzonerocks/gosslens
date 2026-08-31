@@ -233,6 +233,19 @@ extension GossSession {
         }
     }
 
+    /// Runs the engine's own segmenter on a source's frames so its key mode 3
+    /// matte is computed on-device (a virtual background for a remote guest).
+    /// The model is the selfie/hair net enableSegmentation takes; an empty model
+    /// tears the source segmenter down.
+    public func enableSourceSegmentation(_ name: String, model: Data, threads: Int32) throws {
+        var nameBytes = Array(name.utf8)
+        try nameBytes.withUnsafeMutableBufferPointer { nb in
+            try model.withUnsafeBytes { mb in
+                try checked(goss_session_enable_source_segmentation(handle, nb.baseAddress, nb.count, mb.bindMemory(to: UInt8.self).baseAddress, mb.count, threads))
+            }
+        }
+    }
+
     /// Defines a screen-share source: its frame letterboxes to fit its cell
     /// instead of stretching.
     public func defineScreenShare(_ name: String) throws {

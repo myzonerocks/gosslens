@@ -155,6 +155,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_clear_layout(goss_session *session)",
     "goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity)",
     "goss_status goss_session_submit_source_mask(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *rgba, uint32_t width, uint32_t height)",
+    "goss_status goss_session_enable_source_segmentation(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *model_bytes, size_t model_len, int32_t threads)",
     "goss_status goss_session_define_screen_share(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us)",
     "goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m)",
@@ -1069,6 +1070,12 @@ pub const Session = struct {
     /// (a screen share, an opaque video) is cut to a mask without touching its
     /// own alpha. Null until submitted; key mode 3 with none shows the source.
     source_mask_tex: [comp.max_sources]?render.TextureHandle = @splat(null),
+    /// An optional per-source segmenter: with one, the engine runs it on the
+    /// guest source's own frame each submit and fills the source's key-mode-3
+    /// matte from the subject mask, so a guest's background keys out on-device
+    /// with no host segmenter. Its mask uploads through source_seg_mask.
+    source_segmenter: [comp.max_sources]?*segmentation.Segmentation = @splat(null),
+    source_seg_mask: [comp.max_sources]render.Renderer.DynamicMask = @splat(.{}),
     source_count: u8 = 0,
     /// Per-source composite blend the layout draws with: opacity, key mode
     /// (0 none, 1 matte from the source alpha, 2 chroma-key, 3 a supplied
@@ -4718,6 +4725,8 @@ pub fn destroySession(session: *Session) void {
         for (0..session.source_count) |i| {
             session.source_tex[i].deinit();
             if (session.source_mask_tex[i]) |tex| r.destroyTexture(tex);
+            if (session.source_segmenter[i]) |seg| segmentation.destroy(seg);
+            session.source_seg_mask[i].deinit();
         }
         if (session.brush_stamp_texture) |tex| r.destroyTexture(tex);
     }
@@ -5007,6 +5016,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         pollSpriteLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
+        pollSourceSegmentation(s);
         pollMlMasks(s);
         pollMlStyle(s);
         pollMlDepth(s);
@@ -5109,6 +5119,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollSourceSegmentation(s);
     pollMlMasks(s);
     pollMlStyle(s);
     pollMlDepth(s);
@@ -5211,6 +5222,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSpriteLoaders(s, r, s.engine.gpa);
     pollModelLoaders(s, r, s.engine.gpa);
     pollSegmentationMask(s);
+    pollSourceSegmentation(s);
     pollMlMasks(s);
     pollMlStyle(s);
     pollMlDepth(s);
@@ -6101,6 +6113,34 @@ pub export fn goss_session_submit_source_mask(session: ?*Session, name: ?[*]cons
     return .ok;
 }
 
+/// Stands up a segmenter that runs on a guest source's own frames, so its
+/// subject mask fills the source's key-mode-3 matte on-device with no host
+/// segmenter (a virtual background for a remote guest). The model bytes are the
+/// same selfie/hair segmenter enable_segmentation takes; model_len 0 disables.
+pub export fn goss_session_enable_source_segmentation(session: ?*Session, name: ?[*]const u8, name_len: usize, model_bytes: ?[*]const u8, model_len: usize, threads: i32) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    if (std.mem.eql(u8, nm[0..name_len], "camera")) return .invalid_argument;
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+    if (model_len == 0) {
+        if (s.source_segmenter[idx]) |seg| segmentation.destroy(seg);
+        s.source_segmenter[idx] = null;
+        s.source_seg_mask[idx].deinit();
+        s.source_seg_mask[idx] = .{};
+        return .ok;
+    }
+    const bytes = model_bytes orelse return .invalid_argument;
+    if (!modelAllowed(s, bytes[0..model_len])) return .invalid_argument;
+    if (s.source_segmenter[idx] != null) return .ok;
+    const worker_threads = if (threads <= 0) 2 else threads;
+    s.source_segmenter[idx] = segmentation.create(s.engine.gpa, bytes[0..model_len], worker_threads) catch |err| switch (err) {
+        error.Unsupported => return .unsupported,
+        error.InvalidModel => return .invalid_argument,
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return .ok;
+}
+
 /// Removes a named source, freeing its texture; later sources shift down to
 /// keep the definition order dense.
 pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8, name_len: usize) Status {
@@ -6111,6 +6151,8 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
     if (s.source_mask_tex[idx]) |old| {
         if (s.engine.renderer) |*r| r.destroyTexture(old);
     }
+    if (s.source_segmenter[idx]) |seg| segmentation.destroy(seg);
+    s.source_seg_mask[idx].deinit();
     var i: u8 = idx;
     while (i + 1 < s.source_count) : (i += 1) {
         s.source_names[i] = s.source_names[i + 1];
@@ -6119,6 +6161,8 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
         s.source_dims[i] = s.source_dims[i + 1];
         s.source_has_frame[i] = s.source_has_frame[i + 1];
         s.source_mask_tex[i] = s.source_mask_tex[i + 1];
+        s.source_segmenter[i] = s.source_segmenter[i + 1];
+        s.source_seg_mask[i] = s.source_seg_mask[i + 1];
         s.source_opacity[i] = s.source_opacity[i + 1];
         s.source_key[i] = s.source_key[i + 1];
         s.source_chroma[i] = s.source_chroma[i + 1];
@@ -6128,6 +6172,8 @@ pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8,
     s.source_count -= 1;
     s.source_tex[s.source_count] = .{}; // its handle moved down; do not deinit here
     s.source_mask_tex[s.source_count] = null; // moved down; do not destroy here
+    s.source_segmenter[s.source_count] = null; // moved down; do not destroy here
+    s.source_seg_mask[s.source_count] = .{}; // moved down; do not deinit here
     s.source_has_frame[s.source_count] = false;
     s.source_opacity[s.source_count] = 1;
     s.source_key[s.source_count] = 0;
@@ -6151,7 +6197,43 @@ pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, nam
     _ = s.source_tex[idx].uploadCopy(@intCast(d.width), @intCast(d.height), format, rgba_ptr, stride);
     s.source_dims[idx] = .{ @intCast(d.width), @intCast(d.height) };
     s.source_has_frame[idx] = true;
+    if (s.source_segmenter[idx]) |seg| feedSourceSegmenter(s, seg, d, rgba_ptr, stride);
     return .ok;
+}
+
+/// Feeds a source's own frame to its segmenter: repacks the (possibly strided,
+/// possibly BGRA) RGBA into tight RGBA, converts to NV12, and submits it. A
+/// best effort - an allocation failure just skips this frame's mask update.
+fn feedSourceSegmenter(s: *Session, seg: *segmentation.Segmentation, d: *const FrameDesc, rgba_ptr: [*]const u8, stride: u32) void {
+    const gpa = s.engine.gpa;
+    const w: usize = d.width;
+    const h: usize = d.height;
+    const tight = gpa.alloc(u8, w * h * 4) catch return;
+    defer gpa.free(tight);
+    const bgra = d.pixel_format == pixel_format_bgra8;
+    for (0..h) |row| {
+        const srow = rgba_ptr[row * stride ..][0 .. w * 4];
+        const drow = tight[row * w * 4 ..][0 .. w * 4];
+        if (bgra) {
+            for (0..w) |col| {
+                drow[col * 4 + 0] = srow[col * 4 + 2];
+                drow[col * 4 + 1] = srow[col * 4 + 1];
+                drow[col * 4 + 2] = srow[col * 4 + 0];
+                drow[col * 4 + 3] = srow[col * 4 + 3];
+            }
+        } else {
+            @memcpy(drow, srow);
+        }
+    }
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    const y_out = gpa.alloc(u8, w * h) catch return;
+    defer gpa.free(y_out);
+    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return;
+    defer gpa.free(uv_out);
+    const conv = math.color.rgbToYuv(.bt601, .video);
+    image.argbToNv12(tight, @intCast(w), @intCast(h), .bt601, .video, y_out, uv_out) catch return;
+    segmentation.submitNv12(seg, @intCast(w), @intCast(h), d.timestamp_us, conv, y_out.ptr, @intCast(w), uv_out.ptr, @intCast(half_w * 2));
 }
 
 /// Sets the composite arrangement over the camera plus the named sources
@@ -6251,7 +6333,13 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
             } else {
                 const params = [4]f32{ s.source_opacity[src], @floatFromInt(s.source_key[src]), s.source_chroma[src][3], s.source_softness[src] };
                 const chroma = [4]f32{ s.source_chroma[src][0], s.source_chroma[src][1], s.source_chroma[src][2], 0 };
-                const source_mask = s.source_mask_tex[src] orelse r.default_mask_texture;
+                // The engine's own segmentation of the source wins when a
+                // per-source segmenter is active, else the host-supplied matte,
+                // else a full-white mask (mode 3 with none shows the source).
+                const source_mask = if (s.source_segmenter[src] != null)
+                    s.source_seg_mask[src].handle
+                else
+                    (s.source_mask_tex[src] orelse r.default_mask_texture);
                 r.submitCompositeSource(view, s.source_tex[src].handle, source_mask, targets0, cx, cy, cw, ch, params, chroma);
             }
             view += 1;
@@ -8400,6 +8488,18 @@ fn fuseDepthIntoMask(session: *Session, mask: *[segmentation.mask_len]f32) void 
             const scene = depthAt(session, u, v) orelse continue;
             if (scene > 0 and scene >= plane) mask[y * side + x] = 0;
         }
+    }
+}
+
+/// Reads each source segmenter's latest subject mask into that source's key-
+/// mode-3 matte texture, so the composite keys the guest by the engine's own
+/// segmentation of its frame. No mask yet leaves the source showing whole.
+fn pollSourceSegmentation(session: *Session) void {
+    var mask: [segmentation.mask_len]f32 = undefined;
+    for (0..session.source_count) |i| {
+        const seg = session.source_segmenter[i] orelse continue;
+        if (!segmentation.readMask(seg, &mask)) continue;
+        _ = uploadMaskFromF32(&session.source_seg_mask[i], &mask);
     }
 }
 
