@@ -1161,11 +1161,16 @@ default 40), so a room echo or acoustic feedback repeating at that delay is
 removed. Zero on any stage leaves it off. It needs no model.
 
 A `"voice.transform"` node changes the outgoing voice. It draws nothing and
-carries a `"voice": {"pitch"}` block (0.5..2, default 1): the output mix pitch
-shifts the microphone by the `pitch` ratio, above 1 higher and below 1 lower,
-through a two-tap delay line swept at the ratio with a constant-power crossfade,
-so the pitch changes while the track keeps its length. A ratio of one is a
-passthrough. It needs no model.
+carries a `"voice": {"pitch", "formant"}` block, each 0.5..2 and default 1. The
+output mix pitch shifts the microphone by the `pitch` ratio, above 1 higher and
+below 1 lower, through a two-tap delay line swept at the ratio with a
+constant-power crossfade, so the pitch changes while the track keeps its length.
+The `formant` ratio scales the vocal-tract envelope on its own through a short
+cepstral analysis that separates the formants from the pitch harmonics, warps the
+envelope, and resynthesises with the harmonics untouched, so the voice sounds
+larger below 1 and smaller above 1 without its pitch moving. Set formant to
+1/pitch for a natural higher or lower voice that keeps the speaker's character. A
+ratio of one on both is a passthrough. It needs no model.
 
 An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
 that binds a whole output tensor as a segmentation mask. The tensor is read as
@@ -1645,7 +1650,8 @@ frame-bracket op to its mean, holding off until the whole bracket lands;
 an audio.enhance node cleans the outgoing microphone, a tone buried under
 per-sample hiss losing its high-frequency step energy while a control holds;
 a voice.transform node pitch-shifts the outgoing microphone by its ratio, a
-300 Hz tone's fundamental scaling by 1.5 while the track keeps its length;
+300 Hz tone's fundamental scaling by 1.5 while the track keeps its length, and
+warps the vocal-tract envelope by its formant ratio with the pitch untouched;
 a diarized caption segment lands in the read-back ring, a decoded utterance
 held with the times it spanned and its speaker, metadata and text read apart;
 a temporal ml.infer net feeds the previous output frame into its second input,

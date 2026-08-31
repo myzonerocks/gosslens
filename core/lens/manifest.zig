@@ -1156,11 +1156,13 @@ pub const AudioEnhanceField = struct {
     dereverb_ms: f32 = 30,
 };
 
-/// A voice.transform node's real-time voice change: `pitch` (0.5..2) the ratio
-/// the outgoing microphone's pitch is shifted by, 1 unchanged, above 1 higher and
-/// below 1 lower, the duration preserved. Applied in the output mix.
+/// A voice.transform node's real-time voice change, both in the output mix:
+/// `pitch` (0.5..2, default 1) shifts the mic pitch keeping duration, above 1
+/// higher; `formant` (0.5..2, default 1) scales the vocal-tract envelope alone,
+/// above 1 smaller. Set formant to 1/pitch for a natural, character-keeping shift.
 pub const VoiceTransformField = struct {
     pitch: f32 = 1,
+    formant: f32 = 1,
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -3778,6 +3780,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             if (getField(object, "voice")) |vv| {
                 if (vv == .object) {
                     if (getField(vv.object, "pitch")) |v| field.pitch = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.pitch)), 0.5, 2);
+                    if (getField(vv.object, "formant")) |v| field.formant = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.formant)), 0.5, 2);
                 }
             }
             voice_transform_field = field;

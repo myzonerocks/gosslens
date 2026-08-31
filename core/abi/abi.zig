@@ -27,6 +27,7 @@ const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
+const formant = @import("formant");
 const comp = @import("layout");
 const geo = @import("geo");
 const font = @import("font");
@@ -753,6 +754,12 @@ pub const Session = struct {
     voice_delay: [8][voice_delay_len]f32 = @splat(@splat(0)),
     voice_wpos: usize = 0,
     voice_phase: f32 = 0,
+    /// An active voice.transform node's formant ratio (1 when none): the mic's
+    /// spectral envelope is scaled by this before the pitch shift, so the vocal
+    /// tract sounds larger or smaller while the pitch is untouched. The streaming
+    /// STFT state is one Channel per mic channel, allocated on first use.
+    voice_formant: f32 = 1,
+    voice_formant_chans: []formant.Channel = &.{},
     /// The diffusion restyle workers an active lens's diffusion nodes drive,
     /// each drawing its decoded frame through a sprite; built from the bundle at
     /// activation, fed the camera frame, uploaded to their sprite each render.
@@ -4761,6 +4768,7 @@ pub fn destroySession(session: *Session) void {
     if (session.audio_window.len > 0) session.engine.gpa.free(session.audio_window);
     if (session.audio_echo_ring.len > 0) session.engine.gpa.free(session.audio_echo_ring);
     if (session.audio_dereverb_ring.len > 0) session.engine.gpa.free(session.audio_dereverb_ring);
+    if (session.voice_formant_chans.len > 0) session.engine.gpa.free(session.voice_formant_chans);
     destroyDiffusionWorkers(session);
     session.diffusion_workers.deinit(session.engine.gpa);
     destroySplatWorkers(session);
@@ -8990,6 +8998,8 @@ fn destroyBlendState(session: *Session) void {
     session.auto_frame_valid = false;
     session.audio_enhance_strength = 0;
     session.voice_pitch = 1;
+    session.voice_formant = 1;
+    for (session.voice_formant_chans) |*ch| ch.reset();
     session.wants_person_mask = false;
     session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
@@ -9676,11 +9686,15 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
         // neither the raw mic passes straight through.
         const mic_chunk: ?[]const f32 = blk: {
             const raw = if (mic_slice) |m| m[base .. base + span] else break :blk null;
-            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1 and s.audio_echo_strength <= 0 and s.audio_dereverb_strength <= 0) break :blk raw;
+            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1 and s.voice_formant == 1 and s.audio_echo_strength <= 0 and s.audio_dereverb_strength <= 0) break :blk raw;
             @memcpy(enhanced_buf[0..span], raw);
             if (s.audio_enhance_strength > 0) enhanceMic(s, enhanced_buf[0..span], n, channels);
             if (s.audio_dereverb_strength > 0) dereverbMic(s, enhanced_buf[0..span], n, channels, sample_rate);
             if (s.audio_echo_strength > 0) echoCancelMic(s, enhanced_buf[0..span], n, channels, sample_rate);
+            // Formant first: it warps the vocal-tract envelope on the clean mic, then
+            // the pitch shift rides on top, so formant alone stays pure and pairing
+            // it with 1/pitch yields a natural, character-preserving pitch change.
+            if (s.voice_formant != 1) formantShiftMic(s, enhanced_buf[0..span], n, channels);
             if (s.voice_pitch != 1) voiceTransformMic(s, enhanced_buf[0..span], n, channels);
             break :blk enhanced_buf[0..span];
         };
@@ -11323,6 +11337,8 @@ fn resolveAudioEnhance(session: *Session) void {
     session.voice_delay = @splat(@splat(0));
     session.voice_wpos = 0;
     session.voice_phase = 0;
+    session.voice_formant = 1;
+    for (session.voice_formant_chans) |*ch| ch.reset();
     const lens = if (session.active_lens) |*l| l else return;
     for (lens.manifest.nodes) |node| {
         if (node.audio_enhance) |ae| {
@@ -11336,7 +11352,10 @@ fn resolveAudioEnhance(session: *Session) void {
                 session.audio_dereverb_ms = ae.dereverb_ms;
             }
         }
-        if (node.voice_transform) |vt| session.voice_pitch = vt.pitch;
+        if (node.voice_transform) |vt| {
+            session.voice_pitch = vt.pitch;
+            session.voice_formant = vt.formant;
+        }
     }
 }
 
@@ -11465,6 +11484,32 @@ fn voiceTransformMic(session: *Session, mic: []f32, frame_count: u32, channels: 
         if (np < 0) np += n;
         if (np >= n) np -= n;
         session.voice_phase = np;
+    }
+}
+
+/// Formant-shifts one interleaved output chunk's microphone in place, scaling the
+/// spectral envelope by the session's formant ratio without moving the pitch. The
+/// per-channel STFT state is allocated once on first use and freed at teardown; a
+/// failed allocation leaves the mic untouched rather than dropping the chunk.
+fn formantShiftMic(session: *Session, mic: []f32, frame_count: u32, channels: u32) void {
+    const ratio = session.voice_formant;
+    if (ratio == 1) return;
+    const want = @min(channels, @as(u32, 8));
+    if (session.voice_formant_chans.len != want) {
+        const gpa = session.engine.gpa;
+        if (session.voice_formant_chans.len > 0) gpa.free(session.voice_formant_chans);
+        session.voice_formant_chans = gpa.alloc(formant.Channel, want) catch {
+            session.voice_formant_chans = &.{};
+            return;
+        };
+        for (session.voice_formant_chans) |*ch| ch.reset();
+    }
+    for (0..frame_count) |f| {
+        for (0..channels) |c| {
+            const ci = @min(c, session.voice_formant_chans.len - 1);
+            const idx = f * channels + c;
+            mic[idx] = formant.processSample(&session.voice_formant_chans[ci], mic[idx], ratio);
+        }
     }
 }
 
