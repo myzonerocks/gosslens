@@ -31,7 +31,7 @@ repositories {
     maven { url = uri("https://jitpack.io") }
 }
 dependencies {
-    implementation("com.myzonerocks:gosslens:0.8.0")
+    implementation("com.myzonerocks:gosslens:0.9.0")
 }
 ```
 
