@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.reshape-body",
+  "version": "1.0.0",
+  "display_name": "Reshape Body",
+  "engine_compat": ">=0.5",
+  "capabilities": ["pose"],
+  "parameters": [],
+  "nodes": [
+    {"id": "sculpt", "type": "reshape.body", "inputs": {"frame": "camera"}, "params": {},
+     "body": {"waist_slim": 0.5, "torso_slim": 0.3, "hip_width": -0.2, "leg_length": 0.35, "shoulder_width": 0.2}}
+  ],
+  "triggers": []
+}

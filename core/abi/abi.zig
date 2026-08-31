@@ -1016,6 +1016,10 @@ pub const Session = struct {
     /// amounts in ReshapeField order, resolved at activation. The live tracked
     /// contour joins them each frame in the draw arm.
     reshape_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [66]f32) = .empty,
+    /// reshape.body nodes by graph index: their body sculpt amounts in
+    /// BodyReshapeField order, resolved at activation. The live pose landmarks
+    /// and the body mask join them each frame in the draw arm.
+    body_reshape_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [runtime.body_reshape_param_count]f32) = .empty,
     /// ssr.pass nodes by graph index: their reflection strength and floor plane.
     ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
@@ -2272,6 +2276,36 @@ fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirro
     return true;
 }
 
+const body_point_count = render.body_reshape_points_vec4_count * 4;
+
+/// Whether a reshape.body node has a body to sculpt this frame.
+fn bodyPoseReady(s: *Session) bool {
+    return currentPose(s) != null;
+}
+
+/// Fills the six pose anchors a reshape.body warp needs - the two shoulders, the
+/// two hips, the ankle midpoint, and the head - each normalized then carried into
+/// the preview's mirror-and-rotation space so the sculpt lands where the frame
+/// draws. False when no body holds, the same hold-through degradation as the face.
+fn fillBodyPose(s: *Session, rotation: u32, mirror: bool, points: *[body_point_count]f32) bool {
+    const result = currentPose(s) orelse return false;
+    const lm = &result.landmarks;
+    const at = struct {
+        fn p(l: *const [pose.landmark_count * 3]f32, i: usize, rot: u32, mir: bool) [2]f32 {
+            return face106.transformPoint(l[i * 3], l[i * 3 + 1], rot, mir);
+        }
+    }.p;
+    const sl = at(lm, 11, rotation, mirror);
+    const sr = at(lm, 12, rotation, mirror);
+    const hl = at(lm, 23, rotation, mirror);
+    const hr = at(lm, 24, rotation, mirror);
+    const al = at(lm, 27, rotation, mirror);
+    const ar = at(lm, 28, rotation, mirror);
+    const head = at(lm, 0, rotation, mirror);
+    points.* = .{ sl[0], sl[1], sr[0], sr[1], hl[0], hl[1], hr[0], hr[1], (al[0] + ar[0]) * 0.5, (al[1] + ar[1]) * 0.5, head[0], head[1] };
+    return true;
+}
+
 /// The tracked face's centroid and a covering radius in the frame's normalized
 /// draw space, so a face_scale warp scales the whole face about its own center.
 /// The radius is the farthest contour point plus a margin, aspect corrected the
@@ -2517,6 +2551,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // needs depth: with its params resolved but no face it holds the
             // frame through, the standard capability degradation.
             .reshape => s.reshape_params.contains(entry.graph_index) and reshapeFaceReady(s),
+            .body_reshape => s.body_reshape_params.contains(entry.graph_index) and bodyPoseReady(s),
             // A motion trail owns the frame it echoes (a session target it
             // seeds from the current frame on the first pass), so it is ready
             // as soon as its echo amount is resolved - no host input to gate on.
@@ -3153,6 +3188,25 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 const aspect_ratio = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
                 r.submitReshapeBank(view_id, input_texture, contour[0 .. render.face_point_vec4_count * 4], hubs, bank, aspect_ratio);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .body_reshape => {
+                const bank = s.body_reshape_params.getPtr(entry.graph_index) orelse continue;
+                var points: [body_point_count]f32 = undefined;
+                if (!fillBodyPose(s, rotation, mirror, &points)) continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const mask = s.segmentation_texture orelse r.default_mask_texture;
+                const aspect_ratio = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                r.submitReshapeBody(view_id, input_texture, mask, &points, bank, aspect_ratio);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -4707,6 +4761,7 @@ pub fn destroySession(session: *Session) void {
     session.warp_params.deinit(session.engine.gpa);
     session.warp_masks.deinit(session.engine.gpa);
     session.reshape_params.deinit(session.engine.gpa);
+    session.body_reshape_params.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
@@ -9050,6 +9105,7 @@ fn destroyBlendState(session: *Session) void {
     session.warp_params.clearRetainingCapacity();
     session.warp_masks.clearRetainingCapacity();
     session.reshape_params.clearRetainingCapacity();
+    session.body_reshape_params.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
     session.ssr_params.clearRetainingCapacity();
     session.env_params.clearRetainingCapacity();
@@ -9806,6 +9862,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createEdgeParams(s, gpa) catch {};
     createWarpParams(s, gpa) catch {};
     createReshapeParams(s, gpa) catch {};
+    createBodyReshapeParams(s, gpa) catch {};
     createTrailParams(s, gpa) catch {};
     createSsrParams(s, gpa) catch {};
     createEnvParams(s, gpa) catch {};
@@ -10200,6 +10257,17 @@ fn createReshapeParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(reshapes);
     for (reshapes) |rp| {
         session.reshape_params.put(gpa, rp.graph_index, rp.params) catch {};
+    }
+}
+
+/// Resolves the active lens's reshape.body nodes into session.body_reshape_params,
+/// once at activation. The live pose landmarks and body mask join them each frame.
+fn createBodyReshapeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const bodies = try lens.bodyReshapePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(bodies);
+    for (bodies) |bp| {
+        session.body_reshape_params.put(gpa, bp.graph_index, bp.params) catch {};
     }
 }
 
@@ -13384,6 +13452,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createEdgeParams(session, gpa);
     try createWarpParams(session, gpa);
     try createReshapeParams(session, gpa);
+    try createBodyReshapeParams(session, gpa);
     try createTrailParams(session, gpa);
     try createSsrParams(session, gpa);
     try createEnvParams(session, gpa);

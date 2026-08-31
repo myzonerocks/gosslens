@@ -4857,6 +4857,7 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // reshape.bank's own fixed fragment shader: the sixty-six per-region
         // face sculpt, same reasoning as fs_lut_pass above.
         .{ .name = "fs_reshape_bank", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_reshape_body", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // beauty.lipstick/beauty.blusher's own mesh vertex stage - its
         // own varying def, a_position is vec2 here, not the vec3 every
         // other vertex contract in this project shares.

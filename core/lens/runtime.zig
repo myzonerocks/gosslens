@@ -37,7 +37,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, dehaze_pass, relight_pass, glare_pass, vignette_pass, lowlight_pass, undistort_pass, awb_pass, stabilize_pass, zoom_pass, dereflect_pass, harmonize_pass, inpaint_pass, rolling_pass, parallax_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, dehaze_pass, relight_pass, glare_pass, vignette_pass, lowlight_pass, undistort_pass, awb_pass, stabilize_pass, zoom_pass, dereflect_pass, harmonize_pass, inpaint_pass, rolling_pass, parallax_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, reshape_body, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -82,6 +82,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "edge.pass")) return .edge_pass;
     if (std.mem.eql(u8, type_str, "warp.pass")) return .warp_pass;
     if (std.mem.eql(u8, type_str, "reshape.bank")) return .reshape_bank;
+    if (std.mem.eql(u8, type_str, "reshape.body")) return .reshape_body;
     if (std.mem.eql(u8, type_str, "trail.pass")) return .trail_pass;
     if (std.mem.eql(u8, type_str, "ssr.pass")) return .ssr_pass;
     if (std.mem.eql(u8, type_str, "env.pass")) return .env_pass;
@@ -129,7 +130,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .dehaze_pass, .relight_pass, .glare_pass, .vignette_pass, .lowlight_pass, .undistort_pass, .awb_pass, .stabilize_pass, .zoom_pass, .dereflect_pass, .harmonize_pass, .inpaint_pass, .rolling_pass, .parallax_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .dehaze_pass, .relight_pass, .glare_pass, .vignette_pass, .lowlight_pass, .undistort_pass, .awb_pass, .stabilize_pass, .zoom_pass, .dereflect_pass, .harmonize_pass, .inpaint_pass, .rolling_pass, .parallax_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .reshape_body, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
     };
 }
 
@@ -267,6 +268,8 @@ const LensNode = struct {
     warp: ?manifest.WarpField = null,
     /// .reshape_bank only: the node's sixty-six per-region face sculpt amounts.
     reshape: ?manifest.ReshapeField = null,
+    /// .reshape_body only: the node's per-region body sculpt amounts.
+    body_reshape: ?manifest.BodyReshapeField = null,
     /// .trail_pass only: the node's motion-trail echo amount.
     trail: ?manifest.TrailField = null,
     /// .ssr_pass only: the node's reflection strength and floor plane.
@@ -734,6 +737,16 @@ pub const ReshapePassNode = struct {
     params: [66]f32,
 };
 
+/// One reshape.body node ready to draw: which graph node it is, and its body
+/// sculpt amounts in BodyReshapeField order, each in [-1,1] with 0 the identity.
+/// The caller pairs these with the live pose landmarks and the body mask.
+pub const BodyReshapePassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [body_reshape_param_count]f32,
+};
+
+pub const body_reshape_param_count = @typeInfo(manifest.BodyReshapeField).@"struct".fields.len;
+
 pub const TrailPassNode = struct {
     graph_index: graph.NodeIndex,
     amount: f32,
@@ -755,7 +768,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, dehaze, relight, glare, vignette, lowlight, undistort, awb, stabilize, zoom, dereflect, harmonize, inpaint, rolling, parallax, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
+pub const PassKind = enum { shader, lut, blend, blur, grade, dehaze, relight, glare, vignette, lowlight, undistort, awb, stabilize, zoom, dereflect, harmonize, inpaint, rolling, parallax, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, body_reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
 
 /// One matte.hair source node ready for the caller to draw - which graph node
 /// it is, and its guided-filter parameters packed for the refine pass (radius,
@@ -1434,6 +1447,25 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every reshape.body node this lens spliced, in execution order, each
+    /// carrying its body sculpt amounts in BodyReshapeField order.
+    pub fn bodyReshapePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]BodyReshapePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(BodyReshapePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .reshape_body) continue;
+            const bf = node.body_reshape orelse manifest.BodyReshapeField{};
+            var params: [body_reshape_param_count]f32 = undefined;
+            inline for (std.meta.fields(manifest.BodyReshapeField), 0..) |f, i| {
+                params[i] = @field(bf, f.name);
+            }
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = params });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every trail.pass node this lens spliced, in execution order, each
     /// carrying its motion-trail echo amount.
     pub fn trailPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]TrailPassNode {
@@ -1669,6 +1701,7 @@ pub const Lens = struct {
                 .edge_pass => .edge,
                 .warp_pass => .warp,
                 .reshape_bank => .reshape,
+                .reshape_body => .body_reshape,
                 .trail_pass => .trail,
                 .ssr_pass => .ssr,
                 .env_pass => .env,
@@ -2007,6 +2040,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .edge = if (node_type == .edge_pass) node.edge else null,
             .warp = if (node_type == .warp_pass) node.warp else null,
             .reshape = if (node_type == .reshape_bank) node.reshape else null,
+            .body_reshape = if (node_type == .reshape_body) node.body_reshape else null,
             .trail = if (node_type == .trail_pass) node.trail else null,
             .ssr = if (node_type == .ssr_pass) node.ssr else null,
             .env = if (node_type == .env_pass) node.env else null,
