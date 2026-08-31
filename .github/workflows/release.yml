@@ -178,6 +178,24 @@ jobs:
             dist/apple/GosslensKit.xcframework.zip \
             dist/web/*.tgz \
             --title "${GITHUB_REF_NAME}" --notes "$notes"
+      # Pin SwiftPM to the XCFramework this release just published, so Swift
+      # consumers get the prebuilt engine with no Zig. Best effort: if main is
+      # protected the push is skipped and the values are printed to pin by hand.
+      - name: pin the swift binary target on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          checksum=$(cat dist/apple/GosslensKit.checksum.txt)
+          git config user.name avosa
+          git config user.email avosa.developer@gmail.com
+          git fetch origin main && git checkout main
+          tools/pin-swift-xcframework.sh "${GITHUB_REF_NAME}" "${checksum}"
+          if ! git diff --quiet sdk/swift/Package.swift; then
+            git add sdk/swift/Package.swift
+            git commit -m "release ${GITHUB_REF_NAME}: pin the swift xcframework binary target"
+            git push origin main || echo "note: push to main was rejected (branch protection); run tools/pin-swift-xcframework.sh with the values above and open a PR"
+          fi
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
       - name: publish to maven central
