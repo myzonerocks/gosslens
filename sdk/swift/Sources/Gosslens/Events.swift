@@ -270,6 +270,49 @@ extension GossSession {
         try checked(goss_session_submit_orientation(handle, gravityX, gravityY, gravityZ, timestampUs))
     }
 
+    /// Feeds a host info value keyed by name, the rail an info sticker reads: a
+    /// text.2d node with a matching content_source shows the latest value each
+    /// frame (a time, a place, a sensor reading). A nil value clears the key.
+    public func setInfo(_ key: String, _ value: String?) throws {
+        let k = Array(key.utf8)
+        if let value {
+            let v = Array(value.utf8)
+            try checked(goss_session_set_info(handle, k, k.count, v, v.count))
+        } else {
+            try checked(goss_session_set_info(handle, k, k.count, nil, 0))
+        }
+    }
+
+    /// Serializes the active lens's parameter state to a blob a connected lens
+    /// publishes so the cloud syncs it to peers, or nil with no lens. Applying a
+    /// peer's blob with applyLensState converges the shared state.
+    public func snapshotLensState() -> [UInt8]? {
+        var needed: Int = 0
+        if goss_session_snapshot_lens_state(handle, nil, 0, &needed) != GOSS_OK { return nil }
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        if goss_session_snapshot_lens_state(handle, &out, out.count, &written) != GOSS_OK { return nil }
+        return Array(out[0..<written])
+    }
+
+    /// Applies a peer's lens-state blob to the active lens, clamping each value
+    /// into its parameter so two runtimes on the same lens converge.
+    public func applyLensState(_ blob: [UInt8]) throws {
+        try checked(goss_session_apply_lens_state(handle, blob, blob.count))
+    }
+
+    /// The active lens's content-provenance manifest as JSON (producer, lens,
+    /// whether the frame is model-generated or edited, and the operations), for the
+    /// host to bind to a capture per C2PA. Nil with no active lens.
+    public func captureProvenance() -> String? {
+        var needed: Int = 0
+        if goss_session_capture_provenance(handle, nil, 0, &needed) != GOSS_OK { return nil }
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        if goss_session_capture_provenance(handle, &out, out.count, &written) != GOSS_OK { return nil }
+        return String(decoding: out[0..<written], as: UTF8.self)
+    }
+
     /// Captures the current viewpoint (the last submitted world pose and depth)
     /// into a guided scan, back-projecting the depth into a deterministic gaussian
     /// reconstruction, and returns the scan's coverage so the app can steer the

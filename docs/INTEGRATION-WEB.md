@@ -24,18 +24,37 @@ use, from your own static host.
 
 ## Install
 
-`@myzonerocks/gosslens` is not published to a registry yet. Consume it from this
-checkout as a workspace dependency (the demo does), pointing your workspace at
-`sdk/ts`:
+The npm package is the JavaScript wrapper; the engine it drives is the
+emscripten `gosslens_web.js`/`.wasm` (a WebGL2 and a WebGPU build) plus
+`gosslens_tracking.wasm`, which you host next to your app.
 
-    { "dependencies": { "@myzonerocks/gosslens": "workspace:*" } }
+### Released package
 
-or a direct path while you develop:
+```sh
+bun add @myzonerocks/gosslens        # or: npm install @myzonerocks/gosslens
+```
 
-    { "dependencies": { "@myzonerocks/gosslens": "file:../gosslens/sdk/ts" } }
+Then serve the engine files. Each release attaches `gosslens-web-engine.zip` -
+the two `gosslens_web` builds and the tracking wasm - so unzip it into your
+static assets, or build them yourself:
 
-Run `bun run build` in `sdk/ts` first so `dist/` exists. The imports below use
-the package name either way.
+```sh
+zig build wasm-emscripten
+zig build wasm-emscripten-webgpu
+zig build tracking-wasm
+```
+
+`pickEngineUrl` picks the WebGL2 or WebGPU build at load time from the URLs you
+point it at.
+
+### Local development
+
+Consume this checkout as a workspace dependency (the demo does), running
+`bun run build` in `sdk/ts` first so `dist/` exists:
+
+```json
+{ "dependencies": { "@myzonerocks/gosslens": "workspace:*" } }
+```
 
 ## The render loop
 

@@ -270,11 +270,18 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("photo", photoModule(b, target, optimize));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
     abi_module.addImport("audio_mix", audioMixModule(b, target, optimize));
+    abi_module.addImport("sfx", sfxModule(b, target, optimize));
+    abi_module.addImport("music", musicModule(b, target, optimize));
+    abi_module.addImport("barcode", barcodeModule(b, target, optimize));
+    abi_module.addImport("medialib", medialibModule(b, target, optimize));
+    abi_module.addImport("qr", qrModule(b, target, optimize));
+    abi_module.addImport("flash", flashModule(b, target, optimize));
     const fft_abi_module = fftModule(b, target, optimize);
     abi_module.addImport("formant", formantModule(b, target, optimize, fft_abi_module));
     abi_module.addImport("fingerprint", fingerprintModule(b, target, optimize, fft_abi_module));
     abi_module.addImport("layout", compositeLayoutModule(b, target, optimize));
     abi_module.addImport("geo", geoModule(b, target, optimize));
+    abi_module.addImport("world_mesh", worldMeshModule(b, target, optimize));
     abi_module.addImport("font", fontModule(b, target, optimize));
     abi_module.addImport("stroke", strokeModule(b, target, optimize));
     abi_module.addImport("world_board", worldBoardModule(b, target, optimize));
@@ -421,11 +428,18 @@ pub fn build(b: *std.Build) void {
     const color_tests = b.addTest(.{ .root_module = colorModule(b, target, optimize) });
     const audio_analysis_tests = b.addTest(.{ .root_module = audioAnalysisModule(b, target, optimize) });
     const audio_mix_tests = b.addTest(.{ .root_module = audioMixModule(b, target, optimize) });
+    const sfx_tests = b.addTest(.{ .root_module = sfxModule(b, target, optimize) });
+    const music_tests = b.addTest(.{ .root_module = musicModule(b, target, optimize) });
+    const barcode_tests = b.addTest(.{ .root_module = barcodeModule(b, target, optimize) });
+    const medialib_tests = b.addTest(.{ .root_module = medialibModule(b, target, optimize) });
+    const qr_tests = b.addTest(.{ .root_module = qrModule(b, target, optimize) });
+    const flash_tests = b.addTest(.{ .root_module = flashModule(b, target, optimize) });
     const fft_tests = b.addTest(.{ .root_module = fftModule(b, target, optimize) });
     const formant_tests = b.addTest(.{ .root_module = formantModule(b, target, optimize, fftModule(b, target, optimize)) });
     const fingerprint_tests = b.addTest(.{ .root_module = fingerprintModule(b, target, optimize, fftModule(b, target, optimize)) });
     const composite_layout_tests = b.addTest(.{ .root_module = compositeLayoutModule(b, target, optimize) });
     const geo_tests = b.addTest(.{ .root_module = geoModule(b, target, optimize) });
+    const world_mesh_tests = b.addTest(.{ .root_module = worldMeshModule(b, target, optimize) });
     const font_tests = b.addTest(.{ .root_module = fontModule(b, target, optimize) });
     const stroke_tests = b.addTest(.{ .root_module = strokeModule(b, target, optimize) });
     const world_board_tests = b.addTest(.{ .root_module = worldBoardModule(b, target, optimize) });
@@ -472,11 +486,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(color_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_analysis_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_mix_tests).step);
+    test_step.dependOn(&b.addRunArtifact(sfx_tests).step);
+    test_step.dependOn(&b.addRunArtifact(music_tests).step);
+    test_step.dependOn(&b.addRunArtifact(barcode_tests).step);
+    test_step.dependOn(&b.addRunArtifact(medialib_tests).step);
+    test_step.dependOn(&b.addRunArtifact(qr_tests).step);
+    test_step.dependOn(&b.addRunArtifact(flash_tests).step);
     test_step.dependOn(&b.addRunArtifact(fft_tests).step);
     test_step.dependOn(&b.addRunArtifact(formant_tests).step);
     test_step.dependOn(&b.addRunArtifact(fingerprint_tests).step);
     test_step.dependOn(&b.addRunArtifact(composite_layout_tests).step);
     test_step.dependOn(&b.addRunArtifact(geo_tests).step);
+    test_step.dependOn(&b.addRunArtifact(world_mesh_tests).step);
     test_step.dependOn(&b.addRunArtifact(font_tests).step);
     test_step.dependOn(&b.addRunArtifact(stroke_tests).step);
     test_step.dependOn(&b.addRunArtifact(world_board_tests).step);
@@ -832,11 +853,18 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_tracking_module.addImport("audio_mix", audioMixModule(b, target, optimize));
+        abi_tracking_module.addImport("sfx", sfxModule(b, target, optimize));
+        abi_tracking_module.addImport("music", musicModule(b, target, optimize));
+        abi_tracking_module.addImport("barcode", barcodeModule(b, target, optimize));
+        abi_tracking_module.addImport("medialib", medialibModule(b, target, optimize));
+        abi_tracking_module.addImport("qr", qrModule(b, target, optimize));
+        abi_tracking_module.addImport("flash", flashModule(b, target, optimize));
         const fft_abi_tracking_module = fftModule(b, target, optimize);
         abi_tracking_module.addImport("formant", formantModule(b, target, optimize, fft_abi_tracking_module));
         abi_tracking_module.addImport("fingerprint", fingerprintModule(b, target, optimize, fft_abi_tracking_module));
         abi_tracking_module.addImport("layout", compositeLayoutModule(b, target, optimize));
         abi_tracking_module.addImport("geo", geoModule(b, target, optimize));
+        abi_tracking_module.addImport("world_mesh", worldMeshModule(b, target, optimize));
         abi_tracking_module.addImport("font", fontModule(b, target, optimize));
         abi_tracking_module.addImport("stroke", strokeModule(b, target, optimize));
         abi_tracking_module.addImport("world_board", worldBoardModule(b, target, optimize));
@@ -1060,11 +1088,18 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("sfx", sfxModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("music", musicModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("barcode", barcodeModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("medialib", medialibModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("qr", qrModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("flash", flashModule(b, wasm_target, .ReleaseSmall));
     const fft_abi_wasm = fftModule(b, wasm_target, .ReleaseSmall);
     abi_wasm.addImport("formant", formantModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
     abi_wasm.addImport("fingerprint", fingerprintModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
     abi_wasm.addImport("layout", compositeLayoutModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("geo", geoModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("world_mesh", worldMeshModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("font", fontModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("stroke", strokeModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("world_board", worldBoardModule(b, wasm_target, .ReleaseSmall));
@@ -1259,6 +1294,9 @@ pub fn build(b: *std.Build) void {
             },
         });
         const conformance_png_module = pngModule(b, target, optimize);
+        const conformance_barcode_module = barcodeModule(b, target, optimize);
+        const conformance_medialib_module = medialibModule(b, target, optimize);
+        const conformance_qr_module = qrModule(b, target, optimize);
         const conformance_jpeg_module = jpegModule(b, target, optimize);
         const conformance_color_module = colorModule(b, target, optimize);
         abi_conformance_module.addImport("png", conformance_png_module);
@@ -1270,11 +1308,18 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_conformance_module.addImport("audio_mix", audioMixModule(b, target, optimize));
+        abi_conformance_module.addImport("sfx", sfxModule(b, target, optimize));
+        abi_conformance_module.addImport("music", musicModule(b, target, optimize));
+        abi_conformance_module.addImport("barcode", conformance_barcode_module);
+        abi_conformance_module.addImport("medialib", conformance_medialib_module);
+        abi_conformance_module.addImport("qr", conformance_qr_module);
+        abi_conformance_module.addImport("flash", flashModule(b, target, optimize));
         const fft_abi_conformance_module = fftModule(b, target, optimize);
         abi_conformance_module.addImport("formant", formantModule(b, target, optimize, fft_abi_conformance_module));
         abi_conformance_module.addImport("fingerprint", fingerprintModule(b, target, optimize, fft_abi_conformance_module));
         abi_conformance_module.addImport("layout", compositeLayoutModule(b, target, optimize));
         abi_conformance_module.addImport("geo", geoModule(b, target, optimize));
+        abi_conformance_module.addImport("world_mesh", worldMeshModule(b, target, optimize));
         abi_conformance_module.addImport("font", fontModule(b, target, optimize));
         abi_conformance_module.addImport("stroke", strokeModule(b, target, optimize));
         abi_conformance_module.addImport("world_board", worldBoardModule(b, target, optimize));
@@ -1419,6 +1464,9 @@ pub fn build(b: *std.Build) void {
         conformance_module.addImport("gif", gifModule(b, target, optimize));
         conformance_module.addImport("jpeg", conformance_jpeg_module);
         conformance_module.addImport("color", conformance_color_module);
+        conformance_module.addImport("barcode", conformance_barcode_module);
+        conformance_module.addImport("medialib", conformance_medialib_module);
+        conformance_module.addImport("qr", conformance_qr_module);
         // The hostile-input tripwire drives the untrusted parsers directly.
         conformance_module.addImport("manifest", lens_manifest_module);
         conformance_module.addImport("material", material_module);
@@ -1651,11 +1699,18 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
+    abi_android.addImport("sfx", sfxModule(b, android_target, optimize));
+    abi_android.addImport("music", musicModule(b, android_target, optimize));
+    abi_android.addImport("barcode", barcodeModule(b, android_target, optimize));
+    abi_android.addImport("medialib", medialibModule(b, android_target, optimize));
+    abi_android.addImport("qr", qrModule(b, android_target, optimize));
+    abi_android.addImport("flash", flashModule(b, android_target, optimize));
     const fft_abi_android = fftModule(b, android_target, optimize);
     abi_android.addImport("formant", formantModule(b, android_target, optimize, fft_abi_android));
     abi_android.addImport("fingerprint", fingerprintModule(b, android_target, optimize, fft_abi_android));
     abi_android.addImport("layout", compositeLayoutModule(b, android_target, optimize));
     abi_android.addImport("geo", geoModule(b, android_target, optimize));
+    abi_android.addImport("world_mesh", worldMeshModule(b, android_target, optimize));
     abi_android.addImport("font", fontModule(b, android_target, optimize));
     abi_android.addImport("stroke", strokeModule(b, android_target, optimize));
     abi_android.addImport("world_board", worldBoardModule(b, android_target, optimize));
@@ -1927,6 +1982,30 @@ fn audioMixModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     return b.createModule(.{ .root_source_file = b.path("core/media/audio_mix.zig"), .target = target, .optimize = optimize });
 }
 
+fn sfxModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/sfx.zig"), .target = target, .optimize = optimize });
+}
+
+fn flashModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/flash.zig"), .target = target, .optimize = optimize });
+}
+
+fn musicModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/music.zig"), .target = target, .optimize = optimize });
+}
+
+fn barcodeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/barcode.zig"), .target = target, .optimize = optimize });
+}
+
+fn medialibModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/library.zig"), .target = target, .optimize = optimize });
+}
+
+fn qrModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/qr.zig"), .target = target, .optimize = optimize });
+}
+
 fn fftModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/media/fft.zig"), .target = target, .optimize = optimize });
 }
@@ -1949,6 +2028,10 @@ fn compositeLayoutModule(b: *std.Build, target: std.Build.ResolvedTarget, optimi
 
 fn geoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/geo/geo.zig"), .target = target, .optimize = optimize });
+}
+
+fn worldMeshModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/geo/world_mesh.zig"), .target = target, .optimize = optimize });
 }
 
 fn fontModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -3842,11 +3925,18 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     abi_ios.addImport("audio_mix", audioMixModule(b, ios_target, optimize));
+    abi_ios.addImport("sfx", sfxModule(b, ios_target, optimize));
+    abi_ios.addImport("music", musicModule(b, ios_target, optimize));
+    abi_ios.addImport("barcode", barcodeModule(b, ios_target, optimize));
+    abi_ios.addImport("medialib", medialibModule(b, ios_target, optimize));
+    abi_ios.addImport("qr", qrModule(b, ios_target, optimize));
+    abi_ios.addImport("flash", flashModule(b, ios_target, optimize));
     const fft_abi_ios = fftModule(b, ios_target, optimize);
     abi_ios.addImport("formant", formantModule(b, ios_target, optimize, fft_abi_ios));
     abi_ios.addImport("fingerprint", fingerprintModule(b, ios_target, optimize, fft_abi_ios));
     abi_ios.addImport("layout", compositeLayoutModule(b, ios_target, optimize));
     abi_ios.addImport("geo", geoModule(b, ios_target, optimize));
+    abi_ios.addImport("world_mesh", worldMeshModule(b, ios_target, optimize));
     abi_ios.addImport("font", fontModule(b, ios_target, optimize));
     abi_ios.addImport("stroke", strokeModule(b, ios_target, optimize));
     abi_ios.addImport("world_board", worldBoardModule(b, ios_target, optimize));
@@ -4480,11 +4570,18 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_mix", audioMixModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("sfx", sfxModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("music", musicModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("barcode", barcodeModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("medialib", medialibModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("qr", qrModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("flash", flashModule(b, em_target, .ReleaseSmall));
     const fft_abi_em = fftModule(b, em_target, .ReleaseSmall);
     abi_em.addImport("formant", formantModule(b, em_target, .ReleaseSmall, fft_abi_em));
     abi_em.addImport("fingerprint", fingerprintModule(b, em_target, .ReleaseSmall, fft_abi_em));
     abi_em.addImport("layout", compositeLayoutModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("geo", geoModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("world_mesh", worldMeshModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("font", fontModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("stroke", strokeModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("world_board", worldBoardModule(b, em_target, .ReleaseSmall));
@@ -4798,6 +4895,8 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // cutout.pass's own fixed face-isolation shader: the face matte keys the
         // frame through, the rest goes flat color, same reasoning as fs_smooth.
         .{ .name = "fs_cutout_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_cutout_sticker", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_inpaint_coherence", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         .{ .name = "fs_smooth_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // retouch.pass's own fixed fragment shader: a mode-branched selective
         // skin filter (edge-aware blemish smooth or T-zone shine matte), same
@@ -4857,6 +4956,7 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // reshape.bank's own fixed fragment shader: the sixty-six per-region
         // face sculpt, same reasoning as fs_lut_pass above.
         .{ .name = "fs_reshape_bank", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_reshape_body", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // beauty.lipstick/beauty.blusher's own mesh vertex stage - its
         // own varying def, a_position is vec2 here, not the vec3 every
         // other vertex contract in this project shares.

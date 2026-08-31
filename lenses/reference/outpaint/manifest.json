@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.outpaint",
+  "version": "1.0.0",
+  "display_name": "Generative Outpaint",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "surround", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "opacity": 1.0}},
+    {"id": "inset", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5, "opacity": 1.0, "cutout": {}}}
+  ],
+  "triggers": []
+}

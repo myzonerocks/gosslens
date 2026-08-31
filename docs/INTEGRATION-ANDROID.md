@@ -22,27 +22,64 @@ either emulator all link and run the engine.
 
 ## Add the SDK
 
-The Kotlin SDK is an Android library module that packages the `.so` for you -
-its gradle reads `jniLibs.srcDir("../../zig-out/android")`, so once you have run
-`zig build android`, the archive it produces carries the native library.
+The Kotlin SDK is an Android library that packages the prebuilt `.so` into an
+AAR, so a consuming app never runs Zig or the NDK. Pick one of three ways in.
 
-The SDK is not published to Maven Central (or anywhere) yet, so add this
-project as an included build and depend on it - gradle substitutes the module
-for the coordinate, no registry involved:
+### Maven Central (recommended)
 
-    // settings.gradle.kts
-    includeBuild("../gosslens/sdk/kotlin")
+The release pipeline builds the per-ABI `.so` on CI, bakes it into the AAR, and
+publishes the signed artifact to Maven Central. Add one coordinate:
 
-    // build.gradle.kts
-    dependencies {
-        implementation("com.myzonerocks:gosslens")
-    }
+```kotlin
+// build.gradle.kts
+dependencies {
+    implementation("io.github.avosa:gosslens:0.9.0")
+}
+```
 
-Publishing an AAR to a coordinate later works the same way, as long as the
-`.so` exists at publish time - so a publish step runs `zig build android`
-first. A source-only service like JitPack does not run that step and would ship
-an AAR with no native library, which crashes on `System.loadLibrary`; the
-included build above is the only path that works today.
+No repository declaration, no toolchain. This is the frictionless path once a
+`vX.Y.Z` release has been cut.
+
+### JitPack (alternative)
+
+JitPack builds the same AAR from a tagged commit, compiling the native core from
+source on its servers first. Add the JitPack repository and the coordinate:
+
+```kotlin
+// settings.gradle.kts
+dependencyResolutionManagement {
+    repositories { maven { url = uri("https://jitpack.io") } }
+}
+
+// build.gradle.kts
+dependencies {
+    implementation("com.github.myzonerocks:gosslens:v0.9.0")
+}
+```
+
+> [!NOTE]
+> JitPack compiles from source, so its first build of a tag is heavier and
+> depends on the toolchain being available in JitPack's environment. Maven
+> Central ships the binary our CI already built, which is why it is the
+> recommended path.
+
+### Local development (included build)
+
+To build against your own checkout with no registry at all, run
+`zig build android` once, then substitute the module for the coordinate:
+
+```kotlin
+// settings.gradle.kts
+includeBuild("../gosslens/sdk/kotlin")
+
+// build.gradle.kts
+dependencies {
+    implementation("io.github.avosa:gosslens")
+}
+```
+
+The SDK's gradle reads `jniLibs.srcDir("../../zig-out/android")`, so the AAR it
+produces carries the native library you just built.
 
 ## The render loop
 

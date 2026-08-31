@@ -520,7 +520,10 @@ pixel is replaced by the color of the nearest unmasked boundary, gathered along
 rays cast outward and weighted by inverse distance, so the hole takes on the
 surrounding content while the unmasked pixels hold. With no mask on the named
 channel it holds the frame through, the standard capability degradation. It ships
-no asset.
+no asset. A `"coherence"` (0..1, default 0) turns on temporal consistency for a
+video inpaint: the fill blends toward the previous frame's fill inside the mask
+by that amount, so it holds steady instead of flickering frame to frame; 0 is the
+raw per-frame fill.
 
 A `"rolling.pass"` node is a rolling-shutter correction. It carries a `"rolling":
 {"strength", "readout"}` block: `strength` (0..1, default 1) scales the
@@ -877,14 +880,37 @@ so a value flowing into it moves and sizes the sprite. An unbound axis keeps
 its static value. This is how a lens anchors a sprite to something a model
 found: an `ml.infer` node writes a detected box's center or a tracked
 keypoint's position into a parameter, and the sprite bound to it follows.
+An `"anchor_face"` gives the sprite a face-mesh landmark index (0..477): the
+sprite pins its center to that point on the tracked face each frame, so a
+sticker rides the head with no model in the lens - glasses on the eyes, a hat
+over the brow. The authored size holds; a negative index (the default) leaves
+the sprite at its screen rect, and the sprite falls back to that rect when no
+face is tracked.
 A `"frames"` count above one makes the sprite animated: it loads
 `assets/<id>_0.png` through `assets/<id>_(frames-1).png` and cycles them at
-`"fps"` off the lens clock. Shipping the image as an animated GIF at
+`"fps"` off the lens clock. A `"play"` retimes the cycle: `"loop"` (the default)
+runs forward, `"reverse"` runs backward, and `"boomerang"` ping-pongs forward
+then back, so `fps` sets the speed and `play` the slow-mo/reverse/boomerang edit.
+Shipping the image as an animated GIF at
 `assets/<id>.gif` instead plays the clip as a video texture: the engine
 decodes its frames and cycles them at the clip's own frame timing, so a
 sticker animates without a param or a frame count. Until its image decodes
 (all frames, for an animated sprite) the node holds the frame through, never
 blocking the chain.
+
+A `"cutout"` turns the sprite into an auto-subject sticker maker: instead of a
+bundled image, it lifts the live subject from the camera frame keyed by a
+segmentation channel into a transparent-background texture drawn at the sprite
+rect, so the segmented person (or any masked class) becomes a movable, scalable
+sticker. The block is `{"mask": "<channel>", "softness": <0.001..0.5>}`; `mask`
+names the channel (`person` for the whole subject) and `softness` feathers the
+matte edge. A cutout sprite ships no image asset and composites by its matte
+alpha, so its clear regions show the frame; it takes the same `interaction` and
+`anchor_face`, so the cut subject drags, scales, and can ride the face. With no
+live mask it draws nothing, the standard capability degradation. A cutout block
+with no `mask` (`"cutout": {}`) draws the whole camera frame at the rect, a frame
+inset: a full-frame generative sprite behind it and the inset camera on top
+expands the frame with generated surroundings (outpaint).
 
 A `"mask"` names a segmentation channel and keys the sprite full-frame against
 the region it marks, composited the way `blend.pass` swaps a background. A
@@ -943,7 +969,19 @@ flows to the rect's proportions instead of stretching thin; the author's own
 newlines are kept, and no `wrap` leaves the content as written. A `"bend"` (a
 value in -1 to 1) bows the baseline along an arc: the middle glyphs lift above
 the ends for a positive value and drop below for a negative one, so a lens
-curves a banner; 0 keeps the baseline straight.
+curves a banner; 0 keeps the baseline straight. Like a sprite, a text node
+takes an `"anchor_face"` face-mesh landmark index (0..477): the caption pins
+its center to that point on the tracked face each frame, so a name tag or a
+label rides the head. A negative index (the default) leaves the text at its
+screen rect, and it falls back to that rect when no face is tracked. A
+`"content_source"` turns the node into an info sticker whose text updates each
+frame instead of the static `content`: `"clock.elapsed"` shows the time since
+the lens started and `"countdown"` the remaining `"countdown_seconds"`, both
+formatted mm:ss (hh:mm:ss past an hour) off the lens clock; any other name is a
+host key the app feeds through `goss_session_set_info` (a time, a place, a
+sensor reading), and the node shows the latest value fed, or blank until one
+arrives. The node re-rasterizes only when its value changes, so a still frame
+does no work.
 
 A `"video.texture"` node plays an MP4 clip over the frame like a sprite. It
 ships its clip as `assets/<source>.mp4` and carries a `"video": {"source",
@@ -1310,7 +1348,10 @@ small closed grammar, parsed once at load time into a typed expression tree
   while a tracked hand's thumb and index tips are closed together),
   `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
 onset hops), `audio.beat_count` (a monotonic count of onsets, for syncing to a
-  beat number), `voice.command('phrase')` (true for the tick the on-device
+  beat number), `safety.flash_risk` (0..1, the engine's photosensitivity risk
+  from the frame's light-dark flashing rate over the last second, so a lens gates
+  or softens a strobing effect when `safety.flash_risk > 0.5`),
+  `voice.command('phrase')` (true for the tick the on-device
   captioner's recognized speech carries the phrase, a case-insensitive substring
   match, so a spoken word drives a lens; the audio never leaves the engine, only
   the recognized text reaches the trigger, and it needs a captioning audio.infer
@@ -1327,6 +1368,13 @@ onset hops), `audio.beat_count` (a monotonic count of onsets, for syncing to a
   pi straight, and zero with no body, so gate with `body.present`),
   `body.jump` / `body.wave` (true for one tick when a hop or a raised-hand wave
   completes), `body.dance` (true while rhythmic whole-body motion lasts),
+  `foot.present` (true while an ankle or foot landmark stays visible, so a shoe
+  try-on lens reacts to feet in frame; a foot/ankle skeleton anchor places the
+  content), `pet.present` (true while a pet is tracked) and `pet.expression` (the
+  pet's expression strength 0..1), both fed from a bring-your-own pet model in an
+  ml.infer node that writes the reserved `pet_present` and `pet_expression`
+  parameters - any OSS, commercial, or custom pet model plugs in and its
+  keypoints drive placement through the ml.infer parameter bindings,
   `timer('name')` (seconds since the
   timer's last reset, see actions below), `device.in_volume` (true while the
   tracked device is inside the lens's `volume` region, see below),
@@ -1382,7 +1430,10 @@ named glTF animation clip), `play_sound` (start a voice for the sound at
 the bundle-relative path in `target`, decoded from `sounds/` and mixed into
 the audio the host pulls out, with optional `gain`, `loop`, a linear
 `fade_in_ms`/`fade_out_ms`, and an equal-power stereo `pan` (-1 left to 1 right);
-several fired at once layer on the mixer's voices), `reset_timer` (name a timer
+several fired at once layer on the mixer's voices; a `target` of
+`builtin:<name>` plays an engine-synthesized effect with no bundled file, one of
+`ding`, `chime`, `click`, `pop`, `beep`, `whoosh`, `swoosh`, `applause`,
+`success`, `error`), `reset_timer` (name a timer
 signal back to
 zero), the counter actions `increment_counter`, `reset_counter` and
 `set_counter` (step a named counter that `counter('name')` reads and that

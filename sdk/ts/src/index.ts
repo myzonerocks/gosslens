@@ -544,6 +544,181 @@ export class GossEngine {
     return json;
   }
 
+  /// Composes an on-device generative-music track from a text prompt and returns
+  /// it as a mono 16-bit WAV. A non-zero seed varies the take; bars 0 uses the
+  /// default length. Deterministic, no model and no network.
+  generateSong(prompt: string, sampleRate = 48000, seed = 0, bars = 0): Uint8Array {
+    const bytes = new TextEncoder().encode(prompt);
+    const promptPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length || 1]) as number;
+    this.mod.HEAPU8.set(bytes, promptPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const view = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number", "number"];
+    this.mod.ccall("goss_engine_generate_song", "number", args, [this.handle, promptPtr, bytes.length, sampleRate, seed, bars, 0, 0, lenPtr]);
+    const needed = view();
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+    this.mod.ccall("goss_engine_generate_song", "number", args, [this.handle, promptPtr, bytes.length, sampleRate, seed, bars, outPtr, needed, lenPtr]);
+    const written = view();
+    const wav = this.mod.HEAPU8.slice(outPtr, outPtr + written);
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [promptPtr, bytes.length || 1]);
+    return wav;
+  }
+
+  /// Scans a width*height 8-bit luminance frame for an EAN-13 / UPC-A barcode,
+  /// returning its 13 digits or null when no checksum-valid symbol is found.
+  /// Purely algorithmic and deterministic, no model.
+  scanBarcode(luminance: Uint8Array, width: number, height: number): Uint8Array | null {
+    const lumPtr = this.mod.ccall("goss_alloc", "number", ["number"], [luminance.length || 1]) as number;
+    this.mod.HEAPU8.set(luminance, lumPtr);
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [13]) as number;
+    const status = this.mod.ccall("goss_engine_scan_barcode", "number", ["number", "number", "number", "number", "number"], [this.handle, lumPtr, width, height, outPtr]) as number;
+    const digits = status === 0 ? this.mod.HEAPU8.slice(outPtr, outPtr + 13) : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [lumPtr, luminance.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 13]);
+    return digits;
+  }
+
+  /// Scans a width*height 8-bit luminance frame for a QR code and returns its
+  /// decoded payload bytes, or null when no QR decodes. Reed-Solomon error
+  /// correction, algorithmic and deterministic, no model.
+  scanQR(luminance: Uint8Array, width: number, height: number): Uint8Array | null {
+    const lumPtr = this.mod.ccall("goss_alloc", "number", ["number"], [luminance.length || 1]) as number;
+    this.mod.HEAPU8.set(luminance, lumPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const view = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number", "number"];
+    const probe = this.mod.ccall("goss_engine_scan_qr", "number", args, [this.handle, lumPtr, width, height, 0, 0, lenPtr]) as number;
+    let out: Uint8Array | null = null;
+    if (probe === 0) {
+      const needed = view();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+      const fill = this.mod.ccall("goss_engine_scan_qr", "number", args, [this.handle, lumPtr, width, height, outPtr, needed, lenPtr]) as number;
+      if (fill === 0) out = this.mod.HEAPU8.slice(outPtr, outPtr + view());
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lumPtr, luminance.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    return out;
+  }
+
+  /// Generates a QR code for a payload and renders it into a square 8-bit
+  /// luminance image (0 dark, 255 light); returns the pixels and the side
+  /// length. Algorithmic and deterministic, no model.
+  generateQR(payload: Uint8Array, moduleScale = 6, quietModules = 4): { image: Uint8Array; dim: number } | null {
+    const payPtr = this.mod.ccall("goss_alloc", "number", ["number"], [payload.length || 1]) as number;
+    this.mod.HEAPU8.set(payload, payPtr);
+    const dimPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const dimOf = () => new DataView(this.mod.HEAPU8.buffer, dimPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number"];
+    let result: { image: Uint8Array; dim: number } | null = null;
+    if ((this.mod.ccall("goss_engine_generate_qr", "number", args, [this.handle, payPtr, payload.length, moduleScale, quietModules, 0, 0, dimPtr]) as number) === 0) {
+      const dim = dimOf();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [dim * dim || 1]) as number;
+      if ((this.mod.ccall("goss_engine_generate_qr", "number", args, [this.handle, payPtr, payload.length, moduleScale, quietModules, outPtr, dim * dim, dimPtr]) as number) === 0) {
+        result = { image: this.mod.HEAPU8.slice(outPtr, outPtr + dim * dim), dim };
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, dim * dim || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [payPtr, payload.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [dimPtr, 4]);
+    return result;
+  }
+
+  /// Ranks a media archive by semantic similarity. corpus holds count embedding
+  /// vectors of length dim contiguously and query is one dim-vector, all from
+  /// your own embedding model; returns the top k hits by cosine similarity. The
+  /// engine owns the exact search; any embedder feeds it.
+  mediaSearch(corpus: Float32Array, count: number, dim: number, query: Float32Array, k: number): { index: number; score: number }[] {
+    const corpusPtr = this.mod.ccall("goss_alloc", "number", ["number"], [corpus.length * 4 || 4]) as number;
+    this.mod.HEAPF32.set(corpus, corpusPtr / 4);
+    const queryPtr = this.mod.ccall("goss_alloc", "number", ["number"], [query.length * 4 || 4]) as number;
+    this.mod.HEAPF32.set(query, queryPtr / 4);
+    const idxPtr = this.mod.ccall("goss_alloc", "number", ["number"], [k * 4 || 4]) as number;
+    const scorePtr = this.mod.ccall("goss_alloc", "number", ["number"], [k * 4 || 4]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number", "number"];
+    const hits: { index: number; score: number }[] = [];
+    if ((this.mod.ccall("goss_engine_media_search", "number", args, [this.handle, corpusPtr, count, dim, queryPtr, k, idxPtr, scorePtr, countPtr]) as number) === 0) {
+      const n = new DataView(this.mod.HEAPU8.buffer, countPtr, 4).getUint32(0, true);
+      for (let i = 0; i < n; i++) {
+        const index = new DataView(this.mod.HEAPU8.buffer, idxPtr + i * 4, 4).getUint32(0, true);
+        const score = new DataView(this.mod.HEAPU8.buffer, scorePtr + i * 4, 4).getFloat32(0, true);
+        hits.push({ index, score });
+      }
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [corpusPtr, corpus.length * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [queryPtr, query.length * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [idxPtr, k * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [scorePtr, k * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+    return hits;
+  }
+
+  /// Seals a media blob for the on-device vault with ChaCha20-Poly1305 under a
+  /// 32-byte key and 12-byte nonce, binding aad; returns ciphertext then the
+  /// 16-byte tag. Keep the key in the platform keystore.
+  sealMedia(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array, aad: Uint8Array = new Uint8Array(0)): Uint8Array | null {
+    return this.aeadMedia("goss_seal_media", key, nonce, plaintext, aad);
+  }
+
+  /// Opens a sealed vault blob back to plaintext under the same key, nonce and
+  /// aad. Returns null if authentication fails, so a tampered blob never decodes.
+  openMedia(key: Uint8Array, nonce: Uint8Array, sealed: Uint8Array, aad: Uint8Array = new Uint8Array(0)): Uint8Array | null {
+    return this.aeadMedia("goss_open_media", key, nonce, sealed, aad);
+  }
+
+  private aeadMedia(fn: string, key: Uint8Array, nonce: Uint8Array, input: Uint8Array, aad: Uint8Array): Uint8Array | null {
+    const keyPtr = this.mod.ccall("goss_alloc", "number", ["number"], [key.length || 1]) as number;
+    this.mod.HEAPU8.set(key, keyPtr);
+    const noncePtr = this.mod.ccall("goss_alloc", "number", ["number"], [nonce.length || 1]) as number;
+    this.mod.HEAPU8.set(nonce, noncePtr);
+    const inPtr = this.mod.ccall("goss_alloc", "number", ["number"], [input.length || 1]) as number;
+    this.mod.HEAPU8.set(input, inPtr);
+    const aadPtr = this.mod.ccall("goss_alloc", "number", ["number"], [aad.length || 1]) as number;
+    this.mod.HEAPU8.set(aad, aadPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const lenOf = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number", "number"];
+    let out: Uint8Array | null = null;
+    if ((this.mod.ccall(fn, "number", args, [keyPtr, noncePtr, inPtr, input.length, aadPtr, aad.length, 0, 0, lenPtr]) as number) === 0) {
+      const needed = lenOf();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+      if ((this.mod.ccall(fn, "number", args, [keyPtr, noncePtr, inPtr, input.length, aadPtr, aad.length, outPtr, needed, lenPtr]) as number) === 0) {
+        out = this.mod.HEAPU8.slice(outPtr, outPtr + lenOf());
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [keyPtr, key.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [noncePtr, nonce.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [inPtr, input.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [aadPtr, aad.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    return out;
+  }
+
+  /// Picks the best frame of a burst: count luminance frames of width*height
+  /// frameStride bytes apart, scored by sharpness blended with a per-frame
+  /// openness score weighted by opennessWeight in 0..1. Returns the winning
+  /// frame index for best-take fusion.
+  bestTake(frames: Uint8Array, frameStride: number, count: number, width: number, height: number, openness: Float32Array, opennessWeight: number): number {
+    const framesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [frames.length || 1]) as number;
+    this.mod.HEAPU8.set(frames, framesPtr);
+    const opennessPtr = this.mod.ccall("goss_alloc", "number", ["number"], [openness.length * 4 || 4]) as number;
+    this.mod.HEAPF32.set(openness, opennessPtr / 4);
+    const indexPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number", "number"];
+    let index = 0;
+    if ((this.mod.ccall("goss_engine_best_take", "number", args, [this.handle, framesPtr, frameStride, count, width, height, opennessPtr, opennessWeight, indexPtr]) as number) === 0) {
+      index = new DataView(this.mod.HEAPU8.buffer, indexPtr, 4).getUint32(0, true);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [framesPtr, frames.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [opennessPtr, openness.length * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [indexPtr, 4]);
+    return index;
+  }
+
   /// Fingerprints a reference recording and registers it under trackId in the
   /// engine's on-device music catalog. Samples are interleaved f32; re-adding a
   /// trackId layers more landmarks in.
@@ -1044,6 +1219,43 @@ export class GossSession {
     const hit: [number, number, number] | null = status === 0 ? [this.mod.HEAPF32[w]!, this.mod.HEAPF32[w + 1]!, this.mod.HEAPF32[w + 2]!] : null;
     this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 12]);
     return hit;
+  }
+
+  /// Submits the device's pre-scanned world mesh (scene reconstruction, a VPS
+  /// scan) in world space: vertices are xyz triples and indices name three
+  /// vertices per triangle. Passing empty arrays clears the stored mesh.
+  submitWorldMesh(vertices: Float32Array, indices: Uint32Array): void {
+    const vPtr = this.mod.ccall("goss_alloc", "number", ["number"], [vertices.length * 4 || 4]) as number;
+    this.mod.HEAPF32.set(vertices, vPtr / 4);
+    const iPtr = this.mod.ccall("goss_alloc", "number", ["number"], [indices.length * 4 || 4]) as number;
+    this.mod.HEAPU32.set(indices, iPtr / 4);
+    const args = ["number", "number", "number", "number", "number"];
+    this.mod.ccall("goss_session_submit_world_mesh", "number", args, [this.handle, vPtr, vertices.length / 3, iPtr, indices.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [vPtr, vertices.length * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [iPtr, indices.length * 4 || 4]);
+  }
+
+  /// Casts a world-space ray against the submitted world mesh, returning the
+  /// nearest surface hit `{ point, distance }`, or null when no mesh is
+  /// submitted or the ray misses. A tap-to-place lens anchors content there.
+  raycastWorldMesh(origin: [number, number, number], direction: [number, number, number]): { point: [number, number, number]; distance: number } | null {
+    const oPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    this.mod.HEAPF32.set(origin, oPtr / 4);
+    const dPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    this.mod.HEAPF32.set(direction, dPtr / 4);
+    const pPtr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const distPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const args = ["number", "number", "number", "number", "number"];
+    const status = this.mod.ccall("goss_session_raycast_world_mesh", "number", args, [this.handle, oPtr, dPtr, pPtr, distPtr]) as number;
+    const pw = pPtr >> 2;
+    const result = status === 0
+      ? { point: [this.mod.HEAPF32[pw]!, this.mod.HEAPF32[pw + 1]!, this.mod.HEAPF32[pw + 2]!] as [number, number, number], distance: this.mod.HEAPF32[distPtr >> 2]! }
+      : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [oPtr, 12]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [dPtr, 12]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [pPtr, 12]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [distPtr, 4]);
+    return result;
   }
 
   /// Feeds interleaved f32 PCM into the session's own level and beat
@@ -1702,6 +1914,73 @@ export class GossSession {
   /// near-zero vector clears the stream, leaving a rolling.pass inert.
   submitOrientation(gravityX: number, gravityY: number, gravityZ: number, timestampUs: bigint = 0n): void {
     this.mod.ccall("goss_session_submit_orientation", "number", ["number", "number", "number", "number", "number"], [this.handle, gravityX, gravityY, gravityZ, timestampUs]);
+  }
+
+  /// Feeds a host info value keyed by name, the rail an info sticker reads: a
+  /// text.2d node with a matching content_source shows the latest value each
+  /// frame (a time, a place, a sensor reading). A null value clears the key.
+  setInfo(key: string, value: string | null): void {
+    const keyBytes = new TextEncoder().encode(key);
+    const keyPtr = this.mod.ccall("goss_alloc", "number", ["number"], [keyBytes.length || 1]) as number;
+    this.mod.HEAPU8.set(keyBytes, keyPtr);
+    let valuePtr = 0;
+    let valueLen = 0;
+    let valueBytes: Uint8Array | null = null;
+    if (value !== null) {
+      valueBytes = new TextEncoder().encode(value);
+      valueLen = valueBytes.length;
+      valuePtr = this.mod.ccall("goss_alloc", "number", ["number"], [valueLen || 1]) as number;
+      this.mod.HEAPU8.set(valueBytes, valuePtr);
+    }
+    this.mod.ccall("goss_session_set_info", "number", ["number", "number", "number", "number", "number"], [this.handle, keyPtr, keyBytes.length, valuePtr, valueLen]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [keyPtr, keyBytes.length || 1]);
+    if (valuePtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [valuePtr, valueLen || 1]);
+  }
+
+  /// Serializes the active lens's parameter state to a blob a connected lens
+  /// publishes so the cloud syncs it to peers, or null with no lens.
+  snapshotLensState(): Uint8Array | null {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const view = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    let out: Uint8Array | null = null;
+    if ((this.mod.ccall("goss_session_snapshot_lens_state", "number", ["number", "number", "number", "number"], [this.handle, 0, 0, lenPtr]) as number) === 0) {
+      const needed = view();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+      if ((this.mod.ccall("goss_session_snapshot_lens_state", "number", ["number", "number", "number", "number"], [this.handle, outPtr, needed, lenPtr]) as number) === 0) {
+        out = this.mod.HEAPU8.slice(outPtr, outPtr + view());
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    return out;
+  }
+
+  /// Applies a peer's lens-state blob to the active lens, clamping each value
+  /// into its parameter so two runtimes on the same lens converge.
+  applyLensState(blob: Uint8Array): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [blob.length || 1]) as number;
+    this.mod.HEAPU8.set(blob, ptr);
+    this.mod.ccall("goss_session_apply_lens_state", "number", ["number", "number", "number"], [this.handle, ptr, blob.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, blob.length || 1]);
+  }
+
+  /// The active lens's content-provenance manifest as JSON (producer, lens,
+  /// whether the frame is model-generated or edited, and the operations), for the
+  /// host to bind to a capture per C2PA. Null with no active lens.
+  captureProvenance(): string | null {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const view = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    let json: string | null = null;
+    if ((this.mod.ccall("goss_session_capture_provenance", "number", ["number", "number", "number", "number"], [this.handle, 0, 0, lenPtr]) as number) === 0) {
+      const needed = view();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+      if ((this.mod.ccall("goss_session_capture_provenance", "number", ["number", "number", "number", "number"], [this.handle, outPtr, needed, lenPtr]) as number) === 0) {
+        json = new TextDecoder().decode(this.mod.HEAPU8.slice(outPtr, outPtr + view()));
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    return json;
   }
 
   /// Captures the current viewpoint (the last submitted world pose and depth) into

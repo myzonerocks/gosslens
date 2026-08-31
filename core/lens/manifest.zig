@@ -399,6 +399,10 @@ pub const InpaintField = struct {
     /// how far to search outward for the surrounding color that fills it.
     mask_channel: u8 = head_channel,
     radius: f32 = 0.08,
+    /// Temporal consistency for a video inpaint: the fill blends toward the
+    /// previous frame's fill by this amount (0..1) inside the mask, so it holds
+    /// steady instead of flickering. 0 (default) is the raw per-frame fill.
+    coherence: f32 = 0,
 };
 
 pub const RollingShutterField = struct {
@@ -751,6 +755,24 @@ pub const ReshapeField = struct {
     face_overall: f32 = 0,
 };
 
+/// A reshape.body node's per-region body sculpt: each in [-1,1] with 0 the
+/// identity. The warp displaces the body inside its segmentation mask along the
+/// pose axis from the shoulders to the hips, so the background around the body
+/// stays put while the figure is slimmed or lengthened.
+pub const BodyReshapeField = struct {
+    height: f32 = 0,
+    head_size: f32 = 0,
+    neck_length: f32 = 0,
+    shoulder_width: f32 = 0,
+    chest_size: f32 = 0,
+    torso_slim: f32 = 0,
+    waist_slim: f32 = 0,
+    hip_width: f32 = 0,
+    arm_slim: f32 = 0,
+    leg_length: f32 = 0,
+    leg_slim: f32 = 0,
+};
+
 pub const TrailField = struct {
     /// A trail.pass node's echo amount (0..1): how much of the previous
     /// frame blends into this one, so moving content leaves a motion trail.
@@ -827,6 +849,10 @@ pub const SpriteField = struct {
     /// unbounded number of textures.
     frames: u32 = 1,
     fps: f32 = 12.0,
+    /// How an animated sprite retimes its frames: `loop` cycles forward,
+    /// `reverse` cycles backward, and `boomerang` ping-pongs forward then back -
+    /// the slow-mo/reverse/boomerang edit; `fps` sets the speed.
+    play: SpritePlay = .loop,
     /// A segmentation channel that keys the sprite full-frame against the region
     /// it names. Null draws the sprite over the frame at its rect as usual.
     mask_channel: ?u8 = null,
@@ -838,11 +864,33 @@ pub const SpriteField = struct {
     /// the frame and 1 is the full restyle; `mask_strength_param` binds it live.
     mask_strength: f32 = 1,
     mask_strength_param: []const u8 = "",
+    /// A face landmark index (0..477) the sprite pins its center to, so a sticker
+    /// tracks the face - glasses on the eyes, a hat above the brow - following the
+    /// head each frame. Negative (default) leaves the sprite at its screen rect.
+    anchor_face: i32 = -1,
+    /// A segmentation channel the sprite lifts the live subject from instead of a
+    /// bundled image: the frame keyed by it becomes a transparent cutout drawn at
+    /// the sprite rect, an auto-subject sticker. Negative (default) uses the
+    /// bundled image; cutout_softness feathers the matte edge.
+    cutout_channel: i32 = -1,
+    cutout_softness: f32 = 0.02,
+    /// A cutout with no mask channel draws the whole camera frame at the rect - a
+    /// frame inset for generative outpaint, the real frame placed over a generated
+    /// surround. Set when a cutout block omits its mask.
+    cutout_whole: bool = false,
 };
 
 pub const SpriteMaskMode = enum { behind, over };
 
+/// How an animated sprite retimes its frames: forward loop, backward, or a
+/// forward-then-back ping-pong (boomerang).
+pub const SpritePlay = enum { loop, reverse, boomerang };
+
 pub const max_sprite_frames = 64;
+
+/// The face-mesh landmark count an `anchor_face` index is bound within; mirrors
+/// the tracker's dense face mesh so a sticker can pin to any point on it.
+pub const face_landmark_count = 478;
 
 pub const TextField = struct {
     /// A text.2d node's inline string, the screen rect it fills (same
@@ -879,6 +927,17 @@ pub const TextField = struct {
     /// a positive value and drop below for a negative one, so a lens curves a
     /// banner. Clamped to -1..1 (a full text-height bow); 0 keeps it straight.
     bend: f32 = 0,
+    /// A face landmark index (0..477) the text pins its center to, so a caption
+    /// tracks the head - a name tag over the brow, a label on the chin. Negative
+    /// (default) leaves the text at its screen rect.
+    anchor_face: i32 = -1,
+    /// Names a live source filling the text each frame instead of the static
+    /// content: a built-in clock ("clock.elapsed", "countdown") or a host key the
+    /// app feeds through the info rail. Empty draws the static content once.
+    content_source: []const u8 = "",
+    /// The duration a "countdown" content_source counts down from, in seconds;
+    /// the text formats the remaining time off the lens clock.
+    countdown_seconds: f32 = 0,
 };
 
 pub const VideoField = struct {
@@ -1364,6 +1423,8 @@ pub const Node = struct {
     /// Set only on a reshape.bank node: its sixty-six per-region face sculpt
     /// amounts.
     reshape: ?ReshapeField = null,
+    /// Set only on a reshape.body node: its per-region body sculpt amounts.
+    body_reshape: ?BodyReshapeField = null,
     /// Set only on a trail.pass node: its motion-trail echo amount.
     trail: ?TrailField = null,
     /// Set only on an ssr.pass node: its reflection strength and floor plane.
@@ -2499,6 +2560,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             } else {
                 var field: InpaintField = .{};
                 if (getField(iv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0, 0.5);
+                if (getField(iv.object, "coherence")) |v| field.coherence = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.coherence)), 0, 1);
                 if (getField(iv.object, "mask")) |v| {
                     if (v == .string) {
                         if (maskChannelIndex(v.string)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "inpaint mask names an unknown channel '{s}'", .{v.string});
@@ -3045,6 +3107,26 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         } else if (std.mem.eql(u8, node_type, "reshape.bank")) {
             reshape_field = .{};
         }
+        var body_reshape_field: ?BodyReshapeField = null;
+        if (getField(object, "body")) |bv| {
+            const bmark = path.push("body");
+            if (!std.mem.eql(u8, node_type, "reshape.body")) {
+                try diags.add(path.slice(), "body is a reshape.body field, found it on '{s}'", .{node_type});
+            } else if (bv != .object) {
+                try diags.add(path.slice(), "body must be an object", .{});
+            } else {
+                var field: BodyReshapeField = .{};
+                inline for (std.meta.fields(BodyReshapeField)) |f| {
+                    if (getField(bv.object, f.name)) |v| {
+                        @field(field, f.name) = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse @field(field, f.name))), -1.0, 1.0);
+                    }
+                }
+                body_reshape_field = field;
+            }
+            path.pop(bmark);
+        } else if (std.mem.eql(u8, node_type, "reshape.body")) {
+            body_reshape_field = .{};
+        }
         var trail_field: ?TrailField = null;
         if (getField(object, "trail")) |tv| {
             const tmark = path.push("trail");
@@ -3139,12 +3221,32 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(sv.object, "h_param")) |v| {
                     if (try expectString(diags, path, v)) |s| field.h_param = try arena.dupe(u8, s);
                 }
+                if (getField(sv.object, "anchor_face")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer < face_landmark_count) {
+                        field.anchor_face = @intCast(v.integer);
+                    } else try diags.add(path.slice(), "sprite anchor_face must be a face landmark index 0..{d}", .{face_landmark_count - 1});
+                }
+                if (getField(sv.object, "cutout")) |cv| {
+                    if (cv == .object) {
+                        if (getField(cv.object, "mask")) |mv| {
+                            if (try expectString(diags, path, mv)) |name| {
+                                if (maskChannelIndex(name)) |channel| field.cutout_channel = channel else try diags.add(path.slice(), "sprite cutout mask names an unknown channel '{s}'", .{name});
+                            }
+                        } else field.cutout_whole = true;
+                        if (getField(cv.object, "softness")) |sfv| field.cutout_softness = std.math.clamp(@as(f32, @floatCast(numberOf(sfv) orelse field.cutout_softness)), 0.001, 0.5);
+                    } else try diags.add(path.slice(), "sprite cutout must be an object", .{});
+                }
                 if (getField(sv.object, "frames")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= max_sprite_frames) {
                         field.frames = @intCast(v.integer);
                     } else try diags.add(path.slice(), "sprite frames must be an integer 1..{d}", .{max_sprite_frames});
                 }
                 if (getField(sv.object, "fps")) |v| field.fps = @floatCast(numberOf(v) orelse field.fps);
+                if (getField(sv.object, "play")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        if (std.mem.eql(u8, name, "loop")) field.play = .loop else if (std.mem.eql(u8, name, "reverse")) field.play = .reverse else if (std.mem.eql(u8, name, "boomerang")) field.play = .boomerang else try diags.add(path.slice(), "sprite play is 'loop', 'reverse' or 'boomerang', found '{s}'", .{name});
+                    }
+                }
                 if (getField(sv.object, "mask")) |v| {
                     if (try expectString(diags, path, v)) |name| {
                         if (maskChannelIndex(name)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "sprite mask names an unknown channel '{s}'", .{name});
@@ -3256,6 +3358,15 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(tv.object, "bend")) |v| {
                     if (numberOf(v)) |n| field.bend = std.math.clamp(@as(f32, @floatCast(n)), -1.0, 1.0);
                 }
+                if (getField(tv.object, "anchor_face")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer < face_landmark_count) {
+                        field.anchor_face = @intCast(v.integer);
+                    } else try diags.add(path.slice(), "text anchor_face must be a face landmark index 0..{d}", .{face_landmark_count - 1});
+                }
+                if (getField(tv.object, "content_source")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.content_source = try arena.dupe(u8, s);
+                }
+                if (getField(tv.object, "countdown_seconds")) |v| field.countdown_seconds = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.countdown_seconds)));
                 text_field = field;
             }
             path.pop(tmark);
@@ -3963,6 +4074,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .edge = edge_field,
             .warp = warp_field,
             .reshape = reshape_field,
+            .body_reshape = body_reshape_field,
             .trail = trail_field,
             .ssr = ssr_field,
             .env = env_field,
@@ -5934,4 +6046,42 @@ test "a lens declares custom hand gestures and rejects malformed ones" {
     var result = try parseFails(bad_len);
     defer result.deinit();
     try t.expect(std.mem.indexOf(u8, result.diags.items[0].message, "five states") != null);
+}
+
+test "the manifest parser survives deterministic mutation fuzzing without crashing or leaking" {
+    // The lens format is a public, forkable standard, so its parser is the trust
+    // boundary for untrusted lenses. Hammer a valid manifest with deterministic
+    // byte and structural mutations; the parser must always return, never crash
+    // on malformed bytes, and the testing allocator must see no leak.
+    const base =
+        \\{"glf":"1.0","id":"fuzz","version":"1.0.0","display_name":"Fuzz","engine_compat":">=0.5","capabilities":["hands"],"parameters":[{"name":"p","type":"int","default":5,"min":0,"max":100}],"nodes":[{"type":"model.gltf","id":"n","src":"m.glb","particles":{"color":[1,0,0]}},{"type":"sprite.2d","id":"s","asset":"s.png"}],"triggers":[{"when":"start","action":{"kind":"param_ramp","target":"p","to":1,"duration_ms":100}}]}
+    ;
+    var prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
+    const rand = prng.random();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(t.allocator);
+    var iter: usize = 0;
+    while (iter < 3000) : (iter += 1) {
+        buf.clearRetainingCapacity();
+        try buf.appendSlice(t.allocator, base);
+        const mutations = 1 + rand.uintLessThan(usize, 6);
+        var m: usize = 0;
+        while (m < mutations) : (m += 1) {
+            if (buf.items.len == 0) break;
+            switch (rand.uintLessThan(u8, 4)) {
+                0 => buf.items[rand.uintLessThan(usize, buf.items.len)] = rand.int(u8),
+                1 => try buf.insert(t.allocator, rand.uintLessThan(usize, buf.items.len), rand.int(u8)),
+                2 => _ = buf.orderedRemove(rand.uintLessThan(usize, buf.items.len)),
+                3 => buf.shrinkRetainingCapacity(rand.uintLessThan(usize, buf.items.len)),
+                else => unreachable,
+            }
+        }
+        var arena = std.heap.ArenaAllocator.init(t.allocator);
+        defer arena.deinit();
+        var diags: Diagnostics = .{ .arena = arena.allocator() };
+        var parsed = parse(t.allocator, &diags, buf.items) catch |e| switch (e) {
+            error.OutOfMemory => continue,
+        };
+        if (parsed) |*mani| mani.deinit();
+    }
 }

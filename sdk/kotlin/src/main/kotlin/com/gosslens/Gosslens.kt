@@ -31,6 +31,14 @@ object Gosslens {
     internal external fun nativeSubmitAudio(session: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Int
     internal external fun nativeRenderFrame(engine: Long, session: Long): Int
     internal external fun nativeCompilePrompt(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeGenerateSong(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, sampleRate: Int, seed: Int, bars: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeScanBarcode(engine: Long, lumBuffer: ByteBuffer, width: Int, height: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativeScanQr(engine: Long, lumBuffer: ByteBuffer, width: Int, height: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeGenerateQr(engine: Long, payloadBuffer: ByteBuffer, payloadLen: Int, moduleScale: Int, quietModules: Int, outBuffer: ByteBuffer, outCapacity: Long, dimBuffer: ByteBuffer): Int
+    internal external fun nativeMediaSearch(engine: Long, corpusBuffer: ByteBuffer, count: Int, dim: Int, queryBuffer: ByteBuffer, k: Int, indicesBuffer: ByteBuffer, scoresBuffer: ByteBuffer, countBuffer: ByteBuffer): Int
+    internal external fun nativeSealMedia(keyBuffer: ByteBuffer, nonceBuffer: ByteBuffer, plaintextBuffer: ByteBuffer, plaintextLen: Int, aadBuffer: ByteBuffer, aadLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeOpenMedia(keyBuffer: ByteBuffer, nonceBuffer: ByteBuffer, sealedBuffer: ByteBuffer, sealedLen: Int, aadBuffer: ByteBuffer, aadLen: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeBestTake(engine: Long, framesBuffer: ByteBuffer, frameStride: Long, count: Int, width: Int, height: Int, opennessBuffer: ByteBuffer, opennessWeight: Float, indexBuffer: ByteBuffer): Int
     internal external fun nativeMusicAddReference(engine: Long, trackId: Int, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeMusicClearReferences(engine: Long)
     internal external fun nativeMusicIdentify(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int, outBuffer: ByteBuffer): Int
@@ -110,6 +118,10 @@ object Gosslens {
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
     internal external fun nativeSubmitOrientation(session: Long, gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Int
+    internal external fun nativeSetInfo(session: Long, keyBuffer: ByteBuffer, keyLen: Int, valueBuffer: ByteBuffer?, valueLen: Int): Int
+    internal external fun nativeSnapshotLensState(session: Long, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeApplyLensState(session: Long, blobBuffer: ByteBuffer, blobLen: Int): Int
+    internal external fun nativeCaptureProvenance(session: Long, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
     internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
     internal external fun nativeCaptionSegment(session: Long, index: Int, out: ByteBuffer): Int
     internal external fun nativeCaptionSegmentText(session: Long, index: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
@@ -127,6 +139,8 @@ object Gosslens {
     internal external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
     internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeHitTest(session: Long, screenX: Float, screenY: Float, outBuffer: ByteBuffer): Int
+    internal external fun nativeSubmitWorldMesh(session: Long, verticesBuffer: ByteBuffer, vertexCount: Int, indicesBuffer: ByteBuffer, indexCount: Int): Int
+    internal external fun nativeRaycastWorldMesh(session: Long, originBuffer: ByteBuffer, directionBuffer: ByteBuffer, pointBuffer: ByteBuffer, distanceBuffer: ByteBuffer): Int
     internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
@@ -471,6 +485,149 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         val result = ByteArray(written)
         out.get(result)
         return String(result, Charsets.UTF_8)
+    }
+
+    /** Composes an on-device generative-music track from a text prompt and
+     * returns it as a mono 16-bit WAV. A non-zero seed varies the take; bars 0
+     * uses the default length. Deterministic, no model and no network. */
+    fun generateSong(prompt: String, sampleRate: Int = 48000, seed: Int = 0, bars: Int = 0): ByteArray {
+        val bytes = prompt.toByteArray(Charsets.UTF_8)
+        val promptBuffer = ByteBuffer.allocateDirect(maxOf(bytes.size, 1))
+        promptBuffer.put(bytes)
+        promptBuffer.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        Gosslens.nativeGenerateSong(handle, promptBuffer, bytes.size, sampleRate, seed, bars, probe, 0L, len)
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        Gosslens.nativeGenerateSong(handle, promptBuffer, bytes.size, sampleRate, seed, bars, out, needed.toLong(), len)
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return result
+    }
+
+    /** Scans a width*height 8-bit luminance frame for an EAN-13 / UPC-A barcode,
+     * returning its 13 digits or null when no checksum-valid symbol is found.
+     * Purely algorithmic and deterministic, no model. */
+    fun scanBarcode(luminance: ByteArray, width: Int, height: Int): ByteArray? {
+        val lumBuffer = ByteBuffer.allocateDirect(maxOf(luminance.size, 1))
+        lumBuffer.put(luminance)
+        lumBuffer.rewind()
+        val out = ByteBuffer.allocateDirect(13)
+        if (Gosslens.nativeScanBarcode(handle, lumBuffer, width, height, out) != 0) return null
+        val result = ByteArray(13)
+        out.get(result)
+        return result
+    }
+
+    /** Scans a width*height 8-bit luminance frame for a QR code and returns its
+     * decoded payload bytes, or null when no QR decodes. Reed-Solomon error
+     * correction, algorithmic and deterministic, no model. */
+    fun scanQR(luminance: ByteArray, width: Int, height: Int): ByteArray? {
+        val lumBuffer = ByteBuffer.allocateDirect(maxOf(luminance.size, 1))
+        lumBuffer.put(luminance)
+        lumBuffer.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeScanQr(handle, lumBuffer, width, height, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        if (Gosslens.nativeScanQr(handle, lumBuffer, width, height, out, needed.toLong(), len) != 0) return null
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return result
+    }
+
+    /** Generates a QR code for a payload and renders it into a square 8-bit
+     * luminance image (0 dark, 255 light); returns the pixels and the side
+     * length. Algorithmic and deterministic, no model. */
+    fun generateQR(payload: ByteArray, moduleScale: Int = 6, quietModules: Int = 4): Pair<ByteArray, Int>? {
+        val payloadBuffer = ByteBuffer.allocateDirect(maxOf(payload.size, 1))
+        payloadBuffer.put(payload)
+        payloadBuffer.rewind()
+        val dim = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeGenerateQr(handle, payloadBuffer, payload.size, moduleScale, quietModules, probe, 0L, dim) != 0) return null
+        val side = dim.getInt(0)
+        val out = ByteBuffer.allocateDirect(maxOf(side * side, 1))
+        if (Gosslens.nativeGenerateQr(handle, payloadBuffer, payload.size, moduleScale, quietModules, out, (side * side).toLong(), dim) != 0) return null
+        val result = ByteArray(side * side)
+        out.get(result)
+        return Pair(result, side)
+    }
+
+    /** One semantic-search hit: the archive index of a media item and its cosine
+     * similarity to the query. */
+    data class MediaHit(val index: Int, val score: Float)
+
+    /** Ranks a media archive by semantic similarity. [corpus] holds [count]
+     * embedding vectors of length [dim] contiguously and [query] is one
+     * dim-vector, all from your own embedding model; returns the top [k] hits by
+     * cosine similarity. The engine owns the exact search; any embedder feeds it. */
+    fun mediaSearch(corpus: FloatArray, count: Int, dim: Int, query: FloatArray, k: Int): List<MediaHit> {
+        val corpusBuffer = ByteBuffer.allocateDirect(maxOf(corpus.size, 1) * 4).order(ByteOrder.nativeOrder())
+        corpusBuffer.asFloatBuffer().put(corpus)
+        val queryBuffer = ByteBuffer.allocateDirect(maxOf(query.size, 1) * 4).order(ByteOrder.nativeOrder())
+        queryBuffer.asFloatBuffer().put(query)
+        val indices = ByteBuffer.allocateDirect(maxOf(k, 1) * 4).order(ByteOrder.nativeOrder())
+        val scores = ByteBuffer.allocateDirect(maxOf(k, 1) * 4).order(ByteOrder.nativeOrder())
+        val written = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeMediaSearch(handle, corpusBuffer, count, dim, queryBuffer, k, indices, scores, written) != 0) return emptyList()
+        val n = written.getInt(0)
+        return (0 until n).map { MediaHit(indices.getInt(it * 4), scores.getFloat(it * 4)) }
+    }
+
+    /** Seals a media blob for the on-device vault with ChaCha20-Poly1305 under a
+     * 32-byte [key] and 12-byte [nonce], binding [aad]; returns ciphertext then
+     * the 16-byte tag. Keep the key in the platform keystore. */
+    fun sealMedia(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray? {
+        val keyBuffer = ByteBuffer.allocateDirect(maxOf(key.size, 1)); keyBuffer.put(key); keyBuffer.rewind()
+        val nonceBuffer = ByteBuffer.allocateDirect(maxOf(nonce.size, 1)); nonceBuffer.put(nonce); nonceBuffer.rewind()
+        val plainBuffer = ByteBuffer.allocateDirect(maxOf(plaintext.size, 1)); plainBuffer.put(plaintext); plainBuffer.rewind()
+        val aadBuffer = ByteBuffer.allocateDirect(maxOf(aad.size, 1)); aadBuffer.put(aad); aadBuffer.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeSealMedia(keyBuffer, nonceBuffer, plainBuffer, plaintext.size, aadBuffer, aad.size, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        if (Gosslens.nativeSealMedia(keyBuffer, nonceBuffer, plainBuffer, plaintext.size, aadBuffer, aad.size, out, needed.toLong(), len) != 0) return null
+        val result = ByteArray(len.getLong(0).toInt())
+        out.get(result)
+        return result
+    }
+
+    /** Opens a sealed vault blob back to plaintext under the same key, nonce and
+     * aad. Returns null if authentication fails, so a tampered blob never
+     * decodes. */
+    fun openMedia(key: ByteArray, nonce: ByteArray, sealed: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray? {
+        val keyBuffer = ByteBuffer.allocateDirect(maxOf(key.size, 1)); keyBuffer.put(key); keyBuffer.rewind()
+        val nonceBuffer = ByteBuffer.allocateDirect(maxOf(nonce.size, 1)); nonceBuffer.put(nonce); nonceBuffer.rewind()
+        val sealedBuffer = ByteBuffer.allocateDirect(maxOf(sealed.size, 1)); sealedBuffer.put(sealed); sealedBuffer.rewind()
+        val aadBuffer = ByteBuffer.allocateDirect(maxOf(aad.size, 1)); aadBuffer.put(aad); aadBuffer.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeOpenMedia(keyBuffer, nonceBuffer, sealedBuffer, sealed.size, aadBuffer, aad.size, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        if (Gosslens.nativeOpenMedia(keyBuffer, nonceBuffer, sealedBuffer, sealed.size, aadBuffer, aad.size, out, needed.toLong(), len) != 0) return null
+        val result = ByteArray(len.getLong(0).toInt())
+        out.get(result)
+        return result
+    }
+
+    /** Picks the best frame of a burst: [count] luminance frames of width*height
+     * [frameStride] bytes apart, scored by sharpness blended with a per-frame
+     * [openness] score weighted by [opennessWeight] in 0..1. Returns the winning
+     * frame index for best-take fusion. */
+    fun bestTake(frames: ByteArray, frameStride: Long, count: Int, width: Int, height: Int, openness: FloatArray, opennessWeight: Float): Int {
+        val framesBuffer = ByteBuffer.allocateDirect(maxOf(frames.size, 1)); framesBuffer.put(frames); framesBuffer.rewind()
+        val opennessBuffer = ByteBuffer.allocateDirect(maxOf(openness.size, 1) * 4).order(ByteOrder.nativeOrder())
+        opennessBuffer.asFloatBuffer().put(openness)
+        val index = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeBestTake(handle, framesBuffer, frameStride, count, width, height, opennessBuffer, opennessWeight, index) != 0) return 0
+        return index.getInt(0)
     }
 
     /** Fingerprints a reference recording and registers it under [trackId] in the
@@ -1197,6 +1354,62 @@ class GossSession private constructor(
     fun submitOrientation(gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Boolean =
         Gosslens.nativeSubmitOrientation(handle, gravityX, gravityY, gravityZ, timestampUs) == 0
 
+    /** Feeds a host info value keyed by name, the rail an info sticker reads: a
+     * text.2d node with a matching content_source shows the latest value each
+     * frame (a time, a place, a sensor reading). A null value clears the key. */
+    fun setInfo(key: String, value: String?): Boolean {
+        val keyBytes = key.toByteArray(Charsets.UTF_8)
+        val keyBuffer = ByteBuffer.allocateDirect(maxOf(keyBytes.size, 1))
+        keyBuffer.put(keyBytes)
+        keyBuffer.rewind()
+        if (value == null) return Gosslens.nativeSetInfo(handle, keyBuffer, keyBytes.size, null, 0) == 0
+        val valueBytes = value.toByteArray(Charsets.UTF_8)
+        val valueBuffer = ByteBuffer.allocateDirect(maxOf(valueBytes.size, 1))
+        valueBuffer.put(valueBytes)
+        valueBuffer.rewind()
+        return Gosslens.nativeSetInfo(handle, keyBuffer, keyBytes.size, valueBuffer, valueBytes.size) == 0
+    }
+
+    /** Serializes the active lens's parameter state to a blob a connected lens
+     * publishes so the cloud syncs it to peers, or null with no lens. */
+    fun snapshotLensState(): ByteArray? {
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeSnapshotLensState(handle, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        if (Gosslens.nativeSnapshotLensState(handle, out, needed.toLong(), len) != 0) return null
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return result
+    }
+
+    /** Applies a peer's lens-state blob to the active lens, clamping each value
+     * into its parameter so two runtimes on the same lens converge. */
+    fun applyLensState(blob: ByteArray): Boolean {
+        val blobBuffer = ByteBuffer.allocateDirect(maxOf(blob.size, 1))
+        blobBuffer.put(blob)
+        blobBuffer.rewind()
+        return Gosslens.nativeApplyLensState(handle, blobBuffer, blob.size) == 0
+    }
+
+    /** The active lens's content-provenance manifest as JSON (producer, lens,
+     * whether the frame is model-generated or edited, and the operations), for the
+     * host to bind to a capture per C2PA. Null with no active lens. */
+    fun captureProvenance(): String? {
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeCaptureProvenance(handle, probe, 0L, len) != 0) return null
+        val needed = len.getLong(0).toInt()
+        val out = ByteBuffer.allocateDirect(maxOf(needed, 1))
+        if (Gosslens.nativeCaptureProvenance(handle, out, needed.toLong(), len) != 0) return null
+        val written = len.getLong(0).toInt()
+        val result = ByteArray(written)
+        out.get(result)
+        return String(result, Charsets.UTF_8)
+    }
+
     /** Captures the current viewpoint (the last submitted world pose and depth)
      * into a guided scan, back-projecting the depth into a deterministic gaussian
      * reconstruction, and returns the scan's coverage. Null on failure. */
@@ -1375,6 +1588,35 @@ class GossSession private constructor(
         val outBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
         return if (Gosslens.nativeHitTest(handle, screenX, screenY, outBuf) == 0)
             floatArrayOf(outBuf.getFloat(0), outBuf.getFloat(4), outBuf.getFloat(8)) else null
+    }
+
+    /** One world-mesh raycast hit: the world-space [point] and the ray
+     * [distance] to it. */
+    data class WorldMeshHit(val point: FloatArray, val distance: Float)
+
+    /** Submits the device's pre-scanned world mesh (scene reconstruction, a VPS
+     * scan) in world space: [vertices] are xyz triples and [indices] name three
+     * vertices per triangle. Passing empty arrays clears the stored mesh. */
+    fun submitWorldMesh(vertices: FloatArray, indices: IntArray) {
+        val vBuf = ByteBuffer.allocateDirect(maxOf(vertices.size, 1) * 4).order(ByteOrder.nativeOrder())
+        vBuf.asFloatBuffer().put(vertices)
+        val iBuf = ByteBuffer.allocateDirect(maxOf(indices.size, 1) * 4).order(ByteOrder.nativeOrder())
+        iBuf.asIntBuffer().put(indices)
+        Gosslens.nativeSubmitWorldMesh(handle, vBuf, vertices.size / 3, iBuf, indices.size)
+    }
+
+    /** Casts a world-space ray against the submitted world mesh, returning the
+     * nearest surface hit and its ray distance, or null when no mesh is
+     * submitted or the ray misses. A tap-to-place lens anchors content there. */
+    fun raycastWorldMesh(origin: FloatArray, direction: FloatArray): WorldMeshHit? {
+        val oBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
+        oBuf.asFloatBuffer().put(origin)
+        val dBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
+        dBuf.asFloatBuffer().put(direction)
+        val pBuf = ByteBuffer.allocateDirect(3 * 4).order(ByteOrder.nativeOrder())
+        val distBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeRaycastWorldMesh(handle, oBuf, dBuf, pBuf, distBuf) != 0) return null
+        return WorldMeshHit(floatArrayOf(pBuf.getFloat(0), pBuf.getFloat(4), pBuf.getFloat(8)), distBuf.getFloat(0))
     }
 
     /** Pulls the next block of mixed lens audio into a direct [out] buffer

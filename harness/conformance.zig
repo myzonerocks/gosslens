@@ -11,6 +11,8 @@
 
 const std = @import("std");
 const abi = @import("abi");
+const barcode = @import("barcode");
+const qr = @import("qr");
 const sampler = @import("sampler");
 const image_adapter = @import("image");
 const png = @import("png");
@@ -817,6 +819,648 @@ fn provePerFaceBinding(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
 
     std.debug.print("conformance: PROOF a model bound to face_index 1 draws only on the second face - the right half lights ({d} px) while the left stays byte-identical, bit-stable\n", .{right_changed});
+    return true;
+}
+
+/// Proves a face-anchored node tracks the head: a node with `anchor_face` pins
+/// its center to a face landmark. The content sits on the head; shifting the
+/// face left then right lands it on each side, so the two frames differ on the
+/// side the content occupies. Shared by the sprite and text sticker proofs.
+fn proveFaceAnchored(gpa: std.mem.Allocator, engine: *abi.Engine, lens_dir: []const u8, noun: []const u8, out_png: []const u8) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 1) != .ok) {
+        std.debug.print("conformance: FAIL {s} tracking enable\n", .{noun});
+        return false;
+    }
+    if (abi.goss_session_activate_lens_from_directory(session, lens_dir.ptr, lens_dir.len) != .ok) {
+        std.debug.print("conformance: FAIL {s} lens activation\n", .{noun});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    // Harvest one real face off the corpus so its landmarks fit a real head.
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+    var base: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.goss_session_face_result(session, &base) == .again) {
+        std.Thread.yield() catch {};
+        if (g_watch) c.glfwPollEvents();
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+
+    // Slide the whole head a fifth of the frame each way: the anchored content
+    // rides its landmark, so it lands clearly left then clearly right.
+    const shift = @as(f32, @floatFromInt(planes.width)) * 0.2;
+    const landmark_count = base.landmarks.len / 3;
+    var left = base;
+    var right = base;
+    var lm: usize = 0;
+    while (lm < landmark_count) : (lm += 1) {
+        left.landmarks[lm * 3] -= shift;
+        right.landmarks[lm * 3] += shift;
+    }
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_left = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_left);
+    const shot_right = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_right);
+    const shot_left_again = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_left_again);
+
+    const one_left = [_]abi.FaceResult{left};
+    const one_right = [_]abi.FaceResult{right};
+    var wl: u32 = 0;
+    var hl: u32 = 0;
+    var wr: u32 = 0;
+    var hr: u32 = 0;
+    var wl2: u32 = 0;
+    var hl2: u32 = 0;
+    try renderSubmittedFaces(engine, session, &desc, planes, &one_left, shot_left, &wl, &hl);
+    try renderSubmittedFaces(engine, session, &desc, planes, &one_right, shot_right, &wr, &hr);
+    try renderSubmittedFaces(engine, session, &desc, planes, &one_left, shot_left_again, &wl2, &hl2);
+    if (wl != wr or hl != hr or wl == 0 or hl == 0) {
+        std.debug.print("conformance: FAIL {s} capture size {d}x{d} vs {d}x{d}\n", .{ noun, wl, hl, wr, hr });
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_left[0 .. wl * hl * 4], shot_left_again[0 .. wl2 * hl2 * 4])) {
+        std.debug.print("conformance: FAIL {s} is not bit-stable across runs\n", .{noun});
+        return false;
+    }
+
+    // Only the content's position differs between the two frames. Where the left
+    // frame's content sits (left half) it differs from the right frame, and where
+    // the right frame's content sits (right half) it differs too - so it followed
+    // the face across the middle instead of holding one spot.
+    var left_changed: usize = 0;
+    var right_changed: usize = 0;
+    var y: u32 = 0;
+    while (y < hl) : (y += 1) {
+        var x: u32 = 0;
+        while (x < wl) : (x += 1) {
+            const idx = (y * wl + x) * 4;
+            const differs = !std.mem.eql(u8, shot_left[idx .. idx + 4], shot_right[idx .. idx + 4]);
+            if (differs) {
+                if (x < wl / 2) left_changed += 1 else right_changed += 1;
+            }
+        }
+    }
+    if (left_changed == 0 or right_changed == 0) {
+        std.debug.print("conformance: FAIL {s} did not track the face (left changed {d}, right changed {d})\n", .{ noun, left_changed, right_changed });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_right[0 .. wl * hl * 4], @intCast(wl), @intCast(hl));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = out_png, .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF a face-anchored {s} tracks the head - it rode the landmark left ({d} px) then right ({d} px), bit-stable\n", .{ noun, left_changed, right_changed });
+    return true;
+}
+
+fn proveFaceSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    return proveFaceAnchored(gpa, engine, ".lens-packages/sticker-face", "sprite sticker", "zig-out/conformance-face-sticker.png");
+}
+
+fn proveFaceText(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    return proveFaceAnchored(gpa, engine, ".lens-packages/text-face", "text caption", "zig-out/conformance-face-text.png");
+}
+
+/// Renders the info-clock lens after advancing the lens clock `seconds` seconds
+/// and captures the frame: the countdown text resolves off the elapsed time, so
+/// two elapsed points draw different digits. A fresh session each call.
+fn renderInfoClockCapture(engine: *abi.Engine, desc: *const abi.FrameDesc, planes: anytype, seconds: u32, shot: []u8, out_w: *u32, out_h: *u32) !void {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/info-clock", ".lens-packages/info-clock".len) != .ok) return error.LensActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    // One frame establishes the current frame, then the clock advances a
+    // second at a time, then a few frames draw the resolved countdown.
+    if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    var i: u32 = 0;
+    while (i < seconds) : (i += 1) _ = abi.goss_session_tick_lens(session, 1_000_000, &signals);
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+}
+
+/// Proves an info sticker updates live: a text.2d node with a "countdown"
+/// content_source shows a clock ticking off the lens time, so the start digits
+/// differ from those a minute later and the same elapsed point redraws
+/// bit-identically. Host-fed stickers flow the same rail through set_info.
+fn proveInfoSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_start = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_start);
+    const shot_late = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_late);
+    const shot_late_again = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_late_again);
+
+    var ws: u32 = 0;
+    var hs: u32 = 0;
+    var wl: u32 = 0;
+    var hl: u32 = 0;
+    var wl2: u32 = 0;
+    var hl2: u32 = 0;
+    // 90-second countdown: "01:30" at the start, "00:25" after 65 seconds.
+    try renderInfoClockCapture(engine, &desc, planes, 0, shot_start, &ws, &hs);
+    try renderInfoClockCapture(engine, &desc, planes, 65, shot_late, &wl, &hl);
+    try renderInfoClockCapture(engine, &desc, planes, 65, shot_late_again, &wl2, &hl2);
+    if (ws != wl or hs != hl or ws == 0 or hs == 0) {
+        std.debug.print("conformance: FAIL info-sticker capture size {d}x{d} vs {d}x{d}\n", .{ ws, hs, wl, hl });
+        return false;
+    }
+    if (std.mem.eql(u8, shot_start[0 .. ws * hs * 4], shot_late[0 .. wl * hl * 4])) {
+        std.debug.print("conformance: FAIL info-sticker countdown did not change over time\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_late[0 .. wl * hl * 4], shot_late_again[0 .. wl2 * hl2 * 4])) {
+        std.debug.print("conformance: FAIL info-sticker is not bit-stable at the same elapsed time\n", .{});
+        return false;
+    }
+
+    var changed: usize = 0;
+    for (0..ws * hs) |px| {
+        const idx = px * 4;
+        if (!std.mem.eql(u8, shot_start[idx .. idx + 4], shot_late[idx .. idx + 4])) changed += 1;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_late[0 .. wl * hl * 4], @intCast(wl), @intCast(hl));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-info-sticker.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF an info sticker updates live - a countdown redrew from 01:30 to 00:25 as the lens clock advanced ({d} px changed), bit-stable at a fixed time\n", .{changed});
+    return true;
+}
+
+/// Proves the auto-subject cutout sticker maker: a sprite.2d with a `cutout`
+/// channel lifts the segmented subject into a transparent texture drawn at the
+/// sprite rect. With a subject mask the right-side rect changes while the left
+/// half stays byte-identical to the no-mask frame, and it redraws deterministically.
+fn proveCutoutSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const rgba = corpus.frame.pixels.rgba8;
+    const cw = corpus.frame.width;
+    const ch = corpus.frame.height;
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_cut = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_cut);
+    const shot_cut2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_cut2);
+    const shot_none = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_none);
+    var wc: u32 = 0;
+    var hc: u32 = 0;
+    var wc2: u32 = 0;
+    var hc2: u32 = 0;
+    var wn: u32 = 0;
+    var hn: u32 = 0;
+
+    // The subject is present: a segmenter mask keys the cutout, which the sprite
+    // draws at its right-side rect.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/cutout-sticker", ".lens-packages/cutout-sticker".len) != .ok) return error.ActivationFailed;
+        if (abi.goss_session_submit_segmentation_image(session, rgba.ptr, cw, ch) != .ok) return error.SubmitSegImageFailed;
+        var polls: usize = 0;
+        while (session.segmentation_texture == null) {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            polls += 1;
+            if (polls > 1_000_000) return error.MaskNeverProduced;
+        }
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_cut.ptr, shot_cut.len, &wc, &hc) != .ok) return error.CaptureFailed;
+        for (0..3) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_cut2.ptr, shot_cut2.len, &wc2, &hc2) != .ok) return error.CaptureFailed;
+    }
+    // No subject mask: the cutout keys to nothing and stays transparent, so the
+    // frame passes through untouched - the sticker's off-state.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/cutout-sticker", ".lens-packages/cutout-sticker".len) != .ok) return error.ActivationFailed;
+        for (0..10) |_| {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_none.ptr, shot_none.len, &wn, &hn) != .ok) return error.CaptureFailed;
+    }
+    if (wc == 0 or wc != wn or hc != hn or wc != wc2 or hc != hc2) {
+        std.debug.print("conformance: FAIL cutout-sticker capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_cut[0 .. wc * hc * 4], shot_cut2[0 .. wc * hc * 4])) {
+        std.debug.print("conformance: FAIL cutout-sticker is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // The cutout only draws at the right-side rect, so the left half stays
+    // byte-identical to the untouched frame while the right half gains the
+    // lifted subject.
+    var left_changed: usize = 0;
+    var right_changed: usize = 0;
+    var y: u32 = 0;
+    while (y < hc) : (y += 1) {
+        var x: u32 = 0;
+        while (x < wc) : (x += 1) {
+            const idx = (y * wc + x) * 4;
+            if (!std.mem.eql(u8, shot_cut[idx .. idx + 4], shot_none[idx .. idx + 4])) {
+                if (x < wc / 2) left_changed += 1 else right_changed += 1;
+            }
+        }
+    }
+    if (right_changed == 0 or left_changed != 0) {
+        std.debug.print("conformance: FAIL cutout-sticker did not lift the subject to its rect (left changed {d}, right changed {d})\n", .{ left_changed, right_changed });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_cut[0 .. wc * hc * 4], @intCast(wc), @intCast(hc));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-cutout-sticker.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF the cutout sticker maker lifts the segmented subject to a movable rect - the right-side sticker gained {d} px while the left half stayed byte-identical, deterministic\n", .{right_changed});
+    return true;
+}
+
+/// Proves object move with background fill composes: an inpaint.pass removes the
+/// subject and fills where it was, and a cutout sprite redraws it at a new rect.
+/// The cutout lifts from the original frame, so the upstream inpaint does not
+/// empty it - the subject's old region fills while it reappears at the rect.
+fn proveObjectMove(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const rgba = corpus.frame.pixels.rgba8;
+    const cw = corpus.frame.width;
+    const ch = corpus.frame.height;
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_move = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_move);
+    const shot_move2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_move2);
+    const shot_plain = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_plain);
+    var wm: u32 = 0;
+    var hm: u32 = 0;
+    var wm2: u32 = 0;
+    var hm2: u32 = 0;
+    var wp: u32 = 0;
+    var hp: u32 = 0;
+
+    // With the subject mask: the inpaint fills where the subject was and the
+    // cutout redraws it at the right rect.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/object-move", ".lens-packages/object-move".len) != .ok) return error.ActivationFailed;
+        if (abi.goss_session_submit_segmentation_image(session, rgba.ptr, cw, ch) != .ok) return error.SubmitSegImageFailed;
+        var polls: usize = 0;
+        while (session.segmentation_texture == null) {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            polls += 1;
+            if (polls > 1_000_000) return error.MaskNeverProduced;
+        }
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_move.ptr, shot_move.len, &wm, &hm) != .ok) return error.CaptureFailed;
+        for (0..3) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_move2.ptr, shot_move2.len, &wm2, &hm2) != .ok) return error.CaptureFailed;
+    }
+    // No subject mask: the inpaint holds the frame through and the cutout is
+    // transparent, so the frame passes through untouched.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/object-move", ".lens-packages/object-move".len) != .ok) return error.ActivationFailed;
+        for (0..10) |_| {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_plain.ptr, shot_plain.len, &wp, &hp) != .ok) return error.CaptureFailed;
+    }
+    if (wm == 0 or wm != wp or hm != hp or wm != wm2 or hm != hm2) {
+        std.debug.print("conformance: FAIL object-move capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_move[0 .. wm * hm * 4], shot_move2[0 .. wm * hm * 4])) {
+        std.debug.print("conformance: FAIL object-move is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // The inpaint fills the subject's original region (a change on the left,
+    // where the subject stood) and the cutout redraws it at the right rect (a
+    // change on the right). Both being non-empty proves the two composed and the
+    // cutout survived the upstream removal.
+    var left_changed: usize = 0;
+    var right_changed: usize = 0;
+    var y: u32 = 0;
+    while (y < hm) : (y += 1) {
+        var x: u32 = 0;
+        while (x < wm) : (x += 1) {
+            const idx = (y * wm + x) * 4;
+            if (!std.mem.eql(u8, shot_move[idx .. idx + 4], shot_plain[idx .. idx + 4])) {
+                if (x < wm / 2) left_changed += 1 else right_changed += 1;
+            }
+        }
+    }
+    if (left_changed == 0 or right_changed == 0) {
+        std.debug.print("conformance: FAIL object-move did not compose (inpaint left {d}, cutout right {d})\n", .{ left_changed, right_changed });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_move[0 .. wm * hm * 4], @intCast(wm), @intCast(hm));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-object-move.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF object move composes inpaint and cutout - the subject's region filled ({d} px left) while it redrew at a new rect ({d} px right), deterministic\n", .{ left_changed, right_changed });
+    return true;
+}
+
+/// Runs an inpaint lens on a subject mask: submits `first`, then `second` if
+/// given (each for several frames), and captures. The mask comes from the still
+/// so it holds across the frames; the fill follows the submitted frame's color.
+fn renderInpaintSeq(engine: *abi.Engine, lens_dir: []const u8, seg_bytes: []const u8, rgba: []const u8, cw: u32, ch: u32, desc: *const abi.FrameDesc, first: anytype, second: anytype, shot: []u8, out_w: *u32, out_h: *u32) !void {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+    if (abi.goss_session_activate_lens_from_directory(session, lens_dir.ptr, lens_dir.len) != .ok) return error.ActivationFailed;
+    if (abi.goss_session_submit_segmentation_image(session, rgba.ptr, cw, ch) != .ok) return error.SubmitSegImageFailed;
+    const half_w = (first.width + 1) / 2;
+    var polls: usize = 0;
+    while (session.segmentation_texture == null) {
+        _ = abi.goss_session_submit_frame_copy(session, desc, first.y.ptr, first.width, first.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 1_000_000) return error.MaskNeverProduced;
+    }
+    for (0..6) |_| {
+        _ = abi.goss_session_submit_frame_copy(session, desc, first.y.ptr, first.width, first.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (@TypeOf(second) != @TypeOf(null)) {
+        for (0..6) |_| {
+            _ = abi.goss_session_submit_frame_copy(session, desc, second.y.ptr, second.width, second.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+}
+
+/// Proves temporally consistent video inpaint: an inpaint.pass with a coherence
+/// blends its fill toward the previous frame's fill, so when the frame changes
+/// the coherent fill holds the old content while a plain fill follows the new.
+/// The coherent A-then-B output stays nearer the A-only fill than the plain one.
+fn proveInpaintCoherence(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const rgba = corpus.frame.pixels.rgba8;
+    const cw = corpus.frame.width;
+    const ch = corpus.frame.height;
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    // Frame B is the same frame brightened, so its inpaint fill (drawn from the
+    // surrounding color) differs from frame A's.
+    const y_b = try gpa.dupe(u8, planes.y);
+    defer gpa.free(y_b);
+    for (y_b) |*p| p.* +|= 60;
+    const planes_b = Nv12Copy{ .y = y_b, .uv = planes.uv, .width = planes.width, .height = planes.height };
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_a = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_a);
+    const shot_coh = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_coh);
+    const shot_coh2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_coh2);
+    const shot_plain = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_plain);
+    var wa: u32 = 0;
+    var ha: u32 = 0;
+    var wc: u32 = 0;
+    var hc: u32 = 0;
+    var wc2: u32 = 0;
+    var hc2: u32 = 0;
+    var wpn: u32 = 0;
+    var hpn: u32 = 0;
+    // A-only fill (plain), the reference the fills are measured against.
+    try renderInpaintSeq(engine, ".lens-packages/inpaint-plain", seg_bytes, rgba, cw, ch, &desc, planes, null, shot_a, &wa, &ha);
+    // A then B, coherent: the fill holds A across the change to B.
+    try renderInpaintSeq(engine, ".lens-packages/inpaint-coherent", seg_bytes, rgba, cw, ch, &desc, planes, planes_b, shot_coh, &wc, &hc);
+    try renderInpaintSeq(engine, ".lens-packages/inpaint-coherent", seg_bytes, rgba, cw, ch, &desc, planes, planes_b, shot_coh2, &wc2, &hc2);
+    // A then B, plain: the fill follows B.
+    try renderInpaintSeq(engine, ".lens-packages/inpaint-plain", seg_bytes, rgba, cw, ch, &desc, planes, planes_b, shot_plain, &wpn, &hpn);
+    if (wa == 0 or wa != wc or ha != hc or wa != wpn or ha != hpn) {
+        std.debug.print("conformance: FAIL inpaint-coherence capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_coh[0 .. wc * hc * 4], shot_coh2[0 .. wc2 * hc2 * 4])) {
+        std.debug.print("conformance: FAIL inpaint-coherence is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // Both A-then-B frames show frame B outside the mask, so that region cancels;
+    // inside the fill the coherent one held A (near the A reference) while the
+    // plain one moved to B (far), so the coherent distance is the smaller.
+    var dist_coh: u64 = 0;
+    var dist_plain: u64 = 0;
+    for (0..wa * ha * 4) |i| {
+        dist_coh += @abs(@as(i32, shot_coh[i]) - @as(i32, shot_a[i]));
+        dist_plain += @abs(@as(i32, shot_plain[i]) - @as(i32, shot_a[i]));
+    }
+    if (dist_plain == 0 or dist_coh >= dist_plain) {
+        std.debug.print("conformance: FAIL inpaint coherence did not hold the past (coherent dist {d}, plain dist {d})\n", .{ dist_coh, dist_plain });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a coherent inpaint holds the fill across a frame change - its distance to the old fill ({d}) is nearer than the plain fill's ({d}), deterministic\n", .{ dist_coh, dist_plain });
+    return true;
+}
+
+/// Renders a lens (or the plain frame when lens_dir is null) and captures it.
+fn renderLensCapture(engine: *abi.Engine, desc: *const abi.FrameDesc, planes: anytype, lens_dir: ?[]const u8, shot: []u8, out_w: *u32, out_h: *u32) !void {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (lens_dir) |dir| {
+        if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) return error.ActivationFailed;
+    }
+    const half_w = (planes.width + 1) / 2;
+    for (0..8) |_| {
+        if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+}
+
+/// Proves generative outpaint composes: a full-frame surround sprite fills the
+/// canvas and a whole-frame cutout draws the camera inset at a centered rect, so
+/// the frame is expanded with surrounding content. Outside the inset the frame
+/// is the surround (not the camera); inside it is the camera.
+fn proveOutpaint(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_out = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_out);
+    const shot_out2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_out2);
+    const shot_sur = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_sur);
+    const shot_cam = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_cam);
+    var wo: u32 = 0;
+    var ho: u32 = 0;
+    var wo2: u32 = 0;
+    var ho2: u32 = 0;
+    var ws: u32 = 0;
+    var hs: u32 = 0;
+    var wcm: u32 = 0;
+    var hcm: u32 = 0;
+    try renderLensCapture(engine, &desc, planes, ".lens-packages/outpaint", shot_out, &wo, &ho);
+    try renderLensCapture(engine, &desc, planes, ".lens-packages/outpaint", shot_out2, &wo2, &ho2);
+    try renderLensCapture(engine, &desc, planes, ".lens-packages/surround-only", shot_sur, &ws, &hs);
+    try renderLensCapture(engine, &desc, planes, null, shot_cam, &wcm, &hcm);
+    if (wo == 0 or wo != ws or ho != hs or wo != wcm or ho != hcm) {
+        std.debug.print("conformance: FAIL outpaint capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_out[0 .. wo * ho * 4], shot_out2[0 .. wo2 * ho2 * 4])) {
+        std.debug.print("conformance: FAIL outpaint is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // The inset rect is the centered half; outside it is the border. The border
+    // must be the surround (outpaint equals surround-only there and differs from
+    // the plain camera), and the inset must carry the camera (outpaint differs
+    // from surround-only there).
+    var border_out_vs_sur: usize = 0;
+    var border_sur_vs_cam: usize = 0;
+    var inset_out_vs_sur: usize = 0;
+    var y: u32 = 0;
+    while (y < ho) : (y += 1) {
+        var x: u32 = 0;
+        while (x < wo) : (x += 1) {
+            const idx = (y * wo + x) * 4;
+            const fx = @as(f32, @floatFromInt(x)) / @as(f32, @floatFromInt(wo));
+            const fy = @as(f32, @floatFromInt(y)) / @as(f32, @floatFromInt(ho));
+            // The inset rect is the centered half (0.25..0.75). Test strictly
+            // inside it and strictly outside a margin around it, ignoring the
+            // transition ring at the rect edge.
+            const inset = fx >= 0.3 and fx <= 0.7 and fy >= 0.3 and fy <= 0.7;
+            const border = fx < 0.2 or fx > 0.8 or fy < 0.2 or fy > 0.8;
+            const out_ne_sur = !std.mem.eql(u8, shot_out[idx .. idx + 4], shot_sur[idx .. idx + 4]);
+            const sur_ne_cam = !std.mem.eql(u8, shot_sur[idx .. idx + 4], shot_cam[idx .. idx + 4]);
+            if (inset) {
+                if (out_ne_sur) inset_out_vs_sur += 1;
+            } else if (border) {
+                if (out_ne_sur) border_out_vs_sur += 1;
+                if (sur_ne_cam) border_sur_vs_cam += 1;
+            }
+        }
+    }
+    if (border_out_vs_sur != 0 or border_sur_vs_cam == 0 or inset_out_vs_sur == 0) {
+        std.debug.print("conformance: FAIL outpaint did not compose (border drift {d}, surround-vs-camera {d}, inset camera {d})\n", .{ border_out_vs_sur, border_sur_vs_cam, inset_out_vs_sur });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_out[0 .. wo * ho * 4], @intCast(wo), @intCast(ho));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-outpaint.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF generative outpaint composes - the border stays the surround ({d} px differ from the camera) while the camera insets at the center ({d} px), deterministic\n", .{ border_sur_vs_cam, inset_out_vs_sur });
     return true;
 }
 
@@ -7524,6 +8168,273 @@ fn proveCompilePrompt(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Renders a song for `prompt` through the ABI into an owned WAV buffer.
+fn composeSong(gpa: std.mem.Allocator, engine: *abi.Engine, prompt: []const u8) ![]u8 {
+    var needed: usize = 0;
+    if (abi.goss_engine_generate_song(engine, prompt.ptr, prompt.len, 48000, 0, 4, null, 0, &needed) != .ok or needed == 0) return error.NoLength;
+    const buf = try gpa.alloc(u8, needed);
+    errdefer gpa.free(buf);
+    var written: usize = 0;
+    if (abi.goss_engine_generate_song(engine, prompt.ptr, prompt.len, 48000, 0, 4, buf.ptr, buf.len, &written) != .ok or written != needed) return error.FillFailed;
+    return buf;
+}
+
+/// Proves on-device generative music: goss_engine_generate_song composes a
+/// coherent track from a prompt into a well-formed, non-silent WAV, the same
+/// prompt renders bit-identically, and a different prompt renders a different
+/// track - all on device with no model and no network.
+fn proveGenerateSong(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const a = try composeSong(gpa, engine, "an upbeat happy dance track");
+    defer gpa.free(a);
+    const a2 = try composeSong(gpa, engine, "an upbeat happy dance track");
+    defer gpa.free(a2);
+    const sad = try composeSong(gpa, engine, "a sad slow melancholy song");
+    defer gpa.free(sad);
+    if (a.len <= 44 or !std.mem.eql(u8, a[0..4], "RIFF") or !std.mem.eql(u8, a[8..12], "WAVE")) {
+        std.debug.print("conformance: FAIL generated song is not a well-formed WAV\n", .{});
+        return false;
+    }
+    var energy: u64 = 0;
+    var i: usize = 44;
+    while (i + 1 < a.len) : (i += 2) energy += @abs(@as(i64, std.mem.readInt(i16, a[i..][0..2], .little)));
+    if (energy == 0) {
+        std.debug.print("conformance: FAIL generated song is silent\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, a, a2)) {
+        std.debug.print("conformance: FAIL generated song is not deterministic across runs\n", .{});
+        return false;
+    }
+    if (a.len == sad.len and std.mem.eql(u8, a, sad)) {
+        std.debug.print("conformance: FAIL two different prompts rendered the same song\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF on-device generative music composes a non-silent track from a prompt ({d} bytes), bit-identical on a repeat and different for a different prompt\n", .{a.len});
+    return true;
+}
+
+/// Proves on-device barcode scanning: a known EAN-13 rendered into a luminance
+/// frame is decoded back to its digits through goss_engine_scan_barcode, and a
+/// blank frame reports no code - a real algorithmic recognition op, no model.
+fn proveScanBarcode(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const digits = [13]u8{ 4, 0, 0, 6, 3, 8, 1, 3, 3, 3, 9, 3, 1 };
+    var sym: [barcode.symbol_modules]u8 = undefined;
+    barcode.encode(digits, &sym);
+    // Render the symbol into a luminance frame at 4 px/module with a quiet zone,
+    // repeated down several rows the way a real barcode band fills the frame.
+    const scale = 4;
+    const quiet = 12;
+    const frame_w = quiet * 2 + barcode.symbol_modules * scale;
+    const frame_h = 40;
+    const frame = try gpa.alloc(u8, frame_w * frame_h);
+    defer gpa.free(frame);
+    @memset(frame, 255);
+    for (0..frame_h) |y| {
+        for (0..barcode.symbol_modules) |m| {
+            if (sym[m] == 1) {
+                const start = quiet + m * scale;
+                for (start..start + scale) |x| frame[y * frame_w + x] = 0;
+            }
+        }
+    }
+    var out: [13]u8 = @splat(0);
+    if (abi.goss_engine_scan_barcode(engine, frame.ptr, @intCast(frame_w), @intCast(frame_h), &out) != .ok) {
+        std.debug.print("conformance: FAIL barcode scan did not decode the rendered symbol\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, &digits, &out)) {
+        std.debug.print("conformance: FAIL barcode scan decoded the wrong digits\n", .{});
+        return false;
+    }
+    // A blank frame carries no symbol, so the scan reports none rather than a
+    // false read.
+    @memset(frame, 200);
+    var blank: [13]u8 = @splat(0);
+    if (abi.goss_engine_scan_barcode(engine, frame.ptr, @intCast(frame_w), @intCast(frame_h), &blank) == .ok) {
+        std.debug.print("conformance: FAIL barcode scan hallucinated a code on a blank frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF on-device barcode scan decodes an EAN-13 from a luminance frame and reports none on a blank frame\n", .{});
+    return true;
+}
+
+/// Proves on-device QR round-trips through the ABI: a payload is generated to a
+/// QR image by goss_engine_generate_qr and decoded back by goss_engine_scan_qr,
+/// and a blank frame reports none - real algorithmic encode and decode, no model.
+fn proveScanQr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const payload = "https://goss.rocks/unlock/studio-42";
+    // Generate the QR image through the ABI (probe the side, then fill).
+    var dim32: u32 = 0;
+    if (abi.goss_engine_generate_qr(engine, payload.ptr, payload.len, 6, 4, null, 0, &dim32) != .ok or dim32 == 0) {
+        std.debug.print("conformance: FAIL QR generate reported no size\n", .{});
+        return false;
+    }
+    const dim: usize = dim32;
+    const frame = try gpa.alloc(u8, dim * dim);
+    defer gpa.free(frame);
+    if (abi.goss_engine_generate_qr(engine, payload.ptr, payload.len, 6, 4, frame.ptr, frame.len, &dim32) != .ok) {
+        std.debug.print("conformance: FAIL QR generate did not render\n", .{});
+        return false;
+    }
+    var out: [512]u8 = undefined;
+    var written: usize = 0;
+    if (abi.goss_engine_scan_qr(engine, frame.ptr, @intCast(dim), @intCast(dim), &out, out.len, &written) != .ok) {
+        std.debug.print("conformance: FAIL QR scan did not decode the rendered code\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, payload, out[0..written])) {
+        std.debug.print("conformance: FAIL QR scan decoded the wrong payload\n", .{});
+        return false;
+    }
+    @memset(frame, 255);
+    var blank: [512]u8 = undefined;
+    var blank_len: usize = 0;
+    if (abi.goss_engine_scan_qr(engine, frame.ptr, @intCast(dim), @intCast(dim), &blank, blank.len, &blank_len) == .ok) {
+        std.debug.print("conformance: FAIL QR scan hallucinated a payload on a blank frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF on-device QR round-trips through the ABI - a payload generated to a {d}px image decodes back ({d} bytes), and a blank frame reports none\n", .{ dim, written });
+    return true;
+}
+
+/// Proves the content-provenance manifest: an active lens reports a JSON record
+/// through goss_session_capture_provenance naming the producer, the lens, and the
+/// operations that touched the frame, so a host binds it to a capture per C2PA.
+fn proveProvenance(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
+        std.debug.print("conformance: FAIL provenance lens activation\n", .{});
+        return false;
+    }
+    var needed: usize = 0;
+    if (abi.goss_session_capture_provenance(session, null, 0, &needed) != .ok or needed == 0) {
+        std.debug.print("conformance: FAIL provenance reported no manifest\n", .{});
+        return false;
+    }
+    const buf = try gpa.alloc(u8, needed);
+    defer gpa.free(buf);
+    var written: usize = 0;
+    if (abi.goss_session_capture_provenance(session, buf.ptr, buf.len, &written) != .ok or written != needed) {
+        std.debug.print("conformance: FAIL provenance did not fill the manifest\n", .{});
+        return false;
+    }
+    const json = buf[0..written];
+    // The manifest names gosslens as the producer and lists the operation that
+    // touched the frame, so a verifier can read what was done.
+    if (std.mem.indexOf(u8, json, "\"producer\":\"gosslens\"") == null or std.mem.indexOf(u8, json, "shader.pass") == null) {
+        std.debug.print("conformance: FAIL provenance manifest missing producer or operations: {s}\n", .{json});
+        return false;
+    }
+    std.debug.print("conformance: PROOF the content-provenance manifest names the producer, lens and operations - {s}\n", .{json});
+    return true;
+}
+
+/// Proves the on-device media-library primitives through the ABI: semantic
+/// search ranks the nearest embedding, the vault seals and opens a blob and
+/// rejects a tampered one, and best-take picks the sharp frame of a burst. The
+/// media-library section's end-to-end proof - all algorithmic, no model.
+fn proveMediaLibrary(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // Semantic search: three 2-D embeddings, a query aligned with the second.
+    const corpus = [_]f32{ 1, 0, 0, 1, 0.9, 0.1 };
+    const query = [_]f32{ 0, 2 };
+    var idx: [2]u32 = undefined;
+    var score: [2]f32 = undefined;
+    var written: u32 = 0;
+    if (abi.goss_engine_media_search(engine, &corpus, 3, 2, &query, 2, &idx, &score, &written) != .ok or written != 2 or idx[0] != 1) {
+        std.debug.print("conformance: FAIL media search did not rank the nearest embedding first\n", .{});
+        return false;
+    }
+
+    // Vault: seal a blob, open it back, then confirm a flipped byte fails.
+    const key = [_]u8{7} ** 32;
+    const nonce = [_]u8{3} ** 12;
+    const plain = "a private capture blob";
+    const aad = "capture-2026";
+    var sealed_len: usize = 0;
+    if (abi.goss_seal_media(&key, &nonce, plain.ptr, plain.len, aad.ptr, aad.len, null, 0, &sealed_len) != .ok or sealed_len != plain.len + 16) {
+        std.debug.print("conformance: FAIL media seal did not report the sealed length\n", .{});
+        return false;
+    }
+    const sealed = try gpa.alloc(u8, sealed_len);
+    defer gpa.free(sealed);
+    var sw: usize = 0;
+    _ = abi.goss_seal_media(&key, &nonce, plain.ptr, plain.len, aad.ptr, aad.len, sealed.ptr, sealed.len, &sw);
+    const opened = try gpa.alloc(u8, plain.len);
+    defer gpa.free(opened);
+    var ow: usize = 0;
+    if (abi.goss_open_media(&key, &nonce, sealed.ptr, sealed.len, aad.ptr, aad.len, opened.ptr, opened.len, &ow) != .ok or !std.mem.eql(u8, opened[0..ow], plain)) {
+        std.debug.print("conformance: FAIL media open did not round-trip the sealed blob\n", .{});
+        return false;
+    }
+    sealed[0] ^= 0xff;
+    if (abi.goss_open_media(&key, &nonce, sealed.ptr, sealed.len, aad.ptr, aad.len, opened.ptr, opened.len, &ow) == .ok) {
+        std.debug.print("conformance: FAIL media open accepted a tampered blob\n", .{});
+        return false;
+    }
+
+    // Best-take: a flat 4x4 frame and a checkerboard one; the sharp one wins.
+    const flat = [_]u8{128} ** 16;
+    const sharp = [_]u8{ 0, 255, 0, 255, 255, 0, 255, 0, 0, 255, 0, 255, 255, 0, 255, 0 };
+    var frames: [32]u8 = undefined;
+    @memcpy(frames[0..16], &flat);
+    @memcpy(frames[16..32], &sharp);
+    const openness = [_]f32{ 0, 0 };
+    var best: u32 = 0;
+    if (abi.goss_engine_best_take(engine, &frames, 16, 2, 4, 4, &openness, 0, &best) != .ok or best != 1) {
+        std.debug.print("conformance: FAIL best-take did not pick the sharp frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF media search ranks the nearest embedding, the vault seals and rejects tampering, and best-take keeps the sharp frame\n", .{});
+    return true;
+}
+
+/// Proves world-mesh anchoring through the ABI: a host submits a pre-scanned
+/// floor mesh, a world-space ray meets it at the surface, a ray that clears it
+/// reports none, and clearing the mesh drops the hit. The geospatial section's
+/// pre-scanned landmark-anchoring proof - pure geometry, no model.
+fn proveWorldMeshAnchor(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    // A floor quad at y=0 spanning x,z in [-2,2], two triangles.
+    const verts = [_]f32{ -2, 0, -2, 2, 0, -2, 2, 0, 2, -2, 0, 2 };
+    const idx = [_]u32{ 0, 1, 2, 0, 2, 3 };
+    if (abi.goss_session_submit_world_mesh(session, &verts, 4, &idx, 6) != .ok) {
+        std.debug.print("conformance: FAIL world mesh submission\n", .{});
+        return false;
+    }
+    // A ray straight down from above the floor meets it at y=0, three units down.
+    const origin = [3]f32{ 0.5, 3, 0.5 };
+    const down = [3]f32{ 0, -1, 0 };
+    var point: [3]f32 = undefined;
+    var dist: f32 = 0;
+    if (abi.goss_session_raycast_world_mesh(session, &origin, &down, &point, &dist) != .ok) {
+        std.debug.print("conformance: FAIL world mesh raycast missed the floor\n", .{});
+        return false;
+    }
+    if (@abs(point[1]) > 1e-4 or @abs(dist - 3) > 1e-4) {
+        std.debug.print("conformance: FAIL world mesh hit at the wrong point y={d} dist={d}\n", .{ point[1], dist });
+        return false;
+    }
+    // A ray that clears the quad reports none rather than a false hit.
+    const off = [3]f32{ 9, 3, 9 };
+    if (abi.goss_session_raycast_world_mesh(session, &off, &down, &point, &dist) == .ok) {
+        std.debug.print("conformance: FAIL world mesh hallucinated a hit off the mesh\n", .{});
+        return false;
+    }
+    // Clearing the mesh makes the same on-surface ray report none.
+    _ = abi.goss_session_submit_world_mesh(session, null, 0, null, 0);
+    if (abi.goss_session_raycast_world_mesh(session, &origin, &down, &point, &dist) == .ok) {
+        std.debug.print("conformance: FAIL world mesh raycast hit after the mesh was cleared\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a world-space ray meets the submitted scanned mesh at the surface, misses off it, and clears\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -8355,7 +9266,116 @@ fn proveAudio(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-/// Proves the camera-controls contract through the public ABI: out-of-range
+/// Proves the built-in SFX library: a play_sound target of "builtin:ding"
+/// synthesizes the effect in-engine with no bundled file, so the mixer pulls a
+/// voice after the trigger where it was silent before.
+fn proveBuiltinSfx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const block: u32 = 512;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/sfx-builtin", ".lens-packages/sfx-builtin".len) != .ok) {
+        std.debug.print("conformance: FAIL built-in sfx lens activation\n", .{});
+        return false;
+    }
+
+    var pre: [block]i16 = undefined;
+    _ = abi.goss_session_pull_audio(session, &pre, block);
+    var pre_energy: u64 = 0;
+    for (pre) |s| pre_energy += @abs(@as(i32, s));
+    if (pre_energy != 0) {
+        std.debug.print("conformance: FAIL built-in sfx audio before the trigger is not silent\n", .{});
+        return false;
+    }
+
+    var present = std.mem.zeroes(abi.LensSignals);
+    present.has_face = true;
+    _ = abi.goss_session_tick_lens(session, 16000, &present);
+    var post: [block]i16 = undefined;
+    _ = abi.goss_session_pull_audio(session, &post, block);
+    var energy: u64 = 0;
+    for (post) |s| energy += @abs(@as(i32, s));
+    if (energy == 0) {
+        std.debug.print("conformance: FAIL a builtin:ding play_sound produced no audio\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a builtin:ding play_sound synthesizes and mixes an effect with no bundled file (energy {d})\n", .{energy});
+    return true;
+}
+
+/// Feeds a session solid-luma NV12 frames, ticking each, so a caller can drive
+/// the flash detector with a strobe or a steady grey and read the result back.
+fn runFlashSequence(engine: *abi.Engine, session: *abi.Session, luma: []const u8, y: []u8, uv: []const u8, wpx: u32, hpx: u32) void {
+    const half_w = (wpx + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    for (luma, 0..) |lv, i| {
+        @memset(y, lv);
+        const desc: abi.FrameDesc = .{ .width = wpx, .height = hpx, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast(1000 + i * 33_333) };
+        _ = abi.goss_session_submit_frame_copy(session, &desc, y.ptr, wpx, uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    }
+}
+
+/// Proves the photosensitivity gate: a black-white strobe drives the engine's
+/// safety.flash_risk past the general-flash threshold so a lens trigger warns,
+/// while a steady grey holds it clear.
+fn proveFlashDetection(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const y_size = @as(usize, width) * height;
+    const half_w = (width + 1) / 2;
+    const half_h = (height + 1) / 2;
+    const y = try gpa.alloc(u8, y_size);
+    defer gpa.free(y);
+    const uv = try gpa.alloc(u8, @as(usize, half_w) * half_h * 2);
+    defer gpa.free(uv);
+    @memset(uv, 128);
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/flash-warn");
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.flash-warn","version":"1.0.0","display_name":"Flash Warn","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"warned","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[],
+        \\ "triggers":[{"when":"safety.flash_risk > 0.5","action":{"kind":"param_set","target":"warned","to":1.0}}]}
+    ;
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/flash-warn/manifest.json", .data = manifest_json });
+
+    // A strobe alternating black and white every frame.
+    var strobe: [40]u8 = undefined;
+    for (&strobe, 0..) |*v, i| v.* = if (i % 2 == 0) @as(u8, 0) else 255;
+
+    const flashing = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(flashing);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(flashing, "zig-out/flash-warn", "zig-out/flash-warn".len) != .ok) return error.ActivationFailed;
+    runFlashSequence(engine, flashing, &strobe, y, uv, width, height);
+    var warned: f32 = 0;
+    _ = abi.goss_session_parameter_value(flashing, "warned", "warned".len, &warned);
+    if (warned < 0.5) {
+        std.debug.print("conformance: FAIL a black-white strobe did not raise the flash risk (warned {d})\n", .{warned});
+        return false;
+    }
+
+    // A steady grey holds the risk clear, so the warning never fires.
+    var steady: [40]u8 = undefined;
+    @memset(&steady, 128);
+    const calm = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(calm);
+    if (abi.goss_session_activate_lens_from_directory(calm, "zig-out/flash-warn", "zig-out/flash-warn".len) != .ok) return error.ActivationFailed;
+    runFlashSequence(engine, calm, &steady, y, uv, width, height);
+    var calm_warned: f32 = 0;
+    _ = abi.goss_session_parameter_value(calm, "warned", "warned".len, &calm_warned);
+    if (calm_warned != 0) {
+        std.debug.print("conformance: FAIL a steady frame raised the flash risk (warned {d})\n", .{calm_warned});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the photosensitivity gate raises safety.flash_risk on a black-white strobe so a lens warns, and holds clear on a steady frame\n", .{});
+    return true;
+}
+
+///Proves the camera-controls contract through the public ABI: out-of-range
 /// intent is normalized to its valid envelope and read back exactly, with no
 /// hardware and no host dependence.
 fn proveCameraControls(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
@@ -12774,7 +13794,94 @@ fn captureBodyWarpShot(gpa: std.mem.Allocator, engine: *abi.Engine, planes: Nv12
 /// background: a full-frame bulge moves the masked center but leaves a corner
 /// outside the mask byte-identical to the original frame, while an unmasked or
 /// fully-present-class warp matches the no-mask warp. Bit-stable across runs.
-fn proveBodyReshape(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+fn setPoseLm(body: *abi.PoseResult, i: usize, x: f32, y: f32) void {
+    body.landmarks[i * 3 + 0] = x;
+    body.landmarks[i * 3 + 1] = y;
+    body.landmarks[i * 3 + 2] = 0;
+    body.visibilities[i] = 1.0;
+    body.presences[i] = 1.0;
+}
+
+/// Proves the dedicated reshape.body node: a synthetic standing pose sculpts the
+/// figure along its shoulder-to-hip axis, so the rendered frame moves against a
+/// plain render, deterministically, while a body-less render leaves it be.
+fn proveReshapeBody(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const i = (row * @as(usize, width) + col) * 4;
+            frame_rgba[i + 0] = @intCast(col * 255 / (@as(usize, width) - 1));
+            frame_rgba[i + 1] = @intCast(row * 255 / (@as(usize, height) - 1));
+            frame_rgba[i + 2] = 128;
+            frame_rgba[i + 3] = 255;
+        }
+    }
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height };
+    const planes = try rgbaToNv12(gpa, frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{ .width = width, .height = height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    var body = std.mem.zeroes(abi.PoseResult);
+    body.presence = 1.0;
+    body.landmark_count_out = 33;
+    body.timestamp_us = 1000;
+    setPoseLm(&body, 11, 0.40, 0.30);
+    setPoseLm(&body, 12, 0.60, 0.30);
+    setPoseLm(&body, 23, 0.43, 0.55);
+    setPoseLm(&body, 24, 0.57, 0.55);
+    setPoseLm(&body, 27, 0.45, 0.92);
+    setPoseLm(&body, 28, 0.55, 0.92);
+    setPoseLm(&body, 0, 0.50, 0.15);
+
+    const shot_len = @as(usize, width) * height * 4;
+    const captureOne = struct {
+        fn go(e: *abi.Engine, d: *const abi.FrameDesc, pl: anytype, b: []const abi.PoseResult, dir: ?[]const u8, out: []u8) !void {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(e);
+            if (dir) |path| {
+                if (abi.goss_session_activate_lens_from_directory(session, path.ptr, path.len) != .ok) return error.ActivationFailed;
+            }
+            var ow: u32 = 0;
+            var oh: u32 = 0;
+            try renderSubmittedBodies(e, session, d, pl, b, out, &ow, &oh);
+        }
+    }.go;
+
+    const reshaped_a = try gpa.alloc(u8, shot_len);
+    defer gpa.free(reshaped_a);
+    try captureOne(engine, &desc, planes, &.{body}, "lenses/reference/reshape-body", reshaped_a);
+    const reshaped_b = try gpa.alloc(u8, shot_len);
+    defer gpa.free(reshaped_b);
+    try captureOne(engine, &desc, planes, &.{body}, "lenses/reference/reshape-body", reshaped_b);
+    if (!std.mem.eql(u8, reshaped_a, reshaped_b)) {
+        std.debug.print("conformance: FAIL reshape.body is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    // A render with no body submitted holds the frame (the readiness gate spares
+    // it), and stands as the identity the reshape moves against.
+    const plain = try gpa.alloc(u8, shot_len);
+    defer gpa.free(plain);
+    try captureOne(engine, &desc, planes, &.{}, "lenses/reference/reshape-body", plain);
+
+    var moved: usize = 0;
+    var i: usize = 0;
+    while (i < shot_len) : (i += 4) {
+        const dr = @abs(@as(i32, reshaped_a[i]) - @as(i32, plain[i]));
+        const dg = @abs(@as(i32, reshaped_a[i + 1]) - @as(i32, plain[i + 1]));
+        if (dr + dg > 12) moved += 1;
+    }
+    if (moved < 200) {
+        std.debug.print("conformance: FAIL reshape.body moved too few pixels ({d})\n", .{moved});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a reshape.body node sculpts the figure along its pose axis: a standing pose moves {d} pixels against a plain render, bit-stable, and a body-less render holds the frame\n", .{moved});
+    return true;
+}
+
+fn proveBodyReshapeMasked(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const cap_w: usize = 400;
     const cap_h: usize = 300;
     const corner: usize = 40;
@@ -13627,6 +14734,44 @@ fn proveHostileManifest(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
 
     std.debug.print("conformance: PROOF hostile inputs fail closed with a diagnostic\n", .{});
+    return true;
+}
+
+/// The lens-format fuzzer: a valid manifest is hammered with deterministic byte
+/// and structural mutations and re-parsed, and the parser must return every time
+/// - a manifest or typed diagnostics, never a crash on malformed bytes. Proves
+/// the published, forkable lens format's parser is a hard trust boundary.
+fn proveManifestFuzz(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = engine;
+    const base =
+        \\{"glf":"1.0","id":"fuzz","version":"1.0.0","display_name":"Fuzz","engine_compat":">=0.5","capabilities":["hands"],"parameters":[{"name":"p","type":"int","default":5,"min":0,"max":100}],"nodes":[{"type":"model.gltf","id":"n","src":"m.glb","particles":{"color":[1,0,0]}},{"type":"sprite.2d","id":"s","asset":"s.png"}],"triggers":[{"when":"start","action":{"kind":"param_ramp","target":"p","to":1,"duration_ms":100}}]}
+    ;
+    var prng = std.Random.DefaultPrng.init(0xd1b54a32d192 ^ base.len);
+    const rand = prng.random();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(gpa);
+    const iterations = 2000;
+    var iter: usize = 0;
+    while (iter < iterations) : (iter += 1) {
+        buf.clearRetainingCapacity();
+        try buf.appendSlice(gpa, base);
+        const mutations = 1 + rand.uintLessThan(usize, 6);
+        var m: usize = 0;
+        while (m < mutations) : (m += 1) {
+            if (buf.items.len == 0) break;
+            switch (rand.uintLessThan(u8, 4)) {
+                0 => buf.items[rand.uintLessThan(usize, buf.items.len)] = rand.int(u8),
+                1 => try buf.insert(gpa, rand.uintLessThan(usize, buf.items.len), rand.int(u8)),
+                2 => _ = buf.orderedRemove(rand.uintLessThan(usize, buf.items.len)),
+                3 => buf.shrinkRetainingCapacity(rand.uintLessThan(usize, buf.items.len)),
+                else => unreachable,
+            }
+        }
+        _ = manifestDiagCount(gpa, buf.items) catch |e| switch (e) {
+            error.OutOfMemory => continue,
+        };
+    }
+    std.debug.print("conformance: PROOF the lens-format parser survives {d} mutation-fuzz iterations without crashing\n", .{iterations});
     return true;
 }
 
@@ -19092,7 +20237,8 @@ pub fn main(init_args: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, only, "liquify-symmetry")) {
             if (!try proveLiquifySymmetry(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "body-reshape")) {
-            if (!try proveBodyReshape(gpa, engine)) return 1;
+            if (!try proveBodyReshapeMasked(gpa, engine)) return 1;
+            if (!try proveReshapeBody(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "reshape")) {
             if (!try proveReshapeBank(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "face-transform")) {
@@ -19103,8 +20249,36 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) return 1;
         } else if (std.mem.eql(u8, only, "per-frame-alloc")) {
             if (!try provePerFrameAllocCalls(gpa, engine, &frame_counter)) return 1;
+        } else if (std.mem.eql(u8, only, "face-sticker")) {
+            if (!try proveFaceSticker(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "face-text")) {
+            if (!try proveFaceText(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "info-sticker")) {
+            if (!try proveInfoSticker(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "cutout-sticker")) {
+            if (!try proveCutoutSticker(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "object-move")) {
+            if (!try proveObjectMove(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "inpaint-coherence")) {
+            if (!try proveInpaintCoherence(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "outpaint")) {
+            if (!try proveOutpaint(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "generate-song")) {
+            if (!try proveGenerateSong(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "scan-barcode")) {
+            if (!try proveScanBarcode(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "scan-qr")) {
+            if (!try proveScanQr(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "provenance")) {
+            if (!try proveProvenance(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "media-library")) {
+            if (!try proveMediaLibrary(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "world-mesh-anchor")) {
+            if (!try proveWorldMeshAnchor(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "manifest-fuzz")) {
+            if (!try proveManifestFuzz(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -19231,6 +20405,20 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("multi face fan out");
     if (!try provePerFaceBinding(gpa, engine)) return 1;
     watchHold("per face binding");
+    if (!try proveFaceSticker(gpa, engine)) return 1;
+    watchHold("face sticker");
+    if (!try proveFaceText(gpa, engine)) return 1;
+    watchHold("face text");
+    if (!try proveInfoSticker(gpa, engine)) return 1;
+    watchHold("info sticker");
+    if (!try proveCutoutSticker(gpa, engine)) return 1;
+    watchHold("cutout sticker");
+    if (!try proveObjectMove(gpa, engine)) return 1;
+    watchHold("object move");
+    if (!try proveInpaintCoherence(gpa, engine)) return 1;
+    watchHold("inpaint coherence");
+    if (!try proveOutpaint(gpa, engine)) return 1;
+    watchHold("outpaint");
     if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;
@@ -19441,6 +20629,18 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("ml infer selfie avatar");
     if (!try proveCompilePrompt(gpa, engine)) return 1;
     watchHold("compile prompt");
+    if (!try proveGenerateSong(gpa, engine)) return 1;
+    watchHold("generate song");
+    if (!try proveScanBarcode(gpa, engine)) return 1;
+    watchHold("scan barcode");
+    if (!try proveScanQr(gpa, engine)) return 1;
+    watchHold("scan qr");
+    if (!try proveProvenance(gpa, engine)) return 1;
+    watchHold("provenance");
+    if (!try proveMediaLibrary(gpa, engine)) return 1;
+    watchHold("media library");
+    if (!try proveWorldMeshAnchor(gpa, engine)) return 1;
+    watchHold("world mesh anchor");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveScriptFile(gpa, engine)) return 1;
@@ -19463,6 +20663,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("hemisphere-ibl");
     if (!try proveAudio(gpa, engine)) return 1;
     watchHold("audio");
+    if (!try proveBuiltinSfx(gpa, engine)) return 1;
+    watchHold("builtin sfx");
+    if (!try proveFlashDetection(gpa, engine)) return 1;
+    watchHold("flash detection");
     if (!try proveOutputMix(gpa, engine)) return 1;
     watchHold("output mix");
     if (!try proveCameraControls(gpa, engine)) return 1;
@@ -19509,8 +20713,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("warp");
     if (!try proveLiquifySymmetry(gpa, engine)) return 1;
     watchHold("liquify symmetry");
-    if (!try proveBodyReshape(gpa, engine)) return 1;
+    if (!try proveBodyReshapeMasked(gpa, engine)) return 1;
     watchHold("body reshape");
+    if (!try proveReshapeBody(gpa, engine)) return 1;
+    watchHold("reshape body node");
     if (!try proveReshapeBank(gpa, engine)) return 1;
     watchHold("reshape bank");
     if (!try proveFaceTransform(gpa, engine)) return 1;
@@ -19551,6 +20757,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("tiled post effect");
     if (!try proveHostileManifest(gpa, engine)) return 1;
     watchHold("hostile manifest");
+    if (!try proveManifestFuzz(gpa, engine)) return 1;
+    watchHold("manifest fuzz");
     if (!try proveNoLeaks(gpa, engine, &frame_counter)) return 1;
     watchHold("no leaks");
     if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;

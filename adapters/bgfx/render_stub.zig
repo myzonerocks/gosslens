@@ -15,6 +15,8 @@ pub const IndexBufferHandle = struct { idx: u16 = invalid_handle };
 /// fs_beauty_reshape.sc's own u_facePoints packing - mirrored here so
 /// abi.zig's contour slicing compiles identically against the stub.
 pub const face_point_vec4_count = 53;
+pub const body_reshape_points_vec4_count = 3;
+pub const body_reshape_bank_vec4_count = 3;
 
 // Format constants mirrored so the export layer compiles identically
 // against the stub and the real binding.
@@ -281,7 +283,7 @@ pub const Renderer = struct {
         _ = chroma;
     }
 
-    pub fn submitSpriteAtRect(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32) void {
+    pub fn submitSpriteAtRect(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32, source_alpha: bool) void {
         _ = r;
         _ = view_id;
         _ = sprite_tex;
@@ -290,9 +292,10 @@ pub const Renderer = struct {
         _ = dw;
         _ = dh;
         _ = opacity;
+        _ = source_alpha;
     }
 
-    pub fn submitSpriteRotated(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32) void {
+    pub fn submitSpriteRotated(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32, source_alpha: bool) void {
         _ = r;
         _ = view_id;
         _ = sprite_tex;
@@ -303,6 +306,7 @@ pub const Renderer = struct {
         _ = rotation;
         _ = aspect;
         _ = opacity;
+        _ = source_alpha;
     }
 
     pub fn setLayoutViewport(view_id: u16, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
@@ -423,6 +427,14 @@ pub const Renderer = struct {
         _ = input_texture;
         _ = mask_texture;
         _ = color;
+        _ = softness;
+    }
+
+    pub fn submitCutoutSticker(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, softness: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
         _ = softness;
     }
 
@@ -605,6 +617,15 @@ pub const Renderer = struct {
         _ = aspect;
     }
 
+    pub fn submitInpaintCoherence(r: *Renderer, view_id: u16, fresh_texture: TextureHandle, prev_texture: TextureHandle, mask_texture: TextureHandle, coherence: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = fresh_texture;
+        _ = prev_texture;
+        _ = mask_texture;
+        _ = coherence;
+    }
+
     pub fn submitRollingPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, skew_x: f32, skew_y: f32) void {
         _ = r;
         _ = view_id;
@@ -711,6 +732,16 @@ pub const Renderer = struct {
         _ = input_texture;
         _ = face_points;
         _ = hubs;
+        _ = bank;
+        _ = aspect_ratio;
+    }
+
+    pub fn submitReshapeBody(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, points: *const [body_reshape_points_vec4_count * 4]f32, bank: *const [11]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
+        _ = points;
         _ = bank;
         _ = aspect_ratio;
     }
@@ -1291,6 +1322,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadReshapeBankProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadReshapeBodyProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

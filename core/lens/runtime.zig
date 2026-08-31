@@ -37,7 +37,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, dehaze_pass, relight_pass, glare_pass, vignette_pass, lowlight_pass, undistort_pass, awb_pass, stabilize_pass, zoom_pass, dereflect_pass, harmonize_pass, inpaint_pass, rolling_pass, parallax_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, dehaze_pass, relight_pass, glare_pass, vignette_pass, lowlight_pass, undistort_pass, awb_pass, stabilize_pass, zoom_pass, dereflect_pass, harmonize_pass, inpaint_pass, rolling_pass, parallax_pass, bloom_pass, dof_pass, fog_pass, outline_pass, occluder_pass, cutout_pass, tint_pass, smooth_pass, retouch_pass, matte_refine, stylize_pass, edge_pass, warp_pass, reshape_bank, reshape_body, trail_pass, ssr_pass, env_pass, model_gltf, mesh_face, mesh_lashes, paint_face, draw_board, layout_composite, sprite_2d, text_2d, video_texture, matte_hair, face_swap, splat_cloud };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -82,6 +82,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "edge.pass")) return .edge_pass;
     if (std.mem.eql(u8, type_str, "warp.pass")) return .warp_pass;
     if (std.mem.eql(u8, type_str, "reshape.bank")) return .reshape_bank;
+    if (std.mem.eql(u8, type_str, "reshape.body")) return .reshape_body;
     if (std.mem.eql(u8, type_str, "trail.pass")) return .trail_pass;
     if (std.mem.eql(u8, type_str, "ssr.pass")) return .ssr_pass;
     if (std.mem.eql(u8, type_str, "env.pass")) return .env_pass;
@@ -129,7 +130,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .dehaze_pass, .relight_pass, .glare_pass, .vignette_pass, .lowlight_pass, .undistort_pass, .awb_pass, .stabilize_pass, .zoom_pass, .dereflect_pass, .harmonize_pass, .inpaint_pass, .rolling_pass, .parallax_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .dehaze_pass, .relight_pass, .glare_pass, .vignette_pass, .lowlight_pass, .undistort_pass, .awb_pass, .stabilize_pass, .zoom_pass, .dereflect_pass, .harmonize_pass, .inpaint_pass, .rolling_pass, .parallax_pass, .bloom_pass, .dof_pass, .fog_pass, .outline_pass, .occluder_pass, .cutout_pass, .tint_pass, .smooth_pass, .retouch_pass, .matte_refine, .matte_hair, .stylize_pass, .edge_pass, .warp_pass, .reshape_bank, .reshape_body, .trail_pass, .ssr_pass, .env_pass, .model_gltf, .mesh_face, .mesh_lashes, .paint_face, .face_swap, .draw_board, .layout_composite, .sprite_2d, .text_2d, .video_texture, .splat_cloud => &.{},
     };
 }
 
@@ -267,6 +268,8 @@ const LensNode = struct {
     warp: ?manifest.WarpField = null,
     /// .reshape_bank only: the node's sixty-six per-region face sculpt amounts.
     reshape: ?manifest.ReshapeField = null,
+    /// .reshape_body only: the node's per-region body sculpt amounts.
+    body_reshape: ?manifest.BodyReshapeField = null,
     /// .trail_pass only: the node's motion-trail echo amount.
     trail: ?manifest.TrailField = null,
     /// .ssr_pass only: the node's reflection strength and floor plane.
@@ -408,6 +411,8 @@ pub const SpriteNode = struct {
     /// Frame count and rate for an animated sprite; frames == 1 is static.
     frames: u32,
     fps: f32,
+    /// How the animation retimes its frames: forward, backward, or boomerang.
+    play: manifest.SpritePlay,
     /// The direct-manipulation gestures this sprite responds to.
     interaction: manifest.Interaction,
     /// A segmentation channel that keys the sprite full-frame; null draws the
@@ -418,6 +423,17 @@ pub const SpriteNode = struct {
     /// Over-mode restyle strength (0..1) and its optional live parameter name.
     mask_strength: f32,
     mask_strength_param: []const u8,
+    /// A face-mesh landmark index the sprite pins its center to each frame, so it
+    /// tracks the head; negative leaves the sprite at its screen rect.
+    anchor_face: i32,
+    /// A segmentation channel the sprite lifts the live subject from into a
+    /// transparent cutout drawn at its rect (an auto-subject sticker); negative
+    /// uses the bundled image. cutout_softness feathers the matte edge.
+    cutout_channel: i32,
+    cutout_softness: f32,
+    /// A cutout with no channel draws the whole frame at the rect, a frame inset
+    /// for outpaint.
+    cutout_whole: bool,
 };
 
 /// One splat.cloud node ready for the caller to load and draw - which graph node
@@ -476,6 +492,14 @@ pub const TextNode = struct {
     wrap: u32 = 0,
     /// Bow the baseline along an arc (positive up, negative down); 0 is straight.
     bend: f32 = 0,
+    /// A face-mesh landmark index the text pins its center to each frame, so a
+    /// caption tracks the head; negative leaves the text at its screen rect.
+    anchor_face: i32 = -1,
+    /// A live source that fills the text each frame (a built-in clock or a host
+    /// info key); empty draws the static content. countdown_seconds is the start
+    /// duration a "countdown" source counts down from.
+    content_source: []const u8 = "",
+    countdown_seconds: f32 = 0,
 };
 
 pub const VideoNode = struct {
@@ -589,6 +613,9 @@ pub const InpaintPassNode = struct {
     graph_index: graph.NodeIndex,
     mask_channel: u8,
     radius: f32,
+    /// Temporal blend toward the previous frame's fill (0..1) for a steady video
+    /// inpaint; 0 is the raw per-frame fill.
+    coherence: f32,
 };
 
 /// One rolling.pass node ready for the caller to draw - its correction strength
@@ -734,6 +761,16 @@ pub const ReshapePassNode = struct {
     params: [66]f32,
 };
 
+/// One reshape.body node ready to draw: which graph node it is, and its body
+/// sculpt amounts in BodyReshapeField order, each in [-1,1] with 0 the identity.
+/// The caller pairs these with the live pose landmarks and the body mask.
+pub const BodyReshapePassNode = struct {
+    graph_index: graph.NodeIndex,
+    params: [body_reshape_param_count]f32,
+};
+
+pub const body_reshape_param_count = @typeInfo(manifest.BodyReshapeField).@"struct".fields.len;
+
 pub const TrailPassNode = struct {
     graph_index: graph.NodeIndex,
     amount: f32,
@@ -755,7 +792,7 @@ pub const EnvPassNode = struct {
     image_stem: ?[]const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, dehaze, relight, glare, vignette, lowlight, undistort, awb, stabilize, zoom, dereflect, harmonize, inpaint, rolling, parallax, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
+pub const PassKind = enum { shader, lut, blend, blur, grade, dehaze, relight, glare, vignette, lowlight, undistort, awb, stabilize, zoom, dereflect, harmonize, inpaint, rolling, parallax, bloom, dof, fog, outline, occluder, cutout, tint, smooth, retouch, matte, stylize, edge, warp, reshape, body_reshape, trail, ssr, env, model, mesh, lashes, paint, draw_board, sprite, hair_matte, face_swap, splat };
 
 /// One matte.hair source node ready for the caller to draw - which graph node
 /// it is, and its guided-filter parameters packed for the refine pass (radius,
@@ -1145,7 +1182,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .inpaint_pass) continue;
             const ip = node.inpaint orelse manifest.InpaintField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .mask_channel = ip.mask_channel, .radius = ip.radius });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .mask_channel = ip.mask_channel, .radius = ip.radius, .coherence = ip.coherence });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1434,6 +1471,25 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every reshape.body node this lens spliced, in execution order, each
+    /// carrying its body sculpt amounts in BodyReshapeField order.
+    pub fn bodyReshapePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]BodyReshapePassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(BodyReshapePassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .reshape_body) continue;
+            const bf = node.body_reshape orelse manifest.BodyReshapeField{};
+            var params: [body_reshape_param_count]f32 = undefined;
+            inline for (std.meta.fields(manifest.BodyReshapeField), 0..) |f, i| {
+                params[i] = @field(bf, f.name);
+            }
+            try out.append(gpa, .{ .graph_index = node.graph_index, .params = params });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every trail.pass node this lens spliced, in execution order, each
     /// carrying its motion-trail echo amount.
     pub fn trailPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]TrailPassNode {
@@ -1573,7 +1629,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over, .mask_strength = sp.mask_strength, .mask_strength_param = sp.mask_strength_param });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .play = sp.play, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over, .mask_strength = sp.mask_strength, .mask_strength_param = sp.mask_strength_param, .anchor_face = sp.anchor_face, .cutout_channel = sp.cutout_channel, .cutout_softness = sp.cutout_softness, .cutout_whole = sp.cutout_whole });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1605,7 +1661,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .text_2d) continue;
             const tf = node.text orelse manifest.TextField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth, .wrap = tf.wrap, .bend = tf.bend });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth, .wrap = tf.wrap, .bend = tf.bend, .anchor_face = tf.anchor_face, .content_source = tf.content_source, .countdown_seconds = tf.countdown_seconds });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1669,6 +1725,7 @@ pub const Lens = struct {
                 .edge_pass => .edge,
                 .warp_pass => .warp,
                 .reshape_bank => .reshape,
+                .reshape_body => .body_reshape,
                 .trail_pass => .trail,
                 .ssr_pass => .ssr,
                 .env_pass => .env,
@@ -1787,6 +1844,30 @@ pub const Lens = struct {
     pub fn paramValue(self: *const Lens, name: []const u8) ?f32 {
         const i = paramIndex(self, name) orelse return null;
         return self.param_values[i];
+    }
+
+    /// Serializes the lens parameter values into `out` (a little-endian u32 count
+    /// then that many f32s) and returns the byte length, so a peer syncs this
+    /// lens's shared state. `out` too small writes nothing and reports the size.
+    pub fn snapshotState(self: *const Lens, out: []u8) usize {
+        const need = 4 + self.param_values.len * 4;
+        if (out.len < need) return need;
+        std.mem.writeInt(u32, out[0..4], @intCast(self.param_values.len), .little);
+        for (self.param_values, 0..) |v, i| std.mem.writeInt(u32, out[4 + i * 4 ..][0..4], @bitCast(v), .little);
+        return need;
+    }
+
+    /// Applies a peer's snapshot: each value is clamped into its parameter and
+    /// set, so two runtimes with the same lens converge on one shared state. A
+    /// short or over-long blob applies only the parameters it covers.
+    pub fn applyState(self: *Lens, bytes: []const u8) void {
+        if (bytes.len < 4) return;
+        const n = std.mem.readInt(u32, bytes[0..4], .little);
+        const count = @min(@min(n, self.param_values.len), (bytes.len - 4) / 4);
+        for (0..count) |i| {
+            const bits = std.mem.readInt(u32, bytes[4 + i * 4 ..][0..4], .little);
+            self.param_values[i] = clampToParam(self.manifest.parameters[i], @bitCast(bits));
+        }
     }
 
     /// The bundle-relative sound paths a play_sound trigger fired on the last
@@ -2007,6 +2088,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .edge = if (node_type == .edge_pass) node.edge else null,
             .warp = if (node_type == .warp_pass) node.warp else null,
             .reshape = if (node_type == .reshape_bank) node.reshape else null,
+            .body_reshape = if (node_type == .reshape_body) node.body_reshape else null,
             .trail = if (node_type == .trail_pass) node.trail else null,
             .ssr = if (node_type == .ssr_pass) node.ssr else null,
             .env = if (node_type == .env_pass) node.env else null,
@@ -2478,6 +2560,37 @@ test "a param bound to a node reports its default as the initial effect value" {
     try t.expectEqual(@as(usize, 1), effects.len);
     try t.expectEqual(EffectSlot.thin_face, effects[0].effect);
     try t.expectEqual(@as(f32, 0.0), effects[0].value);
+}
+
+test "lens state snapshots and applies for a shared connected lens" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+    const lens_manifest = try parseTestManifest(t.allocator, clip_weight_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    lens.setParam("walk", 0.25);
+    lens.setParam("run", 0.75);
+    var buf: [64]u8 = undefined;
+    const n = lens.snapshotState(&buf);
+    try t.expectEqual(@as(usize, 4 + 2 * 4), n);
+
+    // A peer overwrote its params; applying the snapshot converges them back.
+    lens.setParam("walk", 0.9);
+    lens.setParam("run", 0.1);
+    lens.applyState(buf[0..n]);
+    try t.expectEqual(@as(f32, 0.25), lens.paramValue("walk").?);
+    try t.expectEqual(@as(f32, 0.75), lens.paramValue("run").?);
+
+    // An out-of-range value in a blob is clamped into the parameter on apply.
+    std.mem.writeInt(u32, buf[4..8], @bitCast(@as(f32, 9.0)), .little);
+    lens.applyState(buf[0..n]);
+    try t.expectEqual(@as(f32, 1.0), lens.paramValue("walk").?);
+
+    // A probe with a too-small buffer reports the needed size, writing nothing.
+    var tiny: [2]u8 = undefined;
+    try t.expectEqual(n, lens.snapshotState(&tiny));
 }
 
 const clip_weight_manifest =

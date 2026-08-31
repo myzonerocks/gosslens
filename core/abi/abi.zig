@@ -27,10 +27,17 @@ const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
+const sfx = @import("sfx");
+const music = @import("music");
+const barcode = @import("barcode");
+const qr = @import("qr");
+const medialib = @import("medialib");
+const flash = @import("flash");
 const formant = @import("formant");
 const fingerprint = @import("fingerprint");
 const comp = @import("layout");
 const geo = @import("geo");
+const world_mesh = @import("world_mesh");
 const font = @import("font");
 const stroke = @import("stroke");
 const wboard = @import("world_board");
@@ -132,6 +139,8 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_recording_stop(goss_engine *engine)",
     "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
     "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
+    "goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count)",
+    "goss_status goss_session_raycast_world_mesh(goss_session *session, const float *origin, const float *direction, float *out_point, float *out_distance)",
     "goss_status goss_session_hit_test(goss_session *session, float screen_x, float screen_y, float *out_position)",
     "goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)",
@@ -231,6 +240,10 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
     "goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)",
     "goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)",
+    "goss_status goss_session_set_info(goss_session *session, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len)",
+    "goss_status goss_session_snapshot_lens_state(goss_session *session, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_session_apply_lens_state(goss_session *session, const uint8_t *blob, size_t blob_len)",
+    "goss_status goss_session_capture_provenance(goss_session *session, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance)",
     "goss_status goss_session_reset_capture(goss_session *session)",
     "goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
@@ -254,6 +267,14 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
     "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
     "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits)",
+    "goss_status goss_engine_scan_qr(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_generate_qr(goss_engine *engine, const uint8_t *payload, size_t payload_len, uint32_t module_scale, uint32_t quiet_modules, uint8_t *out_buf, size_t out_cap, uint32_t *out_dim)",
+    "goss_status goss_engine_media_search(goss_engine *engine, const float *corpus, uint32_t count, uint32_t dim, const float *query, uint32_t k, uint32_t *out_indices, float *out_scores, uint32_t *out_count)",
+    "goss_status goss_seal_media(const uint8_t *key, const uint8_t *nonce, const uint8_t *plaintext, size_t plaintext_len, const uint8_t *aad, size_t aad_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_open_media(const uint8_t *key, const uint8_t *nonce, const uint8_t *sealed, size_t sealed_len, const uint8_t *aad, size_t aad_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_best_take(goss_engine *engine, const uint8_t *frames, size_t frame_stride, uint32_t count, uint32_t width, uint32_t height, const float *openness, float openness_weight, uint32_t *out_index)",
     "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
@@ -478,6 +499,10 @@ const WorldStore = struct {
     light: WorldLight = .{ .ambient_intensity = 0, .color_temperature_kelvin = 0 },
     dropped_planes: u32 = 0,
     dropped_anchors: u32 = 0,
+    // A host-submitted world mesh in world space (device scene reconstruction),
+    // owned by the session allocator, for raycast anchoring onto scanned surfaces.
+    mesh_vertices: []const [3]f32 = &.{},
+    mesh_indices: []const u32 = &.{},
 };
 
 const identity16 = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -950,6 +975,30 @@ pub const Session = struct {
     splat_scene_target: ?render.Renderer.OffscreenTarget = null,
     splat_scene_w: u16 = 0,
     splat_scene_h: u16 = 0,
+    /// A cutout sprite lifts the subject into this transparent-background target
+    /// each frame, then draws it at its rect; kept off the chain ping-pong so the
+    /// cutout render and the sprite draw never share one target. One is reused
+    /// across cutout sprites since each renders before it draws.
+    cutout_sticker_target: ?render.Renderer.OffscreenTarget = null,
+    cutout_sticker_w: u16 = 0,
+    cutout_sticker_h: u16 = 0,
+    /// The camera frame copied here at chain start when a cutout sprite is
+    /// present, so the cutout lifts the subject from the original frame no matter
+    /// what upstream passes did to the chain - an object-move lens can inpaint the
+    /// subject out of its place and still cut it out to draw at a new rect.
+    cutout_source_target: ?render.Renderer.OffscreenTarget = null,
+    cutout_source_w: u16 = 0,
+    cutout_source_h: u16 = 0,
+    /// A coherent inpaint renders its fresh fill into inpaint_fresh_target, blends
+    /// it toward the previous fill into inpaint_coherent_target, presents that, and
+    /// copies it back to the history for next frame - so the fill accumulates.
+    /// prev_valid gates the first frame, which has no history yet.
+    inpaint_fresh_target: ?render.Renderer.OffscreenTarget = null,
+    inpaint_coherent_target: ?render.Renderer.OffscreenTarget = null,
+    inpaint_prev_target: ?render.Renderer.OffscreenTarget = null,
+    inpaint_coherence_w: u16 = 0,
+    inpaint_coherence_h: u16 = 0,
+    inpaint_prev_valid: bool = false,
     /// cutout.pass nodes by graph index: their background color (rgb) and edge
     /// softness. The face matte keys the frame through, the rest goes flat color.
     cutout_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1016,6 +1065,10 @@ pub const Session = struct {
     /// amounts in ReshapeField order, resolved at activation. The live tracked
     /// contour joins them each frame in the draw arm.
     reshape_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [66]f32) = .empty,
+    /// reshape.body nodes by graph index: their body sculpt amounts in
+    /// BodyReshapeField order, resolved at activation. The live pose landmarks
+    /// and the body mask join them each frame in the draw arm.
+    body_reshape_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [runtime.body_reshape_param_count]f32) = .empty,
     /// ssr.pass nodes by graph index: their reflection strength and floor plane.
     ssr_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [2]f32) = .empty,
     /// env.pass nodes by graph index: their sky gradient (top rgb, bottom rgb)
@@ -1317,6 +1370,11 @@ pub const Session = struct {
     auto_frame_cy: f32 = 0.5,
     auto_frame_scale: f32 = 1,
     auto_frame_valid: bool = false,
+    /// The photosensitivity flash detector, fed each submitted frame's mean
+    /// luminance, and the risk (0..1) it last reported for the safety.flash_risk
+    /// trigger signal.
+    flash_detector: flash.Detector = .{},
+    flash_risk: f32 = 0,
     /// A monotonic sequence stamped on each submitted exposure so a bracket-source
     /// temporal.fuse ring keeps every distinct exposure rather than deduping them.
     bracket_seq: i64 = 0,
@@ -1370,6 +1428,23 @@ pub const Session = struct {
     /// A sprite.2d node's live interaction transform, when it declares one, so
     /// the recognized gestures drag and scale it and a tap on it fires an event.
     sprite_interactions: std.AutoHashMapUnmanaged(graph.NodeIndex, SpriteInteraction) = .empty,
+    /// A sprite.2d node's face-mesh anchor landmark, when it declares one, so the
+    /// sprite pins its center to that point on the tracked face each frame - a
+    /// sticker that follows the head (glasses on the eyes, a hat over the brow).
+    sprite_anchor_faces: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    /// A sprite.2d node that lifts the live subject as its source instead of a
+    /// bundled image, by graph index: the segmentation channel it cuts out and
+    /// the matte-edge feather. The frame keyed by it draws at the sprite rect as a
+    /// movable, scalable cutout sticker.
+    sprite_cutouts: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { channel: u8, softness: f32, whole: bool }) = .empty,
+    /// A text.2d node whose content comes from a live source, by graph index. The
+    /// frame path re-rasterizes each when its resolved string changes, so an info
+    /// sticker (a clock, a countdown, a host-fed reading) updates in place.
+    dynamic_texts: std.AutoHashMapUnmanaged(graph.NodeIndex, DynamicText) = .empty,
+    /// Host-fed info values keyed by name (owned copies), the rail an info sticker
+    /// reads through `content_source`: the app writes time, place, or a sensor
+    /// reading with goss_session_set_info and a bound text node shows the latest.
+    info_values: std.StringHashMapUnmanaged([]const u8) = .empty,
     /// A sprite.2d node's segmentation key, when it declares one: the channel
     /// and whether the sprite fills behind that region (greenscreen) or over it
     /// (a restyle). The generative background and full-face restyle ride this.
@@ -1771,6 +1846,49 @@ fn ensureSplatScene(s: *Session, width: u16, height: u16) !void {
     s.splat_scene_h = height;
 }
 
+/// (Re)creates the session-owned target a cutout sprite lifts the subject into,
+/// only when the frame size changes or it does not exist yet. The transparent
+/// cutout renders here, then the sprite draws it at its rect.
+fn ensureCutoutSticker(s: *Session, width: u16, height: u16) !void {
+    if (s.cutout_sticker_w == width and s.cutout_sticker_h == height and s.cutout_sticker_target != null) return;
+    if (s.cutout_sticker_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.cutout_sticker_target = null;
+    s.cutout_sticker_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.cutout_sticker_w = width;
+    s.cutout_sticker_h = height;
+}
+
+/// (Re)creates the target the camera frame is copied into at chain start for a
+/// cutout sprite, so the cutout lifts from the original frame however the chain
+/// edits it afterward. Sized the same lazy way the other session targets are.
+fn ensureCutoutSource(s: *Session, width: u16, height: u16) !void {
+    if (s.cutout_source_w == width and s.cutout_source_h == height and s.cutout_source_target != null) return;
+    if (s.cutout_source_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.cutout_source_target = null;
+    s.cutout_source_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.cutout_source_w = width;
+    s.cutout_source_h = height;
+}
+
+/// (Re)creates the fresh and previous targets a coherent inpaint blends across,
+/// on a size change or first use, resetting the history so the next frame
+/// reseeds instead of blending against a stale echo.
+fn ensureInpaintCoherence(s: *Session, width: u16, height: u16) !void {
+    if (s.inpaint_coherence_w == width and s.inpaint_coherence_h == height and s.inpaint_fresh_target != null and s.inpaint_coherent_target != null and s.inpaint_prev_target != null) return;
+    if (s.inpaint_fresh_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (s.inpaint_coherent_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (s.inpaint_prev_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.inpaint_fresh_target = null;
+    s.inpaint_coherent_target = null;
+    s.inpaint_prev_target = null;
+    s.inpaint_fresh_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.inpaint_coherent_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.inpaint_prev_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.inpaint_coherence_w = width;
+    s.inpaint_coherence_h = height;
+    s.inpaint_prev_valid = false;
+}
+
 /// (Re)creates the session-owned target a matte.hair source refines the
 /// strand-level hair alpha into, only when the frame size changes or it does
 /// not exist yet. Bound as the hair_matte channel texture each frame.
@@ -2160,7 +2278,7 @@ fn drawBrushStrokes(r: *render.Renderer, board: *const stroke.Board, view_id: u8
             const spacing = @max(half * 2.0, 1e-3);
             const nc = board.buildStampCenters(si, spacing, &centers);
             for (centers[0..nc]) |cpt| {
-                r.submitSpriteRotated(view_id, tex, cpt[0], cpt[1], half / aspect, half, 0, aspect, 1.0);
+                r.submitSpriteRotated(view_id, tex, cpt[0], cpt[1], half / aspect, half, 0, aspect, 1.0, false);
             }
             continue;
         }
@@ -2269,6 +2387,63 @@ fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirro
         contour[at * 2] = out[0];
         contour[at * 2 + 1] = out[1];
     }
+    return true;
+}
+
+/// The screen position (0..1) of face-mesh landmark `idx` on the tracked face,
+/// mapped the same way anchored draws map content: the landmark's image-space
+/// coordinate turned and mirrored into the display frame. Null with no face.
+fn faceAnchorScreen(s: *Session, idx: u32, width: u16, height: u16, rotation: u32, mirror: bool) ?[2]f32 {
+    var result: face.Result = undefined;
+    var flat: ?*const [face.landmark_count * 3]f32 = null;
+    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+        flat = &s.face_results[0].landmarks;
+    } else if (s.face_tracking) |worker| {
+        if (tracking.readResult(worker, &result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+            flat = &result.landmarks;
+        }
+    }
+    const src = flat orelse return null;
+    if (idx >= face.landmark_count) return null;
+    const u = src[idx * 3] / @as(f32, @floatFromInt(width));
+    const v = src[idx * 3 + 1] / @as(f32, @floatFromInt(height));
+    return face106.transformPoint(u, v, rotation, mirror);
+}
+
+const body_point_count = render.body_reshape_points_vec4_count * 4;
+
+/// The body a reshape.body warp sculpts around: the first host-submitted body
+/// when any were submitted, otherwise the tracked pose. Null when neither holds.
+fn currentBody(s: *Session) ?pose.Result {
+    if (s.body_count > 0) return s.body_results[0];
+    return currentPose(s);
+}
+
+/// Whether a reshape.body node has a body to sculpt this frame.
+fn bodyPoseReady(s: *Session) bool {
+    return currentBody(s) != null;
+}
+
+/// Fills the six pose anchors a reshape.body warp needs - the two shoulders, the
+/// two hips, the ankle midpoint, and the head - each normalized then carried into
+/// the preview's mirror-and-rotation space so the sculpt lands where the frame
+/// draws. False when no body holds, the same hold-through degradation as the face.
+fn fillBodyPose(s: *Session, rotation: u32, mirror: bool, points: *[body_point_count]f32) bool {
+    const result = currentBody(s) orelse return false;
+    const lm = &result.landmarks;
+    const at = struct {
+        fn p(l: *const [pose.landmark_count * 3]f32, i: usize, rot: u32, mir: bool) [2]f32 {
+            return face106.transformPoint(l[i * 3], l[i * 3 + 1], rot, mir);
+        }
+    }.p;
+    const sl = at(lm, 11, rotation, mirror);
+    const sr = at(lm, 12, rotation, mirror);
+    const hl = at(lm, 23, rotation, mirror);
+    const hr = at(lm, 24, rotation, mirror);
+    const al = at(lm, 27, rotation, mirror);
+    const ar = at(lm, 28, rotation, mirror);
+    const head = at(lm, 0, rotation, mirror);
+    points.* = .{ sl[0], sl[1], sr[0], sr[1], hl[0], hl[1], hr[0], hr[1], (al[0] + ar[0]) * 0.5, (al[1] + ar[1]) * 0.5, head[0], head[1] };
     return true;
 }
 
@@ -2421,6 +2596,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // The tile is set per final full-screen pass below; every source-res
     // intermediate draw and every non-capture frame renders untiled.
     r.tile = null;
+    // Live text nodes (a clock, a countdown, a host-fed reading) re-rasterize
+    // here when their value changed, before the chain reads their textures.
+    refreshDynamicText(s);
     var ready_count: usize = 0;
     for (s.chain_order) |entry| {
         // A node a hide or swap_subgraph action hid does not draw and is not
@@ -2517,6 +2695,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // needs depth: with its params resolved but no face it holds the
             // frame through, the standard capability degradation.
             .reshape => s.reshape_params.contains(entry.graph_index) and reshapeFaceReady(s),
+            .body_reshape => s.body_reshape_params.contains(entry.graph_index) and bodyPoseReady(s),
             // A motion trail owns the frame it echoes (a session target it
             // seeds from the current frame on the first pass), so it is ready
             // as soon as its echo amount is resolved - no host input to gate on.
@@ -2559,6 +2738,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // through, never blocking the chain.
             .sprite => s.sprite_textures.contains(entry.graph_index) or s.text3d_meshes.contains(entry.graph_index) or
                 s.video_textures.contains(entry.graph_index) or s.ml_style_textures.contains(entry.graph_index) or
+                s.sprite_cutouts.contains(entry.graph_index) or
                 (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
             // A splat cloud is ready once its model has produced its first point
             // set; until then it holds the frame through like any pending draw.
@@ -2634,6 +2814,20 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             next_view_id += 1;
             r.tile = null;
             render.Renderer.setViewTarget(seed_view, oft, width, height);
+            r.submitShaderPass(seed_view, r.passthroughProgram(), targets[0].texture, r.default_mask_texture);
+        }
+    }
+
+    // A cutout sprite lifts the subject from the original frame, so copy it here
+    // before any pass edits the chain - an object-move lens inpaints the subject
+    // out of place yet still cuts it from this copy to draw at a new rect.
+    if (s.sprite_cutouts.count() > 0) {
+        ensureCutoutSource(s, width, height) catch {};
+        if (s.cutout_source_target) |cst| {
+            const seed_view = next_view_id;
+            next_view_id += 1;
+            r.tile = null;
+            render.Renderer.setViewTarget(seed_view, cst, width, height);
             r.submitShaderPass(seed_view, r.passthroughProgram(), targets[0].texture, r.default_mask_texture);
         }
     }
@@ -2941,10 +3135,52 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 next_view_id += 1;
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
-                r.tile = if (is_final) s.capture_tile else null;
-                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 const mask_tex = if (ip.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[ip.channel] orelse r.zero_mask_texture;
                 const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                // A coherent inpaint renders the fresh fill to its own target,
+                // blends it toward the previous frame's fill inside the mask, then
+                // keeps the fresh fill as next frame's history - a steady video
+                // inpaint that does not flicker.
+                coherent: {
+                    if (ip.coherence <= 0) break :coherent;
+                    ensureInpaintCoherence(s, width, height) catch break :coherent;
+                    const fresh = s.inpaint_fresh_target orelse break :coherent;
+                    const coherent_tex = s.inpaint_coherent_target orelse break :coherent;
+                    const prev = s.inpaint_prev_target orelse break :coherent;
+                    // Fresh fill for this frame.
+                    r.tile = null;
+                    render.Renderer.setViewTarget(view_id, fresh, width, height);
+                    r.submitInpaintPass(view_id, input_texture, mask_tex, ip.radius, aspect);
+                    // Blend it toward the history into the coherent target (always
+                    // a real target, so the history holds however the output is
+                    // presented). The first frame blends against itself.
+                    const blend_view = next_view_id;
+                    next_view_id += 1;
+                    r.tile = null;
+                    render.Renderer.setViewTarget(blend_view, coherent_tex, width, height);
+                    const prev_tex = if (s.inpaint_prev_valid) prev.texture else fresh.texture;
+                    r.submitInpaintCoherence(blend_view, fresh.texture, prev_tex, mask_tex, ip.coherence);
+                    // Copy the coherent result into the history for next frame.
+                    const store_view = next_view_id;
+                    next_view_id += 1;
+                    r.tile = null;
+                    render.Renderer.setViewTarget(store_view, prev, width, height);
+                    r.submitShaderPass(store_view, r.passthroughProgram(), coherent_tex.texture, r.default_mask_texture);
+                    s.inpaint_prev_valid = true;
+                    // Present the coherent result to the chain output.
+                    const present_view = next_view_id;
+                    next_view_id += 1;
+                    r.tile = if (is_final) s.capture_tile else null;
+                    if (output) |target| render.Renderer.setViewTarget(present_view, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(present_view, null, output_width, output_height);
+                    r.submitShaderPass(present_view, r.passthroughProgram(), coherent_tex.texture, r.default_mask_texture);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitInpaintPass(view_id, input_texture, mask_tex, ip.radius, aspect);
                 if (output) |target| {
                     input_texture = target.texture;
@@ -3153,6 +3389,25 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 const aspect_ratio = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
                 r.submitReshapeBank(view_id, input_texture, contour[0 .. render.face_point_vec4_count * 4], hubs, bank, aspect_ratio);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .body_reshape => {
+                const bank = s.body_reshape_params.getPtr(entry.graph_index) orelse continue;
+                var points: [body_point_count]f32 = undefined;
+                if (!fillBodyPose(s, rotation, mirror, &points)) continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const mask = s.segmentation_texture orelse r.default_mask_texture;
+                const aspect_ratio = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                r.submitReshapeBody(view_id, input_texture, mask, &points, bank, aspect_ratio);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -3811,7 +4066,22 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (anim.loaded != anim.frames) continue;
                     const active_us = if (s.active_lens) |*lens| lens.elapsedUs() else 0;
                     const frame_idx: u64 = @intFromFloat(@as(f64, @floatFromInt(active_us)) / 1_000_000.0 * @as(f64, anim.fps));
-                    sprite_texture = anim.textures[@intCast(frame_idx % anim.frames)];
+                    sprite_texture = anim.textures[anim.frameAt(frame_idx)];
+                } else if (s.sprite_cutouts.get(entry.graph_index)) |co| {
+                    // A cutout sprite lifts the live subject keyed by its channel
+                    // (or the whole frame, on the ones mask) into a transparent
+                    // target drawn at the sprite rect. It lifts from the original
+                    // frame copy, so an upstream inpaint cannot empty it.
+                    const mask_tex = if (co.whole) r.default_mask_texture else if (co.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[co.channel] orelse r.zero_mask_texture;
+                    ensureCutoutSticker(s, width, height) catch continue;
+                    const cutout_target = s.cutout_sticker_target orelse continue;
+                    const source_tex = if (s.cutout_source_target) |cst| cst.texture else input_texture;
+                    const cutout_view = next_view_id;
+                    next_view_id += 1;
+                    r.tile = null;
+                    render.Renderer.setViewTarget(cutout_view, cutout_target, width, height);
+                    r.submitCutoutSticker(cutout_view, source_tex, mask_tex, co.softness);
+                    sprite_texture = cutout_target.texture;
                 } else {
                     sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
                 }
@@ -3858,6 +4128,15 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
                 var rect = s.sprite_rects.get(entry.graph_index) orelse [5]f32{ 0, 0, 1, 1, 1 };
                 applyPlacementParams(s, entry.graph_index, rect[0..4]);
+                // A face-anchored sprite pins its center to a face landmark, so
+                // the sticker tracks the head; it keeps its authored size and
+                // holds its rect when no face is tracked.
+                if (s.sprite_anchor_faces.get(entry.graph_index)) |anchor| {
+                    if (faceAnchorScreen(s, anchor, width, height, rotation, mirror)) |c| {
+                        rect[0] = c[0] - rect[2] * 0.5;
+                        rect[1] = c[1] - rect[3] * 0.5;
+                    }
+                }
                 // An interactive sprite draws at its dragged and scaled rect,
                 // keeping its own opacity, and turned by any live rotation.
                 var sprite_rotation: f32 = 0;
@@ -3898,15 +4177,18 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         if (lens.paramValue(pname)) |v| sprite_opacity = std.math.clamp(v, 0, 1);
                     }
                 }
+                // A cutout sprite composites by its own matte alpha so its clear
+                // regions show the frame; an opaque sprite fills flat by opacity.
+                const source_alpha = s.sprite_cutouts.contains(entry.graph_index);
                 if (sprite_rotation != 0) {
                     // A turned sprite draws as a rotated quad over the full
                     // view; the axis-aligned rect path cannot rotate.
                     const cx = rect[0] + rect[2] * 0.5;
                     const cy = rect[1] + rect[3] * 0.5;
                     const aspect = if (full_h > 0) full_w / full_h else 1.0;
-                    r.submitSpriteRotated(sprite_view, sprite_texture, cx, cy, rect[2] * 0.5, rect[3] * 0.5, sprite_rotation, aspect, sprite_opacity);
+                    r.submitSpriteRotated(sprite_view, sprite_texture, cx, cy, rect[2] * 0.5, rect[3] * 0.5, sprite_rotation, aspect, sprite_opacity, source_alpha);
                 } else {
-                    r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, sprite_opacity);
+                    r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, sprite_opacity, source_alpha);
                 }
                 if (output) |target| {
                     input_texture = target.texture;
@@ -4661,6 +4943,17 @@ pub fn destroySession(session: *Session) void {
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
+    session.sprite_anchor_faces.deinit(session.engine.gpa);
+    session.sprite_cutouts.deinit(session.engine.gpa);
+    session.dynamic_texts.deinit(session.engine.gpa);
+    {
+        var info_it = session.info_values.iterator();
+        while (info_it.next()) |e| {
+            session.engine.gpa.free(e.key_ptr.*);
+            session.engine.gpa.free(e.value_ptr.*);
+        }
+        session.info_values.deinit(session.engine.gpa);
+    }
     session.sprite_masks.deinit(session.engine.gpa);
     session.sprite_mask_strength_params.deinit(session.engine.gpa);
     session.model_controls.deinit(session.engine.gpa);
@@ -4707,12 +5000,17 @@ pub fn destroySession(session: *Session) void {
     session.warp_params.deinit(session.engine.gpa);
     session.warp_masks.deinit(session.engine.gpa);
     session.reshape_params.deinit(session.engine.gpa);
+    session.body_reshape_params.deinit(session.engine.gpa);
     session.trail_params.deinit(session.engine.gpa);
     session.ssr_params.deinit(session.engine.gpa);
     session.env_params.deinit(session.engine.gpa);
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.occluder_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.splat_scene_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.cutout_sticker_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.cutout_source_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.inpaint_fresh_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.inpaint_prev_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -4730,6 +5028,8 @@ pub fn destroySession(session: *Session) void {
     session.model_body_anchors.deinit(session.engine.gpa);
     session.model_skeleton_anchors.deinit(session.engine.gpa);
     session.model_world_anchors.deinit(session.engine.gpa);
+    if (session.world.mesh_vertices.len > 0) session.engine.gpa.free(session.world.mesh_vertices);
+    if (session.world.mesh_indices.len > 0) session.engine.gpa.free(session.world.mesh_indices);
     if (session.physics_world) |world| world.destroy();
     session.physics_bodies.deinit(session.engine.gpa);
     session.pending_glb_colliders.deinit(session.engine.gpa);
@@ -5563,6 +5863,48 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
     s.world.dropped_anchors +|= @intCast(anchor_count -| max_world_anchors);
     if (light) |l| s.world.light = l.*;
     s.world_engine_fed = true;
+    return .ok;
+}
+
+/// Submits the device's pre-scanned world mesh (ARKit/ARCore reconstruction, a
+/// VPS scan) in world space: vertex_count xyz triples and index_count indices,
+/// three per triangle. The engine copies it, and a ray meets it through
+/// goss_session_raycast_world_mesh. An empty submission clears the stored mesh.
+pub export fn goss_session_submit_world_mesh(session: ?*Session, vertices: ?[*]const f32, vertex_count: usize, indices: ?[*]const u32, index_count: usize) Status {
+    const s = session orelse return .invalid_argument;
+    if (index_count % 3 != 0) return .invalid_argument;
+    if (s.world.mesh_vertices.len > 0) s.engine.gpa.free(s.world.mesh_vertices);
+    if (s.world.mesh_indices.len > 0) s.engine.gpa.free(s.world.mesh_indices);
+    s.world.mesh_vertices = &.{};
+    s.world.mesh_indices = &.{};
+    if (vertex_count == 0 or index_count == 0) return .ok;
+    const v = vertices orelse return .invalid_argument;
+    const idx = indices orelse return .invalid_argument;
+    const verts = s.engine.gpa.alloc([3]f32, vertex_count) catch return .out_of_memory;
+    for (0..vertex_count) |i| verts[i] = .{ v[i * 3], v[i * 3 + 1], v[i * 3 + 2] };
+    const inds = s.engine.gpa.alloc(u32, index_count) catch {
+        s.engine.gpa.free(verts);
+        return .out_of_memory;
+    };
+    @memcpy(inds, idx[0..index_count]);
+    s.world.mesh_vertices = verts;
+    s.world.mesh_indices = inds;
+    return .ok;
+}
+
+/// Casts a world-space ray (origin and direction) against the submitted world
+/// mesh and writes the nearest surface hit into out_point with its ray distance
+/// into out_distance. `.again` when no mesh is submitted or the ray misses, so a
+/// tap-to-place lens anchors content where the ray meets the scanned geometry.
+pub export fn goss_session_raycast_world_mesh(session: ?*Session, origin: ?*const [3]f32, direction: ?*const [3]f32, out_point: ?*[3]f32, out_distance: ?*f32) Status {
+    const s = session orelse return .invalid_argument;
+    const o = origin orelse return .invalid_argument;
+    const d = direction orelse return .invalid_argument;
+    const point_out = out_point orelse return .invalid_argument;
+    if (s.world.mesh_vertices.len == 0) return .again;
+    const hit = world_mesh.raycast(s.world.mesh_vertices, s.world.mesh_indices, o.*, d.*) orelse return .again;
+    point_out.* = hit.point;
+    if (out_distance) |dist| dist.* = hit.distance;
     return .ok;
 }
 
@@ -7030,6 +7372,7 @@ pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const F
         .conversion = math.color.yuvToRgb(standard, range),
     } } };
     fillFrameThumbNv12(s, y_ptr, y_stride, uv_ptr, uv_stride, d.width, d.height, math.color.yuvToRgb(standard, range));
+    s.flash_risk = feedFlashDetector(s, y_ptr, y_stride, d.width, d.height, d.timestamp_us);
     updateStabilization(s);
     s.copied_frames += 1;
     return .ok;
@@ -7710,6 +8053,97 @@ pub export fn goss_session_submit_orientation(session: ?*Session, gravity_x: f32
     return .ok;
 }
 
+/// Feeds a host info value keyed by name, the rail an info sticker reads: a
+/// text.2d node with a matching `content_source` shows the latest value each
+/// frame. A null or empty value clears the key. Keys and values are copied, so
+/// the caller keeps ownership of its buffers.
+pub export fn goss_session_set_info(session: ?*Session, key: ?[*]const u8, key_len: usize, value: ?[*]const u8, value_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const key_ptr = key orelse return .invalid_argument;
+    if (key_len == 0) return .invalid_argument;
+    const gpa = s.engine.gpa;
+    const key_slice = key_ptr[0..key_len];
+    // A null or empty value clears the key.
+    if (value == null or value_len == 0) {
+        if (s.info_values.fetchRemove(key_slice)) |old| {
+            gpa.free(old.key);
+            gpa.free(old.value);
+        }
+        return .ok;
+    }
+    const val_copy = gpa.dupe(u8, value.?[0..value_len]) catch return .out_of_memory;
+    // An existing key keeps its stored key buffer and just swaps the value.
+    if (s.info_values.getEntry(key_slice)) |entry| {
+        gpa.free(entry.value_ptr.*);
+        entry.value_ptr.* = val_copy;
+        return .ok;
+    }
+    const key_copy = gpa.dupe(u8, key_slice) catch {
+        gpa.free(val_copy);
+        return .out_of_memory;
+    };
+    s.info_values.put(gpa, key_copy, val_copy) catch {
+        gpa.free(key_copy);
+        gpa.free(val_copy);
+        return .out_of_memory;
+    };
+    return .ok;
+}
+
+/// Serializes the active lens's parameter state into out_buf (a count then the
+/// values) with the byte length in out_len; .again with no lens. A connected
+/// lens publishes this blob so the cloud syncs it to peers - the deterministic
+/// tick plus the applied state is the shared state. Probe with a null out_buf.
+pub export fn goss_session_snapshot_lens_state(session: ?*Session, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .again;
+    const buf: []u8 = if (out_buf) |b| b[0..out_cap] else &.{};
+    out_len_ptr.* = lens.snapshotState(buf);
+    return .ok;
+}
+
+/// Applies a peer's lens-state blob to the active lens: each value is clamped
+/// into its parameter, so two runtimes on the same lens converge. .again with no
+/// lens. The cloud delivers the blob; a short or over-long one applies what fits.
+pub export fn goss_session_apply_lens_state(session: ?*Session, blob: ?[*]const u8, blob_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const b = blob orelse return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .again;
+    lens.applyState(b[0..blob_len]);
+    return .ok;
+}
+
+/// Writes a content-provenance manifest for the active lens into out_buf as JSON:
+/// the producer, the lens id, whether the frame is model-generated (a diffusion
+/// node) or edited (any lens node), and the operations that touched it. The host
+/// binds this to a capture per C2PA. .again with no lens; probe with a null buf.
+pub export fn goss_session_capture_provenance(session: ?*Session, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .again;
+    var buf: [4096]u8 = undefined;
+    var off: usize = 0;
+    var generated = false;
+    for (lens.manifest.nodes) |node| {
+        if (std.mem.eql(u8, node.type, "diffusion")) generated = true;
+    }
+    const head = std.fmt.bufPrint(buf[off..], "{{\"producer\":\"gosslens\",\"lens\":\"{s}\",\"generated\":{},\"edited\":{},\"operations\":[", .{ lens.manifest.id, generated, lens.manifest.nodes.len > 0 }) catch return .out_of_memory;
+    off += head.len;
+    for (lens.manifest.nodes, 0..) |node, i| {
+        const part = std.fmt.bufPrint(buf[off..], "{s}\"{s}\"", .{ if (i == 0) "" else ",", node.type }) catch return .out_of_memory;
+        off += part.len;
+    }
+    const tail = std.fmt.bufPrint(buf[off..], "]}}", .{}) catch return .out_of_memory;
+    off += tail.len;
+    const json = buf[0..off];
+    out_len_ptr.* = json.len;
+    if (out_buf) |ob| {
+        if (out_cap >= json.len) @memcpy(ob[0..json.len], json);
+    }
+    return .ok;
+}
+
 const capture_target_count: u32 = 8;
 const capture_max_views: usize = 32;
 const capture_grid: usize = 16;
@@ -7924,6 +8358,27 @@ const default_ml_worker_budget: u32 = 8;
 /// planes at a thumb_side grid and converting each with the frame's color map.
 /// Bounded and CPU-only, so an auto-enhance pass has whole-frame statistics
 /// without a GPU readback.
+/// Subsamples the submitted Y (luma) plane to a mean in 0..1 and feeds it to the
+/// photosensitivity flash detector, returning the risk for this frame. Reads a
+/// fixed 32x32 grid so the per-frame cost is bounded and allocation-free.
+fn feedFlashDetector(s: *Session, y: [*]const u8, y_stride: u32, width: u32, height: u32, timestamp_us: i64) f32 {
+    const step_x = @max(width / 32, 1);
+    const step_y = @max(height / 32, 1);
+    var sum: u64 = 0;
+    var count: u64 = 0;
+    var yy: u32 = 0;
+    while (yy < height) : (yy += step_y) {
+        const row = y + yy * y_stride;
+        var xx: u32 = 0;
+        while (xx < width) : (xx += step_x) {
+            sum += row[xx];
+            count += 1;
+        }
+    }
+    const mean: f32 = if (count > 0) @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(count)) / 255.0 else 0;
+    return s.flash_detector.push(mean, timestamp_us);
+}
+
 fn fillFrameThumbNv12(s: *Session, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32, width: u32, height: u32, conv: math.color.Conversion) void {
     for (0..thumb_side) |ty| {
         const sy = (ty * height) / thumb_side;
@@ -7951,7 +8406,7 @@ const AwbEstimate = struct { gains: [3]f32, black: f32, white: f32 };
 
 const HarmonizeStats = struct { fg_mean: [3]f32, fg_std: [3]f32, bg_mean: [3]f32, bg_std: [3]f32 };
 
-const InpaintParams = struct { channel: u8, radius: f32 };
+const InpaintParams = struct { channel: u8, radius: f32, coherence: f32 };
 
 /// Per-channel mean and standard deviation of the person (foreground) and the
 /// rest of the frame (background), read from the frame thumb with the CPU person
@@ -9050,12 +9505,14 @@ fn destroyBlendState(session: *Session) void {
     session.warp_params.clearRetainingCapacity();
     session.warp_masks.clearRetainingCapacity();
     session.reshape_params.clearRetainingCapacity();
+    session.body_reshape_params.clearRetainingCapacity();
     session.trail_params.clearRetainingCapacity();
     session.ssr_params.clearRetainingCapacity();
     session.env_params.clearRetainingCapacity();
     // The prev-frame target is reused across lenses, but its echo belongs to
     // the lens that just left: drop it so the next trail reseeds cleanly.
     session.prev_frame_valid = false;
+    session.inpaint_prev_valid = false;
     session.bloom_params.clearRetainingCapacity();
 }
 
@@ -9084,6 +9541,11 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_opacity_params.clearRetainingCapacity();
     session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
+    session.sprite_anchor_faces.clearRetainingCapacity();
+    session.sprite_cutouts.clearRetainingCapacity();
+    // Host-fed info values survive a lens change (session state, like
+    // orientation); only the lens's own dynamic-text bindings reset here.
+    session.dynamic_texts.clearRetainingCapacity();
     session.sprite_masks.clearRetainingCapacity();
     session.sprite_mask_strength_params.clearRetainingCapacity();
     session.model_controls.clearRetainingCapacity();
@@ -9489,9 +9951,17 @@ fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) vo
         if (trig.action.kind != .play_sound) continue;
         const rel = trig.action.target;
         if (rel.len == 0 or s.sound_ids.contains(rel)) continue;
-        const full = std.fmt.allocPrint(gpa, "{s}/{s}", .{ bundle_path, rel }) catch continue;
-        defer gpa.free(full);
-        const id = mixer.load(full) catch continue;
+        // A "builtin:<name>" target plays an engine-synthesized effect with no
+        // bundled file; anything else loads the sound from the lens bundle.
+        const id = if (std.mem.startsWith(u8, rel, "builtin:")) blk: {
+            const wav = sfx.synth(gpa, rel["builtin:".len..], audio_sample_rate) catch continue;
+            defer gpa.free(wav);
+            break :blk mixer.loadMemory(wav) catch continue;
+        } else blk: {
+            const full = std.fmt.allocPrint(gpa, "{s}/{s}", .{ bundle_path, rel }) catch continue;
+            defer gpa.free(full);
+            break :blk mixer.load(full) catch continue;
+        };
         const key = s.engine.gpa.dupe(u8, rel) catch continue;
         s.sound_ids.put(s.engine.gpa, key, id) catch {
             s.engine.gpa.free(key);
@@ -9560,6 +10030,165 @@ pub export fn goss_compile_prompt(engine: ?*Engine, prompt: ?[*]const u8, prompt
     if (out_buf) |buf| {
         if (out_cap >= json.len) @memcpy(buf[0..json.len], json);
     }
+    return .ok;
+}
+
+/// Composes an on-device generative-music track from a prompt into a mono 16-bit
+/// WAV. Probe with a null out_buf, then fill; a non-zero seed varies the take,
+/// bars 0 the default length. Deterministic, no model; a bundled model feeds the
+/// same WAV path.
+pub export fn goss_engine_generate_song(engine: ?*Engine, prompt: ?[*]const u8, prompt_len: usize, sample_rate: u32, seed: u32, bars: u32, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const e = engine orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (prompt == null and prompt_len != 0) return .invalid_argument;
+    if (sample_rate == 0) return .invalid_argument;
+    const text: []const u8 = if (prompt) |p| p[0..prompt_len] else &.{};
+    var params = music.paramsFromPrompt(text);
+    if (seed != 0) params.seed = seed;
+    if (bars != 0) params.bars = bars;
+    const wav = music.synth(e.gpa, params, sample_rate) catch return .out_of_memory;
+    defer e.gpa.free(wav);
+    out_len_ptr.* = wav.len;
+    if (out_buf) |buf| {
+        if (out_cap >= wav.len) @memcpy(buf[0..wav.len], wav);
+    }
+    return .ok;
+}
+
+/// Scans a luminance frame for an EAN-13 / UPC-A barcode and, on the first row
+/// that decodes, writes its 13 digits into out_digits and returns ok; .again when
+/// no row carries a checksum-valid symbol. Algorithmic and deterministic, no
+/// model, so a lens reads a product code with nothing gated in.
+pub export fn goss_engine_scan_barcode(engine: ?*Engine, luminance: ?[*]const u8, width: u32, height: u32, out_digits: ?*[13]u8) Status {
+    _ = engine;
+    const lum = luminance orelse return .invalid_argument;
+    const out = out_digits orelse return .invalid_argument;
+    if (width < barcode.symbol_modules or height == 0) return .invalid_argument;
+    const buf = lum[0 .. @as(usize, width) * height];
+    // Sample rows across the frame; a barcode spans many rows, so a coarse stride
+    // finds it cheaply, and the first checksum-valid decode wins.
+    const stride: usize = @max(1, height / 64);
+    var row: usize = 0;
+    while (row < height) : (row += stride) {
+        if (barcode.scanRow(buf, width, height, row)) |digits| {
+            out.* = digits;
+            return .ok;
+        }
+    }
+    return .again;
+}
+
+/// Scans a luminance frame for a QR code (versions 1-4, level L, byte mode),
+/// writing its decoded payload into out_buf and its length into out_len; .again
+/// when no QR decodes. Algorithmic and deterministic with Reed-Solomon error
+/// correction, no model, so a lens reads a scan-to-unlock code with nothing gated.
+pub export fn goss_engine_scan_qr(engine: ?*Engine, luminance: ?[*]const u8, width: u32, height: u32, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    _ = engine;
+    const lum = luminance orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    var payload: [512]u8 = undefined;
+    const cap = @min(out_cap, payload.len);
+    const len = qr.scan(lum[0 .. @as(usize, width) * height], width, height, payload[0..payload.len]) orelse return .again;
+    out_len_ptr.* = len;
+    if (out_buf) |buf| {
+        if (cap >= len) @memcpy(buf[0..len], payload[0..len]);
+    }
+    return .ok;
+}
+
+/// Generates a QR code for a payload and renders it into an 8-bit luminance image
+/// (0 dark, 255 light) of side out_dim, at module_scale pixels per module with a
+/// quiet_modules-wide light border. Probe the side with a null out_buf, then
+/// fill. So a lens shares a lens, an unlock, or a session-join code on device.
+pub export fn goss_engine_generate_qr(engine: ?*Engine, payload: ?[*]const u8, payload_len: usize, module_scale: u32, quiet_modules: u32, out_buf: ?[*]u8, out_cap: usize, out_dim: ?*u32) Status {
+    _ = engine;
+    const dim_ptr = out_dim orelse return .invalid_argument;
+    if (payload == null and payload_len != 0) return .invalid_argument;
+    const bytes: []const u8 = if (payload) |p| p[0..payload_len] else &.{};
+    const scale: usize = @max(module_scale, 1);
+    var mat: qr.Matrix = undefined;
+    qr.encode(bytes, 2, &mat) catch return .invalid_argument;
+    const quiet_px = @as(usize, quiet_modules) * scale;
+    const dim = quiet_px * 2 + mat.size * scale;
+    dim_ptr.* = @intCast(dim);
+    if (out_buf) |buf| {
+        if (out_cap >= dim * dim) qr.render(&mat, scale, quiet_px, buf[0 .. dim * dim], dim);
+    }
+    return .ok;
+}
+
+/// Ranks a media archive by semantic similarity: corpus holds count embedding
+/// vectors of length dim and query is one dim-vector, all from the host's
+/// bring-your-own embedding model. Writes the top k archive indices and cosine
+/// scores and their count. The engine owns the k-NN search; any embedder feeds it.
+pub export fn goss_engine_media_search(engine: ?*Engine, corpus: ?[*]const f32, count: u32, dim: u32, query: ?[*]const f32, k: u32, out_indices: ?[*]u32, out_scores: ?[*]f32, out_count: ?*u32) Status {
+    _ = engine;
+    const corp = corpus orelse return .invalid_argument;
+    const q = query orelse return .invalid_argument;
+    const idx = out_indices orelse return .invalid_argument;
+    const sc = out_scores orelse return .invalid_argument;
+    const cnt = out_count orelse return .invalid_argument;
+    if (dim == 0 or k == 0) return .invalid_argument;
+    const total = @as(usize, count) * dim;
+    const n = medialib.search(corp[0..total], count, dim, q[0..dim], idx[0..k], sc[0..k]);
+    cnt.* = @intCast(n);
+    return .ok;
+}
+
+/// Seals a media blob for the on-device vault: encrypts plaintext with
+/// ChaCha20-Poly1305 under the 32-byte key and 12-byte nonce, binding aad, and
+/// writes ciphertext-then-tag into out_buf. Probe the length with a null out_buf
+/// (plaintext_len + 16), then fill. The host holds the key in its keystore.
+pub export fn goss_seal_media(key: ?*const [medialib.key_length]u8, nonce: ?*const [medialib.nonce_length]u8, plaintext: ?[*]const u8, plaintext_len: usize, aad: ?[*]const u8, aad_len: usize, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const key_ptr = key orelse return .invalid_argument;
+    const nonce_ptr = nonce orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (plaintext == null and plaintext_len != 0) return .invalid_argument;
+    const plain: []const u8 = if (plaintext) |p| p[0..plaintext_len] else &.{};
+    const ad: []const u8 = if (aad) |a| a[0..aad_len] else &.{};
+    const sealed_len = plaintext_len + medialib.tag_length;
+    out_len_ptr.* = sealed_len;
+    if (out_buf) |buf| {
+        if (out_cap >= sealed_len) medialib.seal(key_ptr.*, nonce_ptr.*, plain, ad, buf[0..sealed_len]);
+    }
+    return .ok;
+}
+
+/// Opens a sealed vault blob back to plaintext under the same key, nonce, and
+/// aad, writing it into out_buf. Probe the plaintext length with a null out_buf
+/// (it is sealed_len - 16), then fill. Returns .invalid_argument if the key,
+/// nonce, aad, or bytes fail authentication, so a tampered blob never decodes.
+pub export fn goss_open_media(key: ?*const [medialib.key_length]u8, nonce: ?*const [medialib.nonce_length]u8, sealed: ?[*]const u8, sealed_len: usize, aad: ?[*]const u8, aad_len: usize, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const key_ptr = key orelse return .invalid_argument;
+    const nonce_ptr = nonce orelse return .invalid_argument;
+    const sealed_ptr = sealed orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (sealed_len < medialib.tag_length) return .invalid_argument;
+    const plain_len = sealed_len - medialib.tag_length;
+    const ad: []const u8 = if (aad) |a| a[0..aad_len] else &.{};
+    out_len_ptr.* = plain_len;
+    if (out_buf) |buf| {
+        if (out_cap >= plain_len) {
+            _ = medialib.open(key_ptr.*, nonce_ptr.*, sealed_ptr[0..sealed_len], ad, buf[0..plain_len]) catch return .invalid_argument;
+        }
+    }
+    return .ok;
+}
+
+/// Picks the best frame of a burst: count luminance frames of width*height,
+/// frame_stride bytes apart, scored by sharpness blended with a per-frame host
+/// openness score weighted by openness_weight in 0..1. Writes the winning frame
+/// index into out_index, so best-take keeps the crisp, eyes-open shot.
+pub export fn goss_engine_best_take(engine: ?*Engine, frames: ?[*]const u8, frame_stride: usize, count: u32, width: u32, height: u32, openness: ?[*]const f32, openness_weight: f32, out_index: ?*u32) Status {
+    _ = engine;
+    const buf = frames orelse return .invalid_argument;
+    const out = out_index orelse return .invalid_argument;
+    if (count == 0 or width == 0 or height == 0) return .invalid_argument;
+    const total = frame_stride * (count - 1) + @as(usize, width) * height;
+    const open_slice: []const f32 = if (openness) |o| o[0..count] else &.{};
+    const best = medialib.bestTake(buf[0..total], frame_stride, count, width, height, open_slice, openness_weight);
+    out.* = @intCast(best);
     return .ok;
 }
 
@@ -9806,6 +10435,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     createEdgeParams(s, gpa) catch {};
     createWarpParams(s, gpa) catch {};
     createReshapeParams(s, gpa) catch {};
+    createBodyReshapeParams(s, gpa) catch {};
     createTrailParams(s, gpa) catch {};
     createSsrParams(s, gpa) catch {};
     createEnvParams(s, gpa) catch {};
@@ -9997,7 +10627,7 @@ fn createInpaintParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.inpaintPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.inpaint_params.put(gpa, n.graph_index, .{ .channel = n.mask_channel, .radius = n.radius }) catch {};
+        session.inpaint_params.put(gpa, n.graph_index, .{ .channel = n.mask_channel, .radius = n.radius, .coherence = n.coherence }) catch {};
     }
 }
 
@@ -10203,6 +10833,17 @@ fn createReshapeParams(session: *Session, gpa: std.mem.Allocator) !void {
     }
 }
 
+/// Resolves the active lens's reshape.body nodes into session.body_reshape_params,
+/// once at activation. The live pose landmarks and body mask join them each frame.
+fn createBodyReshapeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const bodies = try lens.bodyReshapePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(bodies);
+    for (bodies) |bp| {
+        session.body_reshape_params.put(gpa, bp.graph_index, bp.params) catch {};
+    }
+}
+
 /// Resolves every spliced trail.pass node's echo amount into
 /// session.trail_params, once at activation - mirrors createOutlineParams.
 fn createTrailParams(session: *Session, gpa: std.mem.Allocator) !void {
@@ -10397,6 +11038,23 @@ const SpriteAnim = struct {
     loaders: []?*asset.ImageLoader,
     textures: []render.TextureHandle,
     loaded: u32 = 0,
+    play: manifest.SpritePlay = .loop,
+
+    /// The frame to show at step n under the play mode: forward loops, reverse
+    /// counts down, boomerang ping-pongs forward then back over a 2(N-1) period.
+    fn frameAt(self: SpriteAnim, n: u64) u32 {
+        const count = self.frames;
+        if (count <= 1) return 0;
+        return switch (self.play) {
+            .loop => @intCast(n % count),
+            .reverse => @intCast(count - 1 - (n % count)),
+            .boomerang => blk: {
+                const period: u64 = @as(u64, count - 1) * 2;
+                const p = n % period;
+                break :blk if (p < count) @intCast(p) else @intCast(period - p);
+            },
+        };
+    }
 };
 
 /// A video.texture node's live playback: the streaming decoder, the
@@ -10421,6 +11079,24 @@ const VideoPlayback = struct {
     /// Set once a non-looping clip runs out, so the draw holds the last
     /// frame instead of retrying the decoder every frame.
     ended: bool = false,
+};
+
+/// A text.2d node whose content comes from a live source (a built-in clock or a
+/// host info key). The style is captured at load so the frame path can
+/// re-rasterize when the resolved string changes, swapping the sprite texture.
+const DynamicText = struct {
+    source: []const u8,
+    countdown_seconds: f32,
+    color: [3]u8,
+    gradient: ?[3]u8,
+    shadow: bool,
+    stroke: ?[3]u8,
+    bend: f32,
+    wrap: u32,
+    /// The last string rasterized, so an unchanged value skips the re-raster.
+    /// len 0 means nothing has been drawn yet, forcing the first refresh.
+    last_buf: [64]u8 = @splat(0),
+    last_len: usize = 0,
 };
 
 /// Loads a sprite.2d node's animated GIF (assets/<stem>.gif) as a video
@@ -10453,7 +11129,7 @@ fn tryStartGifSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []c
     const avg_cs: f32 = @as(f32, @floatFromInt(total_cs)) / @as(f32, @floatFromInt(n));
     const fps: f32 = if (avg_cs > 0) 100.0 / avg_cs else 12.0;
 
-    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = fps, .loaders = loaders, .textures = textures, .loaded = n }) catch {
+    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = fps, .loaders = loaders, .textures = textures, .loaded = n, .play = sprite.play }) catch {
         if (session.engine.renderer) |*r| for (textures) |tex| r.destroyTexture(tex);
         gpa.free(loaders);
         gpa.free(textures);
@@ -10662,6 +11338,14 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
         }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
+        if (sprite.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, sprite.graph_index, @intCast(sprite.anchor_face)) catch {};
+        // A cutout sprite has no bundled image: it lifts the live subject (or the
+        // whole frame) each frame, so it registers and skips the image-load paths.
+        if (sprite.cutout_channel >= 0 or sprite.cutout_whole) {
+            const channel: u8 = if (sprite.cutout_channel >= 0) @intCast(sprite.cutout_channel) else 0;
+            session.sprite_cutouts.put(gpa, sprite.graph_index, .{ .channel = channel, .softness = sprite.cutout_softness, .whole = sprite.cutout_whole }) catch {};
+            continue;
+        }
         if (sprite.mask_channel) |channel| {
             session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over, .strength = sprite.mask_strength }) catch {};
             if (sprite.mask_strength_param.len > 0) session.sprite_mask_strength_params.put(gpa, sprite.graph_index, sprite.mask_strength_param) catch {};
@@ -10774,7 +11458,7 @@ fn startSpriteAnim(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
         defer gpa.free(path);
         loaders[i] = asset.ImageLoader.start(gpa, path) catch null;
     }
-    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = sprite.fps, .loaders = loaders, .textures = textures }) catch {
+    session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = sprite.fps, .loaders = loaders, .textures = textures, .play = sprite.play }) catch {
         for (loaders) |maybe| if (maybe) |l| l.deinit();
         gpa.free(loaders);
         gpa.free(textures);
@@ -10825,6 +11509,72 @@ fn pollSpriteLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Alloca
     }
 }
 
+/// Formats seconds as mm:ss, or hh:mm:ss past an hour: the info-sticker clock.
+fn formatClock(buf: []u8, seconds: f64) []const u8 {
+    const total: u64 = @intFromFloat(@max(0.0, seconds));
+    const h = total / 3600;
+    const m = (total % 3600) / 60;
+    const sec = total % 60;
+    if (h > 0) return std.fmt.bufPrint(buf, "{d}:{d:0>2}:{d:0>2}", .{ h, m, sec }) catch buf[0..0];
+    return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}", .{ m, sec }) catch buf[0..0];
+}
+
+/// The live string a dynamic text node shows this frame: a built-in clock or
+/// countdown off the lens elapsed time, else the latest host-fed value for the
+/// key (blank until the app feeds one).
+fn resolveInfo(s: *Session, dt: *const DynamicText, buf: []u8) []const u8 {
+    const elapsed_us = if (s.active_lens) |*lens| lens.elapsedUs() else 0;
+    const elapsed_s = @as(f64, @floatFromInt(elapsed_us)) / 1_000_000.0;
+    if (std.mem.eql(u8, dt.source, "countdown")) {
+        return formatClock(buf, @max(0.0, @as(f64, dt.countdown_seconds) - elapsed_s));
+    }
+    if (std.mem.eql(u8, dt.source, "clock.elapsed")) {
+        return formatClock(buf, elapsed_s);
+    }
+    if (s.info_values.get(dt.source)) |v| {
+        const n = @min(v.len, buf.len);
+        @memcpy(buf[0..n], v[0..n]);
+        return buf[0..n];
+    }
+    return buf[0..0];
+}
+
+/// Re-rasterizes every live text node whose resolved string changed this frame
+/// and swaps its sprite texture, so an info sticker updates in place. A node
+/// whose value held is left untouched, so a static frame does no work.
+fn refreshDynamicText(s: *Session) void {
+    if (s.dynamic_texts.count() == 0) return;
+    const gpa = s.engine.gpa;
+    const r = if (s.engine.renderer) |*rr| rr else return;
+    var it = s.dynamic_texts.iterator();
+    while (it.next()) |e| {
+        const gi = e.key_ptr.*;
+        const dt = e.value_ptr;
+        var buf: [64]u8 = undefined;
+        const str = resolveInfo(s, dt, &buf);
+        if (dt.last_len != 0 and std.mem.eql(u8, dt.last_buf[0..dt.last_len], str)) continue;
+        // The font draws a space blank, so an empty value clears to nothing.
+        const draw = if (str.len == 0) " " else str;
+        const rich = dt.gradient != null or dt.shadow or dt.stroke != null or dt.bend != 0;
+        const content = if (dt.wrap > 0) (font.wrap(gpa, draw, dt.wrap) catch draw) else draw;
+        defer if (dt.wrap > 0 and content.ptr != draw.ptr) gpa.free(content);
+        const raster = if (rich)
+            font.rasterizeRich(gpa, content, 4, .{ dt.color[0], dt.color[1], dt.color[2], 255 }, dt.gradient, dt.shadow, dt.stroke, dt.bend) catch continue
+        else
+            font.rasterize(gpa, content, 4, .{ dt.color[0], dt.color[1], dt.color[2], 255 }) catch continue;
+        defer gpa.free(raster.rgba);
+        const texture = render.Renderer.createStaticTexture(@intCast(raster.width), @intCast(raster.height), raster.rgba);
+        const prior = s.sprite_textures.fetchPut(gpa, gi, texture) catch {
+            r.destroyTexture(texture);
+            continue;
+        };
+        if (prior) |old| r.destroyTexture(old.value);
+        const n = @min(str.len, dt.last_buf.len);
+        @memcpy(dt.last_buf[0..n], str[0..n]);
+        dt.last_len = n;
+    }
+}
+
 /// Rasterizes every spliced text.2d node's string with the built-in font
 /// and uploads it as a texture, storing it and its rect in the same maps
 /// the sprite draw reads - so text draws through the sprite path with no
@@ -10868,6 +11618,19 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
         };
         session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
         if (txt.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, txt.graph_index, txt.opacity_param) catch {};
+        if (txt.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, txt.graph_index, @intCast(txt.anchor_face)) catch {};
+        // A live content source registers the node for per-frame refresh; the
+        // static raster above stands in until the first frame resolves it.
+        if (txt.content_source.len > 0) session.dynamic_texts.put(gpa, txt.graph_index, .{
+            .source = txt.content_source,
+            .countdown_seconds = txt.countdown_seconds,
+            .color = txt.color,
+            .gradient = txt.gradient,
+            .shadow = txt.shadow,
+            .stroke = txt.stroke,
+            .bend = txt.bend,
+            .wrap = txt.wrap,
+        }) catch {};
     }
 }
 
@@ -13384,6 +14147,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createEdgeParams(session, gpa);
     try createWarpParams(session, gpa);
     try createReshapeParams(session, gpa);
+    try createBodyReshapeParams(session, gpa);
     try createTrailParams(session, gpa);
     try createSsrParams(session, gpa);
     try createEnvParams(session, gpa);
@@ -14465,6 +15229,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     live_signals.camera_zoom = @max(s.camera_controls.zoom_factor, 1);
     live_signals.camera_focus = s.cam_focus_pulse;
     live_signals.camera_exposure = s.cam_exposure_pulse;
+    live_signals.flash_risk = s.flash_risk;
     // Screen gestures ride the touch stream the host fed since the last tick;
     // the recognizer resolves them here so only completed gestures and the
     // pointer position reach the lens, never the raw touches.
@@ -14531,6 +15296,14 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     s.body_clock_us += @as(i64, dt_us);
     if (currentPose(s)) |body| {
         live_signals.body_present = true;
+        // Feet are present when an ankle or foot landmark stays visible, so a
+        // shoe try-on lens reacts to feet in frame.
+        for ([_]usize{ 27, 28, 31, 32 }) |li| {
+            if (li < body.visibilities.len and body.visibilities[li] > 0.5) {
+                live_signals.foot_present = true;
+                break;
+            }
+        }
         pose.fillBoneAngles(&body.landmarks, &s.bone_angles);
         live_signals.bone_angles = &s.bone_angles;
         if (bodySampleFrom(&body.landmarks, s.body_clock_us)) |sample| {
@@ -14597,6 +15370,13 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     // Each model's latest inference lands in its bound parameters first, so a
     // script may read or override it and the effects see this tick's result.
     pollMlOutputs(s);
+    // A bring-your-own pet model's ml.infer node writes the reserved
+    // pet_present/pet_expression parameters; surface them as first-class pet
+    // signals so a lens reacts to a pet in frame and its expression.
+    if (s.active_lens) |*lens| {
+        if (lens.paramValue("pet_present")) |v| live_signals.pet_present = v >= 0.5;
+        if (lens.paramValue("pet_expression")) |v| live_signals.pet_expression = v;
+    }
     pollAudioInfer(s);
     // The script drives parameters before triggers and ramps read them, so
     // its writes flow into this tick's effects.
@@ -14612,6 +15392,16 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
 }
 
 const t = std.testing;
+
+test "sprite retiming plays frames forward, backward, and boomerang" {
+    const fwd = SpriteAnim{ .frames = 4, .fps = 12, .loaders = &.{}, .textures = &.{}, .play = .loop };
+    for ([_]u32{ 0, 1, 2, 3, 0, 1 }, 0..) |want, n| try t.expectEqual(want, fwd.frameAt(n));
+    const rev = SpriteAnim{ .frames = 4, .fps = 12, .loaders = &.{}, .textures = &.{}, .play = .reverse };
+    for ([_]u32{ 3, 2, 1, 0, 3, 2 }, 0..) |want, n| try t.expectEqual(want, rev.frameAt(n));
+    // Boomerang over 4 frames ping-pongs on a period of 6: 0 1 2 3 2 1 | 0 1 ...
+    const boom = SpriteAnim{ .frames = 4, .fps = 12, .loaders = &.{}, .textures = &.{}, .play = .boomerang };
+    for ([_]u32{ 0, 1, 2, 3, 2, 1, 0, 1 }, 0..) |want, n| try t.expectEqual(want, boom.frameAt(n));
+}
 
 test "face track ids follow position across a submission-order swap" {
     const threshold2: f32 = 0.25 * 0.25;

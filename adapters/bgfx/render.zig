@@ -40,6 +40,11 @@ pub const face_point_vec4_count = 53;
 /// spare, indexed only by compile-time constants for essl safety.
 pub const face_reshape_bank_vec4_count = 17;
 
+/// fs_reshape_body.sc packs six pose points two per vec4 into u_bodyPoints and
+/// its eleven body sculpt amounts four per vec4 into u_bodyBank.
+pub const body_reshape_points_vec4_count = 3;
+pub const body_reshape_bank_vec4_count = 3;
+
 /// A named alias for bgfx's own texture handle, matching the stub
 /// module's TextureHandle - lets callers that need to name the type
 /// (a hashmap value type, say) write render.TextureHandle uniformly
@@ -166,6 +171,7 @@ pub const Renderer = struct {
     tint_program: c.bgfx_program_handle_t,
     occluder_program: c.bgfx_program_handle_t,
     cutout_program: c.bgfx_program_handle_t,
+    cutout_sticker_program: c.bgfx_program_handle_t,
     smooth_program: c.bgfx_program_handle_t,
     retouch_program: c.bgfx_program_handle_t,
     matte_refine_program: c.bgfx_program_handle_t,
@@ -205,6 +211,8 @@ pub const Renderer = struct {
     harmonize_params_uniform: c.bgfx_uniform_handle_t,
     inpaint_program: c.bgfx_program_handle_t,
     inpaint_params_uniform: c.bgfx_uniform_handle_t,
+    inpaint_coherence_program: c.bgfx_program_handle_t,
+    coherence_uniform: c.bgfx_uniform_handle_t,
     rolling_program: c.bgfx_program_handle_t,
     rolling_params_uniform: c.bgfx_uniform_handle_t,
     parallax_program: c.bgfx_program_handle_t,
@@ -215,6 +223,7 @@ pub const Renderer = struct {
     beauty_face_program: c.bgfx_program_handle_t,
     beauty_reshape_program: c.bgfx_program_handle_t,
     reshape_bank_program: c.bgfx_program_handle_t,
+    reshape_body_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
     paint_face_program: c.bgfx_program_handle_t,
     face_swap_program: c.bgfx_program_handle_t,
@@ -323,6 +332,9 @@ pub const Renderer = struct {
     /// derived anchors (forehead center xy, nose-bridge midpoint zw).
     reshape_bank_uniform: c.bgfx_uniform_handle_t,
     reshape_hubs_uniform: c.bgfx_uniform_handle_t,
+    body_params_uniform: c.bgfx_uniform_handle_t,
+    body_points_uniform: c.bgfx_uniform_handle_t,
+    body_bank_uniform: c.bgfx_uniform_handle_t,
     /// 106 tracked face points, two per vec4 (xy, zw) - matching
     /// fs_beauty_reshape.sc's own u_facePoints packing.
     face_points_uniform: c.bgfx_uniform_handle_t,
@@ -487,6 +499,7 @@ pub const Renderer = struct {
         const tint_program = try loadTintProgram();
         const occluder_program = try loadOccluderProgram();
         const cutout_program = try loadCutoutProgram();
+        const cutout_sticker_program = try loadCutoutStickerProgram();
         const smooth_program = try loadSmoothProgram();
         const retouch_program = try loadRetouchProgram();
         const matte_refine_program = try loadMatteRefineProgram();
@@ -512,6 +525,7 @@ pub const Renderer = struct {
         const dereflect_program = try loadDereflectProgram();
         const harmonize_program = try loadHarmonizeProgram();
         const inpaint_program = try loadInpaintProgram();
+        const inpaint_coherence_program = try loadInpaintCoherenceProgram();
         const rolling_program = try loadRollingProgram();
         const parallax_program = try loadParallaxProgram();
         const bloom_extract_program = try loadBloomExtractProgram();
@@ -520,6 +534,7 @@ pub const Renderer = struct {
         const beauty_face_program = try loadBeautyFaceProgram();
         const beauty_reshape_program = try loadBeautyReshapeProgram();
         const reshape_bank_program = try loadReshapeBankProgram();
+        const reshape_body_program = try loadReshapeBodyProgram();
         const makeup_program = try loadMakeupProgram();
         const paint_face_program = try loadPaintFaceProgram();
         const face_swap_program = try loadFaceSwapProgram();
@@ -613,6 +628,7 @@ pub const Renderer = struct {
             .tint_program = tint_program,
             .occluder_program = occluder_program,
             .cutout_program = cutout_program,
+            .cutout_sticker_program = cutout_sticker_program,
             .smooth_program = smooth_program,
             .retouch_program = retouch_program,
             .matte_refine_program = matte_refine_program,
@@ -652,6 +668,8 @@ pub const Renderer = struct {
             .harmonize_params_uniform = c.bgfx_create_uniform("u_harmonize", c.BGFX_UNIFORM_TYPE_VEC4, 4),
             .inpaint_program = inpaint_program,
             .inpaint_params_uniform = c.bgfx_create_uniform("u_inpaint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .inpaint_coherence_program = inpaint_coherence_program,
+            .coherence_uniform = c.bgfx_create_uniform("u_coherence", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .rolling_program = rolling_program,
             .rolling_params_uniform = c.bgfx_create_uniform("u_rolling", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .parallax_program = parallax_program,
@@ -662,6 +680,7 @@ pub const Renderer = struct {
             .beauty_face_program = beauty_face_program,
             .beauty_reshape_program = beauty_reshape_program,
             .reshape_bank_program = reshape_bank_program,
+            .reshape_body_program = reshape_body_program,
             .makeup_program = makeup_program,
             .paint_face_program = paint_face_program,
             .face_swap_program = face_swap_program,
@@ -743,6 +762,9 @@ pub const Renderer = struct {
             .reshape_params_uniform = c.bgfx_create_uniform("u_reshapeParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .reshape_bank_uniform = c.bgfx_create_uniform("u_reshapeBank", c.BGFX_UNIFORM_TYPE_VEC4, face_reshape_bank_vec4_count),
             .reshape_hubs_uniform = c.bgfx_create_uniform("u_reshapeHubs", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .body_params_uniform = c.bgfx_create_uniform("u_bodyParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .body_points_uniform = c.bgfx_create_uniform("u_bodyPoints", c.BGFX_UNIFORM_TYPE_VEC4, body_reshape_points_vec4_count),
+            .body_bank_uniform = c.bgfx_create_uniform("u_bodyBank", c.BGFX_UNIFORM_TYPE_VEC4, body_reshape_bank_vec4_count),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .paint_params_uniform = c.bgfx_create_uniform("u_paintParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .swap_params_uniform = c.bgfx_create_uniform("u_swapParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -908,6 +930,16 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_cutout_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_cutout_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_cutout_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    pub fn loadCutoutStickerProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_cutout_sticker_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_cutout_sticker_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_cutout_sticker_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_cutout_sticker_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -1148,6 +1180,16 @@ pub const Renderer = struct {
         };
     }
 
+    pub fn loadInpaintCoherenceProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_inpaint_coherence_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_inpaint_coherence_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_inpaint_coherence_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_inpaint_coherence_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     pub fn loadRollingProgram() !c.bgfx_program_handle_t {
         return switch (c.bgfx_get_renderer_type()) {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_rolling_pass_metal),
@@ -1298,6 +1340,16 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_reshape_bank_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_reshape_bank_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_reshape_bank_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    pub fn loadReshapeBodyProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_reshape_body_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_reshape_body_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_reshape_body_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_reshape_body_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -1522,6 +1574,9 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_bloom);
         c.bgfx_destroy_uniform(r.beauty_params_uniform);
         c.bgfx_destroy_uniform(r.reshape_params_uniform);
+        c.bgfx_destroy_uniform(r.body_params_uniform);
+        c.bgfx_destroy_uniform(r.body_points_uniform);
+        c.bgfx_destroy_uniform(r.body_bank_uniform);
         c.bgfx_destroy_uniform(r.reshape_bank_uniform);
         c.bgfx_destroy_uniform(r.reshape_hubs_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
@@ -1557,6 +1612,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.tint_program);
         c.bgfx_destroy_program(r.occluder_program);
         c.bgfx_destroy_program(r.cutout_program);
+        c.bgfx_destroy_program(r.cutout_sticker_program);
         c.bgfx_destroy_program(r.smooth_program);
         c.bgfx_destroy_program(r.retouch_program);
         c.bgfx_destroy_program(r.matte_refine_program);
@@ -1596,6 +1652,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.harmonize_params_uniform);
         c.bgfx_destroy_program(r.inpaint_program);
         c.bgfx_destroy_uniform(r.inpaint_params_uniform);
+        c.bgfx_destroy_program(r.inpaint_coherence_program);
+        c.bgfx_destroy_uniform(r.coherence_uniform);
         c.bgfx_destroy_program(r.rolling_program);
         c.bgfx_destroy_uniform(r.rolling_params_uniform);
         c.bgfx_destroy_program(r.parallax_program);
@@ -1606,6 +1664,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.beauty_face_program);
         c.bgfx_destroy_program(r.beauty_reshape_program);
         c.bgfx_destroy_program(r.reshape_bank_program);
+        c.bgfx_destroy_program(r.reshape_body_program);
         c.bgfx_destroy_program(r.makeup_program);
         c.bgfx_destroy_program(r.paint_face_program);
         c.bgfx_destroy_program(r.face_swap_program);
@@ -2082,12 +2141,14 @@ pub const Renderer = struct {
     /// the view to the sprite's pixel rect and alpha-composites the image
     /// there at `opacity` through the shared composite program. The caller
     /// sets the target, so this works for an offscreen target or swap chain.
-    pub fn submitSpriteAtRect(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32) void {
+    pub fn submitSpriteAtRect(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32, source_alpha: bool) void {
         c.bgfx_set_view_rect(view_id, @intCast(dx), @intCast(dy), dw, dh);
         c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, sprite_tex, std.math.maxInt(u32));
-        const params = [4]f32{ opacity, 0, 0, 0 };
+        // Key mode 1 cuts the sprite by its own alpha (a cutout sticker's matte);
+        // mode 0 is a flat opacity fill for an opaque sprite.
+        const params = [4]f32{ opacity, if (source_alpha) 1 else 0, 0, 0 };
         const chroma = [4]f32{ 0, 0, 0, 0 };
         c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
         c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
@@ -2100,7 +2161,7 @@ pub const Renderer = struct {
     /// sprite can be turned two-fingered. cx, cy is the centre and hw, hh the
     /// half extents in normalized frame coordinates; rotation is radians and
     /// aspect the output width over height, so the turn keeps the sprite shape.
-    pub fn submitSpriteRotated(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32) void {
+    pub fn submitSpriteRotated(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32, source_alpha: bool) void {
         var tvb: c.bgfx_transient_vertex_buffer_t = undefined;
         var tib: c.bgfx_transient_index_buffer_t = undefined;
         if (c.bgfx_get_avail_transient_vertex_buffer(4, &r.layout) < 4) return;
@@ -2132,7 +2193,7 @@ pub const Renderer = struct {
         c.bgfx_set_transient_vertex_buffer(0, &tvb, 0, 4);
         c.bgfx_set_transient_index_buffer(&tib, 0, 6);
         c.bgfx_set_texture(0, r.tex_color, sprite_tex, std.math.maxInt(u32));
-        const params = [4]f32{ opacity, 0, 0, 0 };
+        const params = [4]f32{ opacity, if (source_alpha) 1 else 0, 0, 0 };
         const chroma = [4]f32{ 0, 0, 0, 0 };
         c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
         c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
@@ -2273,6 +2334,20 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.cutout_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.cutout_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Lifts the segmented subject into a transparent-background cutout: the
+    /// matte becomes the alpha, so the subject keeps the camera color and the
+    /// rest goes clear, ready to draw at a rect as a movable sticker. Reuses the
+    /// cutout uniform; only w (softness) matters, the color is unused.
+    pub fn submitCutoutSticker(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, softness: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ 0, 0, 0, softness };
+        c.bgfx_set_uniform(r.cutout_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.cutout_sticker_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Blends the frame toward a small neighbor average, masked by the texture
@@ -2547,6 +2622,20 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.inpaint_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Blends a fresh inpaint fill toward the previous frame's fill inside the
+    /// removal mask by `coherence`, so a video inpaint holds steady frame to
+    /// frame. fresh_texture is this frame's fill, prev_texture last frame's.
+    pub fn submitInpaintCoherence(r: *Renderer, view_id: c.bgfx_view_id_t, fresh_texture: c.bgfx_texture_handle_t, prev_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, coherence: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, fresh_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_background, prev_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        var params = [4]f32{ coherence, 0, 0, 0 };
+        c.bgfx_set_uniform(r.coherence_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.inpaint_coherence_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Draws one rolling.pass node as a full-screen pass into view_id: the frame
     /// on unit 0 and u_rolling (the per-row skew the engine derived from the
     /// orientation stream), the one fixed rolling_program every node shares.
@@ -2713,6 +2802,23 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.reshape_bank_uniform, &slots, face_reshape_bank_vec4_count);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.reshape_bank_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one reshape.body node: a full-screen warp that sculpts the figure
+    /// along the pose axis inside the body mask, so the background stays put.
+    /// points holds six pose points (two per vec4), bank the eleven amounts.
+    pub fn submitReshapeBody(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, points: *const [body_reshape_points_vec4_count * 4]f32, bank: *const [11]f32, aspect_ratio: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const header = [4]f32{ aspect_ratio, 0.0, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.body_params_uniform, &header, 1);
+        c.bgfx_set_uniform(r.body_points_uniform, points, body_reshape_points_vec4_count);
+        var slots: [body_reshape_bank_vec4_count * 4]f32 = @splat(0);
+        @memcpy(slots[0..11], bank);
+        c.bgfx_set_uniform(r.body_bank_uniform, &slots, body_reshape_bank_vec4_count);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.reshape_body_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one beauty.lipstick or beauty.blusher node: the 176-triangle

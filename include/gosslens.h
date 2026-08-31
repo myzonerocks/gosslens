@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 81u
+#define GOSS_ABI_MINOR 95u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -374,6 +374,18 @@ typedef struct goss_capture_guidance {
  * trigger signal and world-anchored lens content. */
 goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light);
 
+/* Submits the device's pre-scanned world mesh (ARKit/ARCore reconstruction, a
+ * VPS scan) in world space: vertex_count xyz triples and index_count indices,
+ * three per triangle. The engine copies it, and a ray meets it through
+ * goss_session_raycast_world_mesh. An empty submission clears the stored mesh. */
+goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count);
+
+/* Casts a world-space ray (origin and direction) against the submitted world
+ * mesh and writes the nearest surface hit into out_point with its ray distance
+ * into out_distance. GOSS_AGAIN when no mesh is submitted or the ray misses, so
+ * a tap-to-place lens anchors content where the ray meets the scanned geometry. */
+goss_status goss_session_raycast_world_mesh(goss_session *session, const float *origin, const float *direction, float *out_point, float *out_distance);
+
 /* Raycasts a normalized screen point (0..1, origin top-left) against the
  * tracked ground plane and writes the world hit position into out_position
  * (three floats). Returns goss_again until world tracking is in its tracked
@@ -618,6 +630,29 @@ goss_status goss_session_submit_camera_intrinsics(goss_session *session, float f
  * velocity derived from consecutive samples to correct rolling-shutter skew; the
  * host submits one per frame from the IMU. A near-zero vector clears the stream. */
 goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us);
+
+/* Feeds a host info value keyed by name, the rail an info sticker reads: a
+ * text.2d node with a matching content_source shows the latest value each frame
+ * (a time, a place, a sensor reading). A null or empty value clears the key.
+ * Keys and values are copied, so the caller keeps ownership of its buffers. */
+goss_status goss_session_set_info(goss_session *session, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len);
+
+/* Serializes the active lens's parameter state into out_buf (a count then the
+ * values) with the byte length in out_len; GOSS_AGAIN with no lens. A connected
+ * lens publishes this blob for the cloud to sync to peers; the deterministic tick
+ * plus the applied state is the shared state. A NULL out_buf reports the size. */
+goss_status goss_session_snapshot_lens_state(goss_session *session, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Applies a peer's lens-state blob to the active lens: each value is clamped into
+ * its parameter so two runtimes on the same lens converge. GOSS_AGAIN with no
+ * lens. A short or over-long blob applies only the parameters it covers. */
+goss_status goss_session_apply_lens_state(goss_session *session, const uint8_t *blob, size_t blob_len);
+
+/* Writes a content-provenance manifest for the active lens into out_buf as JSON:
+ * the producer, the lens id, whether the frame is model-generated (a diffusion node)
+ * or edited (any lens node), and the operations that touched it. The host binds
+ * this to a capture per C2PA. GOSS_AGAIN with no lens; a NULL out_buf sizes it. */
+goss_status goss_session_capture_provenance(goss_session *session, uint8_t *out_buf, size_t out_cap, size_t *out_len);
 
 /* Captures the current viewpoint (the last submitted world pose and depth) into a
  * guided scan: marks the yaw target it covers, back-projects the depth into
@@ -938,6 +973,57 @@ goss_status goss_session_activate_lens_from_directory(goss_session *session, con
  * out_cap) reports the length only, so the caller sizes a buffer and calls
  * again, then inspects, saves, or activates the result with no assets needed. */
 goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Composes an on-device generative-music track from a text prompt into a mono
+ * 16-bit WAV in out_buf, its length in out_len; a NULL out_buf reports the
+ * length only. A non-zero seed varies the take, bars 0 the default length.
+ * Deterministic, no model; an external model feeds the same WAV path. */
+goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Scans a width*height 8-bit luminance frame for an EAN-13 / UPC-A barcode and,
+ * on the first row that decodes, writes its 13 digits (0..9) into out_digits and
+ * returns GOSS_OK; GOSS_AGAIN when no row carries a checksum-valid symbol. Purely
+ * algorithmic and deterministic, no model. */
+goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits);
+
+/* Scans a width*height 8-bit luminance frame for a QR code (versions 1-4, level
+ * L, byte mode) and writes its decoded payload into out_buf with the length in
+ * out_len, returning GOSS_OK; GOSS_AGAIN when no QR decodes. Reed-Solomon error
+ * correction, algorithmic and deterministic, no model. A NULL out_buf reports
+ * the length only. */
+goss_status goss_engine_scan_qr(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Generates a QR code for a payload and renders it into an 8-bit luminance image
+ * (0 dark, 255 light) of side out_dim, at module_scale pixels per module with a
+ * quiet_modules-wide light border. A NULL out_buf reports the side only, so the
+ * caller sizes a buffer and calls again. Algorithmic, deterministic, no model. */
+goss_status goss_engine_generate_qr(goss_engine *engine, const uint8_t *payload, size_t payload_len, uint32_t module_scale, uint32_t quiet_modules, uint8_t *out_buf, size_t out_cap, uint32_t *out_dim);
+
+/* Ranks a media archive by semantic similarity. corpus holds count embedding
+ * vectors of length dim contiguously and query is one dim-vector, all from the
+ * host's bring-your-own embedding model. Writes up to k winners into
+ * out_indices with their cosine scores into out_scores and the count into
+ * out_count. The engine owns the exact k-nearest search; any embedder feeds it. */
+goss_status goss_engine_media_search(goss_engine *engine, const float *corpus, uint32_t count, uint32_t dim, const float *query, uint32_t k, uint32_t *out_indices, float *out_scores, uint32_t *out_count);
+
+/* Seals a media blob for the on-device vault: encrypts plaintext under the
+ * 32-byte key and 12-byte nonce with ChaCha20-Poly1305, binding aad, writing
+ * ciphertext-then-tag into out_buf. A NULL out_buf reports the sealed length
+ * (plaintext_len + 16) only. The host holds the key in the platform keystore. */
+goss_status goss_seal_media(const uint8_t *key, const uint8_t *nonce, const uint8_t *plaintext, size_t plaintext_len, const uint8_t *aad, size_t aad_len, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Opens a sealed vault blob back to plaintext under the same key, nonce, and
+ * aad. A NULL out_buf reports the plaintext length (sealed_len - 16) only.
+ * Returns GOSS_INVALID_ARGUMENT if authentication fails, so a tampered or
+ * forged blob never decodes. */
+goss_status goss_open_media(const uint8_t *key, const uint8_t *nonce, const uint8_t *sealed, size_t sealed_len, const uint8_t *aad, size_t aad_len, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Picks the best frame of a burst for computational capture: count luminance
+ * frames of width*height, frame_stride bytes apart, scored by normalized
+ * sharpness blended with a host openness score per frame (eyes-open, smile)
+ * weighted by openness_weight in 0..1. Writes the winning frame index into
+ * out_index, so best-take fusion keeps the crisp, eyes-open shot on device. */
+goss_status goss_engine_best_take(goss_engine *engine, const uint8_t *frames, size_t frame_stride, uint32_t count, uint32_t width, uint32_t height, const float *openness, float openness_weight, uint32_t *out_index);
 
 /* Graph thread. Unsplices the active lens and frees everything its
  * activation allocated. Accepts no active lens and does nothing. */
