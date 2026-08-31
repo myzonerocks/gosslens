@@ -6240,9 +6240,6 @@ pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, nam
     return .ok;
 }
 
-/// Feeds a source's own frame to its segmenter: repacks the (possibly strided,
-/// possibly BGRA) RGBA into tight RGBA, converts to NV12, and submits it. A
-/// best effort - an allocation failure just skips this frame's mask update.
 /// Grows a scratch slice to at least `need` bytes, reusing it otherwise; null
 /// only if a grow ever fails, in which case the caller skips the frame.
 fn growScratch(gpa: std.mem.Allocator, buf: *[]u8, need: usize) ?[]u8 {
@@ -6254,6 +6251,9 @@ fn growScratch(gpa: std.mem.Allocator, buf: *[]u8, need: usize) ?[]u8 {
     return buf.*[0..need];
 }
 
+/// Feeds a source's own frame to its segmenter: repacks the (possibly strided,
+/// possibly BGRA) RGBA into tight RGBA, converts to NV12, and submits it. A
+/// best effort - an allocation failure just skips this frame's mask update.
 fn feedSourceSegmenter(s: *Session, seg: *segmentation.Segmentation, d: *const FrameDesc, rgba_ptr: [*]const u8, stride: u32) void {
     const gpa = s.engine.gpa;
     const w: usize = d.width;
