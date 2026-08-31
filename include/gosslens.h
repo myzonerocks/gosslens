@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 89u
+#define GOSS_ABI_MINOR 93u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -986,6 +986,32 @@ goss_status goss_engine_scan_qr(goss_engine *engine, const uint8_t *luminance, u
  * quiet_modules-wide light border. A NULL out_buf reports the side only, so the
  * caller sizes a buffer and calls again. Algorithmic, deterministic, no model. */
 goss_status goss_engine_generate_qr(goss_engine *engine, const uint8_t *payload, size_t payload_len, uint32_t module_scale, uint32_t quiet_modules, uint8_t *out_buf, size_t out_cap, uint32_t *out_dim);
+
+/* Ranks a media archive by semantic similarity. corpus holds count embedding
+ * vectors of length dim contiguously and query is one dim-vector, all from the
+ * host's bring-your-own embedding model. Writes up to k winners into
+ * out_indices with their cosine scores into out_scores and the count into
+ * out_count. The engine owns the exact k-nearest search; any embedder feeds it. */
+goss_status goss_engine_media_search(goss_engine *engine, const float *corpus, uint32_t count, uint32_t dim, const float *query, uint32_t k, uint32_t *out_indices, float *out_scores, uint32_t *out_count);
+
+/* Seals a media blob for the on-device vault: encrypts plaintext under the
+ * 32-byte key and 12-byte nonce with ChaCha20-Poly1305, binding aad, writing
+ * ciphertext-then-tag into out_buf. A NULL out_buf reports the sealed length
+ * (plaintext_len + 16) only. The host holds the key in the platform keystore. */
+goss_status goss_seal_media(const uint8_t *key, const uint8_t *nonce, const uint8_t *plaintext, size_t plaintext_len, const uint8_t *aad, size_t aad_len, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Opens a sealed vault blob back to plaintext under the same key, nonce, and
+ * aad. A NULL out_buf reports the plaintext length (sealed_len - 16) only.
+ * Returns GOSS_INVALID_ARGUMENT if authentication fails, so a tampered or
+ * forged blob never decodes. */
+goss_status goss_open_media(const uint8_t *key, const uint8_t *nonce, const uint8_t *sealed, size_t sealed_len, const uint8_t *aad, size_t aad_len, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Picks the best frame of a burst for computational capture: count luminance
+ * frames of width*height, frame_stride bytes apart, scored by normalized
+ * sharpness blended with a host openness score per frame (eyes-open, smile)
+ * weighted by openness_weight in 0..1. Writes the winning frame index into
+ * out_index, so best-take fusion keeps the crisp, eyes-open shot on device. */
+goss_status goss_engine_best_take(goss_engine *engine, const uint8_t *frames, size_t frame_stride, uint32_t count, uint32_t width, uint32_t height, const float *openness, float openness_weight, uint32_t *out_index);
 
 /* Graph thread. Unsplices the active lens and frees everything its
  * activation allocated. Accepts no active lens and does nothing. */

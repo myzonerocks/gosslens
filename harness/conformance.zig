@@ -8331,6 +8331,65 @@ fn proveProvenance(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the on-device media-library primitives through the ABI: semantic
+/// search ranks the nearest embedding, the vault seals and opens a blob and
+/// rejects a tampered one, and best-take picks the sharp frame of a burst. The
+/// media-library section's end-to-end proof - all algorithmic, no model.
+fn proveMediaLibrary(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // Semantic search: three 2-D embeddings, a query aligned with the second.
+    const corpus = [_]f32{ 1, 0, 0, 1, 0.9, 0.1 };
+    const query = [_]f32{ 0, 2 };
+    var idx: [2]u32 = undefined;
+    var score: [2]f32 = undefined;
+    var written: u32 = 0;
+    if (abi.goss_engine_media_search(engine, &corpus, 3, 2, &query, 2, &idx, &score, &written) != .ok or written != 2 or idx[0] != 1) {
+        std.debug.print("conformance: FAIL media search did not rank the nearest embedding first\n", .{});
+        return false;
+    }
+
+    // Vault: seal a blob, open it back, then confirm a flipped byte fails.
+    const key = [_]u8{7} ** 32;
+    const nonce = [_]u8{3} ** 12;
+    const plain = "a private capture blob";
+    const aad = "capture-2026";
+    var sealed_len: usize = 0;
+    if (abi.goss_seal_media(&key, &nonce, plain.ptr, plain.len, aad.ptr, aad.len, null, 0, &sealed_len) != .ok or sealed_len != plain.len + 16) {
+        std.debug.print("conformance: FAIL media seal did not report the sealed length\n", .{});
+        return false;
+    }
+    const sealed = try gpa.alloc(u8, sealed_len);
+    defer gpa.free(sealed);
+    var sw: usize = 0;
+    _ = abi.goss_seal_media(&key, &nonce, plain.ptr, plain.len, aad.ptr, aad.len, sealed.ptr, sealed.len, &sw);
+    const opened = try gpa.alloc(u8, plain.len);
+    defer gpa.free(opened);
+    var ow: usize = 0;
+    if (abi.goss_open_media(&key, &nonce, sealed.ptr, sealed.len, aad.ptr, aad.len, opened.ptr, opened.len, &ow) != .ok or !std.mem.eql(u8, opened[0..ow], plain)) {
+        std.debug.print("conformance: FAIL media open did not round-trip the sealed blob\n", .{});
+        return false;
+    }
+    sealed[0] ^= 0xff;
+    if (abi.goss_open_media(&key, &nonce, sealed.ptr, sealed.len, aad.ptr, aad.len, opened.ptr, opened.len, &ow) == .ok) {
+        std.debug.print("conformance: FAIL media open accepted a tampered blob\n", .{});
+        return false;
+    }
+
+    // Best-take: a flat 4x4 frame and a checkerboard one; the sharp one wins.
+    const flat = [_]u8{128} ** 16;
+    const sharp = [_]u8{ 0, 255, 0, 255, 255, 0, 255, 0, 0, 255, 0, 255, 255, 0, 255, 0 };
+    var frames: [32]u8 = undefined;
+    @memcpy(frames[0..16], &flat);
+    @memcpy(frames[16..32], &sharp);
+    const openness = [_]f32{ 0, 0 };
+    var best: u32 = 0;
+    if (abi.goss_engine_best_take(engine, &frames, 16, 2, 4, 4, &openness, 0, &best) != .ok or best != 1) {
+        std.debug.print("conformance: FAIL best-take did not pick the sharp frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF media search ranks the nearest embedding, the vault seals and rejects tampering, and best-take keeps the sharp frame\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -20129,6 +20188,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveScanQr(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "provenance")) {
             if (!try proveProvenance(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "media-library")) {
+            if (!try proveMediaLibrary(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -20489,6 +20550,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("scan qr");
     if (!try proveProvenance(gpa, engine)) return 1;
     watchHold("provenance");
+    if (!try proveMediaLibrary(gpa, engine)) return 1;
+    watchHold("media library");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveScriptFile(gpa, engine)) return 1;

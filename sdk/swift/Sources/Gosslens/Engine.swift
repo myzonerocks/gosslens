@@ -124,6 +124,58 @@ public final class GossEngine: @unchecked Sendable {
         return (out, dim)
     }
 
+    /// One semantic-search hit: the archive index of a media item and its cosine
+    /// similarity to the query.
+    public struct MediaHit {
+        public let index: UInt32
+        public let score: Float
+    }
+
+    /// Ranks a media archive by semantic similarity. `corpus` holds `count`
+    /// embedding vectors of length `dim` and `query` is one `dim`-vector, all
+    /// from your own embedding model; returns the top `k` hits by cosine
+    /// similarity. The engine owns the search; any embedder feeds it.
+    public func mediaSearch(corpus: [Float], count: UInt32, dim: UInt32, query: [Float], k: UInt32) -> [MediaHit] {
+        var indices = [UInt32](repeating: 0, count: Int(k))
+        var scores = [Float](repeating: 0, count: Int(k))
+        var written: UInt32 = 0
+        if goss_engine_media_search(handle, corpus, count, dim, query, k, &indices, &scores, &written) != GOSS_OK { return [] }
+        return (0..<Int(written)).map { MediaHit(index: indices[$0], score: scores[$0]) }
+    }
+
+    /// Seals a media blob for the on-device vault with ChaCha20-Poly1305 under a
+    /// 32-byte `key` and 12-byte `nonce`, binding `aad`, returning ciphertext then
+    /// the 16-byte tag. The caller keeps the key in the platform keystore.
+    public func sealMedia(key: [UInt8], nonce: [UInt8], plaintext: [UInt8], aad: [UInt8] = []) -> [UInt8]? {
+        var needed: Int = 0
+        if goss_seal_media(key, nonce, plaintext, plaintext.count, aad, aad.count, nil, 0, &needed) != GOSS_OK { return nil }
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        if goss_seal_media(key, nonce, plaintext, plaintext.count, aad, aad.count, &out, out.count, &written) != GOSS_OK { return nil }
+        return Array(out[0..<written])
+    }
+
+    /// Opens a sealed vault blob back to plaintext under the same key, nonce and
+    /// aad. Returns nil if authentication fails, so a tampered blob never decodes.
+    public func openMedia(key: [UInt8], nonce: [UInt8], sealed: [UInt8], aad: [UInt8] = []) -> [UInt8]? {
+        var needed: Int = 0
+        if goss_open_media(key, nonce, sealed, sealed.count, aad, aad.count, nil, 0, &needed) != GOSS_OK { return nil }
+        var out = [UInt8](repeating: 0, count: needed)
+        var written: Int = 0
+        if goss_open_media(key, nonce, sealed, sealed.count, aad, aad.count, &out, out.count, &written) != GOSS_OK { return nil }
+        return Array(out[0..<written])
+    }
+
+    /// Picks the best frame of a burst: `count` luminance frames of `width*height`
+    /// `frameStride` bytes apart, scored by sharpness blended with a per-frame
+    /// `openness` score (eyes-open, smile) weighted by `opennessWeight` in 0...1.
+    /// Returns the winning frame index for best-take fusion.
+    public func bestTake(frames: [UInt8], frameStride: Int, count: UInt32, width: UInt32, height: UInt32, openness: [Float], opennessWeight: Float) -> UInt32 {
+        var index: UInt32 = 0
+        _ = goss_engine_best_take(handle, frames, frameStride, count, width, height, openness, opennessWeight, &index)
+        return index
+    }
+
     /// Fingerprints a reference recording and registers it under `trackID` in the
     /// engine's on-device music catalog. Samples are interleaved f32.
     public func addMusicReference(trackID: UInt32, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws {

@@ -109,7 +109,6 @@ fn rsDecode(codewords: []u8, n_ec: usize) bool {
         synd[i] = s;
         if (s != 0) has_error = true;
     }
-    if (@import("builtin").is_test) std.debug.print("rsDecode: has_error={} n_ec={d} s0={x} s1={x}\n", .{ has_error, n_ec, synd[0], synd[1] });
     if (!has_error) return true;
     // Berlekamp-Massey for the error locator lambda (ascending, lambda[0]=1);
     // standard form with an explicit shift m and the saved polynomial b_poly.

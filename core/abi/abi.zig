@@ -31,6 +31,7 @@ const sfx = @import("sfx");
 const music = @import("music");
 const barcode = @import("barcode");
 const qr = @import("qr");
+const medialib = @import("medialib");
 const flash = @import("flash");
 const formant = @import("formant");
 const fingerprint = @import("fingerprint");
@@ -267,6 +268,10 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits)",
     "goss_status goss_engine_scan_qr(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_generate_qr(goss_engine *engine, const uint8_t *payload, size_t payload_len, uint32_t module_scale, uint32_t quiet_modules, uint8_t *out_buf, size_t out_cap, uint32_t *out_dim)",
+    "goss_status goss_engine_media_search(goss_engine *engine, const float *corpus, uint32_t count, uint32_t dim, const float *query, uint32_t k, uint32_t *out_indices, float *out_scores, uint32_t *out_count)",
+    "goss_status goss_seal_media(const uint8_t *key, const uint8_t *nonce, const uint8_t *plaintext, size_t plaintext_len, const uint8_t *aad, size_t aad_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_open_media(const uint8_t *key, const uint8_t *nonce, const uint8_t *sealed, size_t sealed_len, const uint8_t *aad, size_t aad_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_best_take(goss_engine *engine, const uint8_t *frames, size_t frame_stride, uint32_t count, uint32_t width, uint32_t height, const float *openness, float openness_weight, uint32_t *out_index)",
     "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
@@ -10059,6 +10064,80 @@ pub export fn goss_engine_generate_qr(engine: ?*Engine, payload: ?[*]const u8, p
     if (out_buf) |buf| {
         if (out_cap >= dim * dim) qr.render(&mat, scale, quiet_px, buf[0 .. dim * dim], dim);
     }
+    return .ok;
+}
+
+/// Ranks a media archive by semantic similarity: corpus holds count embedding
+/// vectors of length dim and query is one dim-vector, all from the host's
+/// bring-your-own embedding model. Writes the top k archive indices and cosine
+/// scores and their count. The engine owns the k-NN search; any embedder feeds it.
+pub export fn goss_engine_media_search(engine: ?*Engine, corpus: ?[*]const f32, count: u32, dim: u32, query: ?[*]const f32, k: u32, out_indices: ?[*]u32, out_scores: ?[*]f32, out_count: ?*u32) Status {
+    _ = engine;
+    const corp = corpus orelse return .invalid_argument;
+    const q = query orelse return .invalid_argument;
+    const idx = out_indices orelse return .invalid_argument;
+    const sc = out_scores orelse return .invalid_argument;
+    const cnt = out_count orelse return .invalid_argument;
+    if (dim == 0 or k == 0) return .invalid_argument;
+    const total = @as(usize, count) * dim;
+    const n = medialib.search(corp[0..total], count, dim, q[0..dim], idx[0..k], sc[0..k]);
+    cnt.* = @intCast(n);
+    return .ok;
+}
+
+/// Seals a media blob for the on-device vault: encrypts plaintext with
+/// ChaCha20-Poly1305 under the 32-byte key and 12-byte nonce, binding aad, and
+/// writes ciphertext-then-tag into out_buf. Probe the length with a null out_buf
+/// (plaintext_len + 16), then fill. The host holds the key in its keystore.
+pub export fn goss_seal_media(key: ?*const [medialib.key_length]u8, nonce: ?*const [medialib.nonce_length]u8, plaintext: ?[*]const u8, plaintext_len: usize, aad: ?[*]const u8, aad_len: usize, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const key_ptr = key orelse return .invalid_argument;
+    const nonce_ptr = nonce orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (plaintext == null and plaintext_len != 0) return .invalid_argument;
+    const plain: []const u8 = if (plaintext) |p| p[0..plaintext_len] else &.{};
+    const ad: []const u8 = if (aad) |a| a[0..aad_len] else &.{};
+    const sealed_len = plaintext_len + medialib.tag_length;
+    out_len_ptr.* = sealed_len;
+    if (out_buf) |buf| {
+        if (out_cap >= sealed_len) medialib.seal(key_ptr.*, nonce_ptr.*, plain, ad, buf[0..sealed_len]);
+    }
+    return .ok;
+}
+
+/// Opens a sealed vault blob back to plaintext under the same key, nonce, and
+/// aad, writing it into out_buf. Probe the plaintext length with a null out_buf
+/// (it is sealed_len - 16), then fill. Returns .invalid_argument if the key,
+/// nonce, aad, or bytes fail authentication, so a tampered blob never decodes.
+pub export fn goss_open_media(key: ?*const [medialib.key_length]u8, nonce: ?*const [medialib.nonce_length]u8, sealed: ?[*]const u8, sealed_len: usize, aad: ?[*]const u8, aad_len: usize, out_buf: ?[*]u8, out_cap: usize, out_len: ?*usize) Status {
+    const key_ptr = key orelse return .invalid_argument;
+    const nonce_ptr = nonce orelse return .invalid_argument;
+    const sealed_ptr = sealed orelse return .invalid_argument;
+    const out_len_ptr = out_len orelse return .invalid_argument;
+    if (sealed_len < medialib.tag_length) return .invalid_argument;
+    const plain_len = sealed_len - medialib.tag_length;
+    const ad: []const u8 = if (aad) |a| a[0..aad_len] else &.{};
+    out_len_ptr.* = plain_len;
+    if (out_buf) |buf| {
+        if (out_cap >= plain_len) {
+            _ = medialib.open(key_ptr.*, nonce_ptr.*, sealed_ptr[0..sealed_len], ad, buf[0..plain_len]) catch return .invalid_argument;
+        }
+    }
+    return .ok;
+}
+
+/// Picks the best frame of a burst: count luminance frames of width*height,
+/// frame_stride bytes apart, scored by sharpness blended with a per-frame host
+/// openness score weighted by openness_weight in 0..1. Writes the winning frame
+/// index into out_index, so best-take keeps the crisp, eyes-open shot.
+pub export fn goss_engine_best_take(engine: ?*Engine, frames: ?[*]const u8, frame_stride: usize, count: u32, width: u32, height: u32, openness: ?[*]const f32, openness_weight: f32, out_index: ?*u32) Status {
+    _ = engine;
+    const buf = frames orelse return .invalid_argument;
+    const out = out_index orelse return .invalid_argument;
+    if (count == 0 or width == 0 or height == 0) return .invalid_argument;
+    const total = frame_stride * (count - 1) + @as(usize, width) * height;
+    const open_slice: []const f32 = if (openness) |o| o[0..count] else &.{};
+    const best = medialib.bestTake(buf[0..total], frame_stride, count, width, height, open_slice, openness_weight);
+    out.* = @intCast(best);
     return .ok;
 }
 

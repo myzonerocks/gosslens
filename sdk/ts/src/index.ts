@@ -626,6 +626,99 @@ export class GossEngine {
     return result;
   }
 
+  /// Ranks a media archive by semantic similarity. corpus holds count embedding
+  /// vectors of length dim contiguously and query is one dim-vector, all from
+  /// your own embedding model; returns the top k hits by cosine similarity. The
+  /// engine owns the exact search; any embedder feeds it.
+  mediaSearch(corpus: Float32Array, count: number, dim: number, query: Float32Array, k: number): { index: number; score: number }[] {
+    const corpusPtr = this.mod.ccall("goss_alloc", "number", ["number"], [corpus.length * 4 || 4]) as number;
+    this.mod.HEAPF32.set(corpus, corpusPtr / 4);
+    const queryPtr = this.mod.ccall("goss_alloc", "number", ["number"], [query.length * 4 || 4]) as number;
+    this.mod.HEAPF32.set(query, queryPtr / 4);
+    const idxPtr = this.mod.ccall("goss_alloc", "number", ["number"], [k * 4 || 4]) as number;
+    const scorePtr = this.mod.ccall("goss_alloc", "number", ["number"], [k * 4 || 4]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number", "number"];
+    const hits: { index: number; score: number }[] = [];
+    if ((this.mod.ccall("goss_engine_media_search", "number", args, [this.handle, corpusPtr, count, dim, queryPtr, k, idxPtr, scorePtr, countPtr]) as number) === 0) {
+      const n = new DataView(this.mod.HEAPU8.buffer, countPtr, 4).getUint32(0, true);
+      for (let i = 0; i < n; i++) {
+        const index = new DataView(this.mod.HEAPU8.buffer, idxPtr + i * 4, 4).getUint32(0, true);
+        const score = new DataView(this.mod.HEAPU8.buffer, scorePtr + i * 4, 4).getFloat32(0, true);
+        hits.push({ index, score });
+      }
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [corpusPtr, corpus.length * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [queryPtr, query.length * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [idxPtr, k * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [scorePtr, k * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+    return hits;
+  }
+
+  /// Seals a media blob for the on-device vault with ChaCha20-Poly1305 under a
+  /// 32-byte key and 12-byte nonce, binding aad; returns ciphertext then the
+  /// 16-byte tag. Keep the key in the platform keystore.
+  sealMedia(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array, aad: Uint8Array = new Uint8Array(0)): Uint8Array | null {
+    return this.aeadMedia("goss_seal_media", key, nonce, plaintext, aad);
+  }
+
+  /// Opens a sealed vault blob back to plaintext under the same key, nonce and
+  /// aad. Returns null if authentication fails, so a tampered blob never decodes.
+  openMedia(key: Uint8Array, nonce: Uint8Array, sealed: Uint8Array, aad: Uint8Array = new Uint8Array(0)): Uint8Array | null {
+    return this.aeadMedia("goss_open_media", key, nonce, sealed, aad);
+  }
+
+  private aeadMedia(fn: string, key: Uint8Array, nonce: Uint8Array, input: Uint8Array, aad: Uint8Array): Uint8Array | null {
+    const keyPtr = this.mod.ccall("goss_alloc", "number", ["number"], [key.length || 1]) as number;
+    this.mod.HEAPU8.set(key, keyPtr);
+    const noncePtr = this.mod.ccall("goss_alloc", "number", ["number"], [nonce.length || 1]) as number;
+    this.mod.HEAPU8.set(nonce, noncePtr);
+    const inPtr = this.mod.ccall("goss_alloc", "number", ["number"], [input.length || 1]) as number;
+    this.mod.HEAPU8.set(input, inPtr);
+    const aadPtr = this.mod.ccall("goss_alloc", "number", ["number"], [aad.length || 1]) as number;
+    this.mod.HEAPU8.set(aad, aadPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const lenOf = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number", "number"];
+    let out: Uint8Array | null = null;
+    if ((this.mod.ccall(fn, "number", args, [keyPtr, noncePtr, inPtr, input.length, aadPtr, aad.length, 0, 0, lenPtr]) as number) === 0) {
+      const needed = lenOf();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed || 1]) as number;
+      if ((this.mod.ccall(fn, "number", args, [keyPtr, noncePtr, inPtr, input.length, aadPtr, aad.length, outPtr, needed, lenPtr]) as number) === 0) {
+        out = this.mod.HEAPU8.slice(outPtr, outPtr + lenOf());
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [keyPtr, key.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [noncePtr, nonce.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [inPtr, input.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [aadPtr, aad.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    return out;
+  }
+
+  /// Picks the best frame of a burst: count luminance frames of width*height
+  /// frameStride bytes apart, scored by sharpness blended with a per-frame
+  /// openness score weighted by opennessWeight in 0..1. Returns the winning
+  /// frame index for best-take fusion.
+  bestTake(frames: Uint8Array, frameStride: number, count: number, width: number, height: number, openness: Float32Array, opennessWeight: number): number {
+    const framesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [frames.length || 1]) as number;
+    this.mod.HEAPU8.set(frames, framesPtr);
+    const opennessPtr = this.mod.ccall("goss_alloc", "number", ["number"], [openness.length * 4 || 4]) as number;
+    this.mod.HEAPF32.set(openness, opennessPtr / 4);
+    const indexPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number", "number"];
+    let index = 0;
+    if ((this.mod.ccall("goss_engine_best_take", "number", args, [this.handle, framesPtr, frameStride, count, width, height, opennessPtr, opennessWeight, indexPtr]) as number) === 0) {
+      index = new DataView(this.mod.HEAPU8.buffer, indexPtr, 4).getUint32(0, true);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [framesPtr, frames.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [opennessPtr, openness.length * 4 || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [indexPtr, 4]);
+    return index;
+  }
+
   /// Fingerprints a reference recording and registers it under trackId in the
   /// engine's on-device music catalog. Samples are interleaved f32; re-adding a
   /// trackId layers more landmarks in.
