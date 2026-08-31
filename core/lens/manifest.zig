@@ -905,6 +905,10 @@ pub const TextField = struct {
     /// a positive value and drop below for a negative one, so a lens curves a
     /// banner. Clamped to -1..1 (a full text-height bow); 0 keeps it straight.
     bend: f32 = 0,
+    /// A face landmark index (0..477) the text pins its center to, so a caption
+    /// tracks the head - a name tag over the brow, a label on the chin. Negative
+    /// (default) leaves the text at its screen rect.
+    anchor_face: i32 = -1,
 };
 
 pub const VideoField = struct {
@@ -3308,6 +3312,11 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(tv.object, "bend")) |v| {
                     if (numberOf(v)) |n| field.bend = std.math.clamp(@as(f32, @floatCast(n)), -1.0, 1.0);
+                }
+                if (getField(tv.object, "anchor_face")) |v| {
+                    if (v == .integer and v.integer >= 0 and v.integer < face_landmark_count) {
+                        field.anchor_face = @intCast(v.integer);
+                    } else try diags.add(path.slice(), "text anchor_face must be a face landmark index 0..{d}", .{face_landmark_count - 1});
                 }
                 text_field = field;
             }

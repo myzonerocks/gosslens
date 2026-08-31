@@ -11016,6 +11016,7 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
         };
         session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
         if (txt.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, txt.graph_index, txt.opacity_param) catch {};
+        if (txt.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, txt.graph_index, @intCast(txt.anchor_face)) catch {};
     }
 }
 

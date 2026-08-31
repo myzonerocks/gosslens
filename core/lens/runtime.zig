@@ -482,6 +482,9 @@ pub const TextNode = struct {
     wrap: u32 = 0,
     /// Bow the baseline along an arc (positive up, negative down); 0 is straight.
     bend: f32 = 0,
+    /// A face-mesh landmark index the text pins its center to each frame, so a
+    /// caption tracks the head; negative leaves the text at its screen rect.
+    anchor_face: i32 = -1,
 };
 
 pub const VideoNode = struct {
@@ -1640,7 +1643,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .text_2d) continue;
             const tf = node.text orelse manifest.TextField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth, .wrap = tf.wrap, .bend = tf.bend });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth, .wrap = tf.wrap, .bend = tf.bend, .anchor_face = tf.anchor_face });
         }
         return out.toOwnedSlice(gpa);
     }

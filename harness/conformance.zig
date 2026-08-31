@@ -820,11 +820,11 @@ fn provePerFaceBinding(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-/// Proves a face-anchored sprite tracks the head: a sprite.2d with `anchor_face`
-/// pins its center to a face landmark. The badge sits on the nose; shifting the
-/// face left then right lands the sticker on each side, so the two frames differ
-/// on the side each badge occupies.
-fn proveFaceSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+/// Proves a face-anchored node tracks the head: a node with `anchor_face` pins
+/// its center to a face landmark. The content sits on the head; shifting the
+/// face left then right lands it on each side, so the two frames differ on the
+/// side the content occupies. Shared by the sprite and text sticker proofs.
+fn proveFaceAnchored(gpa: std.mem.Allocator, engine: *abi.Engine, lens_dir: []const u8, noun: []const u8, out_png: []const u8) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
@@ -832,11 +832,11 @@ fn proveFaceSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
     defer gpa.free(face_bytes);
     if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 1) != .ok) {
-        std.debug.print("conformance: FAIL face-sticker tracking enable\n", .{});
+        std.debug.print("conformance: FAIL {s} tracking enable\n", .{noun});
         return false;
     }
-    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/sticker-face", ".lens-packages/sticker-face".len) != .ok) {
-        std.debug.print("conformance: FAIL face-sticker lens activation\n", .{});
+    if (abi.goss_session_activate_lens_from_directory(session, lens_dir.ptr, lens_dir.len) != .ok) {
+        std.debug.print("conformance: FAIL {s} lens activation\n", .{noun});
         return false;
     }
     const corpus = try loadCorpusFrame(gpa, corpus_path);
@@ -867,8 +867,8 @@ fn proveFaceSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         if (polls > 100_000_000) return error.FaceResultTimedOut;
     }
 
-    // Slide the whole head a fifth of the frame each way: the anchored badge
-    // rides the nose landmark, so it lands clearly left then clearly right.
+    // Slide the whole head a fifth of the frame each way: the anchored content
+    // rides its landmark, so it lands clearly left then clearly right.
     const shift = @as(f32, @floatFromInt(planes.width)) * 0.2;
     const landmark_count = base.landmarks.len / 3;
     var left = base;
@@ -899,18 +899,18 @@ fn proveFaceSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     try renderSubmittedFaces(engine, session, &desc, planes, &one_right, shot_right, &wr, &hr);
     try renderSubmittedFaces(engine, session, &desc, planes, &one_left, shot_left_again, &wl2, &hl2);
     if (wl != wr or hl != hr or wl == 0 or hl == 0) {
-        std.debug.print("conformance: FAIL face-sticker capture size {d}x{d} vs {d}x{d}\n", .{ wl, hl, wr, hr });
+        std.debug.print("conformance: FAIL {s} capture size {d}x{d} vs {d}x{d}\n", .{ noun, wl, hl, wr, hr });
         return false;
     }
     if (!std.mem.eql(u8, shot_left[0 .. wl * hl * 4], shot_left_again[0 .. wl2 * hl2 * 4])) {
-        std.debug.print("conformance: FAIL face-sticker is not bit-stable across runs\n", .{});
+        std.debug.print("conformance: FAIL {s} is not bit-stable across runs\n", .{noun});
         return false;
     }
 
-    // Only the badge position differs between the two frames. Where the left
-    // frame's badge sits (left half) it differs from the right frame, and where
-    // the right frame's badge sits (right half) it differs too - so the sticker
-    // followed the face across the middle instead of holding one spot.
+    // Only the content's position differs between the two frames. Where the left
+    // frame's content sits (left half) it differs from the right frame, and where
+    // the right frame's content sits (right half) it differs too - so it followed
+    // the face across the middle instead of holding one spot.
     var left_changed: usize = 0;
     var right_changed: usize = 0;
     var y: u32 = 0;
@@ -925,17 +925,25 @@ fn proveFaceSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         }
     }
     if (left_changed == 0 or right_changed == 0) {
-        std.debug.print("conformance: FAIL face-sticker did not track the face (left changed {d}, right changed {d})\n", .{ left_changed, right_changed });
+        std.debug.print("conformance: FAIL {s} did not track the face (left changed {d}, right changed {d})\n", .{ noun, left_changed, right_changed });
         return false;
     }
 
     var png_bytes: std.ArrayList(u8) = .empty;
     defer png_bytes.deinit(gpa);
     try png.encodeRgba(gpa, &png_bytes, shot_right[0 .. wl * hl * 4], @intCast(wl), @intCast(hl));
-    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-face-sticker.png", .data = png_bytes.items });
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = out_png, .data = png_bytes.items });
 
-    std.debug.print("conformance: PROOF a face-anchored sprite tracks the head - the badge rode the nose left ({d} px) then right ({d} px), bit-stable\n", .{ left_changed, right_changed });
+    std.debug.print("conformance: PROOF a face-anchored {s} tracks the head - it rode the landmark left ({d} px) then right ({d} px), bit-stable\n", .{ noun, left_changed, right_changed });
     return true;
+}
+
+fn proveFaceSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    return proveFaceAnchored(gpa, engine, ".lens-packages/sticker-face", "sprite sticker", "zig-out/conformance-face-sticker.png");
+}
+
+fn proveFaceText(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    return proveFaceAnchored(gpa, engine, ".lens-packages/text-face", "text caption", "zig-out/conformance-face-text.png");
 }
 
 fn proveMultiBodyFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
@@ -19420,6 +19428,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try provePerFrameAllocCalls(gpa, engine, &frame_counter)) return 1;
         } else if (std.mem.eql(u8, only, "face-sticker")) {
             if (!try proveFaceSticker(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "face-text")) {
+            if (!try proveFaceText(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -19550,6 +19560,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("per face binding");
     if (!try proveFaceSticker(gpa, engine)) return 1;
     watchHold("face sticker");
+    if (!try proveFaceText(gpa, engine)) return 1;
+    watchHold("face text");
     if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;
