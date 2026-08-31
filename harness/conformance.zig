@@ -8566,6 +8566,91 @@ fn proveStampBrush(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The per-channel mean (0..255) of an RGBA capture, a coarse value the exact
+/// sha256 baseline cannot compare across platforms but a tolerance can.
+const ChannelMeans = struct { r: f64, g: f64, b: f64 };
+fn channelMeans(shot: []const u8) ChannelMeans {
+    var sr: u64 = 0;
+    var sg: u64 = 0;
+    var sb: u64 = 0;
+    const px = shot.len / 4;
+    var i: usize = 0;
+    while (i < shot.len) : (i += 4) {
+        sr += shot[i];
+        sg += shot[i + 1];
+        sb += shot[i + 2];
+    }
+    const n: f64 = @floatFromInt(@max(px, 1));
+    return .{ .r = @as(f64, @floatFromInt(sr)) / n, .g = @as(f64, @floatFromInt(sg)) / n, .b = @as(f64, @floatFromInt(sb)) / n };
+}
+
+/// Proves cross-platform value stability: a fixed grade over a fixed gradient
+/// frame lands its per-channel means within a pinned tolerance, and the capture
+/// is bit-identical across runs. The exact sha256 baseline breaks on a 1-ULP
+/// platform float difference; this tolerant pin catches real divergence instead.
+fn proveValueStability(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    // A deterministic gradient: red rides the column, green the row, blue flat,
+    // so a grade's channel math shows up in the means.
+    const frame_rgba = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    defer gpa.free(frame_rgba);
+    for (0..height) |row| {
+        for (0..width) |col| {
+            const idx = (row * width + col) * 4;
+            frame_rgba[idx + 0] = @intCast(col * 255 / width);
+            frame_rgba[idx + 1] = @intCast(row * 255 / height);
+            frame_rgba[idx + 2] = 128;
+            frame_rgba[idx + 3] = 255;
+        }
+    }
+    const planes = try rgbaToNv12(gpa, .{ .pixels = .{ .rgba8 = frame_rgba }, .width = width, .height = height });
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    const json =
+        \\{"glf": "1.0", "id": "vs", "version": "1.0.0", "display_name": "VS", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [],
+        \\ "nodes": [{"id": "g", "type": "grade.pass", "inputs": {"frame": "camera"},
+        \\   "grade": {"exposure": 0.1, "contrast": 1.1, "saturation": 1.2, "temperature": 0.06}}],
+        \\ "triggers": []}
+    ;
+    if (abi.goss_session_activate_lens(session, json.ptr, json.len) != .ok) return error.ActivationFailed;
+
+    const cap = @as(usize, width) * height * 4;
+    const shot = try gpa.alloc(u8, cap);
+    defer gpa.free(shot);
+    const again = try gpa.alloc(u8, cap);
+    defer gpa.free(again);
+    var w1: u32 = 0;
+    var h1: u32 = 0;
+    try renderCapture(engine, session, &desc, planes, half_w, shot, &w1, &h1);
+    try renderCapture(engine, session, &desc, planes, half_w, again, &w1, &h1);
+
+    if (!std.mem.eql(u8, shot, again)) {
+        std.debug.print("conformance: FAIL value stability is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    const m = channelMeans(shot);
+    // Pinned means for the fixed grade over the fixed gradient; a tolerance of
+    // 1.5 per channel survives a 1-ULP platform float difference but catches a
+    // real grade or color divergence.
+    const exp_r: f64 = 146.713;
+    const exp_g: f64 = 134.753;
+    const exp_b: f64 = 117.805;
+    const tol: f64 = 1.5;
+    if (@abs(m.r - exp_r) > tol or @abs(m.g - exp_g) > tol or @abs(m.b - exp_b) > tol) {
+        std.debug.print("conformance: FAIL value stability drifted past tolerance (r {d:.3} g {d:.3} b {d:.3} vs {d:.3}/{d:.3}/{d:.3})\n", .{ m.r, m.g, m.b, exp_r, exp_g, exp_b });
+        return false;
+    }
+    std.debug.print("conformance: PROOF the graded frame's channel means hold within tolerance (r {d:.3} g {d:.3} b {d:.3}), bit-stable across runs - a cross-platform value pin the exact baseline cannot make\n", .{ m.r, m.g, m.b });
+    return true;
+}
+
 /// Proves the engine-side outgoing mix: at the native 48 kHz, the lens over a
 /// silent mic is bit-identical to pull_audio, a non-zero mic sums in with
 /// saturation, and the resampled 44.1 kHz path is non-silent and deterministic
@@ -18721,6 +18806,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("brush stroke");
     if (!try proveStampBrush(gpa, engine)) return 1;
     watchHold("stamp brush");
+    if (!try proveValueStability(gpa, engine)) return 1;
+    watchHold("value stability");
     if (!try proveBlur(gpa, engine)) return 1;
     watchHold("blur");
     if (!try proveGrade(gpa, engine)) return 1;
