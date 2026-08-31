@@ -140,6 +140,13 @@ export fn Java_com_gosslens_Gosslens_nativeGenerateSong(env: *JniEnv, cls: jobje
     return @intFromEnum(status);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeScanBarcode(env: *JniEnv, cls: jobject, engine: i64, lum_buffer: jobject, width: i32, height: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const lum = getDirectBufferAddress(env, lum_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_engine_scan_barcode(engineFromHandle(engine), @ptrCast(lum), @intCast(@max(width, 0)), @intCast(@max(height, 0)), @ptrCast(out)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeMusicAddReference(env: *JniEnv, cls: jobject, engine: i64, track_id: i32, samples_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32) i32 {
     _ = cls;
     const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

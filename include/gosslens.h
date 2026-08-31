@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 83u
+#define GOSS_ABI_MINOR 84u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -950,6 +950,12 @@ goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size
  * length only. A non-zero seed varies the take, bars 0 the default length.
  * Deterministic, no model; an external model feeds the same WAV path. */
 goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Scans a width*height 8-bit luminance frame for an EAN-13 / UPC-A barcode and,
+ * on the first row that decodes, writes its 13 digits (0..9) into out_digits and
+ * returns GOSS_OK; GOSS_AGAIN when no row carries a checksum-valid symbol. Purely
+ * algorithmic and deterministic, no model. */
+goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits);
 
 /* Graph thread. Unsplices the active lens and frees everything its
  * activation allocated. Accepts no active lens and does nothing. */

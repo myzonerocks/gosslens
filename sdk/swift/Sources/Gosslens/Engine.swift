@@ -92,6 +92,15 @@ public final class GossEngine: @unchecked Sendable {
         return Array(out[0..<written])
     }
 
+    /// Scans a width*height 8-bit luminance frame for an EAN-13 / UPC-A barcode,
+    /// returning its 13 digits or nil when no checksum-valid symbol is found.
+    /// Purely algorithmic and deterministic, no model.
+    public func scanBarcode(luminance: [UInt8], width: UInt32, height: UInt32) -> [UInt8]? {
+        var out = [UInt8](repeating: 0, count: 13)
+        let ok = goss_engine_scan_barcode(handle, luminance, width, height, &out) == GOSS_OK
+        return ok ? out : nil
+    }
+
     /// Fingerprints a reference recording and registers it under `trackID` in the
     /// engine's on-device music catalog. Samples are interleaved f32.
     public func addMusicReference(trackID: UInt32, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws {

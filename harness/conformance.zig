@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const abi = @import("abi");
+const barcode = @import("barcode");
 const sampler = @import("sampler");
 const image_adapter = @import("image");
 const png = @import("png");
@@ -8208,6 +8209,51 @@ fn proveGenerateSong(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF on-device generative music composes a non-silent track from a prompt ({d} bytes), bit-identical on a repeat and different for a different prompt\n", .{a.len});
+    return true;
+}
+
+/// Proves on-device barcode scanning: a known EAN-13 rendered into a luminance
+/// frame is decoded back to its digits through goss_engine_scan_barcode, and a
+/// blank frame reports no code - a real algorithmic recognition op, no model.
+fn proveScanBarcode(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const digits = [13]u8{ 4, 0, 0, 6, 3, 8, 1, 3, 3, 3, 9, 3, 1 };
+    var sym: [barcode.symbol_modules]u8 = undefined;
+    barcode.encode(digits, &sym);
+    // Render the symbol into a luminance frame at 4 px/module with a quiet zone,
+    // repeated down several rows the way a real barcode band fills the frame.
+    const scale = 4;
+    const quiet = 12;
+    const frame_w = quiet * 2 + barcode.symbol_modules * scale;
+    const frame_h = 40;
+    const frame = try gpa.alloc(u8, frame_w * frame_h);
+    defer gpa.free(frame);
+    @memset(frame, 255);
+    for (0..frame_h) |y| {
+        for (0..barcode.symbol_modules) |m| {
+            if (sym[m] == 1) {
+                const start = quiet + m * scale;
+                for (start..start + scale) |x| frame[y * frame_w + x] = 0;
+            }
+        }
+    }
+    var out: [13]u8 = @splat(0);
+    if (abi.goss_engine_scan_barcode(engine, frame.ptr, @intCast(frame_w), @intCast(frame_h), &out) != .ok) {
+        std.debug.print("conformance: FAIL barcode scan did not decode the rendered symbol\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, &digits, &out)) {
+        std.debug.print("conformance: FAIL barcode scan decoded the wrong digits\n", .{});
+        return false;
+    }
+    // A blank frame carries no symbol, so the scan reports none rather than a
+    // false read.
+    @memset(frame, 200);
+    var blank: [13]u8 = @splat(0);
+    if (abi.goss_engine_scan_barcode(engine, frame.ptr, @intCast(frame_w), @intCast(frame_h), &blank) == .ok) {
+        std.debug.print("conformance: FAIL barcode scan hallucinated a code on a blank frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF on-device barcode scan decodes an EAN-13 from a luminance frame and reports none on a blank frame\n", .{});
     return true;
 }
 
@@ -20003,6 +20049,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveOutpaint(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "generate-song")) {
             if (!try proveGenerateSong(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "scan-barcode")) {
+            if (!try proveScanBarcode(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -20357,6 +20405,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("compile prompt");
     if (!try proveGenerateSong(gpa, engine)) return 1;
     watchHold("generate song");
+    if (!try proveScanBarcode(gpa, engine)) return 1;
+    watchHold("scan barcode");
     if (!try proveScript(gpa, engine)) return 1;
     watchHold("script");
     if (!try proveScriptFile(gpa, engine)) return 1;

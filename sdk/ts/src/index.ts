@@ -566,6 +566,20 @@ export class GossEngine {
     return wav;
   }
 
+  /// Scans a width*height 8-bit luminance frame for an EAN-13 / UPC-A barcode,
+  /// returning its 13 digits or null when no checksum-valid symbol is found.
+  /// Purely algorithmic and deterministic, no model.
+  scanBarcode(luminance: Uint8Array, width: number, height: number): Uint8Array | null {
+    const lumPtr = this.mod.ccall("goss_alloc", "number", ["number"], [luminance.length || 1]) as number;
+    this.mod.HEAPU8.set(luminance, lumPtr);
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [13]) as number;
+    const status = this.mod.ccall("goss_engine_scan_barcode", "number", ["number", "number", "number", "number", "number"], [this.handle, lumPtr, width, height, outPtr]) as number;
+    const digits = status === 0 ? this.mod.HEAPU8.slice(outPtr, outPtr + 13) : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [lumPtr, luminance.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 13]);
+    return digits;
+  }
+
   /// Fingerprints a reference recording and registers it under trackId in the
   /// engine's on-device music catalog. Samples are interleaved f32; re-adding a
   /// trackId layers more landmarks in.

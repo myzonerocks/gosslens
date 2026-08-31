@@ -29,6 +29,7 @@ const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
 const sfx = @import("sfx");
 const music = @import("music");
+const barcode = @import("barcode");
 const flash = @import("flash");
 const formant = @import("formant");
 const fingerprint = @import("fingerprint");
@@ -259,6 +260,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
     "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits)",
     "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
@@ -9935,6 +9937,29 @@ pub export fn goss_engine_generate_song(engine: ?*Engine, prompt: ?[*]const u8, 
         if (out_cap >= wav.len) @memcpy(buf[0..wav.len], wav);
     }
     return .ok;
+}
+
+/// Scans a luminance frame for an EAN-13 / UPC-A barcode and, on the first row
+/// that decodes, writes its 13 digits into out_digits and returns ok; .again when
+/// no row carries a checksum-valid symbol. Algorithmic and deterministic, no
+/// model, so a lens reads a product code with nothing gated in.
+pub export fn goss_engine_scan_barcode(engine: ?*Engine, luminance: ?[*]const u8, width: u32, height: u32, out_digits: ?*[13]u8) Status {
+    _ = engine;
+    const lum = luminance orelse return .invalid_argument;
+    const out = out_digits orelse return .invalid_argument;
+    if (width < barcode.symbol_modules or height == 0) return .invalid_argument;
+    const buf = lum[0 .. @as(usize, width) * height];
+    // Sample rows across the frame; a barcode spans many rows, so a coarse stride
+    // finds it cheaply, and the first checksum-valid decode wins.
+    const stride: usize = @max(1, height / 64);
+    var row: usize = 0;
+    while (row < height) : (row += stride) {
+        if (barcode.scanRow(buf, width, height, row)) |digits| {
+            out.* = digits;
+            return .ok;
+        }
+    }
+    return .again;
 }
 
 /// Fingerprints a reference recording and registers it under track_id in the
