@@ -9,10 +9,15 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
-  # Manual dry run: builds and gates every slice and uploads the artifacts
-  # without creating a Release or pushing to any registry (the publish job is
-  # tag-only), so the pipeline is verifiable before a real tag is cut.
-  workflow_dispatch: {}
+  # Manual trigger. With an empty version it is a dry run: builds and gates
+  # every slice, publishes nothing. With a version it is a full release: it
+  # creates the vX.Y.Z tag on the current commit and publishes everything.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version like 0.9.0 to tag, build, and publish. Empty runs a dry run that publishes nothing."
+        required: false
+        default: ""
 
 concurrency:
   group: release-${{ github.ref }}
@@ -166,16 +171,18 @@ jobs:
 
   publish:
     needs: [android, apple, web]
-    # Only a real vX.Y.Z tag publishes; a manual dispatch stops after the build
-    # and gate jobs, so verifying the pipeline never creates a Release.
-    if: startsWith(github.ref, 'refs/tags/')
+    # Publishes on a real vX.Y.Z tag, or on a manual dispatch that named a
+    # version. A dispatch with no version stops after the build and gate jobs.
+    if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.version != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Secrets are not readable in step `if:`, so surface their presence through
-    # job env the steps can test.
+    # job env the steps can test. RELEASE_TAG is the tag from a tag push, or
+    # v<version> from a dispatched release.
     env:
       HAS_MAVEN: ${{ secrets.OSSRH_USERNAME != '' }}
       HAS_NPM: ${{ secrets.NPM_TOKEN != '' }}
+      RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', inputs.version) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -186,10 +193,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          target=()
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Clear any stale tag of this name, then tag the current commit.
+            git push origin ":refs/tags/${RELEASE_TAG}" 2>/dev/null || true
+            target=(--target "${GITHUB_SHA}")
+          fi
           notes="SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
           assets=(dist/android/gosslens-android-jniLibs.zip dist/apple/GosslensKit.xcframework.zip dist/web/*.tgz)
           [ -f dist/web/gosslens-web-engine.zip ] && assets+=(dist/web/gosslens-web-engine.zip)
-          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --title "${GITHUB_REF_NAME}" --notes "$notes"
+          gh release create "${RELEASE_TAG}" "${target[@]}" "${assets[@]}" --title "${RELEASE_TAG}" --notes "$notes"
       # Pin SwiftPM to the XCFramework this release just published, so Swift
       # consumers get the prebuilt engine with no Zig. Best effort: if main is
       # protected the push is skipped and the values are printed to pin by hand.
@@ -202,10 +215,10 @@ jobs:
           git config user.name avosa
           git config user.email avosa.developer@gmail.com
           git fetch origin main && git checkout main
-          tools/pin-swift-xcframework.sh "${GITHUB_REF_NAME}" "${checksum}"
+          tools/pin-swift-xcframework.sh "${RELEASE_TAG}" "${checksum}"
           if ! git diff --quiet sdk/swift/Package.swift; then
             git add sdk/swift/Package.swift
-            git commit -m "release ${GITHUB_REF_NAME}: pin the swift xcframework binary target"
+            git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
             git push origin main || echo "note: push to main was rejected (branch protection); run tools/pin-swift-xcframework.sh with the values above and open a PR"
           fi
       # Registry pushes need credentials, so they run only when the secrets are
@@ -223,7 +236,7 @@ jobs:
           # the published AAR carries the prebuilt binary.
           unzip -o dist/android/gosslens-android-jniLibs.zip -d zig-out/android
           cd sdk/kotlin
-          ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache -PVERSION_NAME="${GITHUB_REF_NAME#v}"
+          ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache -PVERSION_NAME="${RELEASE_TAG#v}"
       - name: publish to npm
         if: ${{ env.HAS_NPM == 'true' }}
         env:
