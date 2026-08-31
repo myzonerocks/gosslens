@@ -19,6 +19,8 @@ pub const SignalKind = enum {
     hands_present,
     world_tracking_state,
     audio_level,
+    audio_beat_count,
+    voice_command,
     timer,
     tap,
     param,
@@ -57,8 +59,8 @@ pub const SignalKind = enum {
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
-        .face_blendshape, .world_tracking_state, .audio_level, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .voice_command, .geo_in_region, .geo_named_region, .camera_focus, .camera_exposure, .looking_at_camera, .head_nod, .head_shake, .hand_gesture, .hand_custom_gesture, .hand_pinch, .body_present, .body_jump, .body_wave, .body_dance, .device_in_volume, .hand_in_region, .touch_double_tap, .touch_long_press, .touch_swipe, .touch_drag => true,
+        .face_blendshape, .world_tracking_state, .audio_level, .audio_beat_count, .timer, .param, .camera_zoom, .gaze_x, .gaze_y, .head_tilt, .bone_angle, .touch_pinch, .touch_rotate, .pointer_x, .pointer_y, .counter => false,
     };
 }
 
@@ -126,6 +128,7 @@ pub const Signals = struct {
     world_tracking_state: f64 = 0,
     audio_level: f64 = 0,
     audio_beat: bool = false,
+    audio_beat_count: f64 = 0,
     tap: bool = false,
     blendshapes: ?*const [face.blendshape_count]f32 = null,
     params: []const f64 = &.{},
@@ -145,6 +148,11 @@ pub const Signals = struct {
     /// geo.in_region('name') fires for its own place. Empty with no fix or no
     /// named region matched; borrows the session's store for the tick.
     geo_regions: []const []const u8 = &.{},
+    /// The latest speech the on-device captioner decoded, lowercased, so
+    /// voice.command('phrase') fires when its phrase is spoken. Engine-fed at
+    /// tick from the captioning audio.infer worker; empty with no speech. Only
+    /// the recognized text crosses, never the audio.
+    voice_command_text: []const u8 = &.{},
     /// Whether the tracked device is inside the lens's trigger volume, computed
     /// on-device each tick from the submitted world pose and the manifest's
     /// volume region. False with no world tracking or no volume declared.
@@ -257,6 +265,8 @@ fn readBool(s: Signal, signals: Signals) bool {
             }
             return false;
         },
+        .voice_command => signals.voice_command_text.len > 0 and s.event_name.len > 0 and
+            std.mem.indexOf(u8, signals.voice_command_text, s.event_name) != null,
         .geo_in_region => signals.geo_in_region,
         .geo_named_region => {
             for (signals.geo_regions) |name| {
@@ -295,6 +305,7 @@ fn readNumber(s: Signal, signals: Signals) f64 {
         .face_blendshape => if (signals.blendshapes) |bs| bs[s.blendshape_index] else 0,
         .world_tracking_state => signals.world_tracking_state,
         .audio_level => signals.audio_level,
+        .audio_beat_count => signals.audio_beat_count,
         .timer => blk: {
             for (signals.timers) |tv| {
                 if (std.mem.eql(u8, tv.name, s.timer_name)) break :blk tv.seconds;
@@ -723,6 +734,16 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "beat")) {
             return .{ .kind = .audio_beat };
         }
+        if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "beat_count")) {
+            return .{ .kind = .audio_beat_count };
+        }
+        if (std.mem.eql(u8, head, "voice") and std.mem.eql(u8, tail, "command")) {
+            // The phrase is lowered once here so the tick match is case-insensitive.
+            const phrase = try self.parseCall();
+            const lowered = try self.arena.alloc(u8, phrase.len);
+            for (phrase, 0..) |ch, i| lowered[i] = std.ascii.toLower(ch);
+            return .{ .kind = .voice_command, .event_name = lowered };
+        }
         if (std.mem.eql(u8, head, "camera") and std.mem.eql(u8, tail, "zoom")) {
             return .{ .kind = .camera_zoom };
         }
@@ -1112,6 +1133,16 @@ test "event fires only when its name is in the tick's fired set" {
     try t.expect(!evaluate(expr.root, .{ .events = &.{"other"} }));
     try t.expect(evaluate(expr.root, .{ .events = &.{"celebrate"} }));
     try t.expect(evaluate(expr.root, .{ .events = &.{ "other", "celebrate" } }));
+}
+
+test "voice.command fires when its phrase appears in the recognized speech" {
+    var expr = try compileOk("voice.command('next slide')");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    // A case-insensitive substring match, so it fires inside a longer utterance.
+    try t.expect(!evaluate(expr.root, .{ .voice_command_text = "go back please" }));
+    try t.expect(evaluate(expr.root, .{ .voice_command_text = "next slide" }));
+    try t.expect(evaluate(expr.root, .{ .voice_command_text = "okay, next slide now" }));
 }
 
 test "device.in_volume reads the on-device volume-membership boolean" {

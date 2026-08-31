@@ -5572,13 +5572,17 @@ fn proveTemporalHdr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 }
 
 fn writeAudioEnhanceLens(dir: []const u8, strength: f32) !void {
+    return writeAudioEnhanceLensFull(dir, strength, 0, 40, 0, 30);
+}
+
+fn writeAudioEnhanceLensFull(dir: []const u8, strength: f32, echo: f32, echo_ms: f32, dereverb: f32, dereverb_ms: f32) !void {
     const page = std.heap.page_allocator;
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.audio-enhance","version":"1.0.0","display_name":"Audio Enhance","engine_compat":">=0.5","capabilities":[],
         \\ "parameters":[],
-        \\ "nodes":[{{"id":"clean","type":"audio.enhance","params":{{}},"enhance":{{"strength":{d:.3}}}}}],
+        \\ "nodes":[{{"id":"clean","type":"audio.enhance","params":{{}},"enhance":{{"strength":{d:.3},"echo":{d:.3},"echo_ms":{d:.3},"dereverb":{d:.3},"dereverb_ms":{d:.3}}}}}],
         \\ "triggers":[]}}
-    , .{strength});
+    , .{ strength, echo, echo_ms, dereverb, dereverb_ms });
     defer page.free(manifest_json);
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
@@ -5652,6 +5656,122 @@ fn proveAudioDenoise(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The unnormalized autocorrelation of an i16 track at one lag: how strongly the
+/// track resembles a copy of itself shifted by that many samples. An echo at that
+/// delay adds a strong positive peak; broadband noise on its own does not.
+fn autocorrAtLag(track: []const i16, lag: usize) i64 {
+    var sum: i64 = 0;
+    var i: usize = lag;
+    while (i < track.len) : (i += 1) {
+        sum += @as(i64, track[i]) * @as(i64, track[i - lag]);
+    }
+    return sum;
+}
+
+/// Proves microphone echo cancellation: a deterministic broadband source plus a
+/// delayed, attenuated copy (a room echo) at a known lag. An audio.enhance echo
+/// binding runs an inverse comb that removes the copy, so the strong autocorrelation
+/// peak the echo makes at that lag collapses, while a control leaves it standing.
+fn proveEchoCancel(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sample_rate: u32 = 48000;
+    const n: usize = 9600;
+    const delay_ms: f32 = 20.0;
+    const delay: usize = @intFromFloat(delay_ms / 1000.0 * @as(f32, @floatFromInt(sample_rate)));
+    const echo_gain: f32 = 0.6;
+
+    const src = try gpa.alloc(f32, n);
+    defer gpa.free(src);
+    var seed: u32 = 12345;
+    for (0..n) |i| {
+        seed = seed *% 1664525 +% 1013904223;
+        src[i] = (@as(f32, @floatFromInt(seed >> 16)) / 32768.0 - 1.0) * 0.4;
+    }
+    const mic = try gpa.alloc(f32, n);
+    defer gpa.free(mic);
+    for (0..n) |i| {
+        mic[i] = src[i] + (if (i >= delay) echo_gain * src[i - delay] else 0);
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-echo-0");
+    try writeAudioEnhanceLensFull("zig-out/audio-echo-0", 0.0, 0.0, delay_ms, 0.0, 30);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-echo-1");
+    try writeAudioEnhanceLensFull("zig-out/audio-echo-1", 0.0, echo_gain, delay_ms, 0.0, 30);
+
+    const raw = try captureMixOutput(gpa, engine, "zig-out/audio-echo-0", mic, sample_rate);
+    defer gpa.free(raw);
+    const cancelled = try captureMixOutput(gpa, engine, "zig-out/audio-echo-1", mic, sample_rate);
+    defer gpa.free(cancelled);
+
+    const ac_raw = autocorrAtLag(raw, delay);
+    const ac_cancel = autocorrAtLag(cancelled, delay);
+    if (!(ac_raw > 0)) {
+        std.debug.print("conformance: FAIL the echo test signal had no autocorrelation peak at the echo lag\n", .{});
+        return false;
+    }
+    // The inverse comb removes the delayed copy, so its autocorrelation peak drops
+    // to well under half of the uncancelled signal's.
+    const acr = @as(f64, @floatFromInt(ac_raw));
+    const acc = @as(f64, @floatFromInt(ac_cancel));
+    if (!(acc * 2.0 < acr)) {
+        std.debug.print("conformance: FAIL echo cancellation did not remove the echo (autocorr {d} -> {d})\n", .{ ac_raw, ac_cancel });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.enhance echo binding cancels a room echo: the echo's autocorrelation peak at its {d} ms lag collapses ({d} -> {d}) while a control leaves it standing\n", .{ delay_ms, ac_raw, ac_cancel });
+    return true;
+}
+
+/// Proves microphone de-reverberation: a deterministic broadband source run through
+/// a feedback-comb reverb (a decaying reflection at a fixed delay). An audio.enhance
+/// dereverb binding runs the inverse feedforward comb, so the reverb's strong
+/// autocorrelation peak at that delay collapses while a control leaves it standing.
+fn proveDereverb(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sample_rate: u32 = 48000;
+    const n: usize = 9600;
+    const delay_ms: f32 = 25.0;
+    const delay: usize = @intFromFloat(delay_ms / 1000.0 * @as(f32, @floatFromInt(sample_rate)));
+    const decay: f32 = 0.7;
+
+    const src = try gpa.alloc(f32, n);
+    defer gpa.free(src);
+    var seed: u32 = 987654321;
+    for (0..n) |i| {
+        seed = seed *% 1664525 +% 1013904223;
+        src[i] = (@as(f32, @floatFromInt(seed >> 16)) / 32768.0 - 1.0) * 0.3;
+    }
+    // A feedback-comb reverb: each sample re-injects a decayed copy from `delay`
+    // samples back, so the tail rings on. The dereverb comb is its exact inverse.
+    const mic = try gpa.alloc(f32, n);
+    defer gpa.free(mic);
+    for (0..n) |i| {
+        mic[i] = src[i] + (if (i >= delay) decay * mic[i - delay] else 0);
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-rev-0");
+    try writeAudioEnhanceLensFull("zig-out/audio-rev-0", 0.0, 0.0, 40, 0.0, delay_ms);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/audio-rev-1");
+    try writeAudioEnhanceLensFull("zig-out/audio-rev-1", 0.0, 0.0, 40, decay, delay_ms);
+
+    const raw = try captureMixOutput(gpa, engine, "zig-out/audio-rev-0", mic, sample_rate);
+    defer gpa.free(raw);
+    const cleaned = try captureMixOutput(gpa, engine, "zig-out/audio-rev-1", mic, sample_rate);
+    defer gpa.free(cleaned);
+
+    const ac_raw = autocorrAtLag(raw, delay);
+    const ac_clean = autocorrAtLag(cleaned, delay);
+    if (!(ac_raw > 0)) {
+        std.debug.print("conformance: FAIL the reverb test signal had no autocorrelation peak at the reflection lag\n", .{});
+        return false;
+    }
+    const acr = @as(f64, @floatFromInt(ac_raw));
+    const acc = @as(f64, @floatFromInt(ac_clean));
+    if (!(acc * 2.0 < acr)) {
+        std.debug.print("conformance: FAIL de-reverb did not thin the reverberant tail (autocorr {d} -> {d})\n", .{ ac_raw, ac_clean });
+        return false;
+    }
+    std.debug.print("conformance: PROOF an audio.enhance dereverb binding thins a room reverb: the reflection's autocorrelation peak at its {d} ms lag collapses ({d} -> {d}) while a control leaves it standing\n", .{ delay_ms, ac_raw, ac_clean });
+    return true;
+}
+
 fn writeVoiceLens(dir: []const u8, pitch: f32) !void {
     const page = std.heap.page_allocator;
     const manifest_json = try std.fmt.allocPrint(page,
@@ -5664,6 +5784,35 @@ fn writeVoiceLens(dir: []const u8, pitch: f32) !void {
     const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
     defer page.free(manifest_path);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+fn writeVoiceRobotLens(dir: []const u8, hz: f32) !void {
+    const page = std.heap.page_allocator;
+    const manifest_json = try std.fmt.allocPrint(page,
+        \\{{"glf":"1.0","id":"goss.reference.voice-robot","version":"1.0.0","display_name":"Voice Robot","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[],
+        \\ "nodes":[{{"id":"vox","type":"voice.transform","params":{{}},"voice":{{"robot":{d:.1}}}}}],
+        \\ "triggers":[]}}
+    , .{hz});
+    defer page.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(page, "{s}/manifest.json", .{dir});
+    defer page.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+}
+
+/// The Goertzel power of a single frequency in an s16 track, for checking where a
+/// tone's energy sits after a spectral effect without a full transform.
+fn goertzelPower(track: []const i16, sample_rate: u32, freq: f32) f64 {
+    const w = 2.0 * std.math.pi * @as(f64, freq) / @as(f64, @floatFromInt(sample_rate));
+    const coeff = 2.0 * @cos(w);
+    var s1: f64 = 0;
+    var s2: f64 = 0;
+    for (track) |v| {
+        const s0 = @as(f64, @floatFromInt(v)) + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    return s1 * s1 + s2 * s2 - coeff * s1 * s2;
 }
 
 /// Counts the hysteresis-gated zero crossings over the latter half of an i16
@@ -5731,6 +5880,184 @@ fn proveVoiceTransform(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     std.debug.print("conformance: PROOF a voice.transform node pitch-shifts the outgoing microphone by its ratio while keeping the track length: a 300 Hz tone's fundamental scales {d:.2}x (crossings {d} -> {d}) at pitch 1.5, and a pitch-1 control holds\n", .{ ratio, zc_flat, zc_shift });
+    return true;
+}
+
+/// Fills a rising-staircase melody: the fundamental steps up every note and its
+/// two harmonics give each time segment a distinct spectral signature, so the
+/// fingerprint carries temporal structure a match can localise.
+fn fillMelody(buf: []f32, sample_rate: u32, base: f32, step: f32, note_len: usize) void {
+    for (buf, 0..) |*v, i| {
+        const seg: f32 = @floatFromInt(i / note_len);
+        const f0 = base + seg * step;
+        const p = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sample_rate));
+        const s = @sin(2.0 * std.math.pi * f0 * p) +
+            0.5 * @sin(2.0 * std.math.pi * 2.0 * f0 * p) +
+            0.3 * @sin(2.0 * std.math.pi * 3.0 * f0 * p);
+        v.* = s / 1.8;
+    }
+}
+
+/// Proves on-device music identification: two reference tracks are fingerprinted
+/// into the engine catalog, and a short, noisy snippet cut from the middle of one
+/// identifies that track over the decoy, while unrelated audio finds no match.
+fn proveMusicIdentify(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sr: u32 = 11025;
+    const note_len = sr / 5;
+    const dur = sr * 5;
+
+    const song = try gpa.alloc(f32, dur);
+    defer gpa.free(song);
+    fillMelody(song, sr, 200, 40, note_len);
+    const decoy = try gpa.alloc(f32, dur);
+    defer gpa.free(decoy);
+    fillMelody(decoy, sr, 190, 33, note_len);
+
+    abi.goss_engine_music_clear_references(engine);
+    if (abi.goss_engine_music_add_reference(engine, 1, song.ptr, dur, sr, 1) != .ok) {
+        std.debug.print("conformance: FAIL the reference track could not be registered\n", .{});
+        return false;
+    }
+    if (abi.goss_engine_music_add_reference(engine, 2, decoy.ptr, dur, sr, 1) != .ok) {
+        std.debug.print("conformance: FAIL the decoy track could not be registered\n", .{});
+        return false;
+    }
+
+    // A two-second snippet from the middle of track 1, with mild noise added.
+    const start = sr * 2;
+    const snip_len = sr * 2;
+    const snippet = try gpa.alloc(f32, snip_len);
+    defer gpa.free(snippet);
+    var seed: u32 = 0x9e3779b9;
+    for (snippet, 0..) |*v, i| {
+        seed = seed *% 1664525 +% 1013904223;
+        const noise = (@as(f32, @floatFromInt(seed >> 16)) / 32768.0 - 1.0) * 0.05;
+        v.* = song[start + i] + noise;
+    }
+
+    var track_id: u32 = 0;
+    var votes: u32 = 0;
+    if (abi.goss_engine_music_identify(engine, snippet.ptr, snip_len, sr, 1, 5, &track_id, &votes) != .ok) {
+        std.debug.print("conformance: FAIL identify returned an error\n", .{});
+        return false;
+    }
+    if (!(track_id == 1 and votes >= 5)) {
+        std.debug.print("conformance: FAIL the snippet did not identify its source track (id {d}, votes {d})\n", .{ track_id, votes });
+        return false;
+    }
+
+    // A control: unrelated audio (broadband noise) must not cross the threshold.
+    const other = try gpa.alloc(f32, snip_len);
+    defer gpa.free(other);
+    for (other) |*v| {
+        seed = seed *% 1664525 +% 1013904223;
+        v.* = @as(f32, @floatFromInt(seed >> 16)) / 32768.0 - 1.0;
+    }
+    var other_id: u32 = 0;
+    var other_votes: u32 = 0;
+    _ = abi.goss_engine_music_identify(engine, other.ptr, snip_len, sr, 1, 5, &other_id, &other_votes);
+    if (other_votes != 0) {
+        std.debug.print("conformance: FAIL unrelated audio matched a track (id {d}, votes {d})\n", .{ other_id, other_votes });
+        return false;
+    }
+
+    abi.goss_engine_music_clear_references(engine);
+    std.debug.print("conformance: PROOF an on-device fingerprint identifies a track: a two-second noisy snippet from the middle of a registered melody matches it over a decoy with {d} landmark votes, while unrelated audio stays below threshold\n", .{votes});
+    return true;
+}
+
+/// Proves the voice-command trigger (the voice UI): a captioning audio.infer node
+/// decodes the spoken word, and a voice.command('hi') trigger fires a lens action
+/// when the recognized speech carries the phrase, driving a parameter the harness
+/// reads back. Only the recognized text reaches the trigger, never the audio.
+fn proveVoiceCommand(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxCaptionProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-cmd/assets");
+    const manifest_json =
+        \\{"glf":"1.0","id":"goss.reference.voice-command","version":"1.0.0","display_name":"Voice Command","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{"name":"fired","type":"float","default":0.0,"min":0.0,"max":1.0}],
+        \\ "nodes":[{"id":"aud","type":"audio.infer","params":{},
+        \\   "audio":{"model":"model.onnx","outputs":[],"caption":{"tensor":0,"labels":"labels"}}}],
+        \\ "triggers":[{"when":"voice.command('hi')","action":{"kind":"param_set","target":"fired","to":1.0}}]}
+    ;
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/voice-cmd/manifest.json", .data = manifest_json });
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/voice-cmd/assets/model.onnx", .data = model });
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/voice-cmd/assets/labels.txt", .data = "_\nh\ni" });
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, "zig-out/voice-cmd", "zig-out/voice-cmd".len) != .ok) return error.ActivationFailed;
+
+    const samples = try gpa.alloc(f32, 512);
+    defer gpa.free(samples);
+    @memset(samples, 0.3);
+    const signals = std.mem.zeroes(abi.LensSignals);
+
+    // The parameter rests at zero until the spoken word fires the trigger.
+    var fired: f32 = -1;
+    if (abi.goss_session_parameter_value(session, "fired", "fired".len, &fired) == .ok and fired != 0) {
+        std.debug.print("conformance: FAIL the voice command fired before any speech (value {d})\n", .{fired});
+        return false;
+    }
+    var polls: usize = 0;
+    while (fired < 0.5) : (polls += 1) {
+        _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + polls * 1000));
+        _ = abi.goss_session_tick_lens(session, 16000, &signals);
+        _ = abi.goss_session_parameter_value(session, "fired", "fired".len, &fired);
+        if (polls > 100000) {
+            std.debug.print("conformance: FAIL the voice command never fired for the recognized speech\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF a voice.command trigger fires a lens action when its phrase is recognized: the mic decodes 'hi' and the command drives its parameter to {d}, the recognized text the only thing crossing to the trigger\n", .{fired});
+    return true;
+}
+
+/// Proves the robot voice conversion: a voice.transform robot carrier ring-
+/// modulates the outgoing microphone, so a pure tone's energy leaves its own
+/// frequency and reappears at the carrier plus and minus the tone, the classic
+/// robotic timbre, while a control with no robot keeps the tone where it was.
+fn proveVoiceRobot(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sample_rate: u32 = 48000;
+    const n: usize = 9600;
+    const tone: f32 = 300;
+    const carrier: f32 = 500;
+    const mic = try gpa.alloc(f32, n);
+    defer gpa.free(mic);
+    for (0..n) |i| {
+        const ti = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(sample_rate));
+        mic[i] = 0.5 * @sin(2.0 * std.math.pi * tone * ti);
+    }
+
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-1");
+    try writeVoiceLens("zig-out/voice-1", 1.0);
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/voice-robot");
+    try writeVoiceRobotLens("zig-out/voice-robot", carrier);
+
+    const dry = try captureMixOutput(gpa, engine, "zig-out/voice-1", mic, sample_rate);
+    defer gpa.free(dry);
+    const robot = try captureMixOutput(gpa, engine, "zig-out/voice-robot", mic, sample_rate);
+    defer gpa.free(robot);
+
+    const dry_tone = goertzelPower(dry, sample_rate, tone);
+    const robot_tone = goertzelPower(robot, sample_rate, tone);
+    const robot_lower = goertzelPower(robot, sample_rate, carrier - tone);
+    const robot_upper = goertzelPower(robot, sample_rate, carrier + tone);
+
+    // The tone all but leaves its own frequency under ring modulation.
+    if (!(dry_tone > 0 and robot_tone < dry_tone * 0.05)) {
+        std.debug.print("conformance: FAIL the robot did not move the tone off its frequency (dry {e}, robot {e})\n", .{ dry_tone, robot_tone });
+        return false;
+    }
+    // ...and lands in both sidebands, each far above the residual at the tone.
+    if (!(robot_lower > robot_tone * 10 and robot_upper > robot_tone * 10)) {
+        std.debug.print("conformance: FAIL the robot sidebands did not appear (lower {e}, upper {e}, residual {e})\n", .{ robot_lower, robot_upper, robot_tone });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a voice.transform robot ring-modulates the mic into a robotic voice: a 300 Hz tone collapses at its own frequency and reappears at the carrier's 200 and 800 Hz sidebands, while a no-robot control holds the tone in place\n", .{});
     return true;
 }
 
@@ -19076,8 +19403,18 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("temporal hdr");
     if (!try proveAudioDenoise(gpa, engine)) return 1;
     watchHold("audio enhance");
+    if (!try proveEchoCancel(gpa, engine)) return 1;
+    watchHold("echo cancel");
+    if (!try proveDereverb(gpa, engine)) return 1;
+    watchHold("dereverb");
     if (!try proveVoiceTransform(gpa, engine)) return 1;
     watchHold("voice transform");
+    if (!try proveMusicIdentify(gpa, engine)) return 1;
+    watchHold("music identify");
+    if (!try proveVoiceCommand(gpa, engine)) return 1;
+    watchHold("voice command");
+    if (!try proveVoiceRobot(gpa, engine)) return 1;
+    watchHold("voice robot");
     if (!try proveCaptionSegment(gpa, engine)) return 1;
     watchHold("caption segment");
     if (!try proveMlInferMaterial(gpa, engine)) return 1;

@@ -1144,13 +1144,26 @@ pub const AudioField = struct {
 /// output mix. Zero leaves the mic untouched.
 pub const AudioEnhanceField = struct {
     strength: f32 = 1,
+    /// Echo cancellation: subtracts `echo` (0..1) of the outgoing mic delayed by
+    /// `echo_ms` milliseconds, so a room echo or acoustic feedback repeating at
+    /// that delay is removed from the outgoing track. Zero leaves it untouched.
+    echo: f32 = 0,
+    echo_ms: f32 = 40,
+    /// De-reverberation: a feedforward comb subtracts `dereverb` (0..1) of the mic
+    /// delayed by `dereverb_ms`, inverting the dominant reflection comb of a room
+    /// so the reverberant tail thins. Zero leaves it off.
+    dereverb: f32 = 0,
+    dereverb_ms: f32 = 30,
 };
 
-/// A voice.transform node's real-time voice change: `pitch` (0.5..2) the ratio
-/// the outgoing microphone's pitch is shifted by, 1 unchanged, above 1 higher and
-/// below 1 lower, the duration preserved. Applied in the output mix.
+/// A voice.transform node's real-time voice change in the output mix: `pitch`
+/// (0.5..2) shifts the mic pitch keeping duration, `formant` (0.5..2) scales the
+/// vocal-tract envelope alone (1/pitch keeps the speaker's character), and `robot`
+/// (carrier Hz, 0 off) ring-modulates it for a robotic voice conversion.
 pub const VoiceTransformField = struct {
     pitch: f32 = 1,
+    formant: f32 = 1,
+    robot: f32 = 0,
 };
 
 /// A diffusion node's restyle slot: the three bundled models the loop runs (a
@@ -1405,6 +1418,15 @@ pub const Action = struct {
     curve: Curve = .linear,
     stiffness: f32 = 0,
     damping: f32 = 0,
+    /// play_sound only: the voice's gain (default 1), whether it loops, a linear
+    /// fade in and out in milliseconds (0 for a hard start or stop, a looping
+    /// voice ignoring the fade out), and an equal-power stereo pan (-1 left to 1
+    /// right, 0 centred).
+    sound_gain: f32 = 1,
+    sound_loop: bool = false,
+    fade_in_ms: u32 = 0,
+    fade_out_ms: u32 = 0,
+    pan: f32 = 0,
 };
 
 pub const Trigger = struct {
@@ -3745,6 +3767,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             if (getField(object, "enhance")) |ev| {
                 if (ev == .object) {
                     if (getField(ev.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
+                    if (getField(ev.object, "echo")) |v| field.echo = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.echo)), 0, 1);
+                    if (getField(ev.object, "echo_ms")) |v| field.echo_ms = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.echo_ms)), 5, 60);
+                    if (getField(ev.object, "dereverb")) |v| field.dereverb = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.dereverb)), 0, 1);
+                    if (getField(ev.object, "dereverb_ms")) |v| field.dereverb_ms = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.dereverb_ms)), 5, 60);
                 }
             }
             audio_enhance_field = field;
@@ -3755,6 +3781,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             if (getField(object, "voice")) |vv| {
                 if (vv == .object) {
                     if (getField(vv.object, "pitch")) |v| field.pitch = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.pitch)), 0.5, 2);
+                    if (getField(vv.object, "formant")) |v| field.formant = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.formant)), 0.5, 2);
+                    if (getField(vv.object, "robot")) |v| field.robot = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.robot)), 0, 2000);
                 }
             }
             voice_transform_field = field;
@@ -4416,6 +4444,19 @@ fn parseAction(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, 
     }
     if (getField(object, "stiffness")) |v| action.stiffness = @floatCast(numberOf(v) orelse 0);
     if (getField(object, "damping")) |v| action.damping = @floatCast(numberOf(v) orelse 0);
+    // play_sound voice controls, clamped to sane bounds so a bad value falls back
+    // rather than driving the mixer past its envelope math.
+    if (getField(object, "gain")) |v| action.sound_gain = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse 1)), 0, 4);
+    if (getField(object, "loop")) |v| action.sound_loop = v == .bool and v.bool;
+    if (getField(object, "fade_in_ms")) |v| {
+        const n = numberOf(v) orelse 0;
+        action.fade_in_ms = if (n >= 0 and n <= max_duration_ms) @intFromFloat(n) else 0;
+    }
+    if (getField(object, "fade_out_ms")) |v| {
+        const n = numberOf(v) orelse 0;
+        action.fade_out_ms = if (n >= 0 and n <= max_duration_ms) @intFromFloat(n) else 0;
+    }
+    if (getField(object, "pan")) |v| action.pan = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse 0)), -1, 1);
     return action;
 }
 

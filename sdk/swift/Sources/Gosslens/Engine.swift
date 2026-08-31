@@ -78,4 +78,30 @@ public final class GossEngine: @unchecked Sendable {
         try checked(goss_compile_prompt(handle, bytes, bytes.count, &out, out.count, &written))
         return String(decoding: out[0..<written], as: UTF8.self)
     }
+
+    /// Fingerprints a reference recording and registers it under `trackID` in the
+    /// engine's on-device music catalog. Samples are interleaved f32.
+    public func addMusicReference(trackID: UInt32, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws {
+        try checked(goss_engine_music_add_reference(handle, trackID, samples, frameCount, sampleRate, channels))
+    }
+
+    /// Empties the engine's music catalog.
+    public func clearMusicReferences() {
+        goss_engine_music_clear_references(handle)
+    }
+
+    /// Fingerprints a captured snippet and matches it against the catalog,
+    /// returning the best track and its vote count, or nil below `minVotes`.
+    public func identifyMusic(samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32, minVotes: UInt32 = 5) throws -> MusicMatch? {
+        var trackID: UInt32 = 0
+        var votes: UInt32 = 0
+        try checked(goss_engine_music_identify(handle, samples, frameCount, sampleRate, channels, minVotes, &trackID, &votes))
+        return votes == 0 ? nil : MusicMatch(trackID: trackID, votes: votes)
+    }
+}
+
+/// The best track a music snippet matched: its id and how many landmarks agreed.
+public struct MusicMatch {
+    public let trackID: UInt32
+    public let votes: UInt32
 }

@@ -1147,19 +1147,34 @@ at `rate`, so the audio the SDK pulls carries the voice-over. Dubbing is off by
 default, since a dub speaks over the room.
 
 An `"audio.enhance"` node cleans the outgoing microphone. Like the other audio
-nodes it draws nothing; it carries an `"enhance": {"strength"}` block (0..1,
-default 1). When one is active, the output mix runs a deterministic noise
-reduction over the microphone before it is summed with the lens voices, a
-one-pole low-pass that pulls the high-frequency hiss down and a soft gate that
-eases the near-silent noise floor toward zero, blended in by `strength` so zero
-leaves the mic untouched. It needs no model.
+nodes it draws nothing; it carries an `"enhance": {"strength", "echo", "echo_ms"}`
+block. `strength` (0..1, default 1) runs a deterministic noise reduction over the
+microphone before it is summed with the lens voices, a one-pole low-pass that
+pulls the high-frequency hiss down and a soft gate that eases the near-silent
+noise floor toward zero, blended in by `strength` so zero leaves the mic
+untouched. `dereverb` (0..1, default 0) runs de-reverberation: a feedforward comb subtracts
+`dereverb` of the signal delayed by `dereverb_ms` (5..60, default 30), the inverse
+of a room's dominant feedback-comb reflection, so the reverberant tail thins.
+`echo` (0..1, default 0) then runs echo cancellation: an inverse comb
+subtracts `echo` of the enhanced signal delayed by `echo_ms` milliseconds (5..60,
+default 40), so a room echo or acoustic feedback repeating at that delay is
+removed. Zero on any stage leaves it off. It needs no model.
 
 A `"voice.transform"` node changes the outgoing voice. It draws nothing and
-carries a `"voice": {"pitch"}` block (0.5..2, default 1): the output mix pitch
-shifts the microphone by the `pitch` ratio, above 1 higher and below 1 lower,
-through a two-tap delay line swept at the ratio with a constant-power crossfade,
-so the pitch changes while the track keeps its length. A ratio of one is a
-passthrough. It needs no model.
+carries a `"voice": {"pitch", "formant"}` block, each 0.5..2 and default 1. The
+output mix pitch shifts the microphone by the `pitch` ratio, above 1 higher and
+below 1 lower, through a two-tap delay line swept at the ratio with a
+constant-power crossfade, so the pitch changes while the track keeps its length.
+The `formant` ratio scales the vocal-tract envelope on its own through a short
+cepstral analysis that separates the formants from the pitch harmonics, warps the
+envelope, and resynthesises with the harmonics untouched, so the voice sounds
+larger below 1 and smaller above 1 without its pitch moving. Set formant to
+1/pitch for a natural higher or lower voice that keeps the speaker's character.
+The `robot` field (a carrier frequency in Hz, 0 to 2000, default 0 off) ring
+modulates the shaped voice by a sine at that rate, folding it into carrier-plus-
+and-minus sidebands for a robotic conversion on top of the pitch and formant. A
+ratio of one on pitch and formant with robot off is a passthrough. It needs no
+model.
 
 An `ml.infer` node may also carry a `"mask"` block, `{"tensor", "channel"}`,
 that binds a whole output tensor as a segmentation mask. The tensor is read as
@@ -1294,7 +1309,12 @@ small closed grammar, parsed once at load time into a typed expression tree
   below; an unknown name is a compile error), `hands.pinch` (true
   while a tracked hand's thumb and index tips are closed together),
   `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
-onset hops), `camera.zoom` (the camera zoom factor, one at rest),
+onset hops), `audio.beat_count` (a monotonic count of onsets, for syncing to a
+  beat number), `voice.command('phrase')` (true for the tick the on-device
+  captioner's recognized speech carries the phrase, a case-insensitive substring
+  match, so a spoken word drives a lens; the audio never leaves the engine, only
+  the recognized text reaches the trigger, and it needs a captioning audio.infer
+  node in the lens), `camera.zoom` (the camera zoom factor, one at rest),
   `camera.focus`, `camera.exposure` (true for one tick after the app changes
   focus or exposure), `gaze.x` (horizontal eye gaze, roughly -1 to 1,
   positive toward the subject's left), `gaze.y` (vertical, positive up),
@@ -1360,7 +1380,10 @@ sits farther from the wrist than its inner joint, a scale-free test.
 curve primitives in 6.3), `param_set` (immediate), `play_animation` (a
 named glTF animation clip), `play_sound` (start a voice for the sound at
 the bundle-relative path in `target`, decoded from `sounds/` and mixed into
-the audio the host pulls out), `reset_timer` (name a timer signal back to
+the audio the host pulls out, with optional `gain`, `loop`, a linear
+`fade_in_ms`/`fade_out_ms`, and an equal-power stereo `pan` (-1 left to 1 right);
+several fired at once layer on the mixer's voices), `reset_timer` (name a timer
+signal back to
 zero), the counter actions `increment_counter`, `reset_counter` and
 `set_counter` (step a named counter that `counter('name')` reads and that
 persists across ticks, so a no-code lens keeps a score or a step index with no
@@ -1635,7 +1658,8 @@ frame-bracket op to its mean, holding off until the whole bracket lands;
 an audio.enhance node cleans the outgoing microphone, a tone buried under
 per-sample hiss losing its high-frequency step energy while a control holds;
 a voice.transform node pitch-shifts the outgoing microphone by its ratio, a
-300 Hz tone's fundamental scaling by 1.5 while the track keeps its length;
+300 Hz tone's fundamental scaling by 1.5 while the track keeps its length, and
+warps the vocal-tract envelope by its formant ratio with the pitch untouched;
 a diarized caption segment lands in the read-back ring, a decoded utterance
 held with the times it spanned and its speaker, metadata and text read apart;
 a temporal ml.infer net feeds the previous output frame into its second input,

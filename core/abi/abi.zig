@@ -27,6 +27,8 @@ const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
+const formant = @import("formant");
+const fingerprint = @import("fingerprint");
 const comp = @import("layout");
 const geo = @import("geo");
 const font = @import("font");
@@ -252,6 +254,9 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
     "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
     "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
+    "void goss_engine_music_clear_references(goss_engine *engine)",
+    "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -457,6 +462,11 @@ pub const Engine = struct {
     /// (Android's JNI layer) owns storing and releasing it; the core only
     /// carries the slot.
     attached_window: ?*anyopaque = null,
+    /// The music-identification catalog: fingerprints of the tracks a host has
+    /// registered, queried by a captured snippet. Engine-wide, not per session,
+    /// so one catalog serves every session. Initialised at create, freed at
+    /// destroy.
+    music_db: fingerprint.Database = undefined,
 };
 
 const WorldStore = struct {
@@ -730,6 +740,22 @@ pub const Session = struct {
     /// microphone cleanup is continuous. Resolved at activation.
     audio_enhance_strength: f32 = 0,
     audio_enhance_lp: [8]f32 = @splat(0),
+    /// An active audio.enhance node's echo cancellation: the gain (0 when none)
+    /// and delay in milliseconds it subtracts, and the per-channel ring of past
+    /// enhanced samples the inverse comb reads the delayed copy from. The ring is
+    /// sized to channels times the delay at mix time and freed at teardown.
+    audio_echo_strength: f32 = 0,
+    audio_echo_ms: f32 = 0,
+    audio_echo_ring: []f32 = &.{},
+    audio_echo_pos: usize = 0,
+    /// An active audio.enhance node's de-reverb: the gain and delay of the
+    /// feedforward comb that inverts the room's dominant reflection, and a
+    /// per-channel ring of past input samples the comb subtracts the delayed copy
+    /// from. Sized to channels times the delay at mix time, freed at teardown.
+    audio_dereverb_strength: f32 = 0,
+    audio_dereverb_ms: f32 = 0,
+    audio_dereverb_ring: []f32 = &.{},
+    audio_dereverb_pos: usize = 0,
     /// An active voice.transform node's pitch-shift ratio (1 when none), and the
     /// per-channel delay line the output mix pitch-shifts the microphone through,
     /// a two-tap crossfade sweep carried across chunks. Resolved at activation.
@@ -737,6 +763,17 @@ pub const Session = struct {
     voice_delay: [8][voice_delay_len]f32 = @splat(@splat(0)),
     voice_wpos: usize = 0,
     voice_phase: f32 = 0,
+    /// An active voice.transform node's formant ratio (1 when none): the mic's
+    /// spectral envelope is scaled by this before the pitch shift, so the vocal
+    /// tract sounds larger or smaller while the pitch is untouched. The streaming
+    /// STFT state is one Channel per mic channel, allocated on first use.
+    voice_formant: f32 = 1,
+    voice_formant_chans: []formant.Channel = &.{},
+    /// An active voice.transform node's robot carrier (Hz, 0 off): the mic is
+    /// ring-modulated by a sine at this rate for a robotic voice conversion, its
+    /// phase carried across chunks so the carrier stays continuous.
+    voice_robot: f32 = 0,
+    voice_robot_phase: f32 = 0,
     /// The diffusion restyle workers an active lens's diffusion nodes drive,
     /// each drawing its decoded frame through a sprite; built from the bundle at
     /// activation, fed the camera frame, uploaded to their sprite each render.
@@ -1606,6 +1643,7 @@ pub fn createEngine(gpa: std.mem.Allocator, config: EngineConfig) error{OutOfMem
         .texture_pool_capacity = clampCapacity(config.texture_pool_capacity, default_texture_pool_capacity),
         .staging_pool_capacity = clampCapacity(config.staging_pool_capacity, default_staging_pool_capacity),
     };
+    engine.music_db = fingerprint.Database.init(gpa);
     return engine;
 }
 
@@ -1638,6 +1676,7 @@ pub fn destroyEngine(engine: *Engine) void {
     }
     engine.live_output_slots.deinit(engine.gpa);
     if (engine.capture_convert.len > 0) engine.gpa.free(engine.capture_convert);
+    engine.music_db.deinit();
     if (engine.renderer) |*r| r.deinit();
     engine.texture_pool.deinit();
     engine.staging_pool.deinit();
@@ -4743,6 +4782,9 @@ pub fn destroySession(session: *Session) void {
     destroyAudioWorkers(session);
     session.audio_workers.deinit(session.engine.gpa);
     if (session.audio_window.len > 0) session.engine.gpa.free(session.audio_window);
+    if (session.audio_echo_ring.len > 0) session.engine.gpa.free(session.audio_echo_ring);
+    if (session.audio_dereverb_ring.len > 0) session.engine.gpa.free(session.audio_dereverb_ring);
+    if (session.voice_formant_chans.len > 0) session.engine.gpa.free(session.voice_formant_chans);
     destroyDiffusionWorkers(session);
     session.diffusion_workers.deinit(session.engine.gpa);
     destroySplatWorkers(session);
@@ -8972,6 +9014,10 @@ fn destroyBlendState(session: *Session) void {
     session.auto_frame_valid = false;
     session.audio_enhance_strength = 0;
     session.voice_pitch = 1;
+    session.voice_formant = 1;
+    for (session.voice_formant_chans) |*ch| ch.reset();
+    session.voice_robot = 0;
+    session.voice_robot_phase = 0;
     session.wants_person_mask = false;
     session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
@@ -9407,6 +9453,10 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
 
 const audio_sample_rate: u32 = 48000;
 const audio_channels: u32 = 1;
+/// The lens sound mixer renders stereo so a play_sound can pan across the field;
+/// pull_audio downmixes it back to its mono contract, while mix_output_audio can
+/// place the left and right into a stereo call or live track.
+const sound_mixer_channels: u32 = 2;
 /// The delay-line length a voice.transform pitch shifter sweeps over, per channel.
 const voice_delay_len: usize = 1024;
 
@@ -9434,7 +9484,7 @@ fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) vo
         }
     }
     if (!has_sound) return;
-    var mixer = audio_playback.Mixer.create(audio_sample_rate, audio_channels) catch return;
+    var mixer = audio_playback.Mixer.create(audio_sample_rate, sound_mixer_channels) catch return;
     for (lens.manifest.triggers) |trig| {
         if (trig.action.kind != .play_sound) continue;
         const rel = trig.action.target;
@@ -9456,8 +9506,12 @@ fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) vo
 fn playFiredSounds(s: *Session) void {
     const mixer = if (s.audio_mixer) |*m| m else return;
     const lens = if (s.active_lens) |*l| l else return;
-    for (lens.firedSounds()) |path| {
-        if (s.sound_ids.get(path)) |id| mixer.play(id, false, 1.0);
+    for (lens.firedSounds()) |ev| {
+        if (s.sound_ids.get(ev.path)) |id| {
+            const fade_in = @as(u64, ev.fade_in_ms) * audio_sample_rate / 1000;
+            const fade_out = @as(u64, ev.fade_out_ms) * audio_sample_rate / 1000;
+            mixer.playPan(id, ev.loop, ev.gain, fade_in, fade_out, ev.pan);
+        }
     }
 }
 
@@ -9506,6 +9560,43 @@ pub export fn goss_compile_prompt(engine: ?*Engine, prompt: ?[*]const u8, prompt
     if (out_buf) |buf| {
         if (out_cap >= json.len) @memcpy(buf[0..json.len], json);
     }
+    return .ok;
+}
+
+/// Fingerprints a reference recording and registers it under track_id in the
+/// engine's music catalog, so a later snippet can identify it. Model-free and
+/// on-device; re-adding a track_id layers more landmarks in.
+pub export fn goss_engine_music_add_reference(engine: ?*Engine, track_id: u32, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const src = samples orelse return .invalid_argument;
+    if (frame_count == 0 or channels == 0) return .invalid_argument;
+    const buf = src[0 .. @as(usize, frame_count) * channels];
+    const marks = fingerprint.fingerprint(e.gpa, buf, frame_count, sample_rate, channels) catch return .out_of_memory;
+    defer e.gpa.free(marks);
+    e.music_db.add(track_id, marks) catch return .out_of_memory;
+    return .ok;
+}
+
+/// Empties the engine's music catalog.
+pub export fn goss_engine_music_clear_references(engine: ?*Engine) void {
+    const e = engine orelse return;
+    e.music_db.clear();
+}
+
+/// Fingerprints a captured snippet and matches it against the catalog. Writes the
+/// best track id and its landmark-agreement vote count; a vote count of zero means
+/// no track met min_votes. The match is the track and time offset the snippet's
+/// landmarks most agree on, so a few seconds of noisy audio still identifies.
+pub export fn goss_engine_music_identify(engine: ?*Engine, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, min_votes: u32, out_track_id: ?*u32, out_votes: ?*u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const src = samples orelse return .invalid_argument;
+    if (frame_count == 0 or channels == 0) return .invalid_argument;
+    const buf = src[0 .. @as(usize, frame_count) * channels];
+    const q = fingerprint.fingerprint(e.gpa, buf, frame_count, sample_rate, channels) catch return .out_of_memory;
+    defer e.gpa.free(q);
+    const hit = e.music_db.match(q, min_votes) catch return .out_of_memory;
+    if (out_track_id) |p| p.* = if (hit) |h| h.id else 0;
+    if (out_votes) |p| p.* = if (hit) |h| h.votes else 0;
     return .ok;
 }
 
@@ -9572,8 +9663,26 @@ pub export fn goss_session_set_dubbing(session: ?*Session, enabled: u32) Status 
 pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: u32) Status {
     const s = session orelse return .invalid_argument;
     const data = out orelse return .invalid_argument;
-    const buf = data[0 .. frames * audio_channels];
-    if (s.audio_mixer) |*mixer| mixer.pull(buf, frames) else @memset(buf, 0);
+    const mono = data[0 .. frames * audio_channels];
+    const mixer = if (s.audio_mixer) |*m| m else {
+        @memset(mono, 0);
+        return .ok;
+    };
+    // The mixer renders stereo for panning; pull_audio keeps its mono contract by
+    // averaging the two channels a chunk at a time (no per-frame allocation).
+    var chunk: [1024]i16 = undefined;
+    const per: u32 = @intCast(chunk.len / sound_mixer_channels);
+    var done: u32 = 0;
+    while (done < frames) {
+        const n = @min(per, frames - done);
+        mixer.pull(chunk[0 .. n * sound_mixer_channels], n);
+        for (0..n) |i| {
+            const l: i32 = chunk[i * 2];
+            const r: i32 = chunk[i * 2 + 1];
+            mono[done + i] = @intCast(@divTrunc(l + r, 2));
+        }
+        done += n;
+    }
     return .ok;
 }
 
@@ -9592,31 +9701,38 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
     const ratio = @as(f64, @floatFromInt(audio_sample_rate)) / @as(f64, @floatFromInt(sample_rate));
     const MixCtx = struct {
         m: *audio_playback.Mixer,
+        // The mixer is stereo; the mono resampler pulls the downmix of a frame.
         fn pull(self: *@This()) i16 {
-            var one: [audio_channels]i16 = .{0};
-            self.m.pull(&one, 1);
-            return one[0];
+            var frame: [sound_mixer_channels]i16 = @splat(0);
+            self.m.pull(&frame, 1);
+            return @intCast(@divTrunc(@as(i32, frame[0]) + @as(i32, frame[1]), 2));
         }
     };
 
-    // The lens mixer is 48 kHz mono. Resample its stream to the outgoing rate a
-    // bounded chunk at a time, then sum with the mic. A missing mixer (no lens
-    // sound) mixes silence, so the outgoing track is the mic alone.
+    // The lens mixer renders 48 kHz stereo. At the outgoing rate the stereo pull
+    // carries the pan straight through; at a different rate the mono resampler
+    // pulls the downmix and it plays centred. Bounded chunks, no allocation; a
+    // missing mixer mixes silence so the outgoing track is the mic alone.
     var lens_chunk: [1024]i16 = undefined;
+    var mono_chunk: [512]i16 = undefined;
     var enhanced_buf: [1024 * 8]f32 = undefined;
     var done: u32 = 0;
     while (done < frame_count) {
-        const n = @min(@as(u32, lens_chunk.len), frame_count - done);
-        const lens = lens_chunk[0..n];
+        const n = @min(@as(u32, mono_chunk.len), frame_count - done);
+        const lens_stereo = lens_chunk[0 .. n * sound_mixer_channels];
         if (s.audio_mixer) |*mixer| {
             if (sample_rate == audio_sample_rate) {
-                mixer.pull(lens, n);
+                mixer.pull(lens_stereo, n);
             } else {
                 var ctx = MixCtx{ .m = mixer };
-                s.mix_resampler.process(ratio, lens, &ctx, MixCtx.pull);
+                s.mix_resampler.process(ratio, mono_chunk[0..n], &ctx, MixCtx.pull);
+                for (0..n) |i| {
+                    lens_stereo[i * 2] = mono_chunk[i];
+                    lens_stereo[i * 2 + 1] = mono_chunk[i];
+                }
             }
         } else {
-            @memset(lens, 0);
+            @memset(lens_stereo, 0);
         }
         const base = @as(usize, done) * channels;
         const span = @as(usize, n) * channels;
@@ -9625,13 +9741,22 @@ pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f
         // neither the raw mic passes straight through.
         const mic_chunk: ?[]const f32 = blk: {
             const raw = if (mic_slice) |m| m[base .. base + span] else break :blk null;
-            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1) break :blk raw;
+            if (s.audio_enhance_strength <= 0 and s.voice_pitch == 1 and s.voice_formant == 1 and s.voice_robot == 0 and s.audio_echo_strength <= 0 and s.audio_dereverb_strength <= 0) break :blk raw;
             @memcpy(enhanced_buf[0..span], raw);
             if (s.audio_enhance_strength > 0) enhanceMic(s, enhanced_buf[0..span], n, channels);
+            if (s.audio_dereverb_strength > 0) dereverbMic(s, enhanced_buf[0..span], n, channels, sample_rate);
+            if (s.audio_echo_strength > 0) echoCancelMic(s, enhanced_buf[0..span], n, channels, sample_rate);
+            // Formant first: it warps the vocal-tract envelope on the clean mic, then
+            // the pitch shift rides on top, so formant alone stays pure and pairing
+            // it with 1/pitch yields a natural, character-preserving pitch change.
+            if (s.voice_formant != 1) formantShiftMic(s, enhanced_buf[0..span], n, channels);
             if (s.voice_pitch != 1) voiceTransformMic(s, enhanced_buf[0..span], n, channels);
+            // Robot last: ring-modulating the shaped voice overlays the metallic
+            // carrier for a full character conversion.
+            if (s.voice_robot > 0) robotizeMic(s, enhanced_buf[0..span], n, channels, sample_rate);
             break :blk enhanced_buf[0..span];
         };
-        audio_mix.combine(lens, mic_chunk, out_slice[base .. base + span], n, channels);
+        audio_mix.combineStereo(lens_stereo, mic_chunk, out_slice[base .. base + span], n, channels);
         done += n;
     }
     return .ok;
@@ -11258,16 +11383,40 @@ fn pollMlOutputs(session: *Session) void {
 fn resolveAudioEnhance(session: *Session) void {
     session.audio_enhance_strength = 0;
     session.audio_enhance_lp = @splat(0);
+    session.audio_echo_strength = 0;
+    session.audio_echo_ms = 0;
+    session.audio_echo_pos = 0;
+    if (session.audio_echo_ring.len > 0) @memset(session.audio_echo_ring, 0);
+    session.audio_dereverb_strength = 0;
+    session.audio_dereverb_ms = 0;
+    session.audio_dereverb_pos = 0;
+    if (session.audio_dereverb_ring.len > 0) @memset(session.audio_dereverb_ring, 0);
     session.voice_pitch = 1;
     session.voice_delay = @splat(@splat(0));
     session.voice_wpos = 0;
     session.voice_phase = 0;
+    session.voice_formant = 1;
+    for (session.voice_formant_chans) |*ch| ch.reset();
+    session.voice_robot = 0;
+    session.voice_robot_phase = 0;
     const lens = if (session.active_lens) |*l| l else return;
     for (lens.manifest.nodes) |node| {
         if (node.audio_enhance) |ae| {
             if (ae.strength > session.audio_enhance_strength) session.audio_enhance_strength = ae.strength;
+            if (ae.echo > 0) {
+                session.audio_echo_strength = ae.echo;
+                session.audio_echo_ms = ae.echo_ms;
+            }
+            if (ae.dereverb > 0) {
+                session.audio_dereverb_strength = ae.dereverb;
+                session.audio_dereverb_ms = ae.dereverb_ms;
+            }
         }
-        if (node.voice_transform) |vt| session.voice_pitch = vt.pitch;
+        if (node.voice_transform) |vt| {
+            session.voice_pitch = vt.pitch;
+            session.voice_formant = vt.formant;
+            session.voice_robot = vt.robot;
+        }
     }
 }
 
@@ -11290,6 +11439,80 @@ fn enhanceMic(session: *Session, mic: []f32, frame_count: u32, channels: u32) vo
             mic[idx] = x + (cleaned - x) * strength;
         }
     }
+}
+
+/// Cancels a room echo from one interleaved output chunk: an inverse comb filter
+/// subtracts the enhanced signal delayed by echo_ms and scaled by the echo gain,
+/// so a copy repeating at that delay is removed. The per-channel delay ring is
+/// sized once to the delay and carried across chunks; a resize reallocates it.
+fn echoCancelMic(session: *Session, mic: []f32, frame_count: u32, channels: u32, sample_rate: u32) void {
+    const gain = session.audio_echo_strength;
+    if (gain <= 0 or session.audio_echo_ms <= 0) return;
+    const delay: usize = @intFromFloat(session.audio_echo_ms / 1000.0 * @as(f32, @floatFromInt(sample_rate)));
+    if (delay == 0) return;
+    const need = delay * channels;
+    if (session.audio_echo_ring.len != need) {
+        const gpa = session.engine.gpa;
+        if (session.audio_echo_ring.len > 0) gpa.free(session.audio_echo_ring);
+        session.audio_echo_ring = gpa.alloc(f32, need) catch {
+            session.audio_echo_ring = &.{};
+            return;
+        };
+        @memset(session.audio_echo_ring, 0);
+        session.audio_echo_pos = 0;
+    }
+    var pos = session.audio_echo_pos % delay;
+    for (0..frame_count) |f| {
+        for (0..channels) |c| {
+            const idx = f * channels + c;
+            const slot = pos * channels + c;
+            // The ring slot holds the enhanced sample from `delay` frames ago; the
+            // inverse comb removes that scaled copy, then stores the new output.
+            const delayed = session.audio_echo_ring[slot];
+            const out = mic[idx] - gain * delayed;
+            session.audio_echo_ring[slot] = out;
+            mic[idx] = out;
+        }
+        pos = (pos + 1) % delay;
+    }
+    session.audio_echo_pos = pos;
+}
+
+/// De-reverberates one interleaved output chunk: a feedforward comb subtracts the
+/// input delayed by dereverb_ms and scaled by the dereverb gain, the inverse of a
+/// room's feedback-comb reflection, so the reverberant tail thins. The per-channel
+/// ring holds past input samples and is sized to the delay, carried across chunks.
+fn dereverbMic(session: *Session, mic: []f32, frame_count: u32, channels: u32, sample_rate: u32) void {
+    const gain = session.audio_dereverb_strength;
+    if (gain <= 0 or session.audio_dereverb_ms <= 0) return;
+    const delay: usize = @intFromFloat(session.audio_dereverb_ms / 1000.0 * @as(f32, @floatFromInt(sample_rate)));
+    if (delay == 0) return;
+    const need = delay * channels;
+    if (session.audio_dereverb_ring.len != need) {
+        const gpa = session.engine.gpa;
+        if (session.audio_dereverb_ring.len > 0) gpa.free(session.audio_dereverb_ring);
+        session.audio_dereverb_ring = gpa.alloc(f32, need) catch {
+            session.audio_dereverb_ring = &.{};
+            return;
+        };
+        @memset(session.audio_dereverb_ring, 0);
+        session.audio_dereverb_pos = 0;
+    }
+    var pos = session.audio_dereverb_pos % delay;
+    for (0..frame_count) |f| {
+        for (0..channels) |c| {
+            const idx = f * channels + c;
+            const slot = pos * channels + c;
+            // The ring slot holds the input from `delay` frames ago; the feedforward
+            // comb subtracts that scaled copy, then stores the current input.
+            const delayed = session.audio_dereverb_ring[slot];
+            const x = mic[idx];
+            session.audio_dereverb_ring[slot] = x;
+            mic[idx] = x - gain * delayed;
+        }
+        pos = (pos + 1) % delay;
+    }
+    session.audio_dereverb_pos = pos;
 }
 
 /// Pitch-shifts one interleaved output chunk's microphone in place while keeping
@@ -11323,6 +11546,50 @@ fn voiceTransformMic(session: *Session, mic: []f32, frame_count: u32, channels: 
         if (np >= n) np -= n;
         session.voice_phase = np;
     }
+}
+
+/// Formant-shifts one interleaved output chunk's microphone in place, scaling the
+/// spectral envelope by the session's formant ratio without moving the pitch. The
+/// per-channel STFT state is allocated once on first use and freed at teardown; a
+/// failed allocation leaves the mic untouched rather than dropping the chunk.
+fn formantShiftMic(session: *Session, mic: []f32, frame_count: u32, channels: u32) void {
+    const ratio = session.voice_formant;
+    if (ratio == 1) return;
+    const want = @min(channels, @as(u32, 8));
+    if (session.voice_formant_chans.len != want) {
+        const gpa = session.engine.gpa;
+        if (session.voice_formant_chans.len > 0) gpa.free(session.voice_formant_chans);
+        session.voice_formant_chans = gpa.alloc(formant.Channel, want) catch {
+            session.voice_formant_chans = &.{};
+            return;
+        };
+        for (session.voice_formant_chans) |*ch| ch.reset();
+    }
+    for (0..frame_count) |f| {
+        for (0..channels) |c| {
+            const ci = @min(c, session.voice_formant_chans.len - 1);
+            const idx = f * channels + c;
+            mic[idx] = formant.processSample(&session.voice_formant_chans[ci], mic[idx], ratio);
+        }
+    }
+}
+
+/// Ring-modulates one interleaved output chunk's microphone in place: every
+/// channel is multiplied by a shared sine carrier at the session's robot rate,
+/// folding the voice into carrier-plus-and-minus sidebands for a robotic timbre.
+/// The carrier phase carries across chunks so it never clicks at a boundary.
+fn robotizeMic(session: *Session, mic: []f32, frame_count: u32, channels: u32, sample_rate: u32) void {
+    const hz = session.voice_robot;
+    if (hz <= 0 or sample_rate == 0) return;
+    const step = 2.0 * std.math.pi * hz / @as(f32, @floatFromInt(sample_rate));
+    var phase = session.voice_robot_phase;
+    for (0..frame_count) |f| {
+        const carrier = @sin(phase);
+        for (0..channels) |c| mic[f * channels + c] *= carrier;
+        phase += step;
+        if (phase >= 2.0 * std.math.pi) phase -= 2.0 * std.math.pi;
+    }
+    session.voice_robot_phase = phase;
 }
 
 /// One linearly-interpolated delay-line tap `delay` samples behind the write head.
@@ -11599,7 +11866,7 @@ fn speakPcm(s: *Session, pcm: []const f32, rate: u32) void {
         std.mem.writeInt(i16, wav[44 + i * 2 ..][0..2], @intFromFloat(v * 32767.0), .little);
     }
     if (s.audio_mixer == null) {
-        s.audio_mixer = audio_playback.Mixer.create(audio_sample_rate, audio_channels) catch return;
+        s.audio_mixer = audio_playback.Mixer.create(audio_sample_rate, sound_mixer_channels) catch return;
         s.mix_resampler.reset();
     }
     const mixer = &s.audio_mixer.?;
@@ -14277,6 +14544,17 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (s.audio_engine_fed) {
         live_signals.audio_level = s.audio.level;
         live_signals.audio_beat = s.audio.beat;
+        live_signals.audio_beat_count = @floatFromInt(s.audio.beat_count);
+    }
+    // The newest recognized speech, lowercased into a tick-scoped buffer, so a
+    // voice.command trigger fires when its phrase is spoken. Only the text crosses.
+    var voice_lc: [caption_max]u8 = undefined;
+    for (s.audio_workers.items) |aw| {
+        if (!(aw.has_caption or aw.has_translate) or aw.caption_len == 0) continue;
+        const n = @min(aw.caption_len, voice_lc.len);
+        for (aw.caption_buf[0..n], 0..) |ch, i| voice_lc[i] = std.ascii.toLower(ch);
+        live_signals.voice_command_text = voice_lc[0..n];
+        break;
     }
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);

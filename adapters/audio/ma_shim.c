@@ -62,7 +62,11 @@ size_t goss_ma_live_bytes(void) { return atomic_load(&g_ma_live_bytes); }
 #define GOSS_MAX_VOICES 32
 
 typedef struct { short *pcm; ma_uint64 frames; } Sound;
-typedef struct { int sound; ma_uint64 cursor; int loop; float gain; int active; } Voice;
+// fade_in and fade_out are frame counts for a linear ramp up from the start and
+// down into the end; zero means a hard start or stop. A looping voice ignores
+// fade_out. lgain/rgain are the equal-power left/right pan gains, applied only
+// when the mixer is stereo.
+typedef struct { int sound; ma_uint64 cursor; int loop; float gain; ma_uint64 fade_in; ma_uint64 fade_out; float lgain; float rgain; int active; } Voice;
 
 typedef struct GossMixer {
     int sample_rate;
@@ -77,6 +81,8 @@ void goss_mixer_destroy(GossMixer *m);
 int goss_mixer_load(GossMixer *m, const char *path, size_t path_len);
 int goss_mixer_load_memory(GossMixer *m, const void *data, size_t size);
 void goss_mixer_play(GossMixer *m, int sound_id, int loop, float gain);
+void goss_mixer_play_fade(GossMixer *m, int sound_id, int loop, float gain, ma_uint64 fade_in, ma_uint64 fade_out);
+void goss_mixer_play_pan(GossMixer *m, int sound_id, int loop, float gain, ma_uint64 fade_in, ma_uint64 fade_out, float pan);
 int goss_mixer_active_voices(const GossMixer *m);
 void goss_mixer_pull(GossMixer *m, short *out, int frames);
 
@@ -147,21 +153,40 @@ static long clamp_sample(float f) {
     return (long)f;
 }
 
-void goss_mixer_play(GossMixer *m, int sound_id, int loop, float gain) {
+void goss_mixer_play_pan(GossMixer *m, int sound_id, int loop, float gain, ma_uint64 fade_in, ma_uint64 fade_out, float pan) {
     if (!m || sound_id < 0 || sound_id >= m->sound_count) return;
     // A non-finite gain would make the per-sample cast undefined; a silent
     // voice is the safe reading of a broken value.
     if (!isfinite(gain)) gain = 0.0f;
+    if (!isfinite(pan)) pan = 0.0f;
+    if (pan < -1.0f) pan = -1.0f;
+    if (pan > 1.0f) pan = 1.0f;
+    // Equal-power pan: left full at -1, right full at +1, both at 0.707 centred,
+    // so a swept source holds constant loudness across the stereo field. The
+    // constant is a quarter turn in radians.
+    float angle = (pan + 1.0f) * 0.7853981633974483f;
     for (int i = 0; i < GOSS_MAX_VOICES; i++) {
         if (!m->voices[i].active) {
             m->voices[i].sound = sound_id;
             m->voices[i].cursor = 0;
             m->voices[i].loop = loop;
             m->voices[i].gain = gain;
+            m->voices[i].fade_in = fade_in;
+            m->voices[i].fade_out = fade_out;
+            m->voices[i].lgain = cosf(angle);
+            m->voices[i].rgain = sinf(angle);
             m->voices[i].active = 1;
             return;
         }
     }
+}
+
+void goss_mixer_play_fade(GossMixer *m, int sound_id, int loop, float gain, ma_uint64 fade_in, ma_uint64 fade_out) {
+    goss_mixer_play_pan(m, sound_id, loop, gain, fade_in, fade_out, 0.0f);
+}
+
+void goss_mixer_play(GossMixer *m, int sound_id, int loop, float gain) {
+    goss_mixer_play_pan(m, sound_id, loop, gain, 0, 0, 0.0f);
 }
 
 int goss_mixer_active_voices(const GossMixer *m) {
@@ -186,8 +211,19 @@ void goss_mixer_pull(GossMixer *m, short *out, int frames) {
                 if (vo->loop) vo->cursor = 0;
                 else { vo->active = 0; break; }
             }
+            // Linear fade envelope: ramp up over the first fade_in frames and,
+            // for a one-shot, down over the last fade_out frames.
+            float env = 1.0f;
+            if (vo->fade_in > 0 && vo->cursor < vo->fade_in)
+                env = (float)vo->cursor / (float)vo->fade_in;
+            if (!vo->loop && vo->fade_out > 0 && vo->cursor + vo->fade_out >= s->frames) {
+                float fo = (float)(s->frames - vo->cursor) / (float)vo->fade_out;
+                if (fo < env) env = fo;
+            }
             for (int c = 0; c < ch; c++) {
-                long mixed = out[f * ch + c] + clamp_sample((float)s->pcm[vo->cursor * ch + c] * vo->gain);
+                // Pan only splits a stereo bus; a mono pull plays every voice centred.
+                float chan = (ch == 2) ? (c == 0 ? vo->lgain : vo->rgain) : 1.0f;
+                long mixed = out[f * ch + c] + clamp_sample((float)s->pcm[vo->cursor * ch + c] * vo->gain * env * chan);
                 if (mixed > 32767) mixed = 32767;
                 if (mixed < -32768) mixed = -32768;
                 out[f * ch + c] = (short)mixed;

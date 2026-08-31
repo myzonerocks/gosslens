@@ -791,6 +791,18 @@ pub const AppliedEffect = struct { effect: EffectSlot, value: f32 };
 pub const HapticStyle = enum(u8) { light, medium, heavy, soft, rigid, success, warning, failure };
 pub const HapticEvent = struct { style: HapticStyle, intensity: f32 };
 
+/// A sound a play_sound trigger fired this tick: the bundle-relative path plus
+/// the voice controls (gain, loop, and a fade in and out in ms) the host starts
+/// it on the mixer with.
+pub const SoundEvent = struct {
+    path: []const u8,
+    gain: f32 = 1,
+    loop: bool = false,
+    fade_in_ms: u32 = 0,
+    fade_out_ms: u32 = 0,
+    pan: f32 = 0,
+};
+
 /// A compiled logic.graph node: the evaluatable graph, the parameter its output
 /// drives each tick, and a reusable scratch buffer sized to the node count.
 pub const CompiledLogicGraph = struct {
@@ -851,7 +863,7 @@ pub const Lens = struct {
     /// Bundle-relative paths of sounds a play_sound trigger fired this tick;
     /// the host drains them each frame. Sized to the trigger count, so the
     /// frame path never allocates.
-    tick_sounds: [][]const u8,
+    tick_sounds: []SoundEvent,
     tick_sound_count: usize = 0,
     /// Haptics a haptic trigger fired this tick; the host drains them each
     /// frame and buzzes the device. Sized to the trigger count, so the frame
@@ -1779,7 +1791,7 @@ pub const Lens = struct {
 
     /// The bundle-relative sound paths a play_sound trigger fired on the last
     /// tick, for the host to start on its mixer.
-    pub fn firedSounds(self: *const Lens) []const []const u8 {
+    pub fn firedSounds(self: *const Lens) []const SoundEvent {
         return self.tick_sounds[0..self.tick_sound_count];
     }
 
@@ -2083,7 +2095,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     }
     const tick_applied = try gpa.alloc(AppliedEffect, bound_count);
     errdefer gpa.free(tick_applied);
-    const tick_sounds = try gpa.alloc([]const u8, lens_manifest.triggers.len);
+    const tick_sounds = try gpa.alloc(SoundEvent, lens_manifest.triggers.len);
     errdefer gpa.free(tick_sounds);
     const tick_haptics = try gpa.alloc(HapticEvent, lens_manifest.triggers.len);
     errdefer gpa.free(tick_haptics);
@@ -2373,7 +2385,14 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
         },
         .play_sound => {
             if (lens.tick_sound_count < lens.tick_sounds.len) {
-                lens.tick_sounds[lens.tick_sound_count] = action.target;
+                lens.tick_sounds[lens.tick_sound_count] = .{
+                    .path = action.target,
+                    .gain = action.sound_gain,
+                    .loop = action.sound_loop,
+                    .fade_in_ms = action.fade_in_ms,
+                    .fade_out_ms = action.fade_out_ms,
+                    .pan = action.pan,
+                };
                 lens.tick_sound_count += 1;
             }
         },
