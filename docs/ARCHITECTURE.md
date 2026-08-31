@@ -192,9 +192,9 @@ piece without changing this rule.
 
 ## Dependency licenses
 
-Gosslens is proprietary-compatible by construction. Dependencies must use a
-permissive license that allows the surrounding Gosslens code and SDKs to remain
-private or closed source. Upstream copyright, attribution, NOTICE, patent, and
+Gosslens is licensed under Apache-2.0. Dependencies must use a permissive
+license compatible with redistributing the surrounding Gosslens code and SDKs
+under Apache-2.0. Upstream copyright, attribution, NOTICE, patent, and
 redistribution obligations still apply.
 
 Allowed without a separate policy change:
@@ -205,7 +205,7 @@ Allowed without a separate policy change:
 - Apache-2.0
 - Zlib
 - an explicitly approved permissive equivalent with substantially the same
-  proprietary-use posture
+  permissive-use posture
 
 Explicitly approved exceptions, recorded per component under `third_party/`
 and enforced by the vendor sync's license check: Eigen under MPL-2.0
@@ -213,7 +213,7 @@ and enforced by the vendor sync's license check: Eigen under MPL-2.0
 fft2d under the Ooura permission notice, the Emscripten Python
 runtime under PSF-2.0, and miniaudio under MIT-0 (public-domain-style
 permissive, no attribution required). Each was reviewed against the
-proprietary-use posture above; an exception here never widens the
+permissive-use posture above; an exception here never widens the
 general allowlist.
 
 Blocked:
