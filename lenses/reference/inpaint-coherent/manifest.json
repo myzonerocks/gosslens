@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.inpaint-coherent",
+  "version": "1.0.0",
+  "display_name": "Coherent Inpaint",
+  "engine_compat": ">=0.5",
+  "capabilities": ["segmentation"],
+  "parameters": [],
+  "nodes": [
+    {"id": "fill", "type": "inpaint.pass", "inputs": {"frame": "camera"}, "params": {}, "inpaint": {"mask": "person", "radius": 0.12, "coherence": 1.0}}
+  ],
+  "triggers": []
+}

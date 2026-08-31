@@ -520,7 +520,10 @@ pixel is replaced by the color of the nearest unmasked boundary, gathered along
 rays cast outward and weighted by inverse distance, so the hole takes on the
 surrounding content while the unmasked pixels hold. With no mask on the named
 channel it holds the frame through, the standard capability degradation. It ships
-no asset.
+no asset. A `"coherence"` (0..1, default 0) turns on temporal consistency for a
+video inpaint: the fill blends toward the previous frame's fill inside the mask
+by that amount, so it holds steady instead of flickering frame to frame; 0 is the
+raw per-frame fill.
 
 A `"rolling.pass"` node is a rolling-shutter correction. It carries a `"rolling":
 {"strength", "readout"}` block: `strength` (0..1, default 1) scales the

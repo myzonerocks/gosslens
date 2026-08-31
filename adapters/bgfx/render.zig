@@ -211,6 +211,8 @@ pub const Renderer = struct {
     harmonize_params_uniform: c.bgfx_uniform_handle_t,
     inpaint_program: c.bgfx_program_handle_t,
     inpaint_params_uniform: c.bgfx_uniform_handle_t,
+    inpaint_coherence_program: c.bgfx_program_handle_t,
+    coherence_uniform: c.bgfx_uniform_handle_t,
     rolling_program: c.bgfx_program_handle_t,
     rolling_params_uniform: c.bgfx_uniform_handle_t,
     parallax_program: c.bgfx_program_handle_t,
@@ -523,6 +525,7 @@ pub const Renderer = struct {
         const dereflect_program = try loadDereflectProgram();
         const harmonize_program = try loadHarmonizeProgram();
         const inpaint_program = try loadInpaintProgram();
+        const inpaint_coherence_program = try loadInpaintCoherenceProgram();
         const rolling_program = try loadRollingProgram();
         const parallax_program = try loadParallaxProgram();
         const bloom_extract_program = try loadBloomExtractProgram();
@@ -665,6 +668,8 @@ pub const Renderer = struct {
             .harmonize_params_uniform = c.bgfx_create_uniform("u_harmonize", c.BGFX_UNIFORM_TYPE_VEC4, 4),
             .inpaint_program = inpaint_program,
             .inpaint_params_uniform = c.bgfx_create_uniform("u_inpaint", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .inpaint_coherence_program = inpaint_coherence_program,
+            .coherence_uniform = c.bgfx_create_uniform("u_coherence", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .rolling_program = rolling_program,
             .rolling_params_uniform = c.bgfx_create_uniform("u_rolling", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .parallax_program = parallax_program,
@@ -1175,6 +1180,16 @@ pub const Renderer = struct {
         };
     }
 
+    pub fn loadInpaintCoherenceProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_inpaint_coherence_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_inpaint_coherence_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_inpaint_coherence_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_inpaint_coherence_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     pub fn loadRollingProgram() !c.bgfx_program_handle_t {
         return switch (c.bgfx_get_renderer_type()) {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_rolling_pass_metal),
@@ -1637,6 +1652,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.harmonize_params_uniform);
         c.bgfx_destroy_program(r.inpaint_program);
         c.bgfx_destroy_uniform(r.inpaint_params_uniform);
+        c.bgfx_destroy_program(r.inpaint_coherence_program);
+        c.bgfx_destroy_uniform(r.coherence_uniform);
         c.bgfx_destroy_program(r.rolling_program);
         c.bgfx_destroy_uniform(r.rolling_params_uniform);
         c.bgfx_destroy_program(r.parallax_program);
@@ -2603,6 +2620,20 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.inpaint_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.inpaint_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Blends a fresh inpaint fill toward the previous frame's fill inside the
+    /// removal mask by `coherence`, so a video inpaint holds steady frame to
+    /// frame. fresh_texture is this frame's fill, prev_texture last frame's.
+    pub fn submitInpaintCoherence(r: *Renderer, view_id: c.bgfx_view_id_t, fresh_texture: c.bgfx_texture_handle_t, prev_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, coherence: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, fresh_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_background, prev_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        var params = [4]f32{ coherence, 0, 0, 0 };
+        c.bgfx_set_uniform(r.coherence_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.inpaint_coherence_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one rolling.pass node as a full-screen pass into view_id: the frame

@@ -399,6 +399,10 @@ pub const InpaintField = struct {
     /// how far to search outward for the surrounding color that fills it.
     mask_channel: u8 = head_channel,
     radius: f32 = 0.08,
+    /// Temporal consistency for a video inpaint: the fill blends toward the
+    /// previous frame's fill by this amount (0..1) inside the mask, so it holds
+    /// steady instead of flickering. 0 (default) is the raw per-frame fill.
+    coherence: f32 = 0,
 };
 
 pub const RollingShutterField = struct {
@@ -2544,6 +2548,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             } else {
                 var field: InpaintField = .{};
                 if (getField(iv.object, "radius")) |v| field.radius = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.radius)), 0, 0.5);
+                if (getField(iv.object, "coherence")) |v| field.coherence = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.coherence)), 0, 1);
                 if (getField(iv.object, "mask")) |v| {
                     if (v == .string) {
                         if (maskChannelIndex(v.string)) |channel| field.mask_channel = channel else try diags.add(path.slice(), "inpaint mask names an unknown channel '{s}'", .{v.string});

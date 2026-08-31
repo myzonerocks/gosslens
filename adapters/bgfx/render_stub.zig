@@ -617,6 +617,15 @@ pub const Renderer = struct {
         _ = aspect;
     }
 
+    pub fn submitInpaintCoherence(r: *Renderer, view_id: u16, fresh_texture: TextureHandle, prev_texture: TextureHandle, mask_texture: TextureHandle, coherence: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = fresh_texture;
+        _ = prev_texture;
+        _ = mask_texture;
+        _ = coherence;
+    }
+
     pub fn submitRollingPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, skew_x: f32, skew_y: f32) void {
         _ = r;
         _ = view_id;

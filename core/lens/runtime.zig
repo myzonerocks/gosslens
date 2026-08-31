@@ -608,6 +608,9 @@ pub const InpaintPassNode = struct {
     graph_index: graph.NodeIndex,
     mask_channel: u8,
     radius: f32,
+    /// Temporal blend toward the previous frame's fill (0..1) for a steady video
+    /// inpaint; 0 is the raw per-frame fill.
+    coherence: f32,
 };
 
 /// One rolling.pass node ready for the caller to draw - its correction strength
@@ -1174,7 +1177,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .inpaint_pass) continue;
             const ip = node.inpaint orelse manifest.InpaintField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .mask_channel = ip.mask_channel, .radius = ip.radius });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .mask_channel = ip.mask_channel, .radius = ip.radius, .coherence = ip.coherence });
         }
         return out.toOwnedSlice(gpa);
     }

@@ -967,6 +967,16 @@ pub const Session = struct {
     cutout_source_target: ?render.Renderer.OffscreenTarget = null,
     cutout_source_w: u16 = 0,
     cutout_source_h: u16 = 0,
+    /// A coherent inpaint renders its fresh fill into inpaint_fresh_target, blends
+    /// it toward the previous fill into inpaint_coherent_target, presents that, and
+    /// copies it back to the history for next frame - so the fill accumulates.
+    /// prev_valid gates the first frame, which has no history yet.
+    inpaint_fresh_target: ?render.Renderer.OffscreenTarget = null,
+    inpaint_coherent_target: ?render.Renderer.OffscreenTarget = null,
+    inpaint_prev_target: ?render.Renderer.OffscreenTarget = null,
+    inpaint_coherence_w: u16 = 0,
+    inpaint_coherence_h: u16 = 0,
+    inpaint_prev_valid: bool = false,
     /// cutout.pass nodes by graph index: their background color (rgb) and edge
     /// softness. The face matte keys the frame through, the rest goes flat color.
     cutout_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1836,6 +1846,25 @@ fn ensureCutoutSource(s: *Session, width: u16, height: u16) !void {
     s.cutout_source_target = try render.Renderer.createOffscreenTarget(width, height);
     s.cutout_source_w = width;
     s.cutout_source_h = height;
+}
+
+/// (Re)creates the fresh and previous targets a coherent inpaint blends across,
+/// on a size change or first use, resetting the history so the next frame
+/// reseeds instead of blending against a stale echo.
+fn ensureInpaintCoherence(s: *Session, width: u16, height: u16) !void {
+    if (s.inpaint_coherence_w == width and s.inpaint_coherence_h == height and s.inpaint_fresh_target != null and s.inpaint_coherent_target != null and s.inpaint_prev_target != null) return;
+    if (s.inpaint_fresh_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (s.inpaint_coherent_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (s.inpaint_prev_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.inpaint_fresh_target = null;
+    s.inpaint_coherent_target = null;
+    s.inpaint_prev_target = null;
+    s.inpaint_fresh_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.inpaint_coherent_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.inpaint_prev_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.inpaint_coherence_w = width;
+    s.inpaint_coherence_h = height;
+    s.inpaint_prev_valid = false;
 }
 
 /// (Re)creates the session-owned target a matte.hair source refines the
@@ -3084,10 +3113,52 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 next_view_id += 1;
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
-                r.tile = if (is_final) s.capture_tile else null;
-                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 const mask_tex = if (ip.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[ip.channel] orelse r.zero_mask_texture;
                 const aspect = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+                // A coherent inpaint renders the fresh fill to its own target,
+                // blends it toward the previous frame's fill inside the mask, then
+                // keeps the fresh fill as next frame's history - a steady video
+                // inpaint that does not flicker.
+                coherent: {
+                    if (ip.coherence <= 0) break :coherent;
+                    ensureInpaintCoherence(s, width, height) catch break :coherent;
+                    const fresh = s.inpaint_fresh_target orelse break :coherent;
+                    const coherent_tex = s.inpaint_coherent_target orelse break :coherent;
+                    const prev = s.inpaint_prev_target orelse break :coherent;
+                    // Fresh fill for this frame.
+                    r.tile = null;
+                    render.Renderer.setViewTarget(view_id, fresh, width, height);
+                    r.submitInpaintPass(view_id, input_texture, mask_tex, ip.radius, aspect);
+                    // Blend it toward the history into the coherent target (always
+                    // a real target, so the history holds however the output is
+                    // presented). The first frame blends against itself.
+                    const blend_view = next_view_id;
+                    next_view_id += 1;
+                    r.tile = null;
+                    render.Renderer.setViewTarget(blend_view, coherent_tex, width, height);
+                    const prev_tex = if (s.inpaint_prev_valid) prev.texture else fresh.texture;
+                    r.submitInpaintCoherence(blend_view, fresh.texture, prev_tex, mask_tex, ip.coherence);
+                    // Copy the coherent result into the history for next frame.
+                    const store_view = next_view_id;
+                    next_view_id += 1;
+                    r.tile = null;
+                    render.Renderer.setViewTarget(store_view, prev, width, height);
+                    r.submitShaderPass(store_view, r.passthroughProgram(), coherent_tex.texture, r.default_mask_texture);
+                    s.inpaint_prev_valid = true;
+                    // Present the coherent result to the chain output.
+                    const present_view = next_view_id;
+                    next_view_id += 1;
+                    r.tile = if (is_final) s.capture_tile else null;
+                    if (output) |target| render.Renderer.setViewTarget(present_view, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(present_view, null, output_width, output_height);
+                    r.submitShaderPass(present_view, r.passthroughProgram(), coherent_tex.texture, r.default_mask_texture);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitInpaintPass(view_id, input_texture, mask_tex, ip.radius, aspect);
                 if (output) |target| {
                     input_texture = target.texture;
@@ -3976,10 +4047,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     sprite_texture = anim.textures[@intCast(frame_idx % anim.frames)];
                 } else if (s.sprite_cutouts.get(entry.graph_index)) |co| {
                     // A cutout sprite lifts the live subject keyed by its channel
-                    // into a transparent-background target, then draws that at the
-                    // sprite rect - a movable, scalable auto-subject sticker. It
-                    // lifts from the original-frame copy, so an upstream inpaint
-                    // that removed the subject cannot empty the cutout.
+                    // into a transparent target, then draws that at the sprite rect
+                    // - a movable auto-subject sticker. It lifts from the original
+                    // frame copy, so an upstream inpaint cannot empty the cutout.
                     const mask_tex = if (co.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[co.channel] orelse r.zero_mask_texture;
                     ensureCutoutSticker(s, width, height) catch continue;
                     const cutout_target = s.cutout_sticker_target orelse continue;
@@ -4917,6 +4987,8 @@ pub fn destroySession(session: *Session) void {
     if (session.splat_scene_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.cutout_sticker_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.cutout_source_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.inpaint_fresh_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.inpaint_prev_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -8214,7 +8286,7 @@ const AwbEstimate = struct { gains: [3]f32, black: f32, white: f32 };
 
 const HarmonizeStats = struct { fg_mean: [3]f32, fg_std: [3]f32, bg_mean: [3]f32, bg_std: [3]f32 };
 
-const InpaintParams = struct { channel: u8, radius: f32 };
+const InpaintParams = struct { channel: u8, radius: f32, coherence: f32 };
 
 /// Per-channel mean and standard deviation of the person (foreground) and the
 /// rest of the frame (background), read from the frame thumb with the CPU person
@@ -9320,6 +9392,7 @@ fn destroyBlendState(session: *Session) void {
     // The prev-frame target is reused across lenses, but its echo belongs to
     // the lens that just left: drop it so the next trail reseeds cleanly.
     session.prev_frame_valid = false;
+    session.inpaint_prev_valid = false;
     session.bloom_params.clearRetainingCapacity();
 }
 
@@ -10275,7 +10348,7 @@ fn createInpaintParams(session: *Session, gpa: std.mem.Allocator) !void {
     const nodes = try lens.inpaintPassNodes(gpa, &session.lens_graph);
     defer gpa.free(nodes);
     for (nodes) |n| {
-        session.inpaint_params.put(gpa, n.graph_index, .{ .channel = n.mask_channel, .radius = n.radius }) catch {};
+        session.inpaint_params.put(gpa, n.graph_index, .{ .channel = n.mask_channel, .radius = n.radius, .coherence = n.coherence }) catch {};
     }
 }
 

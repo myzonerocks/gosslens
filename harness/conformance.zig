@@ -1255,6 +1255,113 @@ fn proveObjectMove(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Runs an inpaint lens on a subject mask: submits `first`, then `second` if
+/// given (each for several frames), and captures. The mask comes from the still
+/// so it holds across the frames; the fill follows the submitted frame's color.
+fn renderInpaintSeq(engine: *abi.Engine, lens_dir: []const u8, seg_bytes: []const u8, rgba: []const u8, cw: u32, ch: u32, desc: *const abi.FrameDesc, first: anytype, second: anytype, shot: []u8, out_w: *u32, out_h: *u32) !void {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+    if (abi.goss_session_activate_lens_from_directory(session, lens_dir.ptr, lens_dir.len) != .ok) return error.ActivationFailed;
+    if (abi.goss_session_submit_segmentation_image(session, rgba.ptr, cw, ch) != .ok) return error.SubmitSegImageFailed;
+    const half_w = (first.width + 1) / 2;
+    var polls: usize = 0;
+    while (session.segmentation_texture == null) {
+        _ = abi.goss_session_submit_frame_copy(session, desc, first.y.ptr, first.width, first.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        polls += 1;
+        if (polls > 1_000_000) return error.MaskNeverProduced;
+    }
+    for (0..6) |_| {
+        _ = abi.goss_session_submit_frame_copy(session, desc, first.y.ptr, first.width, first.uv.ptr, half_w * 2);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (@TypeOf(second) != @TypeOf(null)) {
+        for (0..6) |_| {
+            _ = abi.goss_session_submit_frame_copy(session, desc, second.y.ptr, second.width, second.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+}
+
+/// Proves temporally consistent video inpaint: an inpaint.pass with a coherence
+/// blends its fill toward the previous frame's fill, so when the frame changes
+/// the coherent fill holds the old content while a plain fill follows the new.
+/// The coherent A-then-B output stays nearer the A-only fill than the plain one.
+fn proveInpaintCoherence(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const rgba = corpus.frame.pixels.rgba8;
+    const cw = corpus.frame.width;
+    const ch = corpus.frame.height;
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    // Frame B is the same frame brightened, so its inpaint fill (drawn from the
+    // surrounding color) differs from frame A's.
+    const y_b = try gpa.dupe(u8, planes.y);
+    defer gpa.free(y_b);
+    for (y_b) |*p| p.* +|= 60;
+    const planes_b = Nv12Copy{ .y = y_b, .uv = planes.uv, .width = planes.width, .height = planes.height };
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_a = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_a);
+    const shot_coh = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_coh);
+    const shot_coh2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_coh2);
+    const shot_plain = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_plain);
+    var wa: u32 = 0;
+    var ha: u32 = 0;
+    var wc: u32 = 0;
+    var hc: u32 = 0;
+    var wc2: u32 = 0;
+    var hc2: u32 = 0;
+    var wpn: u32 = 0;
+    var hpn: u32 = 0;
+    // A-only fill (plain), the reference the fills are measured against.
+    try renderInpaintSeq(engine, ".lens-packages/inpaint-plain", seg_bytes, rgba, cw, ch, &desc, planes, null, shot_a, &wa, &ha);
+    // A then B, coherent: the fill holds A across the change to B.
+    try renderInpaintSeq(engine, ".lens-packages/inpaint-coherent", seg_bytes, rgba, cw, ch, &desc, planes, planes_b, shot_coh, &wc, &hc);
+    try renderInpaintSeq(engine, ".lens-packages/inpaint-coherent", seg_bytes, rgba, cw, ch, &desc, planes, planes_b, shot_coh2, &wc2, &hc2);
+    // A then B, plain: the fill follows B.
+    try renderInpaintSeq(engine, ".lens-packages/inpaint-plain", seg_bytes, rgba, cw, ch, &desc, planes, planes_b, shot_plain, &wpn, &hpn);
+    if (wa == 0 or wa != wc or ha != hc or wa != wpn or ha != hpn) {
+        std.debug.print("conformance: FAIL inpaint-coherence capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_coh[0 .. wc * hc * 4], shot_coh2[0 .. wc2 * hc2 * 4])) {
+        std.debug.print("conformance: FAIL inpaint-coherence is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // Both A-then-B frames show frame B outside the mask, so that region cancels;
+    // inside the fill the coherent one held A (near the A reference) while the
+    // plain one moved to B (far), so the coherent distance is the smaller.
+    var dist_coh: u64 = 0;
+    var dist_plain: u64 = 0;
+    for (0..wa * ha * 4) |i| {
+        dist_coh += @abs(@as(i32, shot_coh[i]) - @as(i32, shot_a[i]));
+        dist_plain += @abs(@as(i32, shot_plain[i]) - @as(i32, shot_a[i]));
+    }
+    if (dist_plain == 0 or dist_coh >= dist_plain) {
+        std.debug.print("conformance: FAIL inpaint coherence did not hold the past (coherent dist {d}, plain dist {d})\n", .{ dist_coh, dist_plain });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a coherent inpaint holds the fill across a frame change - its distance to the old fill ({d}) is nearer than the plain fill's ({d}), deterministic\n", .{ dist_coh, dist_plain });
+    return true;
+}
+
 fn proveMultiBodyFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -19745,6 +19852,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveCutoutSticker(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "object-move")) {
             if (!try proveObjectMove(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "inpaint-coherence")) {
+            if (!try proveInpaintCoherence(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -19883,6 +19992,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("cutout sticker");
     if (!try proveObjectMove(gpa, engine)) return 1;
     watchHold("object move");
+    if (!try proveInpaintCoherence(gpa, engine)) return 1;
+    watchHold("inpaint coherence");
     if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;
