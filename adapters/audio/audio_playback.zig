@@ -10,6 +10,7 @@ extern fn goss_mixer_destroy(m: ?*Handle) void;
 extern fn goss_mixer_load(m: ?*Handle, path: [*]const u8, path_len: usize) c_int;
 extern fn goss_mixer_load_memory(m: ?*Handle, data: [*]const u8, size: usize) c_int;
 extern fn goss_mixer_play(m: ?*Handle, sound_id: c_int, loop: c_int, gain: f32) void;
+extern fn goss_mixer_play_fade(m: ?*Handle, sound_id: c_int, loop: c_int, gain: f32, fade_in: u64, fade_out: u64) void;
 extern fn goss_mixer_active_voices(m: ?*const Handle) c_int;
 extern fn goss_mixer_pull(m: ?*Handle, out: [*]i16, frames: c_int) void;
 
@@ -44,6 +45,12 @@ pub const Mixer = struct {
 
     pub fn play(self: *Mixer, sound_id: u32, loop: bool, gain: f32) void {
         goss_mixer_play(self.handle, @intCast(sound_id), if (loop) 1 else 0, gain);
+    }
+
+    /// Starts a voice with a linear fade in and out (in frames); a looping voice
+    /// ignores the fade out. Zero fades match play.
+    pub fn playFade(self: *Mixer, sound_id: u32, loop: bool, gain: f32, fade_in: u64, fade_out: u64) void {
+        goss_mixer_play_fade(self.handle, @intCast(sound_id), if (loop) 1 else 0, gain, fade_in, fade_out);
     }
 
     pub fn activeVoices(self: *const Mixer) u32 {
@@ -104,4 +111,41 @@ test "the mixer decodes, plays, and mixes deterministically" {
     var out2 = [_]i16{0} ** pcm.len;
     m.pull(&out2, pcm.len);
     try std.testing.expectEqualSlices(i16, &pcm, &out2);
+}
+
+test "the mixer fades a voice in and out linearly" {
+    const sr: u32 = 48000;
+    const pcm = [_]i16{ 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000 };
+    const data_size: u32 = pcm.len * 2;
+    var wav: [44 + pcm.len * 2]u8 = undefined;
+    @memcpy(wav[0..4], "RIFF");
+    std.mem.writeInt(u32, wav[4..8], 36 + data_size, .little);
+    @memcpy(wav[8..12], "WAVE");
+    @memcpy(wav[12..16], "fmt ");
+    std.mem.writeInt(u32, wav[16..20], 16, .little);
+    std.mem.writeInt(u16, wav[20..22], 1, .little);
+    std.mem.writeInt(u16, wav[22..24], 1, .little);
+    std.mem.writeInt(u32, wav[24..28], sr, .little);
+    std.mem.writeInt(u32, wav[28..32], sr * 2, .little);
+    std.mem.writeInt(u16, wav[32..34], 2, .little);
+    std.mem.writeInt(u16, wav[34..36], 16, .little);
+    @memcpy(wav[36..40], "data");
+    std.mem.writeInt(u32, wav[40..44], data_size, .little);
+    for (pcm, 0..) |s, i| std.mem.writeInt(i16, wav[44 + i * 2 ..][0..2], s, .little);
+
+    var m = try Mixer.create(sr, 1);
+    defer m.destroy();
+    const sound = try m.loadMemory(&wav);
+
+    // Fade in over 4 frames: the constant tone ramps from silence to full.
+    m.playFade(sound, false, 1.0, 4, 0);
+    var fin = [_]i16{0} ** pcm.len;
+    m.pull(&fin, pcm.len);
+    try std.testing.expectEqualSlices(i16, &[_]i16{ 0, 250, 500, 750, 1000, 1000, 1000, 1000 }, &fin);
+
+    // Fade out over 4 frames: the tone ramps down into its end.
+    m.playFade(sound, false, 1.0, 0, 4);
+    var fout = [_]i16{0} ** pcm.len;
+    m.pull(&fout, pcm.len);
+    try std.testing.expectEqualSlices(i16, &[_]i16{ 1000, 1000, 1000, 1000, 1000, 750, 500, 250 }, &fout);
 }

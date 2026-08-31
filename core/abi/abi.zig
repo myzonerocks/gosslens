@@ -9474,8 +9474,12 @@ fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) vo
 fn playFiredSounds(s: *Session) void {
     const mixer = if (s.audio_mixer) |*m| m else return;
     const lens = if (s.active_lens) |*l| l else return;
-    for (lens.firedSounds()) |path| {
-        if (s.sound_ids.get(path)) |id| mixer.play(id, false, 1.0);
+    for (lens.firedSounds()) |ev| {
+        if (s.sound_ids.get(ev.path)) |id| {
+            const fade_in = @as(u64, ev.fade_in_ms) * audio_sample_rate / 1000;
+            const fade_out = @as(u64, ev.fade_out_ms) * audio_sample_rate / 1000;
+            mixer.playFade(id, ev.loop, ev.gain, fade_in, fade_out);
+        }
     }
 }
 

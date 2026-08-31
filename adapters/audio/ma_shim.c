@@ -62,7 +62,10 @@ size_t goss_ma_live_bytes(void) { return atomic_load(&g_ma_live_bytes); }
 #define GOSS_MAX_VOICES 32
 
 typedef struct { short *pcm; ma_uint64 frames; } Sound;
-typedef struct { int sound; ma_uint64 cursor; int loop; float gain; int active; } Voice;
+// fade_in and fade_out are frame counts for a linear ramp up from the start and
+// down into the end; zero means a hard start or stop. A looping voice ignores
+// fade_out.
+typedef struct { int sound; ma_uint64 cursor; int loop; float gain; ma_uint64 fade_in; ma_uint64 fade_out; int active; } Voice;
 
 typedef struct GossMixer {
     int sample_rate;
@@ -77,6 +80,7 @@ void goss_mixer_destroy(GossMixer *m);
 int goss_mixer_load(GossMixer *m, const char *path, size_t path_len);
 int goss_mixer_load_memory(GossMixer *m, const void *data, size_t size);
 void goss_mixer_play(GossMixer *m, int sound_id, int loop, float gain);
+void goss_mixer_play_fade(GossMixer *m, int sound_id, int loop, float gain, ma_uint64 fade_in, ma_uint64 fade_out);
 int goss_mixer_active_voices(const GossMixer *m);
 void goss_mixer_pull(GossMixer *m, short *out, int frames);
 
@@ -147,7 +151,7 @@ static long clamp_sample(float f) {
     return (long)f;
 }
 
-void goss_mixer_play(GossMixer *m, int sound_id, int loop, float gain) {
+void goss_mixer_play_fade(GossMixer *m, int sound_id, int loop, float gain, ma_uint64 fade_in, ma_uint64 fade_out) {
     if (!m || sound_id < 0 || sound_id >= m->sound_count) return;
     // A non-finite gain would make the per-sample cast undefined; a silent
     // voice is the safe reading of a broken value.
@@ -158,10 +162,16 @@ void goss_mixer_play(GossMixer *m, int sound_id, int loop, float gain) {
             m->voices[i].cursor = 0;
             m->voices[i].loop = loop;
             m->voices[i].gain = gain;
+            m->voices[i].fade_in = fade_in;
+            m->voices[i].fade_out = fade_out;
             m->voices[i].active = 1;
             return;
         }
     }
+}
+
+void goss_mixer_play(GossMixer *m, int sound_id, int loop, float gain) {
+    goss_mixer_play_fade(m, sound_id, loop, gain, 0, 0);
 }
 
 int goss_mixer_active_voices(const GossMixer *m) {
@@ -186,8 +196,17 @@ void goss_mixer_pull(GossMixer *m, short *out, int frames) {
                 if (vo->loop) vo->cursor = 0;
                 else { vo->active = 0; break; }
             }
+            // Linear fade envelope: ramp up over the first fade_in frames and,
+            // for a one-shot, down over the last fade_out frames.
+            float env = 1.0f;
+            if (vo->fade_in > 0 && vo->cursor < vo->fade_in)
+                env = (float)vo->cursor / (float)vo->fade_in;
+            if (!vo->loop && vo->fade_out > 0 && vo->cursor + vo->fade_out >= s->frames) {
+                float fo = (float)(s->frames - vo->cursor) / (float)vo->fade_out;
+                if (fo < env) env = fo;
+            }
             for (int c = 0; c < ch; c++) {
-                long mixed = out[f * ch + c] + clamp_sample((float)s->pcm[vo->cursor * ch + c] * vo->gain);
+                long mixed = out[f * ch + c] + clamp_sample((float)s->pcm[vo->cursor * ch + c] * vo->gain * env);
                 if (mixed > 32767) mixed = 32767;
                 if (mixed < -32768) mixed = -32768;
                 out[f * ch + c] = (short)mixed;

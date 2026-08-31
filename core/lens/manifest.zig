@@ -1415,6 +1415,13 @@ pub const Action = struct {
     curve: Curve = .linear,
     stiffness: f32 = 0,
     damping: f32 = 0,
+    /// play_sound only: the voice's gain (default 1), whether it loops, and a
+    /// linear fade in and out in milliseconds (0 for a hard start or stop). A
+    /// looping voice ignores the fade out.
+    sound_gain: f32 = 1,
+    sound_loop: bool = false,
+    fade_in_ms: u32 = 0,
+    fade_out_ms: u32 = 0,
 };
 
 pub const Trigger = struct {
@@ -4430,6 +4437,18 @@ fn parseAction(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, 
     }
     if (getField(object, "stiffness")) |v| action.stiffness = @floatCast(numberOf(v) orelse 0);
     if (getField(object, "damping")) |v| action.damping = @floatCast(numberOf(v) orelse 0);
+    // play_sound voice controls, clamped to sane bounds so a bad value falls back
+    // rather than driving the mixer past its envelope math.
+    if (getField(object, "gain")) |v| action.sound_gain = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse 1)), 0, 4);
+    if (getField(object, "loop")) |v| action.sound_loop = v == .bool and v.bool;
+    if (getField(object, "fade_in_ms")) |v| {
+        const n = numberOf(v) orelse 0;
+        action.fade_in_ms = if (n >= 0 and n <= max_duration_ms) @intFromFloat(n) else 0;
+    }
+    if (getField(object, "fade_out_ms")) |v| {
+        const n = numberOf(v) orelse 0;
+        action.fade_out_ms = if (n >= 0 and n <= max_duration_ms) @intFromFloat(n) else 0;
+    }
     return action;
 }
 

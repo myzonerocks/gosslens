@@ -36,6 +36,15 @@ pub const Mixer = struct {
         _ = gain;
     }
 
+    pub fn playFade(self: *Mixer, sound_id: u32, loop: bool, gain: f32, fade_in: u64, fade_out: u64) void {
+        _ = self;
+        _ = sound_id;
+        _ = loop;
+        _ = gain;
+        _ = fade_in;
+        _ = fade_out;
+    }
+
     pub fn activeVoices(self: *const Mixer) u32 {
         _ = self;
         return 0;
