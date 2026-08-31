@@ -485,6 +485,11 @@ pub const TextNode = struct {
     /// A face-mesh landmark index the text pins its center to each frame, so a
     /// caption tracks the head; negative leaves the text at its screen rect.
     anchor_face: i32 = -1,
+    /// A live source that fills the text each frame (a built-in clock or a host
+    /// info key); empty draws the static content. countdown_seconds is the start
+    /// duration a "countdown" source counts down from.
+    content_source: []const u8 = "",
+    countdown_seconds: f32 = 0,
 };
 
 pub const VideoNode = struct {
@@ -1643,7 +1648,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .text_2d) continue;
             const tf = node.text orelse manifest.TextField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth, .wrap = tf.wrap, .bend = tf.bend, .anchor_face = tf.anchor_face });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth, .wrap = tf.wrap, .bend = tf.bend, .anchor_face = tf.anchor_face, .content_source = tf.content_source, .countdown_seconds = tf.countdown_seconds });
         }
         return out.toOwnedSlice(gpa);
     }

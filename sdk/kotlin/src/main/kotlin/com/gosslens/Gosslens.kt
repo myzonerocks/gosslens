@@ -110,6 +110,7 @@ object Gosslens {
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
     internal external fun nativeSubmitOrientation(session: Long, gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Int
+    internal external fun nativeSetInfo(session: Long, keyBuffer: ByteBuffer, keyLen: Int, valueBuffer: ByteBuffer?, valueLen: Int): Int
     internal external fun nativeCaptionText(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
     internal external fun nativeCaptionSegment(session: Long, index: Int, out: ByteBuffer): Int
     internal external fun nativeCaptionSegmentText(session: Long, index: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
@@ -1196,6 +1197,22 @@ class GossSession private constructor(
      * near-zero vector clears the stream, leaving a rolling.pass inert. */
     fun submitOrientation(gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Boolean =
         Gosslens.nativeSubmitOrientation(handle, gravityX, gravityY, gravityZ, timestampUs) == 0
+
+    /** Feeds a host info value keyed by name, the rail an info sticker reads: a
+     * text.2d node with a matching content_source shows the latest value each
+     * frame (a time, a place, a sensor reading). A null value clears the key. */
+    fun setInfo(key: String, value: String?): Boolean {
+        val keyBytes = key.toByteArray(Charsets.UTF_8)
+        val keyBuffer = ByteBuffer.allocateDirect(maxOf(keyBytes.size, 1))
+        keyBuffer.put(keyBytes)
+        keyBuffer.rewind()
+        if (value == null) return Gosslens.nativeSetInfo(handle, keyBuffer, keyBytes.size, null, 0) == 0
+        val valueBytes = value.toByteArray(Charsets.UTF_8)
+        val valueBuffer = ByteBuffer.allocateDirect(maxOf(valueBytes.size, 1))
+        valueBuffer.put(valueBytes)
+        valueBuffer.rewind()
+        return Gosslens.nativeSetInfo(handle, keyBuffer, keyBytes.size, valueBuffer, valueBytes.size) == 0
+    }
 
     /** Captures the current viewpoint (the last submitted world pose and depth)
      * into a guided scan, back-projecting the depth into a deterministic gaussian

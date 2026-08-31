@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.info-clock",
+  "version": "1.0.0",
+  "display_name": "Countdown Sticker",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "clock", "type": "text.2d", "inputs": {"frame": "camera"}, "params": {}, "text": {"content": "00:00", "x": 0.3, "y": 0.1, "w": 0.4, "h": 0.14, "opacity": 1.0, "color": [1.0, 1.0, 1.0], "content_source": "countdown", "countdown_seconds": 90}}
+  ],
+  "triggers": []
+}

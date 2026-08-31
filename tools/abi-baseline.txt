@@ -1,4 +1,4 @@
-abi 0.81
+abi 0.82
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -221,6 +221,7 @@ fn goss_status goss_session_body_result_at(goss_session *session, uint32_t index
 fn goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)
 fn goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)
 fn goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)
+fn goss_status goss_session_set_info(goss_session *session, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len)
 fn goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance)
 fn goss_status goss_session_reset_capture(goss_session *session)
 fn goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)

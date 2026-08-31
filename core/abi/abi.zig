@@ -233,6 +233,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
     "goss_status goss_session_submit_camera_intrinsics(goss_session *session, float fx, float fy, float cx, float cy, const float *distortion, uint32_t distortion_len)",
     "goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us)",
+    "goss_status goss_session_set_info(goss_session *session, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len)",
     "goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance)",
     "goss_status goss_session_reset_capture(goss_session *session)",
     "goss_status goss_session_submit_frame_bracket(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
@@ -1385,6 +1386,14 @@ pub const Session = struct {
     /// sprite pins its center to that point on the tracked face each frame - a
     /// sticker that follows the head (glasses on the eyes, a hat over the brow).
     sprite_anchor_faces: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    /// A text.2d node whose content comes from a live source, by graph index. The
+    /// frame path re-rasterizes each when its resolved string changes, so an info
+    /// sticker (a clock, a countdown, a host-fed reading) updates in place.
+    dynamic_texts: std.AutoHashMapUnmanaged(graph.NodeIndex, DynamicText) = .empty,
+    /// Host-fed info values keyed by name (owned copies), the rail an info sticker
+    /// reads through `content_source`: the app writes time, place, or a sensor
+    /// reading with goss_session_set_info and a bound text node shows the latest.
+    info_values: std.StringHashMapUnmanaged([]const u8) = .empty,
     /// A sprite.2d node's segmentation key, when it declares one: the channel
     /// and whether the sprite fills behind that region (greenscreen) or over it
     /// (a restyle). The generative background and full-face restyle ride this.
@@ -2493,6 +2502,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // The tile is set per final full-screen pass below; every source-res
     // intermediate draw and every non-capture frame renders untiled.
     r.tile = null;
+    // Live text nodes (a clock, a countdown, a host-fed reading) re-rasterize
+    // here when their value changed, before the chain reads their textures.
+    refreshDynamicText(s);
     var ready_count: usize = 0;
     for (s.chain_order) |entry| {
         // A node a hide or swap_subgraph action hid does not draw and is not
@@ -4763,6 +4775,15 @@ pub fn destroySession(session: *Session) void {
     session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
     session.sprite_anchor_faces.deinit(session.engine.gpa);
+    session.dynamic_texts.deinit(session.engine.gpa);
+    {
+        var info_it = session.info_values.iterator();
+        while (info_it.next()) |e| {
+            session.engine.gpa.free(e.key_ptr.*);
+            session.engine.gpa.free(e.value_ptr.*);
+        }
+        session.info_values.deinit(session.engine.gpa);
+    }
     session.sprite_masks.deinit(session.engine.gpa);
     session.sprite_mask_strength_params.deinit(session.engine.gpa);
     session.model_controls.deinit(session.engine.gpa);
@@ -7814,6 +7835,43 @@ pub export fn goss_session_submit_orientation(session: ?*Session, gravity_x: f32
     return .ok;
 }
 
+/// Feeds a host info value keyed by name, the rail an info sticker reads: a
+/// text.2d node with a matching `content_source` shows the latest value each
+/// frame. A null or empty value clears the key. Keys and values are copied, so
+/// the caller keeps ownership of its buffers.
+pub export fn goss_session_set_info(session: ?*Session, key: ?[*]const u8, key_len: usize, value: ?[*]const u8, value_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const key_ptr = key orelse return .invalid_argument;
+    if (key_len == 0) return .invalid_argument;
+    const gpa = s.engine.gpa;
+    const key_slice = key_ptr[0..key_len];
+    // A null or empty value clears the key.
+    if (value == null or value_len == 0) {
+        if (s.info_values.fetchRemove(key_slice)) |old| {
+            gpa.free(old.key);
+            gpa.free(old.value);
+        }
+        return .ok;
+    }
+    const val_copy = gpa.dupe(u8, value.?[0..value_len]) catch return .out_of_memory;
+    // An existing key keeps its stored key buffer and just swaps the value.
+    if (s.info_values.getEntry(key_slice)) |entry| {
+        gpa.free(entry.value_ptr.*);
+        entry.value_ptr.* = val_copy;
+        return .ok;
+    }
+    const key_copy = gpa.dupe(u8, key_slice) catch {
+        gpa.free(val_copy);
+        return .out_of_memory;
+    };
+    s.info_values.put(gpa, key_copy, val_copy) catch {
+        gpa.free(key_copy);
+        gpa.free(val_copy);
+        return .out_of_memory;
+    };
+    return .ok;
+}
+
 const capture_target_count: u32 = 8;
 const capture_max_views: usize = 32;
 const capture_grid: usize = 16;
@@ -9211,6 +9269,9 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
     session.sprite_anchor_faces.clearRetainingCapacity();
+    // Host-fed info values survive a lens change (session state, like
+    // orientation); only the lens's own dynamic-text bindings reset here.
+    session.dynamic_texts.clearRetainingCapacity();
     session.sprite_masks.clearRetainingCapacity();
     session.sprite_mask_strength_params.clearRetainingCapacity();
     session.model_controls.clearRetainingCapacity();
@@ -10570,6 +10631,24 @@ const VideoPlayback = struct {
     ended: bool = false,
 };
 
+/// A text.2d node whose content comes from a live source (a built-in clock or a
+/// host info key). The style is captured at load so the frame path can
+/// re-rasterize when the resolved string changes, swapping the sprite texture.
+const DynamicText = struct {
+    source: []const u8,
+    countdown_seconds: f32,
+    color: [3]u8,
+    gradient: ?[3]u8,
+    shadow: bool,
+    stroke: ?[3]u8,
+    bend: f32,
+    wrap: u32,
+    /// The last string rasterized, so an unchanged value skips the re-raster.
+    /// len 0 means nothing has been drawn yet, forcing the first refresh.
+    last_buf: [64]u8 = @splat(0),
+    last_len: usize = 0,
+};
+
 /// Loads a sprite.2d node's animated GIF (assets/<stem>.gif) as a video
 /// texture: every frame decodes to a texture up front and a fully-loaded
 /// SpriteAnim the render loop cycles at the clip's own rate. Returns false
@@ -10973,6 +11052,72 @@ fn pollSpriteLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Alloca
     }
 }
 
+/// Formats seconds as mm:ss, or hh:mm:ss past an hour: the info-sticker clock.
+fn formatClock(buf: []u8, seconds: f64) []const u8 {
+    const total: u64 = @intFromFloat(@max(0.0, seconds));
+    const h = total / 3600;
+    const m = (total % 3600) / 60;
+    const sec = total % 60;
+    if (h > 0) return std.fmt.bufPrint(buf, "{d}:{d:0>2}:{d:0>2}", .{ h, m, sec }) catch buf[0..0];
+    return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}", .{ m, sec }) catch buf[0..0];
+}
+
+/// The live string a dynamic text node shows this frame: a built-in clock or
+/// countdown off the lens elapsed time, else the latest host-fed value for the
+/// key (blank until the app feeds one).
+fn resolveInfo(s: *Session, dt: *const DynamicText, buf: []u8) []const u8 {
+    const elapsed_us = if (s.active_lens) |*lens| lens.elapsedUs() else 0;
+    const elapsed_s = @as(f64, @floatFromInt(elapsed_us)) / 1_000_000.0;
+    if (std.mem.eql(u8, dt.source, "countdown")) {
+        return formatClock(buf, @max(0.0, @as(f64, dt.countdown_seconds) - elapsed_s));
+    }
+    if (std.mem.eql(u8, dt.source, "clock.elapsed")) {
+        return formatClock(buf, elapsed_s);
+    }
+    if (s.info_values.get(dt.source)) |v| {
+        const n = @min(v.len, buf.len);
+        @memcpy(buf[0..n], v[0..n]);
+        return buf[0..n];
+    }
+    return buf[0..0];
+}
+
+/// Re-rasterizes every live text node whose resolved string changed this frame
+/// and swaps its sprite texture, so an info sticker updates in place. A node
+/// whose value held is left untouched, so a static frame does no work.
+fn refreshDynamicText(s: *Session) void {
+    if (s.dynamic_texts.count() == 0) return;
+    const gpa = s.engine.gpa;
+    const r = if (s.engine.renderer) |*rr| rr else return;
+    var it = s.dynamic_texts.iterator();
+    while (it.next()) |e| {
+        const gi = e.key_ptr.*;
+        const dt = e.value_ptr;
+        var buf: [64]u8 = undefined;
+        const str = resolveInfo(s, dt, &buf);
+        if (dt.last_len != 0 and std.mem.eql(u8, dt.last_buf[0..dt.last_len], str)) continue;
+        // The font draws a space blank, so an empty value clears to nothing.
+        const draw = if (str.len == 0) " " else str;
+        const rich = dt.gradient != null or dt.shadow or dt.stroke != null or dt.bend != 0;
+        const content = if (dt.wrap > 0) (font.wrap(gpa, draw, dt.wrap) catch draw) else draw;
+        defer if (dt.wrap > 0 and content.ptr != draw.ptr) gpa.free(content);
+        const raster = if (rich)
+            font.rasterizeRich(gpa, content, 4, .{ dt.color[0], dt.color[1], dt.color[2], 255 }, dt.gradient, dt.shadow, dt.stroke, dt.bend) catch continue
+        else
+            font.rasterize(gpa, content, 4, .{ dt.color[0], dt.color[1], dt.color[2], 255 }) catch continue;
+        defer gpa.free(raster.rgba);
+        const texture = render.Renderer.createStaticTexture(@intCast(raster.width), @intCast(raster.height), raster.rgba);
+        const prior = s.sprite_textures.fetchPut(gpa, gi, texture) catch {
+            r.destroyTexture(texture);
+            continue;
+        };
+        if (prior) |old| r.destroyTexture(old.value);
+        const n = @min(str.len, dt.last_buf.len);
+        @memcpy(dt.last_buf[0..n], str[0..n]);
+        dt.last_len = n;
+    }
+}
+
 /// Rasterizes every spliced text.2d node's string with the built-in font
 /// and uploads it as a texture, storing it and its rect in the same maps
 /// the sprite draw reads - so text draws through the sprite path with no
@@ -11017,6 +11162,18 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
         session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
         if (txt.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, txt.graph_index, txt.opacity_param) catch {};
         if (txt.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, txt.graph_index, @intCast(txt.anchor_face)) catch {};
+        // A live content source registers the node for per-frame refresh; the
+        // static raster above stands in until the first frame resolves it.
+        if (txt.content_source.len > 0) session.dynamic_texts.put(gpa, txt.graph_index, .{
+            .source = txt.content_source,
+            .countdown_seconds = txt.countdown_seconds,
+            .color = txt.color,
+            .gradient = txt.gradient,
+            .shadow = txt.shadow,
+            .stroke = txt.stroke,
+            .bend = txt.bend,
+            .wrap = txt.wrap,
+        }) catch {};
     }
 }
 

@@ -909,6 +909,13 @@ pub const TextField = struct {
     /// tracks the head - a name tag over the brow, a label on the chin. Negative
     /// (default) leaves the text at its screen rect.
     anchor_face: i32 = -1,
+    /// Names a live source filling the text each frame instead of the static
+    /// content: a built-in clock ("clock.elapsed", "countdown") or a host key the
+    /// app feeds through the info rail. Empty draws the static content once.
+    content_source: []const u8 = "",
+    /// The duration a "countdown" content_source counts down from, in seconds;
+    /// the text formats the remaining time off the lens clock.
+    countdown_seconds: f32 = 0,
 };
 
 pub const VideoField = struct {
@@ -3318,6 +3325,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                         field.anchor_face = @intCast(v.integer);
                     } else try diags.add(path.slice(), "text anchor_face must be a face landmark index 0..{d}", .{face_landmark_count - 1});
                 }
+                if (getField(tv.object, "content_source")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.content_source = try arena.dupe(u8, s);
+                }
+                if (getField(tv.object, "countdown_seconds")) |v| field.countdown_seconds = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.countdown_seconds)));
                 text_field = field;
             }
             path.pop(tmark);

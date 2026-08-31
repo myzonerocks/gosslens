@@ -633,6 +633,14 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitOrientation(env: *JniEnv, cls: 
     return @intFromEnum(abi.goss_session_submit_orientation(sessionFromHandle(session), gravity_x, gravity_y, gravity_z, timestamp_us));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSetInfo(env: *JniEnv, cls: jobject, session: i64, key_buffer: jobject, key_len: i32, value_buffer: jobject, value_len: i32) i32 {
+    _ = cls;
+    const key = getDirectBufferAddress(env, key_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    // A null value buffer clears the key; only a set value dereferences one.
+    const value = if (value_len > 0) getDirectBufferAddress(env, value_buffer) else null;
+    return @intFromEnum(abi.goss_session_set_info(sessionFromHandle(session), key, @intCast(@max(key_len, 0)), value, @intCast(@max(value_len, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeCaptureView(env: *JniEnv, cls: jobject, session: i64, guidance_buffer: jobject) i32 {
     _ = cls;
     const guidance = getDirectBufferAddress(env, guidance_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

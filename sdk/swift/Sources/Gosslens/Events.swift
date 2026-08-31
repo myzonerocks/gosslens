@@ -270,6 +270,19 @@ extension GossSession {
         try checked(goss_session_submit_orientation(handle, gravityX, gravityY, gravityZ, timestampUs))
     }
 
+    /// Feeds a host info value keyed by name, the rail an info sticker reads: a
+    /// text.2d node with a matching content_source shows the latest value each
+    /// frame (a time, a place, a sensor reading). A nil value clears the key.
+    public func setInfo(_ key: String, _ value: String?) throws {
+        let k = Array(key.utf8)
+        if let value {
+            let v = Array(value.utf8)
+            try checked(goss_session_set_info(handle, k, k.count, v, v.count))
+        } else {
+            try checked(goss_session_set_info(handle, k, k.count, nil, 0))
+        }
+    }
+
     /// Captures the current viewpoint (the last submitted world pose and depth)
     /// into a guided scan, back-projecting the depth into a deterministic gaussian
     /// reconstruction, and returns the scan's coverage so the app can steer the

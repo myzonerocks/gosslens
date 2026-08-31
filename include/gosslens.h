@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 81u
+#define GOSS_ABI_MINOR 82u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -618,6 +618,12 @@ goss_status goss_session_submit_camera_intrinsics(goss_session *session, float f
  * velocity derived from consecutive samples to correct rolling-shutter skew; the
  * host submits one per frame from the IMU. A near-zero vector clears the stream. */
 goss_status goss_session_submit_orientation(goss_session *session, float gravity_x, float gravity_y, float gravity_z, int64_t timestamp_us);
+
+/* Feeds a host info value keyed by name, the rail an info sticker reads: a
+ * text.2d node with a matching content_source shows the latest value each frame
+ * (a time, a place, a sensor reading). A null or empty value clears the key.
+ * Keys and values are copied, so the caller keeps ownership of its buffers. */
+goss_status goss_session_set_info(goss_session *session, const uint8_t *key, size_t key_len, const uint8_t *value, size_t value_len);
 
 /* Captures the current viewpoint (the last submitted world pose and depth) into a
  * guided scan: marks the yaw target it covers, back-projects the depth into

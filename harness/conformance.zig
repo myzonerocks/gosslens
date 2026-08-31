@@ -946,6 +946,94 @@ fn proveFaceText(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return proveFaceAnchored(gpa, engine, ".lens-packages/text-face", "text caption", "zig-out/conformance-face-text.png");
 }
 
+/// Renders the info-clock lens after advancing the lens clock `seconds` seconds
+/// and captures the frame: the countdown text resolves off the elapsed time, so
+/// two elapsed points draw different digits. A fresh session each call.
+fn renderInfoClockCapture(engine: *abi.Engine, desc: *const abi.FrameDesc, planes: anytype, seconds: u32, shot: []u8, out_w: *u32, out_h: *u32) !void {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/info-clock", ".lens-packages/info-clock".len) != .ok) return error.LensActivationFailed;
+    const half_w = (planes.width + 1) / 2;
+    const signals = std.mem.zeroes(abi.LensSignals);
+    // One frame establishes the current frame, then the clock advances a
+    // second at a time, then a few frames draw the resolved countdown.
+    if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+    var i: u32 = 0;
+    while (i < seconds) : (i += 1) _ = abi.goss_session_tick_lens(session, 1_000_000, &signals);
+    for (0..5) |_| {
+        if (abi.goss_session_submit_frame_copy(session, desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, out_w, out_h) != .ok) return error.CaptureFailed;
+}
+
+/// Proves an info sticker updates live: a text.2d node with a "countdown"
+/// content_source shows a clock ticking off the lens time, so the start digits
+/// differ from those a minute later and the same elapsed point redraws
+/// bit-identically. Host-fed stickers flow the same rail through set_info.
+fn proveInfoSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+
+    const cap = @as(usize, 400) * 300 * 4;
+    const shot_start = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_start);
+    const shot_late = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_late);
+    const shot_late_again = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_late_again);
+
+    var ws: u32 = 0;
+    var hs: u32 = 0;
+    var wl: u32 = 0;
+    var hl: u32 = 0;
+    var wl2: u32 = 0;
+    var hl2: u32 = 0;
+    // 90-second countdown: "01:30" at the start, "00:25" after 65 seconds.
+    try renderInfoClockCapture(engine, &desc, planes, 0, shot_start, &ws, &hs);
+    try renderInfoClockCapture(engine, &desc, planes, 65, shot_late, &wl, &hl);
+    try renderInfoClockCapture(engine, &desc, planes, 65, shot_late_again, &wl2, &hl2);
+    if (ws != wl or hs != hl or ws == 0 or hs == 0) {
+        std.debug.print("conformance: FAIL info-sticker capture size {d}x{d} vs {d}x{d}\n", .{ ws, hs, wl, hl });
+        return false;
+    }
+    if (std.mem.eql(u8, shot_start[0 .. ws * hs * 4], shot_late[0 .. wl * hl * 4])) {
+        std.debug.print("conformance: FAIL info-sticker countdown did not change over time\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_late[0 .. wl * hl * 4], shot_late_again[0 .. wl2 * hl2 * 4])) {
+        std.debug.print("conformance: FAIL info-sticker is not bit-stable at the same elapsed time\n", .{});
+        return false;
+    }
+
+    var changed: usize = 0;
+    for (0..ws * hs) |px| {
+        const idx = px * 4;
+        if (!std.mem.eql(u8, shot_start[idx .. idx + 4], shot_late[idx .. idx + 4])) changed += 1;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_late[0 .. wl * hl * 4], @intCast(wl), @intCast(hl));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-info-sticker.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF an info sticker updates live - a countdown redrew from 01:30 to 00:25 as the lens clock advanced ({d} px changed), bit-stable at a fixed time\n", .{changed});
+    return true;
+}
+
 fn proveMultiBodyFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -19430,6 +19518,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveFaceSticker(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "face-text")) {
             if (!try proveFaceText(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "info-sticker")) {
+            if (!try proveInfoSticker(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -19562,6 +19652,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("face sticker");
     if (!try proveFaceText(gpa, engine)) return 1;
     watchHold("face text");
+    if (!try proveInfoSticker(gpa, engine)) return 1;
+    watchHold("info sticker");
     if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;

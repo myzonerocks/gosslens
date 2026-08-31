@@ -1704,6 +1704,27 @@ export class GossSession {
     this.mod.ccall("goss_session_submit_orientation", "number", ["number", "number", "number", "number", "number"], [this.handle, gravityX, gravityY, gravityZ, timestampUs]);
   }
 
+  /// Feeds a host info value keyed by name, the rail an info sticker reads: a
+  /// text.2d node with a matching content_source shows the latest value each
+  /// frame (a time, a place, a sensor reading). A null value clears the key.
+  setInfo(key: string, value: string | null): void {
+    const keyBytes = new TextEncoder().encode(key);
+    const keyPtr = this.mod.ccall("goss_alloc", "number", ["number"], [keyBytes.length || 1]) as number;
+    this.mod.HEAPU8.set(keyBytes, keyPtr);
+    let valuePtr = 0;
+    let valueLen = 0;
+    let valueBytes: Uint8Array | null = null;
+    if (value !== null) {
+      valueBytes = new TextEncoder().encode(value);
+      valueLen = valueBytes.length;
+      valuePtr = this.mod.ccall("goss_alloc", "number", ["number"], [valueLen || 1]) as number;
+      this.mod.HEAPU8.set(valueBytes, valuePtr);
+    }
+    this.mod.ccall("goss_session_set_info", "number", ["number", "number", "number", "number", "number"], [this.handle, keyPtr, keyBytes.length, valuePtr, valueLen]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [keyPtr, keyBytes.length || 1]);
+    if (valuePtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [valuePtr, valueLen || 1]);
+  }
+
   /// Captures the current viewpoint (the last submitted world pose and depth) into
   /// a guided scan, back-projecting the depth into a deterministic gaussian
   /// reconstruction, and returns the scan's coverage so the app can steer the user

@@ -953,7 +953,15 @@ curves a banner; 0 keeps the baseline straight. Like a sprite, a text node
 takes an `"anchor_face"` face-mesh landmark index (0..477): the caption pins
 its center to that point on the tracked face each frame, so a name tag or a
 label rides the head. A negative index (the default) leaves the text at its
-screen rect, and it falls back to that rect when no face is tracked.
+screen rect, and it falls back to that rect when no face is tracked. A
+`"content_source"` turns the node into an info sticker whose text updates each
+frame instead of the static `content`: `"clock.elapsed"` shows the time since
+the lens started and `"countdown"` the remaining `"countdown_seconds"`, both
+formatted mm:ss (hh:mm:ss past an hour) off the lens clock; any other name is a
+host key the app feeds through `goss_session_set_info` (a time, a place, a
+sensor reading), and the node shows the latest value fed, or blank until one
+arrives. The node re-rasterizes only when its value changes, so a still frame
+does no work.
 
 A `"video.texture"` node plays an MP4 clip over the frame like a sprite. It
 ships its clip as `assets/<source>.mp4` and carries a `"video": {"source",
