@@ -870,6 +870,10 @@ pub const TextField = struct {
     /// so a long string flows onto several lines instead of stretching thin;
     /// 0 leaves the content as authored.
     wrap: u32 = 0,
+    /// Bow the baseline along an arc: the middle glyphs lift above the ends for
+    /// a positive value and drop below for a negative one, so a lens curves a
+    /// banner. Clamped to -1..1 (a full text-height bow); 0 keeps it straight.
+    bend: f32 = 0,
 };
 
 pub const VideoField = struct {
@@ -3221,6 +3225,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(tv.object, "depth")) |v| field.depth = @max(0.0, @as(f32, @floatCast(numberOf(v) orelse field.depth)));
                 if (getField(tv.object, "wrap")) |v| {
                     if (v == .integer and v.integer >= 0 and v.integer <= 512) field.wrap = @intCast(v.integer);
+                }
+                if (getField(tv.object, "bend")) |v| {
+                    if (numberOf(v)) |n| field.bend = std.math.clamp(@as(f32, @floatCast(n)), -1.0, 1.0);
                 }
                 text_field = field;
             }

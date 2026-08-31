@@ -10521,9 +10521,9 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
         // budget before rasterizing; an unwrapped one rasterizes as authored.
         const content = if (txt.wrap > 0) (font.wrap(gpa, txt.content, txt.wrap) catch txt.content) else txt.content;
         defer if (txt.wrap > 0 and content.ptr != txt.content.ptr) gpa.free(content);
-        const rich = txt.gradient != null or txt.shadow or txt.stroke != null;
+        const rich = txt.gradient != null or txt.shadow or txt.stroke != null or txt.bend != 0;
         const raster = if (rich)
-            font.rasterizeRich(gpa, content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }, txt.gradient, txt.shadow, txt.stroke) catch continue
+            font.rasterizeRich(gpa, content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }, txt.gradient, txt.shadow, txt.stroke, txt.bend) catch continue
         else
             font.rasterize(gpa, content, 4, .{ txt.color[0], txt.color[1], txt.color[2], 255 }) catch continue;
         defer gpa.free(raster.rgba);

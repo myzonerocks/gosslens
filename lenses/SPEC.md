@@ -938,7 +938,10 @@ A `"wrap"` (a column count above zero) word-wraps long `content` onto several
 lines to that many monospace columns before rasterizing, breaking at spaces
 where a word fits and hard-breaking a word longer than a line, so a caption
 flows to the rect's proportions instead of stretching thin; the author's own
-newlines are kept, and no `wrap` leaves the content as written.
+newlines are kept, and no `wrap` leaves the content as written. A `"bend"` (a
+value in -1 to 1) bows the baseline along an arc: the middle glyphs lift above
+the ends for a positive value and drop below for a negative one, so a lens
+curves a banner; 0 keeps the baseline straight.
 
 A `"video.texture"` node plays an MP4 clip over the frame like a sprite. It
 ships its clip as `assets/<source>.mp4` and carries a `"video": {"source",
