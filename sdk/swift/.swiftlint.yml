@@ -1,0 +1,51 @@
+excluded:
+  - .build
+
+# The formatter adds trailing commas in multiline literals, so that lint rule is
+# off to keep the two tools from disagreeing. Force try and force cast are off
+# because they are reserved for values the code already proved valid - a fixed
+# resource, a landmark buffer sized by a frozen constant - not a runtime path.
+disabled_rules:
+  - trailing_comma
+  - force_try
+  - force_cast
+
+# The wrapper's camera math reads naturally with short domain names - a
+# coordinate is x, a plane stride is s - so brevity is not treated as a smell.
+identifier_name:
+  min_length:
+    warning: 1
+    error: 0
+  max_length:
+    warning: 60
+    error: 80
+
+# Frame and tracking signatures run wide; the formatter governs wrapping, so the
+# line guard sits above what it leaves in place.
+line_length:
+  warning: 200
+  error: 240
+
+# The session is one cohesive facade over the C ABI, so the size guards catch
+# runaway growth without forcing a natural unit to be split.
+type_body_length:
+  warning: 600
+  error: 800
+
+file_length:
+  warning: 800
+  error: 1000
+
+function_body_length:
+  warning: 120
+  error: 200
+
+cyclomatic_complexity:
+  warning: 20
+  error: 30
+
+# A frame descriptor hands over several fields that belong together across the
+# ABI, so the guard sits where it still catches a sprawling one.
+function_parameter_count:
+  warning: 8
+  error: 10

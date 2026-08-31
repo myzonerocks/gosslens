@@ -1,11 +1,12 @@
 plugins {
     id("com.android.application") version "9.3.0" apply false
     id("com.android.library") version "9.3.0"
+    id("org.jlleitschuh.gradle.ktlint") version "12.1.1"
     `maven-publish`
 }
 
 group = "com.myzonerocks"
-version = "0.7.0"
+version = "0.8.0"
 
 android {
     namespace = "com.gosslens"

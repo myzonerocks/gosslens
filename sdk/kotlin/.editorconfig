@@ -1,0 +1,11 @@
+root = true
+
+[*.kt]
+ktlint_code_style = ktlint_official
+# The SDK's frame and tracking signatures run wide by nature, so the line guard
+# sits above what the formatter leaves in place rather than forcing awkward wraps.
+max_line_length = 160
+# Camera math reads naturally with short domain names - a coordinate is x, a
+# plane stride is s - so brevity is not treated as a smell.
+ktlint_standard_property-naming = disabled
+ktlint_standard_function-naming = disabled

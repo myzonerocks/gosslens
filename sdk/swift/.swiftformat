@@ -1,0 +1,3 @@
+--swiftversion 6.0
+--disable redundantOptionalBinding,typeSugar,andOperator,wrapMultilineStatementBraces
+--exclude .build

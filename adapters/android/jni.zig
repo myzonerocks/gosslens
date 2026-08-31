@@ -289,6 +289,25 @@ export fn Java_com_gosslens_Gosslens_nativeDisableSegmentation(env: *JniEnv, cls
     abi.goss_session_disable_segmentation(sessionFromHandle(session));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSetSegmentationMask(env: *JniEnv, cls: jobject, session: i64, mask_buffer: jobject, mask_len: i32) i32 {
+    _ = cls;
+    // mask_len 0 clears the mask; its buffer may be empty or null.
+    const mask: ?[*]const f32 = if (mask_len > 0) @ptrCast(@alignCast(getDirectBufferAddress(env, mask_buffer) orelse return @intFromEnum(abi.Status.invalid_argument))) else null;
+    return @intFromEnum(abi.goss_session_set_segmentation_mask(sessionFromHandle(session), mask, @intCast(@max(mask_len, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSetSegmentationClassMask(env: *JniEnv, cls: jobject, session: i64, channel: i32, mask_buffer: jobject, mask_len: i32) i32 {
+    _ = cls;
+    const mask: ?[*]const f32 = if (mask_len > 0) @ptrCast(@alignCast(getDirectBufferAddress(env, mask_buffer) orelse return @intFromEnum(abi.Status.invalid_argument))) else null;
+    return @intFromEnum(abi.goss_session_set_segmentation_class_mask(sessionFromHandle(session), @intCast(@max(channel, 0)), mask, @intCast(@max(mask_len, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSegmentationChannels(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @bitCast(abi.goss_session_segmentation_channels(sessionFromHandle(session)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSetFaceLandmarks(env: *JniEnv, cls: jobject, session: i64, points_buffer: jobject, point_count: i32) i32 {
     _ = cls;
     if (point_count == 0) return @intFromEnum(abi.goss_session_set_face_landmarks(sessionFromHandle(session), null, 0));

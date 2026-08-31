@@ -195,6 +195,9 @@ object Gosslens {
     internal external fun nativeAllowModelDigest(session: Long, digestBuffer: ByteBuffer): Int
     internal external fun nativeClearModelAllowlist(session: Long): Int
     internal external fun nativeDisableSegmentation(session: Long)
+    internal external fun nativeSetSegmentationMask(session: Long, maskBuffer: ByteBuffer, maskLen: Int): Int
+    internal external fun nativeSetSegmentationClassMask(session: Long, channel: Int, maskBuffer: ByteBuffer, maskLen: Int): Int
+    internal external fun nativeSegmentationChannels(session: Long): Int
     internal external fun nativeSetFaceLandmarks(session: Long, pointsBuffer: ByteBuffer, pointCount: Int): Int
     internal external fun nativeSetBeautyLut(session: Long, slot: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
     internal external fun nativeSetBeautyMakeupTexture(session: Long, effect: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int): Int
@@ -976,6 +979,32 @@ class GossSession private constructor(
         Gosslens.nativeEnableSegmentation(handle, model, model.remaining(), threads) == 0
 
     fun disableSegmentation() = Gosslens.nativeDisableSegmentation(handle)
+
+    /** Feeds a subject mask a host tracking module computed (MASK_SIDE squared
+     * floats, row major) as the subject texture the blend and mask channels
+     * sample; an empty array clears it. The producer path for an app that runs
+     * its own segmentation instead of the in-engine worker. */
+    fun setSegmentationMask(mask: FloatArray): Boolean {
+        if (mask.isEmpty()) return Gosslens.nativeSetSegmentationMask(handle, ByteBuffer.allocateDirect(0), 0) == 0
+        val buf = ByteBuffer.allocateDirect(mask.size * 4).order(java.nio.ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(mask)
+        return Gosslens.nativeSetSegmentationMask(handle, buf, mask.size) == 0
+    }
+
+    /** The class channels the active lens samples, as a bitmask over the mask
+     * channels (bit 0 person, bit 1 background, and so on). Upload exactly these
+     * each frame with setSegmentationClassMask; zero wants only the subject. */
+    fun segmentationChannels(): Int = Gosslens.nativeSegmentationChannels(handle)
+
+    /** Uploads one class channel's mask (MASK_SIDE squared floats) as the texture
+     * that channel's passes sample; channel 0 (person) rides setSegmentationMask,
+     * so upload the classes after it. An empty array clears one channel. */
+    fun setSegmentationClassMask(channel: Int, mask: FloatArray): Boolean {
+        if (mask.isEmpty()) return Gosslens.nativeSetSegmentationClassMask(handle, channel, ByteBuffer.allocateDirect(0), 0) == 0
+        val buf = ByteBuffer.allocateDirect(mask.size * 4).order(java.nio.ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(mask)
+        return Gosslens.nativeSetSegmentationClassMask(handle, channel, buf, mask.size) == 0
+    }
 
     /** Allowlists a bring-your-own model by its 32-byte SHA-256 digest, so a net
      * whose digest is not listed is refused when a tracker or segmenter is

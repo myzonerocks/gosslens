@@ -154,6 +154,13 @@ file must move together.
 
 ### CaptureOutput
 
+Recording and screenshot write to a native encoder or a filesystem path, which a
+browser sandbox does not have, so the web SDK serves the same capability through
+browser-native methods rather than these symbols: `captureFrame()` returns a PNG
+data URL (the screenshot), and `captureStream()` drives a `MediaRecorder` off the
+composited canvas with the engine-normalized recording policy (the recording). So
+the capability is present on all three platforms; only the mechanism differs.
+
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_engine_request_screenshot` | `requestScreenshot(path)` | debug/test where supported |
@@ -195,6 +202,13 @@ file must move together.
 
 ### Face tracking
 
+All three SDKs expose the in-engine tracking, beauty, and result-readback ops
+below (the "native tracking path" rows). On web they call the same symbols and
+return `unsupported` unless the wasm build carries the inference stack; a web app
+without it feeds tracking through the producer path (`submitFaces`,
+`setSegmentationMask`) instead. So the surface is 1:1 across Swift, Kotlin, and
+TS; only the underlying worker differs by build.
+
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_session_enable_face_tracking` | `enableFaceTracking(taskBundle, threads)` | native tracking path |
@@ -233,9 +247,9 @@ file must move together.
 | `goss_session_set_makeup_reference` | `setMakeupReference(rgba, width, height, landmarks)`, samples a reference photo's makeup color per face part: lips, eyes, brows, and a cheek-and-forehead skin patch (the caller passes the reference face's 478 landmarks), so a `tint.pass` with `"source": "reference"` paints the live face in that color and a foundation over `face_skin` matches the reference's skin tone; empty landmarks clears it | native + web makeup |
 | `goss_session_face_region` | `faceRegion(region, outXyz)`, the newest tracked face's named attach point (x, y in frame pixels, z in the same scale) so a lens pins content to the forehead, glabella, nose tip, chin, an eye, a cheek, an ear, or the mouth centre/corner; see the `GOSS_FACE_REGION_*` points | native tracking path |
 | `goss_session_set_face_landmarks` | `setFaceLandmarks(points)`; web adds `sourceWidth, sourceHeight` since its analysis resolution is decoupled from the rendered frame's | Web analysis-producer path |
-| `goss_session_set_segmentation_mask` | `setSegmentationMask(mask)`, a mask_side x mask_side float mask the web tracking module produced, uploaded as the subject texture | Web analysis-producer path |
-| `goss_session_segmentation_channels` | `segmentationChannels()`, a bitmask over the mask channels the active lens samples | Web analysis-producer path |
-| `goss_session_set_segmentation_class_mask` | `setSegmentationClassMask(channel, mask)`, one class channel's mask uploaded as the texture that channel's passes sample | Web analysis-producer path |
+| `goss_session_set_segmentation_mask` | `setSegmentationMask(mask)`, a mask_side x mask_side float mask a host tracking module produced, uploaded as the subject texture | all SDKs (host-produced masks) |
+| `goss_session_segmentation_channels` | `segmentationChannels()`, a bitmask over the mask channels the active lens samples | all SDKs |
+| `goss_session_set_segmentation_class_mask` | `setSegmentationClassMask(channel, mask)`, one class channel's mask uploaded as the texture that channel's passes sample | all SDKs |
 
 ### Segmentation
 
@@ -292,7 +306,7 @@ wasm engine by default) returns `unsupported`, and the web producer path
 | `goss_session_submit_location` | `submitLocation(lat, lon, accuracy, ts)`, feeds a location fix; the engine computes `geo.in_region` on-device and the location never crosses back over the ABI | all SDKs |
 | `goss_session_set_geofence` / `_clear_geofence` | `setGeofence(lat, lon, radius)` / `clearGeofence()`, sets the circle a geofilter lens is active within, derived by the app from the lens's intended place | all SDKs |
 | `goss_session_set_geofence_bbox` / `_set_geofence_polygon` | `setGeofenceBbox(minLat, minLon, maxLat, maxLon)` / `setGeofencePolygon(coords, vertexCount)`, an axis-aligned box or a polygon ring (three to 64 lat/lon vertices) the geofilter lens is active within | all SDKs |
-| `goss_session_set_named_geofence` / `_clear_named_geofences` | `setNamedGeofence(name, lat, lon, radius)` / `clearNamedGeofences()`, named circular regions alongside the default one, so a lens fires `geo.in_region('name')` for its own place among several | Kotlin, TS, web |
+| `goss_session_set_named_geofence` / `_clear_named_geofences` | `setNamedGeofence(name, lat, lon, radius)` / `clearNamedGeofences()`, named circular regions alongside the default one, so a lens fires `geo.in_region('name')` for its own place among several | all SDKs |
 | `goss_session_set_geo_accuracy` | `setGeoAccuracy(maxAccuracyM)`, refuses a fix vaguer than this so a lens does not fire on an uncertain location; zero clears the gate | all SDKs |
 | `goss_session_parameter_value` | `parameterValue(name)`, reads a live lens parameter by name, including whatever a script node last wrote | all SDKs |
 | `goss_session_pull_audio` | `pullAudio(out, frames)`, the next block of mixed lens audio (interleaved s16) a play_sound trigger produced, for the SDK to route to platform audio out; silence when no lens sound is active | all SDKs |
