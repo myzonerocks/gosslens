@@ -263,6 +263,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits)",
     "goss_status goss_engine_scan_qr(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
+    "goss_status goss_engine_generate_qr(goss_engine *engine, const uint8_t *payload, size_t payload_len, uint32_t module_scale, uint32_t quiet_modules, uint8_t *out_buf, size_t out_cap, uint32_t *out_dim)",
     "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
@@ -9979,6 +9980,27 @@ pub export fn goss_engine_scan_qr(engine: ?*Engine, luminance: ?[*]const u8, wid
     out_len_ptr.* = len;
     if (out_buf) |buf| {
         if (cap >= len) @memcpy(buf[0..len], payload[0..len]);
+    }
+    return .ok;
+}
+
+/// Generates a QR code for a payload and renders it into an 8-bit luminance image
+/// (0 dark, 255 light) of side out_dim, at module_scale pixels per module with a
+/// quiet_modules-wide light border. Probe the side with a null out_buf, then
+/// fill. So a lens shares a lens, an unlock, or a session-join code on device.
+pub export fn goss_engine_generate_qr(engine: ?*Engine, payload: ?[*]const u8, payload_len: usize, module_scale: u32, quiet_modules: u32, out_buf: ?[*]u8, out_cap: usize, out_dim: ?*u32) Status {
+    _ = engine;
+    const dim_ptr = out_dim orelse return .invalid_argument;
+    if (payload == null and payload_len != 0) return .invalid_argument;
+    const bytes: []const u8 = if (payload) |p| p[0..payload_len] else &.{};
+    const scale: usize = @max(module_scale, 1);
+    var mat: qr.Matrix = undefined;
+    qr.encode(bytes, 2, &mat) catch return .invalid_argument;
+    const quiet_px = @as(usize, quiet_modules) * scale;
+    const dim = quiet_px * 2 + mat.size * scale;
+    dim_ptr.* = @intCast(dim);
+    if (out_buf) |buf| {
+        if (out_cap >= dim * dim) qr.render(&mat, scale, quiet_px, buf[0 .. dim * dim], dim);
     }
     return .ok;
 }

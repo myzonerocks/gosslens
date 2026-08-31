@@ -34,6 +34,7 @@ object Gosslens {
     internal external fun nativeGenerateSong(engine: Long, promptBuffer: ByteBuffer, promptLen: Int, sampleRate: Int, seed: Int, bars: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
     internal external fun nativeScanBarcode(engine: Long, lumBuffer: ByteBuffer, width: Int, height: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeScanQr(engine: Long, lumBuffer: ByteBuffer, width: Int, height: Int, outBuffer: ByteBuffer, outCapacity: Long, lenBuffer: ByteBuffer): Int
+    internal external fun nativeGenerateQr(engine: Long, payloadBuffer: ByteBuffer, payloadLen: Int, moduleScale: Int, quietModules: Int, outBuffer: ByteBuffer, outCapacity: Long, dimBuffer: ByteBuffer): Int
     internal external fun nativeMusicAddReference(engine: Long, trackId: Int, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeMusicClearReferences(engine: Long)
     internal external fun nativeMusicIdentify(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int, outBuffer: ByteBuffer): Int
@@ -528,6 +529,24 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         val result = ByteArray(written)
         out.get(result)
         return result
+    }
+
+    /** Generates a QR code for a payload and renders it into a square 8-bit
+     * luminance image (0 dark, 255 light); returns the pixels and the side
+     * length. Algorithmic and deterministic, no model. */
+    fun generateQR(payload: ByteArray, moduleScale: Int = 6, quietModules: Int = 4): Pair<ByteArray, Int>? {
+        val payloadBuffer = ByteBuffer.allocateDirect(maxOf(payload.size, 1))
+        payloadBuffer.put(payload)
+        payloadBuffer.rewind()
+        val dim = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeGenerateQr(handle, payloadBuffer, payload.size, moduleScale, quietModules, probe, 0L, dim) != 0) return null
+        val side = dim.getInt(0)
+        val out = ByteBuffer.allocateDirect(maxOf(side * side, 1))
+        if (Gosslens.nativeGenerateQr(handle, payloadBuffer, payload.size, moduleScale, quietModules, out, (side * side).toLong(), dim) != 0) return null
+        val result = ByteArray(side * side)
+        out.get(result)
+        return Pair(result, side)
     }
 
     /** Fingerprints a reference recording and registers it under [trackId] in the

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 85u
+#define GOSS_ABI_MINOR 86u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -963,6 +963,12 @@ goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminan
  * correction, algorithmic and deterministic, no model. A NULL out_buf reports
  * the length only. */
 goss_status goss_engine_scan_qr(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_buf, size_t out_cap, size_t *out_len);
+
+/* Generates a QR code for a payload and renders it into an 8-bit luminance image
+ * (0 dark, 255 light) of side out_dim, at module_scale pixels per module with a
+ * quiet_modules-wide light border. A NULL out_buf reports the side only, so the
+ * caller sizes a buffer and calls again. Algorithmic, deterministic, no model. */
+goss_status goss_engine_generate_qr(goss_engine *engine, const uint8_t *payload, size_t payload_len, uint32_t module_scale, uint32_t quiet_modules, uint8_t *out_buf, size_t out_cap, uint32_t *out_dim);
 
 /* Graph thread. Unsplices the active lens and frees everything its
  * activation allocated. Accepts no active lens and does nothing. */

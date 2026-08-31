@@ -113,6 +113,17 @@ public final class GossEngine: @unchecked Sendable {
         return Array(out[0..<written])
     }
 
+    /// Generates a QR code for a payload and renders it into a square 8-bit
+    /// luminance image (0 dark, 255 light), returning the pixels and the side
+    /// length. Algorithmic and deterministic, no model.
+    public func generateQR(payload: [UInt8], moduleScale: UInt32 = 6, quietModules: UInt32 = 4) -> (image: [UInt8], dim: UInt32)? {
+        var dim: UInt32 = 0
+        if goss_engine_generate_qr(handle, payload, payload.count, moduleScale, quietModules, nil, 0, &dim) != GOSS_OK { return nil }
+        var out = [UInt8](repeating: 0, count: Int(dim) * Int(dim))
+        if goss_engine_generate_qr(handle, payload, payload.count, moduleScale, quietModules, &out, out.count, &dim) != GOSS_OK { return nil }
+        return (out, dim)
+    }
+
     /// Fingerprints a reference recording and registers it under `trackID` in the
     /// engine's on-device music catalog. Samples are interleaved f32.
     public func addMusicReference(trackID: UInt32, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws {

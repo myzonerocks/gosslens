@@ -1,7 +1,7 @@
-//! On-device QR decoding (and a matching encoder for tests): versions 1-4 at
-//! error-correction level L, byte mode, all eight masks, Reed-Solomon over
-//! GF(256). Algorithmic and deterministic, no model - a scan-to-unlock code. A
-//! finder-pattern locator samples the module grid from a luminance frame.
+//! On-device QR codec, both directions first-class: encode a payload to a QR to
+//! share a lens, unlock, or join a session, and decode one from the camera to
+//! scan-to-unlock. Versions 1-4 at level L, byte mode, all eight masks,
+//! Reed-Solomon over GF(256). Algorithmic and deterministic, no model.
 const std = @import("std");
 
 pub const max_version = 4;

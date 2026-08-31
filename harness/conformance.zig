@@ -8258,19 +8258,24 @@ fn proveScanBarcode(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-/// Proves on-device QR scanning: a known payload encoded to a QR and rendered
-/// into a luminance frame is decoded back through goss_engine_scan_qr, and a
-/// blank frame reports none - a real algorithmic recognition op, no model.
+/// Proves on-device QR round-trips through the ABI: a payload is generated to a
+/// QR image by goss_engine_generate_qr and decoded back by goss_engine_scan_qr,
+/// and a blank frame reports none - real algorithmic encode and decode, no model.
 fn proveScanQr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const payload = "https://goss.rocks/unlock/studio-42";
-    var mat: qr.Matrix = undefined;
-    try qr.encode(payload, 2, &mat);
-    const scale = 6;
-    const quiet = 4 * scale;
-    const dim = quiet * 2 + mat.size * scale;
+    // Generate the QR image through the ABI (probe the side, then fill).
+    var dim32: u32 = 0;
+    if (abi.goss_engine_generate_qr(engine, payload.ptr, payload.len, 6, 4, null, 0, &dim32) != .ok or dim32 == 0) {
+        std.debug.print("conformance: FAIL QR generate reported no size\n", .{});
+        return false;
+    }
+    const dim: usize = dim32;
     const frame = try gpa.alloc(u8, dim * dim);
     defer gpa.free(frame);
-    qr.render(&mat, scale, quiet, frame, dim);
+    if (abi.goss_engine_generate_qr(engine, payload.ptr, payload.len, 6, 4, frame.ptr, frame.len, &dim32) != .ok) {
+        std.debug.print("conformance: FAIL QR generate did not render\n", .{});
+        return false;
+    }
     var out: [512]u8 = undefined;
     var written: usize = 0;
     if (abi.goss_engine_scan_qr(engine, frame.ptr, @intCast(dim), @intCast(dim), &out, out.len, &written) != .ok) {
@@ -8288,7 +8293,7 @@ fn proveScanQr(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         std.debug.print("conformance: FAIL QR scan hallucinated a payload on a blank frame\n", .{});
         return false;
     }
-    std.debug.print("conformance: PROOF on-device QR scan decodes a payload from a luminance frame ({d} bytes) and reports none on a blank frame\n", .{written});
+    std.debug.print("conformance: PROOF on-device QR round-trips through the ABI - a payload generated to a {d}px image decodes back ({d} bytes), and a blank frame reports none\n", .{ dim, written });
     return true;
 }
 

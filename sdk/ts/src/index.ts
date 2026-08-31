@@ -603,6 +603,29 @@ export class GossEngine {
     return out;
   }
 
+  /// Generates a QR code for a payload and renders it into a square 8-bit
+  /// luminance image (0 dark, 255 light); returns the pixels and the side
+  /// length. Algorithmic and deterministic, no model.
+  generateQR(payload: Uint8Array, moduleScale = 6, quietModules = 4): { image: Uint8Array; dim: number } | null {
+    const payPtr = this.mod.ccall("goss_alloc", "number", ["number"], [payload.length || 1]) as number;
+    this.mod.HEAPU8.set(payload, payPtr);
+    const dimPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const dimOf = () => new DataView(this.mod.HEAPU8.buffer, dimPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number", "number", "number"];
+    let result: { image: Uint8Array; dim: number } | null = null;
+    if ((this.mod.ccall("goss_engine_generate_qr", "number", args, [this.handle, payPtr, payload.length, moduleScale, quietModules, 0, 0, dimPtr]) as number) === 0) {
+      const dim = dimOf();
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [dim * dim || 1]) as number;
+      if ((this.mod.ccall("goss_engine_generate_qr", "number", args, [this.handle, payPtr, payload.length, moduleScale, quietModules, outPtr, dim * dim, dimPtr]) as number) === 0) {
+        result = { image: this.mod.HEAPU8.slice(outPtr, outPtr + dim * dim), dim };
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, dim * dim || 1]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [payPtr, payload.length || 1]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [dimPtr, 4]);
+    return result;
+  }
+
   /// Fingerprints a reference recording and registers it under trackId in the
   /// engine's on-device music catalog. Samples are interleaved f32; re-adding a
   /// trackId layers more landmarks in.
