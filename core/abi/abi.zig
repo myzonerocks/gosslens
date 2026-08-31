@@ -953,6 +953,13 @@ pub const Session = struct {
     splat_scene_target: ?render.Renderer.OffscreenTarget = null,
     splat_scene_w: u16 = 0,
     splat_scene_h: u16 = 0,
+    /// A cutout sprite lifts the subject into this transparent-background target
+    /// each frame, then draws it at its rect; kept off the chain ping-pong so the
+    /// cutout render and the sprite draw never share one target. One is reused
+    /// across cutout sprites since each renders before it draws.
+    cutout_sticker_target: ?render.Renderer.OffscreenTarget = null,
+    cutout_sticker_w: u16 = 0,
+    cutout_sticker_h: u16 = 0,
     /// cutout.pass nodes by graph index: their background color (rgb) and edge
     /// softness. The face matte keys the frame through, the rest goes flat color.
     cutout_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
@@ -1386,6 +1393,11 @@ pub const Session = struct {
     /// sprite pins its center to that point on the tracked face each frame - a
     /// sticker that follows the head (glasses on the eyes, a hat over the brow).
     sprite_anchor_faces: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    /// A sprite.2d node that lifts the live subject as its source instead of a
+    /// bundled image, by graph index: the segmentation channel it cuts out and
+    /// the matte-edge feather. The frame keyed by it draws at the sprite rect as a
+    /// movable, scalable cutout sticker.
+    sprite_cutouts: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { channel: u8, softness: f32 }) = .empty,
     /// A text.2d node whose content comes from a live source, by graph index. The
     /// frame path re-rasterizes each when its resolved string changes, so an info
     /// sticker (a clock, a countdown, a host-fed reading) updates in place.
@@ -1795,6 +1807,18 @@ fn ensureSplatScene(s: *Session, width: u16, height: u16) !void {
     s.splat_scene_h = height;
 }
 
+/// (Re)creates the session-owned target a cutout sprite lifts the subject into,
+/// only when the frame size changes or it does not exist yet. The transparent
+/// cutout renders here, then the sprite draws it at its rect.
+fn ensureCutoutSticker(s: *Session, width: u16, height: u16) !void {
+    if (s.cutout_sticker_w == width and s.cutout_sticker_h == height and s.cutout_sticker_target != null) return;
+    if (s.cutout_sticker_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    s.cutout_sticker_target = null;
+    s.cutout_sticker_target = try render.Renderer.createOffscreenTarget(width, height);
+    s.cutout_sticker_w = width;
+    s.cutout_sticker_h = height;
+}
+
 /// (Re)creates the session-owned target a matte.hair source refines the
 /// strand-level hair alpha into, only when the frame size changes or it does
 /// not exist yet. Bound as the hair_matte channel texture each frame.
@@ -2184,7 +2208,7 @@ fn drawBrushStrokes(r: *render.Renderer, board: *const stroke.Board, view_id: u8
             const spacing = @max(half * 2.0, 1e-3);
             const nc = board.buildStampCenters(si, spacing, &centers);
             for (centers[0..nc]) |cpt| {
-                r.submitSpriteRotated(view_id, tex, cpt[0], cpt[1], half / aspect, half, 0, aspect, 1.0);
+                r.submitSpriteRotated(view_id, tex, cpt[0], cpt[1], half / aspect, half, 0, aspect, 1.0, false);
             }
             continue;
         }
@@ -2644,6 +2668,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // through, never blocking the chain.
             .sprite => s.sprite_textures.contains(entry.graph_index) or s.text3d_meshes.contains(entry.graph_index) or
                 s.video_textures.contains(entry.graph_index) or s.ml_style_textures.contains(entry.graph_index) or
+                s.sprite_cutouts.contains(entry.graph_index) or
                 (if (s.sprite_anims.get(entry.graph_index)) |a| a.loaded == a.frames else false),
             // A splat cloud is ready once its model has produced its first point
             // set; until then it holds the frame through like any pending draw.
@@ -3916,6 +3941,19 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     const active_us = if (s.active_lens) |*lens| lens.elapsedUs() else 0;
                     const frame_idx: u64 = @intFromFloat(@as(f64, @floatFromInt(active_us)) / 1_000_000.0 * @as(f64, anim.fps));
                     sprite_texture = anim.textures[@intCast(frame_idx % anim.frames)];
+                } else if (s.sprite_cutouts.get(entry.graph_index)) |co| {
+                    // A cutout sprite lifts the live subject keyed by its channel
+                    // into a transparent-background target, then draws that at the
+                    // sprite rect - a movable, scalable auto-subject sticker.
+                    const mask_tex = if (co.channel == 0) s.segmentation_texture orelse r.zero_mask_texture else s.segmentation_class_textures[co.channel] orelse r.zero_mask_texture;
+                    ensureCutoutSticker(s, width, height) catch continue;
+                    const cutout_target = s.cutout_sticker_target orelse continue;
+                    const cutout_view = next_view_id;
+                    next_view_id += 1;
+                    r.tile = null;
+                    render.Renderer.setViewTarget(cutout_view, cutout_target, width, height);
+                    r.submitCutoutSticker(cutout_view, input_texture, mask_tex, co.softness);
+                    sprite_texture = cutout_target.texture;
                 } else {
                     sprite_texture = s.sprite_textures.get(entry.graph_index) orelse continue;
                 }
@@ -4011,15 +4049,18 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         if (lens.paramValue(pname)) |v| sprite_opacity = std.math.clamp(v, 0, 1);
                     }
                 }
+                // A cutout sprite composites by its own matte alpha so its clear
+                // regions show the frame; an opaque sprite fills flat by opacity.
+                const source_alpha = s.sprite_cutouts.contains(entry.graph_index);
                 if (sprite_rotation != 0) {
                     // A turned sprite draws as a rotated quad over the full
                     // view; the axis-aligned rect path cannot rotate.
                     const cx = rect[0] + rect[2] * 0.5;
                     const cy = rect[1] + rect[3] * 0.5;
                     const aspect = if (full_h > 0) full_w / full_h else 1.0;
-                    r.submitSpriteRotated(sprite_view, sprite_texture, cx, cy, rect[2] * 0.5, rect[3] * 0.5, sprite_rotation, aspect, sprite_opacity);
+                    r.submitSpriteRotated(sprite_view, sprite_texture, cx, cy, rect[2] * 0.5, rect[3] * 0.5, sprite_rotation, aspect, sprite_opacity, source_alpha);
                 } else {
-                    r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, sprite_opacity);
+                    r.submitSpriteAtRect(sprite_view, sprite_texture, dx, dy, dw, dh, sprite_opacity, source_alpha);
                 }
                 if (output) |target| {
                     input_texture = target.texture;
@@ -4775,6 +4816,7 @@ pub fn destroySession(session: *Session) void {
     session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
     session.sprite_anchor_faces.deinit(session.engine.gpa);
+    session.sprite_cutouts.deinit(session.engine.gpa);
     session.dynamic_texts.deinit(session.engine.gpa);
     {
         var info_it = session.info_values.iterator();
@@ -4837,6 +4879,7 @@ pub fn destroySession(session: *Session) void {
     if (session.prev_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.occluder_frame_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.splat_scene_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.cutout_sticker_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -9269,6 +9312,7 @@ fn destroySpriteState(session: *Session) void {
     session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
     session.sprite_anchor_faces.clearRetainingCapacity();
+    session.sprite_cutouts.clearRetainingCapacity();
     // Host-fed info values survive a lens change (session state, like
     // orientation); only the lens's own dynamic-text bindings reset here.
     session.dynamic_texts.clearRetainingCapacity();
@@ -10889,6 +10933,12 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
         }
         if (sprite.interaction.any()) session.sprite_interactions.put(gpa, sprite.graph_index, .{ .cfg = sprite.interaction, .base = sprite.rect }) catch {};
         if (sprite.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, sprite.graph_index, @intCast(sprite.anchor_face)) catch {};
+        // A cutout sprite has no bundled image: it lifts the live subject each
+        // frame, so it registers its channel and skips the image-load paths.
+        if (sprite.cutout_channel >= 0) {
+            session.sprite_cutouts.put(gpa, sprite.graph_index, .{ .channel = @intCast(sprite.cutout_channel), .softness = sprite.cutout_softness }) catch {};
+            continue;
+        }
         if (sprite.mask_channel) |channel| {
             session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over, .strength = sprite.mask_strength }) catch {};
             if (sprite.mask_strength_param.len > 0) session.sprite_mask_strength_params.put(gpa, sprite.graph_index, sprite.mask_strength_param) catch {};

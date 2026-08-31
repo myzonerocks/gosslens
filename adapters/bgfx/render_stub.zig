@@ -283,7 +283,7 @@ pub const Renderer = struct {
         _ = chroma;
     }
 
-    pub fn submitSpriteAtRect(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32) void {
+    pub fn submitSpriteAtRect(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32, source_alpha: bool) void {
         _ = r;
         _ = view_id;
         _ = sprite_tex;
@@ -292,9 +292,10 @@ pub const Renderer = struct {
         _ = dw;
         _ = dh;
         _ = opacity;
+        _ = source_alpha;
     }
 
-    pub fn submitSpriteRotated(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32) void {
+    pub fn submitSpriteRotated(r: *Renderer, view_id: u16, sprite_tex: TextureHandle, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32, source_alpha: bool) void {
         _ = r;
         _ = view_id;
         _ = sprite_tex;
@@ -305,6 +306,7 @@ pub const Renderer = struct {
         _ = rotation;
         _ = aspect;
         _ = opacity;
+        _ = source_alpha;
     }
 
     pub fn setLayoutViewport(view_id: u16, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
@@ -425,6 +427,14 @@ pub const Renderer = struct {
         _ = input_texture;
         _ = mask_texture;
         _ = color;
+        _ = softness;
+    }
+
+    pub fn submitCutoutSticker(r: *Renderer, view_id: u16, input_texture: TextureHandle, mask_texture: TextureHandle, softness: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mask_texture;
         _ = softness;
     }
 

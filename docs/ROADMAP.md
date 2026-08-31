@@ -88,7 +88,7 @@ is in one place.
 
 ## Objects, connected AR, and recognition
 
-- [ ] Stickers and cutouts: an auto-subject cutout sticker maker, motion-tracked stickers and text pinned to a moving object, and info and interactive stickers
+- [x] Stickers and cutouts: an auto-subject cutout sticker maker (a sprite.2d `cutout` block lifts the segmented subject into a transparent texture drawn at a movable, scalable rect, proven by the cutout-sticker reference lens), motion-tracked stickers and text pinned to a moving object (an `anchor_face` landmark index on sprite.2d and text.2d pins either to a point on the tracked head, proven by the sticker-face and text-face lenses), live info stickers (a text.2d `content_source` shows a built-in clock or countdown off the lens clock or any host value fed through goss_session_set_info, proven by the info-clock lens), and interactive stickers (the sprite.2d `interaction` block drags, scales, rotates and taps, proven by the interactive-sprite lenses) - each bit-stable through the public surface
 - [x] Object removal and sky replacement: an inpaint.pass magic eraser fills a masked region (an object, blemish or passerby) from its surrounding color along cast rays, and env.pass replaces the sky behind the segmented foreground (the inpaint and env-sky/scene-sky reference lenses, both proven)
 - [ ] Object removal and fill, the rest: temporally consistent video inpaint, generative fill/expand/outpaint, and object move/resize/duplicate with background fill
 - [ ] A try-on catalog: eyewear, jewelry, watches, hats, shoes, apparel draping and tattoo/henna, each tied to its tracker with occlusion and PBR, plus an in-lens product info card and diffusion virtual try-on

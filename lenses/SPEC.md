@@ -892,6 +892,17 @@ sticker animates without a param or a frame count. Until its image decodes
 (all frames, for an animated sprite) the node holds the frame through, never
 blocking the chain.
 
+A `"cutout"` turns the sprite into an auto-subject sticker maker: instead of a
+bundled image, it lifts the live subject from the camera frame keyed by a
+segmentation channel into a transparent-background texture drawn at the sprite
+rect, so the segmented person (or any masked class) becomes a movable, scalable
+sticker. The block is `{"mask": "<channel>", "softness": <0.001..0.5>}`; `mask`
+names the channel (`person` for the whole subject) and `softness` feathers the
+matte edge. A cutout sprite ships no image asset and composites by its matte
+alpha, so its clear regions show the frame; it takes the same `interaction` and
+`anchor_face`, so the cut subject drags, scales, and can ride the face. With no
+live mask it draws nothing, the standard capability degradation.
+
 A `"mask"` names a segmentation channel and keys the sprite full-frame against
 the region it marks, composited the way `blend.pass` swaps a background. A
 `"mask_mode"` picks the side: `"behind"` (the default) fills the sprite where

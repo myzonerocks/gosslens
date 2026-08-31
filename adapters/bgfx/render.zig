@@ -171,6 +171,7 @@ pub const Renderer = struct {
     tint_program: c.bgfx_program_handle_t,
     occluder_program: c.bgfx_program_handle_t,
     cutout_program: c.bgfx_program_handle_t,
+    cutout_sticker_program: c.bgfx_program_handle_t,
     smooth_program: c.bgfx_program_handle_t,
     retouch_program: c.bgfx_program_handle_t,
     matte_refine_program: c.bgfx_program_handle_t,
@@ -496,6 +497,7 @@ pub const Renderer = struct {
         const tint_program = try loadTintProgram();
         const occluder_program = try loadOccluderProgram();
         const cutout_program = try loadCutoutProgram();
+        const cutout_sticker_program = try loadCutoutStickerProgram();
         const smooth_program = try loadSmoothProgram();
         const retouch_program = try loadRetouchProgram();
         const matte_refine_program = try loadMatteRefineProgram();
@@ -623,6 +625,7 @@ pub const Renderer = struct {
             .tint_program = tint_program,
             .occluder_program = occluder_program,
             .cutout_program = cutout_program,
+            .cutout_sticker_program = cutout_sticker_program,
             .smooth_program = smooth_program,
             .retouch_program = retouch_program,
             .matte_refine_program = matte_refine_program,
@@ -922,6 +925,16 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_cutout_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_cutout_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_cutout_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    pub fn loadCutoutStickerProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_cutout_sticker_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_cutout_sticker_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_cutout_sticker_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_cutout_sticker_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -1584,6 +1597,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.tint_program);
         c.bgfx_destroy_program(r.occluder_program);
         c.bgfx_destroy_program(r.cutout_program);
+        c.bgfx_destroy_program(r.cutout_sticker_program);
         c.bgfx_destroy_program(r.smooth_program);
         c.bgfx_destroy_program(r.retouch_program);
         c.bgfx_destroy_program(r.matte_refine_program);
@@ -2110,12 +2124,14 @@ pub const Renderer = struct {
     /// the view to the sprite's pixel rect and alpha-composites the image
     /// there at `opacity` through the shared composite program. The caller
     /// sets the target, so this works for an offscreen target or swap chain.
-    pub fn submitSpriteAtRect(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32) void {
+    pub fn submitSpriteAtRect(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, dx: u16, dy: u16, dw: u16, dh: u16, opacity: f32, source_alpha: bool) void {
         c.bgfx_set_view_rect(view_id, @intCast(dx), @intCast(dy), dw, dh);
         c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, sprite_tex, std.math.maxInt(u32));
-        const params = [4]f32{ opacity, 0, 0, 0 };
+        // Key mode 1 cuts the sprite by its own alpha (a cutout sticker's matte);
+        // mode 0 is a flat opacity fill for an opaque sprite.
+        const params = [4]f32{ opacity, if (source_alpha) 1 else 0, 0, 0 };
         const chroma = [4]f32{ 0, 0, 0, 0 };
         c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
         c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
@@ -2128,7 +2144,7 @@ pub const Renderer = struct {
     /// sprite can be turned two-fingered. cx, cy is the centre and hw, hh the
     /// half extents in normalized frame coordinates; rotation is radians and
     /// aspect the output width over height, so the turn keeps the sprite shape.
-    pub fn submitSpriteRotated(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32) void {
+    pub fn submitSpriteRotated(r: *Renderer, view_id: c.bgfx_view_id_t, sprite_tex: c.bgfx_texture_handle_t, cx: f32, cy: f32, hw: f32, hh: f32, rotation: f32, aspect: f32, opacity: f32, source_alpha: bool) void {
         var tvb: c.bgfx_transient_vertex_buffer_t = undefined;
         var tib: c.bgfx_transient_index_buffer_t = undefined;
         if (c.bgfx_get_avail_transient_vertex_buffer(4, &r.layout) < 4) return;
@@ -2160,7 +2176,7 @@ pub const Renderer = struct {
         c.bgfx_set_transient_vertex_buffer(0, &tvb, 0, 4);
         c.bgfx_set_transient_index_buffer(&tib, 0, 6);
         c.bgfx_set_texture(0, r.tex_color, sprite_tex, std.math.maxInt(u32));
-        const params = [4]f32{ opacity, 0, 0, 0 };
+        const params = [4]f32{ opacity, if (source_alpha) 1 else 0, 0, 0 };
         const chroma = [4]f32{ 0, 0, 0, 0 };
         c.bgfx_set_uniform(r.composite_params_uniform, &params, 1);
         c.bgfx_set_uniform(r.composite_chroma_uniform, &chroma, 1);
@@ -2301,6 +2317,20 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.cutout_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.cutout_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Lifts the segmented subject into a transparent-background cutout: the
+    /// matte becomes the alpha, so the subject keeps the camera color and the
+    /// rest goes clear, ready to draw at a rect as a movable sticker. Reuses the
+    /// cutout uniform; only w (softness) matters, the color is unused.
+    pub fn submitCutoutSticker(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, softness: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        const params = [4]f32{ 0, 0, 0, softness };
+        c.bgfx_set_uniform(r.cutout_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.cutout_sticker_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Blends the frame toward a small neighbor average, masked by the texture

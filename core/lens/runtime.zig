@@ -424,6 +424,11 @@ pub const SpriteNode = struct {
     /// A face-mesh landmark index the sprite pins its center to each frame, so it
     /// tracks the head; negative leaves the sprite at its screen rect.
     anchor_face: i32,
+    /// A segmentation channel the sprite lifts the live subject from into a
+    /// transparent cutout drawn at its rect (an auto-subject sticker); negative
+    /// uses the bundled image. cutout_softness feathers the matte edge.
+    cutout_channel: i32,
+    cutout_softness: f32,
 };
 
 /// One splat.cloud node ready for the caller to load and draw - which graph node
@@ -1616,7 +1621,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over, .mask_strength = sp.mask_strength, .mask_strength_param = sp.mask_strength_param, .anchor_face = sp.anchor_face });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over, .mask_strength = sp.mask_strength, .mask_strength_param = sp.mask_strength_param, .anchor_face = sp.anchor_face, .cutout_channel = sp.cutout_channel, .cutout_softness = sp.cutout_softness });
         }
         return out.toOwnedSlice(gpa);
     }

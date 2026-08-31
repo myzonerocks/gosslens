@@ -860,6 +860,12 @@ pub const SpriteField = struct {
     /// tracks the face - glasses on the eyes, a hat above the brow - following the
     /// head each frame. Negative (default) leaves the sprite at its screen rect.
     anchor_face: i32 = -1,
+    /// A segmentation channel the sprite lifts the live subject from instead of a
+    /// bundled image: the frame keyed by it becomes a transparent cutout drawn at
+    /// the sprite rect, an auto-subject sticker. Negative (default) uses the
+    /// bundled image; cutout_softness feathers the matte edge.
+    cutout_channel: i32 = -1,
+    cutout_softness: f32 = 0.02,
 };
 
 pub const SpriteMaskMode = enum { behind, over };
@@ -3202,6 +3208,16 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     if (v == .integer and v.integer >= 0 and v.integer < face_landmark_count) {
                         field.anchor_face = @intCast(v.integer);
                     } else try diags.add(path.slice(), "sprite anchor_face must be a face landmark index 0..{d}", .{face_landmark_count - 1});
+                }
+                if (getField(sv.object, "cutout")) |cv| {
+                    if (cv == .object) {
+                        if (getField(cv.object, "mask")) |mv| {
+                            if (try expectString(diags, path, mv)) |name| {
+                                if (maskChannelIndex(name)) |channel| field.cutout_channel = channel else try diags.add(path.slice(), "sprite cutout mask names an unknown channel '{s}'", .{name});
+                            }
+                        } else try diags.add(path.slice(), "a sprite cutout needs a mask channel", .{});
+                        if (getField(cv.object, "softness")) |sfv| field.cutout_softness = std.math.clamp(@as(f32, @floatCast(numberOf(sfv) orelse field.cutout_softness)), 0.001, 0.5);
+                    } else try diags.add(path.slice(), "sprite cutout must be an object", .{});
                 }
                 if (getField(sv.object, "frames")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= max_sprite_frames) {

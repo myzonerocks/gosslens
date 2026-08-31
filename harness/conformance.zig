@@ -1034,6 +1034,116 @@ fn proveInfoSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the auto-subject cutout sticker maker: a sprite.2d with a `cutout`
+/// channel lifts the segmented subject into a transparent texture drawn at the
+/// sprite rect. With a subject mask the right-side rect changes while the left
+/// half stays byte-identical to the no-mask frame, and it redraws deterministically.
+fn proveCutoutSticker(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const seg_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(seg_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const rgba = corpus.frame.pixels.rgba8;
+    const cw = corpus.frame.width;
+    const ch = corpus.frame.height;
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const cap = @as(usize, 1024) * 1024 * 4;
+    const shot_cut = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_cut);
+    const shot_cut2 = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_cut2);
+    const shot_none = try gpa.alloc(u8, cap);
+    defer gpa.free(shot_none);
+    var wc: u32 = 0;
+    var hc: u32 = 0;
+    var wc2: u32 = 0;
+    var hc2: u32 = 0;
+    var wn: u32 = 0;
+    var hn: u32 = 0;
+
+    // The subject is present: a segmenter mask keys the cutout, which the sprite
+    // draws at its right-side rect.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_segmentation(session, seg_bytes.ptr, seg_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/cutout-sticker", ".lens-packages/cutout-sticker".len) != .ok) return error.ActivationFailed;
+        if (abi.goss_session_submit_segmentation_image(session, rgba.ptr, cw, ch) != .ok) return error.SubmitSegImageFailed;
+        var polls: usize = 0;
+        while (session.segmentation_texture == null) {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            polls += 1;
+            if (polls > 1_000_000) return error.MaskNeverProduced;
+        }
+        for (0..5) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_cut.ptr, shot_cut.len, &wc, &hc) != .ok) return error.CaptureFailed;
+        for (0..3) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_cut2.ptr, shot_cut2.len, &wc2, &hc2) != .ok) return error.CaptureFailed;
+    }
+    // No subject mask: the cutout keys to nothing and stays transparent, so the
+    // frame passes through untouched - the sticker's off-state.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/cutout-sticker", ".lens-packages/cutout-sticker".len) != .ok) return error.ActivationFailed;
+        for (0..10) |_| {
+            _ = abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        if (abi.goss_engine_capture_frame(engine, session, shot_none.ptr, shot_none.len, &wn, &hn) != .ok) return error.CaptureFailed;
+    }
+    if (wc == 0 or wc != wn or hc != hn or wc != wc2 or hc != hc2) {
+        std.debug.print("conformance: FAIL cutout-sticker capture size mismatch\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shot_cut[0 .. wc * hc * 4], shot_cut2[0 .. wc * hc * 4])) {
+        std.debug.print("conformance: FAIL cutout-sticker is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // The cutout only draws at the right-side rect, so the left half stays
+    // byte-identical to the untouched frame while the right half gains the
+    // lifted subject.
+    var left_changed: usize = 0;
+    var right_changed: usize = 0;
+    var y: u32 = 0;
+    while (y < hc) : (y += 1) {
+        var x: u32 = 0;
+        while (x < wc) : (x += 1) {
+            const idx = (y * wc + x) * 4;
+            if (!std.mem.eql(u8, shot_cut[idx .. idx + 4], shot_none[idx .. idx + 4])) {
+                if (x < wc / 2) left_changed += 1 else right_changed += 1;
+            }
+        }
+    }
+    if (right_changed == 0 or left_changed != 0) {
+        std.debug.print("conformance: FAIL cutout-sticker did not lift the subject to its rect (left changed {d}, right changed {d})\n", .{ left_changed, right_changed });
+        return false;
+    }
+
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shot_cut[0 .. wc * hc * 4], @intCast(wc), @intCast(hc));
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-cutout-sticker.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF the cutout sticker maker lifts the segmented subject to a movable rect - the right-side sticker gained {d} px while the left half stayed byte-identical, deterministic\n", .{right_changed});
+    return true;
+}
+
 fn proveMultiBodyFanOut(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -19520,6 +19630,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveFaceText(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "info-sticker")) {
             if (!try proveInfoSticker(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "cutout-sticker")) {
+            if (!try proveCutoutSticker(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "hostile-manifest")) {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else {
@@ -19654,6 +19766,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("face text");
     if (!try proveInfoSticker(gpa, engine)) return 1;
     watchHold("info sticker");
+    if (!try proveCutoutSticker(gpa, engine)) return 1;
+    watchHold("cutout sticker");
     if (!try proveMultiBodyFanOut(gpa, engine)) return 1;
     watchHold("multi body fan out");
     if (!try proveSkeletonRig(gpa, engine)) return 1;
