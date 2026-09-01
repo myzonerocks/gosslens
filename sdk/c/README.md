@@ -87,8 +87,3 @@ builds `c`, compiles the example against the shared library, and runs it.
 External projects that build with CMake can consume the staged library through
 [`CMakeLists.txt`](CMakeLists.txt), which imports it rather than rebuilding the
 engine.
-
-## TODO
-
-- Tag a release so a consumer can pin a versioned `libgosslens` rather than
-  building it from a checkout.

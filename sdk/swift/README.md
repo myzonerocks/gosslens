@@ -1,36 +1,43 @@
 # Gosslens - Swift SDK
 
-Swift SDK for [Gosslens](../../include/gosslens.h), a camera engine with a
-Zig core behind one C ABI. Wraps it as `GossEngine`, `GossSession`, and
-`Gosslens`, the same names the [Kotlin](../kotlin/README.md) and
-[TypeScript](../ts/README.md) SDKs use.
+Swift SDK for [Gosslens](../../include/gosslens.h), a camera engine behind one
+C ABI. Wraps it as `GossEngine`, `GossSession`, and `Gosslens`, the same names
+the [Kotlin](../kotlin/README.md) and [TypeScript](../ts/README.md) SDKs use.
 
 This SDK owns capture ingress, GPU surface handoff, and platform
 tracking. The frame graph, lens runtime, and effect pipeline live in the
 core.
 
 [docs/INTEGRATION-iOS.md](../../docs/INTEGRATION-iOS.md) is the start-to-finish
-guide: build the slices, add the package, set the two search paths, and the
-minimal render loop.
+guide: add the SwiftPM package, `import Gosslens`, and the minimal render loop.
 
 ## Install
 
+Add the SwiftPM package. Each release attaches a checksummed XCFramework and
+pins `Package.swift` to it, so there is no Zig and no build step:
+
 ```swift
-.package(url: "https://github.com/myzonerocks/gosslens", branch: "main"),
+.package(url: "https://github.com/myzonerocks/gosslens", from: "X.Y.Z"),
 ```
 
 ```swift
 .product(name: "Gosslens", package: "gosslens"),
 ```
 
-Resolved from the [root manifest](../../Package.swift); `cd sdk/swift &&
-swift build` uses this directory's own for development.
+Set `X.Y.Z` to a released version like `0.9.0`; the latest is on the
+[releases page](https://github.com/myzonerocks/gosslens/releases).
 
-A released package carries the prebuilt engine as an XCFramework, so you add
-the SwiftPM dependency, `import Gosslens`, and write Swift - nothing to build or
-link by hand. Building the engine from source (`zig build ios`/`ios-simulator`)
-is only for engine maintainers; the [iOS integration guide](../../docs/INTEGRATION-iOS.md)
-covers that path.
+<details>
+<summary>Against your own checkout (engine maintainers)</summary>
+
+Point SwiftPM at the local package and build the slices first with
+`zig build ios` / `ios-simulator`:
+
+```swift
+.package(path: "../gosslens"),
+```
+
+</details>
 
 ## Use
 
@@ -77,7 +84,7 @@ world.start()
 ```
 
 The full cross-platform capability tour is in the
-[root README](../../README.md#using-gosslens).
+[root README](../../README.md#what-you-get).
 
 ## Demo app
 
@@ -85,6 +92,5 @@ The full cross-platform capability tour is in the
 
 ## TODO
 
-- Tag a release; the manifest above pins to `main`, which drifts.
 - Add a `Tests/` target. Conformance runs through the demo app's
   `-GossConformance` launch argument and [`harness/`](../../harness/) for now.

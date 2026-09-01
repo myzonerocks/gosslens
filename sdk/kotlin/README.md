@@ -1,9 +1,8 @@
 # Gosslens - Kotlin SDK
 
-Kotlin SDK for [Gosslens](../../include/gosslens.h), a camera engine with a
-Zig core behind one C ABI. Wraps it as `GossEngine`, `GossSession`, and
-`Gosslens`, the same names the [Swift](../swift/README.md) and
-[TypeScript](../ts/README.md) SDKs use.
+Kotlin SDK for [Gosslens](../../include/gosslens.h), a camera engine behind one
+C ABI. Wraps it as `GossEngine`, `GossSession`, and `Gosslens`, the same names
+the [Swift](../swift/README.md) and [TypeScript](../ts/README.md) SDKs use.
 
 This SDK owns capture ingress, GPU surface handoff, and platform
 tracking. The frame graph, lens runtime, and effect pipeline live in the
@@ -81,7 +80,7 @@ World tracking feeds ARCore frames in through the demo's
 [`WorldFeeder`](demo/src/main/kotlin/com/gosslens/demo/WorldFeeder.kt).
 Full-resolution stills and platform photo formats are iOS-first for now;
 see [docs/PARITY.md](../../docs/PARITY.md). The full cross-platform
-capability tour is in the [root README](../../README.md#using-gosslens).
+capability tour is in the [root README](../../README.md#what-you-get).
 
 ## Demo app
 

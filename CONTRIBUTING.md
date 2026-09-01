@@ -49,6 +49,26 @@ beta; tick "Show Package Details" and take the pinned version.
 machine wants more memory than an 8 GB host has; it dies with `LLVM ERROR: out
 of memory`. Pass `-j4` there on a machine that small.
 
+## Repository layout
+
+```text
+build.zig  build.zig.zon    one build system for Zig, C, and C++, all targets
+.zigversion                 the pinned Zig version
+include/gosslens.h          the C ABI
+core/                       frame graph, lens runtime, tracking, media, math
+adapters/                   native/vendor backends behind engine boundaries
+sdk/                        c, swift, kotlin, ts packages and demo apps
+lenses/                     the .glens format: spec, validator, reference lenses
+harness/                    headless conformance runner
+third_party/                pinned vendor dependencies
+tools/                      toolchain bootstrap and the source gate
+```
+
+The checked-out layout is authoritative. Existing subsystems stay where they
+are; new work extends the nearest existing boundary. The lens file format,
+published as a forkable standard, is [docs/LENS-FORMAT.md](docs/LENS-FORMAT.md);
+toolchain decisions are logged in [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md).
+
 ## Watch it draw
 
 ```sh

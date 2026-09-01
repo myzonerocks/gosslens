@@ -1,9 +1,9 @@
 # Gosslens - TypeScript SDK
 
 TypeScript SDK for [Gosslens](../../include/gosslens.h), a camera engine
-with a Zig core behind one C ABI, compiled to `wasm32`. Wraps it as
-`GossEngine`, `GossSession`, and `Gosslens`, the same names the
-[Swift](../swift/README.md) and [Kotlin](../kotlin/README.md) SDKs use.
+behind one C ABI, compiled to `wasm32`. Wraps it as `GossEngine`,
+`GossSession`, and `Gosslens`, the same names the [Swift](../swift/README.md)
+and [Kotlin](../kotlin/README.md) SDKs use.
 
 This SDK owns camera capture through `getUserMedia`, the render loop,
 and decoding the PNGs the core has no decoder for. The frame graph, lens
