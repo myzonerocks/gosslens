@@ -214,6 +214,9 @@ jobs:
       # consumers get the prebuilt engine with no Zig. Best effort: if main is
       # protected the push is skipped and the values are printed to pin by hand.
       - name: pin the swift binary target on main
+        # Best effort: pinning commits to protected main, so never let it block
+        # the registry publishes that follow.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
