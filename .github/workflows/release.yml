@@ -294,6 +294,10 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          # A PAT that bypasses main's branch rule lets the pin self-commit; add
+          # RELEASE_PAT as a secret and to the ruleset's bypass list. Without it
+          # the default token push is rejected and the pin is a one-line PR.
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -euo pipefail
           checksum=$(cat dist/apple/GosslensKit.checksum.txt)
@@ -301,10 +305,13 @@ jobs:
           git config user.email avosa.developer@gmail.com
           git fetch origin main && git checkout main
           tools/pin-swift-xcframework.sh "${RELEASE_TAG}" "${checksum}"
-          if ! git diff --quiet sdk/swift/Package.swift; then
-            git add sdk/swift/Package.swift
-            git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
-            git push origin main || echo "note: push to main was rejected (branch protection); run tools/pin-swift-xcframework.sh with the values above and open a PR"
+          if git diff --quiet sdk/swift/Package.swift; then exit 0; fi
+          git add sdk/swift/Package.swift
+          git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
+          if [ -n "${RELEASE_PAT:-}" ]; then
+            git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          else
+            git push origin main || echo "note: no RELEASE_PAT and the branch rule blocks the token push; pin via a one-line PR (tools/pin-swift-xcframework.sh)"
           fi
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
