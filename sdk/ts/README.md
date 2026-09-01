@@ -89,8 +89,3 @@ cross-platform SDK overview is in the [root README](../../README.md).
 parsers and the WebGPU/WebGL2 pick. The browser end-to-end proofs live in
 [`demo/prove.ts`](demo/prove.ts) and [`demo/track-prove.ts`](demo/track-prove.ts),
 with the host conformance in [`harness/`](../../harness/).
-
-## TODO
-
-- Publish `@myzonerocks/gosslens` to npm; until then `bun add` resolves
-  only inside the workspace.

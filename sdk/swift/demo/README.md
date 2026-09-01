@@ -1,5 +1,11 @@
 # iOS demo
 
+> [!TIP]
+> Building your own app? You don't need any of this. Add the SwiftPM package and
+> follow [docs/INTEGRATION-iOS.md](../../../docs/INTEGRATION-iOS.md) - no Zig, no
+> Xcode build settings. This is an in-repo reference that links the SDK from the
+> checkout so it always matches the SDK source.
+
 A UIKit app with a live camera preview through the real ABI - AVFoundation
 capture, zero-copy into a Metal-backed renderer. It shows the full showcase
 every platform carries: the front camera preview (always mirrored), beauty
