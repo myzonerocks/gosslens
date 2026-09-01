@@ -144,7 +144,12 @@ jobs:
           tools/toolchain-sync
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
-        run: zig build vendor-sync
+        # emscripten and emscripten-python are excluded from the default sync
+        # (large, single-use), but the web engine build requires them.
+        run: |
+          zig build vendor-sync
+          zig build vendor-sync -- --only emscripten
+          zig build vendor-sync -- --only emscripten-python
       - uses: oven-sh/setup-bun@v2
       - name: pack the js wrapper
         run: |
