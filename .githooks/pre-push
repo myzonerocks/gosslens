@@ -1,9 +1,42 @@
 #!/bin/sh
-# main is PR-only; squash merges happen server-side, never as a local push.
+# Run the required gates before any branch leaves the desktop, so a push that
+# would fail hosted CI never spends runner minutes. main stays PR-only. Set
+# GOSS_PREPUSH_FULL=1 to also cross-build android and web; --no-verify skips.
+set -e
+
+root="$(git rev-parse --show-toplevel)"
+zig="$root/.local/zig/current/zig"
+[ -x "$zig" ] || zig="$zig.exe"
+[ -x "$zig" ] || zig=zig
+
+gate_needed=0
 while read -r local_ref local_sha remote_ref remote_sha; do
+  # A deletion pushes the all-zero sha; there is nothing to gate.
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+  # main is server-side squash-merge only, never a direct push.
   if [ "$remote_ref" = "refs/heads/main" ]; then
     echo "pre-push: refusing direct push to main; open a PR and squash-merge on green" >&2
     exit 1
   fi
+  # Only branch refs carry source to gate; a tag is a release ref the release
+  # workflow gates on its own.
+  case "$remote_ref" in refs/heads/*) gate_needed=1 ;; esac
 done
-exit 0
+
+[ "$gate_needed" = 1 ] || exit 0
+
+cd "$root"
+echo "pre-push: running the required gates locally (ci + tracking); --no-verify to skip" >&2
+"$zig" build ci
+"$zig" build tracking-harness
+
+if [ "${GOSS_PREPUSH_FULL:-}" = 1 ]; then
+  # Opt-in: the platform lanes are heavier and are not required checks, so they
+  # stay off the default push and run only when asked. Conformance is left to CI
+  # because it can hang when it races another gate process on this machine.
+  echo "pre-push: GOSS_PREPUSH_FULL set, also building android and web" >&2
+  "$zig" build android
+  ( cd sdk/ts && bun install --silent && bun run build && bun test )
+fi
+
+echo "pre-push: gates green" >&2
