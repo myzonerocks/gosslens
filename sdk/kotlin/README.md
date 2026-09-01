@@ -58,11 +58,10 @@ dependencies {
 > Central ships the binary our CI already built, which is why it is the
 > recommended path.
 
-<details>
-<summary>Building the engine from source (engine maintainers only)</summary>
+### Building from source
 
-You only need this if you are changing the engine itself. Run `zig build android`
-once, then substitute the local module for the coordinate:
+Prefer compiling the engine yourself, from a clone or your own fork? Run
+`zig build android` once, then substitute the local module for the coordinate:
 
 ```kotlin
 // settings.gradle.kts
@@ -76,8 +75,6 @@ dependencies {
 
 The SDK's gradle reads `jniLibs.srcDir("../../zig-out/android")`, so the AAR it
 produces carries the native library you just built.
-
-</details>
 
 ## The render loop
 

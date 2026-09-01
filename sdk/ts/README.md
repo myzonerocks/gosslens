@@ -32,11 +32,10 @@ unzip it into your static assets. Grab it from the
 picks the WebGL2 or WebGPU build at load time from the URLs you point it at, after
 confirming a real WebGPU adapter.
 
-<details>
-<summary>Building the engine and the SDK from source (engine maintainers only)</summary>
+### Building from source
 
-You only need this if you are changing the engine or the SDK itself. Build the
-engine artifacts:
+Prefer compiling the engine and the SDK yourself, from a clone or your own
+fork? Build the engine artifacts:
 
 ```sh
 zig build wasm-emscripten
@@ -55,8 +54,6 @@ published package:
 `bun run build` compiles `src/` to `dist/src/` (the package points `main` and
 `types` there); run it once in `sdk/ts` so `dist/` exists before a workspace
 consumer resolves it.
-
-</details>
 
 ## The render loop
 
