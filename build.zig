@@ -2208,8 +2208,8 @@ fn photoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .root_source_file = b.path(root),
         .target = target,
         .optimize = optimize,
-        .imports = if (android) &.{.{ .name = "image", .module = image_module.? }} else &.{},
     });
+    if (android) module.addImport("image", image_module.?);
     if (apple) {
         module.addCSourceFile(.{
             .file = b.path("adapters/image/photo_apple.mm"),
@@ -2248,8 +2248,8 @@ fn mediaVideoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .root_source_file = b.path(root),
         .target = target,
         .optimize = optimize,
-        .imports = if (android) &.{.{ .name = "image", .module = image_module.? }} else &.{},
     });
+    if (android) module.addImport("image", image_module.?);
     if (apple) {
         module.addCSourceFile(.{
             .file = b.path("adapters/media/video_apple.mm"),
