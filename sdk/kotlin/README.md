@@ -19,9 +19,12 @@ is no Zig and no NDK:
 
 ```kotlin
 dependencies {
-    implementation("io.github.avosa:gosslens:0.9.0")
+    implementation("io.github.avosa:gosslens:X.Y.Z")
 }
 ```
+
+Set `X.Y.Z` to a released version like `0.9.0`; the latest is on the
+[releases page](https://github.com/myzonerocks/gosslens/releases).
 
 <details>
 <summary>JitPack, or a local checkout (engine maintainers)</summary>
@@ -31,7 +34,7 @@ dependencies {
 ```kotlin
 repositories { maven { url = uri("https://jitpack.io") } }
 dependencies {
-    implementation("com.github.myzonerocks:gosslens:v0.9.0")
+    implementation("com.github.myzonerocks:gosslens:vX.Y.Z")
 }
 ```
 

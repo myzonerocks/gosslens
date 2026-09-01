@@ -23,12 +23,13 @@ publishes the signed artifact to Maven Central. Add one coordinate:
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.github.avosa:gosslens:0.9.0")
+    implementation("io.github.avosa:gosslens:X.Y.Z")
 }
 ```
 
-No repository declaration, no toolchain. This is the frictionless path once a
-`vX.Y.Z` release has been cut.
+Set `X.Y.Z` to a released version like `0.9.0`; the latest is on the
+[releases page](https://github.com/myzonerocks/gosslens/releases). No repository
+declaration, no toolchain - the frictionless path once a release has been cut.
 
 ### JitPack (alternative)
 
@@ -43,7 +44,7 @@ dependencyResolutionManagement {
 
 // build.gradle.kts
 dependencies {
-    implementation("com.github.myzonerocks:gosslens:v0.9.0")
+    implementation("com.github.myzonerocks:gosslens:vX.Y.Z")
 }
 ```
 

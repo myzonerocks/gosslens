@@ -12,8 +12,11 @@ Each release attaches a prebuilt `GosslensKit.xcframework` and pins
 `Package.swift` to it, so you add one SwiftPM dependency and `import Gosslens`:
 
 ```swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "0.9.0")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "X.Y.Z")
 ```
+
+Set `X.Y.Z` to a released version like `0.9.0`; the latest is on the
+[releases page](https://github.com/myzonerocks/gosslens/releases).
 
 > [!TIP]
 > The XCFramework carries the merged static engine and the C ABI module, and its
