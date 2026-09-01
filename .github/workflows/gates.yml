@@ -338,11 +338,25 @@ jobs:
           key: models-${{ hashFiles('third_party/models.lock') }}
       - name: fetch models
         run: zig build fetch-models
-      # The pixel conformance suite renders through bgfx/Metal, which a
-      # macos runner has and a Linux runner does not, moving the render
-      # proofs off the local-only bar. A headless runner that cannot
-      # present surfaces the gap here rather than hiding it.
+      # The pixel proofs render through bgfx/Metal, which the hosted macos
+      # runner has. The beauty pass is the exception: gpupixel draws through
+      # NSOpenGL, and the runner's virtual display cannot create a pixel
+      # format, so that pass degrades to a silent no-op and hashes wrong.
+      # Every other proof gates here against the pinned baseline; the
+      # beauty-baseline line is reported, not compared, and gates on a mac
+      # with a display through the local zig build conformance.
       - name: conformance
-        run: zig build conformance
         env:
           GOSS_PROBES: "1"
+        run: |
+          hosted_skip=beauty-baseline
+          zig build conformance -- --print > "$RUNNER_TEMP/current.txt"
+          grep -E '^[a-z0-9-]+ [0-9a-f]{64}$' "$RUNNER_TEMP/current.txt" > "$RUNNER_TEMP/got.txt"
+          grep -q "^$hosted_skip " "$RUNNER_TEMP/got.txt" || { echo "conformance: $hosted_skip did not run"; exit 1; }
+          grep -v "^$hosted_skip " lenses/conformance-baseline.txt > "$RUNNER_TEMP/want.txt"
+          grep -v "^$hosted_skip " "$RUNNER_TEMP/got.txt" > "$RUNNER_TEMP/got-hosted.txt"
+          if ! diff -u "$RUNNER_TEMP/want.txt" "$RUNNER_TEMP/got-hosted.txt"; then
+            echo "conformance: hosted proofs differ from lenses/conformance-baseline.txt"
+            exit 1
+          fi
+          echo "conformance: $(wc -l < "$RUNNER_TEMP/want.txt" | tr -d ' ') proofs match the baseline; $hosted_skip needs NSOpenGL and gates locally"
