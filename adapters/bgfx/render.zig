@@ -1724,6 +1724,7 @@ pub const Renderer = struct {
                 self.width = width;
                 self.height = height;
             }
+            if (self.handle.idx == invalid_handle) return self.handle;
             _ = c.bgfx_override_internal_texture_ptr(self.handle, native_ptr, 0);
             return self.handle;
         }
@@ -3345,7 +3346,12 @@ pub const Renderer = struct {
     pub fn createGpuParticleSim(r: *Renderer, count: u32) ?GpuParticleSim {
         if (r.particle_compute_program == null) return null;
         const billboard = c.bgfx_create_dynamic_vertex_buffer(count * 6, &r.billboard_layout, c.BGFX_BUFFER_COMPUTE_WRITE);
+        if (billboard.idx == invalid_handle) return null;
         const state = c.bgfx_create_dynamic_vertex_buffer(count * 3, &r.vec4_layout, c.BGFX_BUFFER_COMPUTE_READ_WRITE);
+        if (state.idx == invalid_handle) {
+            c.bgfx_destroy_dynamic_vertex_buffer(billboard);
+            return null;
+        }
         return .{ .state_buffer = state, .billboard = .{ .position_buffer = billboard, .vertex_count = count * 6 }, .count = count };
     }
 

@@ -9954,13 +9954,22 @@ fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) vo
         // A "builtin:<name>" target plays an engine-synthesized effect with no
         // bundled file; anything else loads the sound from the lens bundle.
         const id = if (std.mem.startsWith(u8, rel, "builtin:")) blk: {
-            const wav = sfx.synth(gpa, rel["builtin:".len..], audio_sample_rate) catch continue;
+            const wav = sfx.synth(gpa, rel["builtin:".len..], audio_sample_rate) catch |err| {
+                std.log.info("gosslens: sound {s} left silent - synthesis failed ({t})", .{ rel, err });
+                continue;
+            };
             defer gpa.free(wav);
-            break :blk mixer.loadMemory(wav) catch continue;
+            break :blk mixer.loadMemory(wav) catch |err| {
+                std.log.info("gosslens: sound {s} left silent - decode failed ({t})", .{ rel, err });
+                continue;
+            };
         } else blk: {
             const full = std.fmt.allocPrint(gpa, "{s}/{s}", .{ bundle_path, rel }) catch continue;
             defer gpa.free(full);
-            break :blk mixer.load(full) catch continue;
+            break :blk mixer.load(full) catch |err| {
+                std.log.info("gosslens: sound {s} left silent - load failed ({t})", .{ rel, err });
+                continue;
+            };
         };
         const key = s.engine.gpa.dupe(u8, rel) catch continue;
         s.sound_ids.put(s.engine.gpa, key, id) catch {
@@ -10461,14 +10470,23 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
     defer gpa.free(passes);
     if (passes.len == 0) return;
 
-    const tag = render.Renderer.currentShaderProfileTag() catch return;
+    const tag = render.Renderer.currentShaderProfileTag() catch |err| {
+        std.log.info("gosslens: every shader.pass left inert - no shader profile for this backend ({t})", .{err});
+        return;
+    };
     const io = defaultIo();
     for (passes) |pass| {
         const bin_path = std.fmt.allocPrint(gpa, "{s}/shaders/{s}.{s}.bin", .{ bundle_path, pass.shader_stem, tag }) catch continue;
         defer gpa.free(bin_path);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, bin_path, gpa, .limited(256 * 1024)) catch continue;
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, bin_path, gpa, .limited(256 * 1024)) catch |err| {
+            std.log.info("gosslens: shader.pass {s} left inert - {s} unreadable ({t})", .{ pass.shader_stem, bin_path, err });
+            continue;
+        };
         defer gpa.free(bytes);
-        const program = render.Renderer.loadLensProgram(bytes) catch continue;
+        const program = render.Renderer.loadLensProgram(bytes) catch |err| {
+            std.log.info("gosslens: shader.pass {s} left inert - {s}.{s} program creation failed ({t})", .{ pass.shader_stem, pass.shader_stem, tag, err });
+            continue;
+        };
         session.shader_programs.put(gpa, pass.graph_index, program.idx) catch {
             render.Renderer.destroyProgram(program);
             continue;
@@ -11381,12 +11399,16 @@ fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         session.sprite_rects.put(gpa, v.graph_index, .{ v.rect[0], v.rect[1], v.rect[2], v.rect[3], v.opacity }) catch {};
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.mp4", .{ bundle_path, v.source }) catch continue;
         defer gpa.free(path);
-        var decoder = video.Decoder.open(path) orelse continue;
+        var decoder = video.Decoder.open(path) orelse {
+            std.log.info("gosslens: video.texture {s} left blank - {s} did not open on this decoder", .{ v.source, path });
+            continue;
+        };
         const rgba = gpa.alloc(u8, @as(usize, decoder.width) * decoder.height * 4) catch {
             decoder.close();
             continue;
         };
         if (decoder.read(rgba) != .frame) {
+            std.log.info("gosslens: video.texture {s} left blank - {s} produced no first frame", .{ v.source, path });
             gpa.free(rgba);
             decoder.close();
             continue;
@@ -11818,10 +11840,10 @@ fn feedFaceEmitters(s: *Session, sys: *particles.System, frame_w: u32, frame_h: 
 /// defaulting to the fountain for anything unrecognised.
 fn particlePattern(name: []const u8) particles.Pattern {
     const names = [_]struct { s: []const u8, p: particles.Pattern }{
-        .{ .s = "rain", .p = .rain },       .{ .s = "burst", .p = .burst },
-        .{ .s = "ring", .p = .ring },       .{ .s = "cone", .p = .cone },
-        .{ .s = "sphere", .p = .sphere },   .{ .s = "box", .p = .box },
-        .{ .s = "disc", .p = .disc },       .{ .s = "hemisphere", .p = .hemisphere },
+        .{ .s = "rain", .p = .rain },     .{ .s = "burst", .p = .burst },
+        .{ .s = "ring", .p = .ring },     .{ .s = "cone", .p = .cone },
+        .{ .s = "sphere", .p = .sphere }, .{ .s = "box", .p = .box },
+        .{ .s = "disc", .p = .disc },     .{ .s = "hemisphere", .p = .hemisphere },
         .{ .s = "face", .p = .face },
     };
     for (names) |n| {
@@ -14599,7 +14621,7 @@ test "buildMorphBlendshapeTable maps ARKit names to blendshape indices" {
 test "writeSplatBillboards carries per-point color when colored, white otherwise" {
     // Colored: two points, xyz then rgb interleaved (stride six).
     const colored_pts = [_]f32{
-        0.1, 0.2, 0.3, 0.9, 0.8, 0.7,
+        0.1, 0.2, 0.3, 0.9,  0.8,  0.7,
         0.4, 0.5, 0.6, 0.15, 0.25, 0.35,
     };
     var out: [2 * 6 * 12]f32 = undefined;
