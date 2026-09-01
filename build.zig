@@ -266,7 +266,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("jpeg", jpegModule(b, target, optimize));
     abi_module.addImport("color", colorModule(b, target, optimize));
     abi_module.addImport("media_recording", recordingModule(b, target, optimize));
-    abi_module.addImport("media_video", mediaVideoModule(b, target, optimize));
+    abi_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
     abi_module.addImport("photo", photoModule(b, target, optimize));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
     abi_module.addImport("audio_mix", audioMixModule(b, target, optimize));
@@ -523,7 +523,7 @@ pub fn build(b: *std.Build) void {
     }
     // On apple hosts this runs the media shim's boundary-guard proof: a
     // deliberate throw behind the C surface must land as a status.
-    const media_video_tests = b.addTest(.{ .root_module = mediaVideoModule(b, target, optimize) });
+    const media_video_tests = b.addTest(.{ .root_module = mediaVideoModule(b, target, optimize, null) });
     test_step.dependOn(&b.addRunArtifact(media_video_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
@@ -871,7 +871,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("jpeg", jpegModule(b, target, optimize));
         abi_tracking_module.addImport("color", colorModule(b, target, optimize));
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize));
-        abi_tracking_module.addImport("media_video", mediaVideoModule(b, target, optimize));
+        abi_tracking_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_tracking_module.addImport("audio_mix", audioMixModule(b, target, optimize));
@@ -1106,7 +1106,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("color", colorModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, .ReleaseSmall, null));
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
@@ -1326,7 +1326,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("jpeg", conformance_jpeg_module);
         abi_conformance_module.addImport("color", conformance_color_module);
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize));
-        abi_conformance_module.addImport("media_video", mediaVideoModule(b, target, optimize));
+        abi_conformance_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_conformance_module.addImport("audio_mix", audioMixModule(b, target, optimize));
@@ -1717,7 +1717,6 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("jpeg", jpegModule(b, android_target, optimize));
     abi_android.addImport("color", colorModule(b, android_target, optimize));
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
-    abi_android.addImport("media_video", mediaVideoModule(b, android_target, optimize));
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
@@ -1910,6 +1909,9 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     const gltf_android = if (have_cgltf_android) gltfModule(b, android_target, optimize, math_android) else null;
     const android_asset = realAssetModules(b, android_target, optimize, gltf_android);
     abi_android.addImport("image", android_asset.image);
+    // Now that the android image adapter exists, wire the video decoder that
+    // converts its YUV output through it.
+    abi_android.addImport("media_video", mediaVideoModule(b, android_target, optimize, android_asset.image));
     render_android.addImport("image", android_asset.image);
     abi_android.addImport("asset", android_asset.asset);
     if (gltf_android) |gm| abi_android.addImport("gltf", gm);
@@ -2213,16 +2215,23 @@ fn photoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 // file's frames one at a time so a live texture pulls the next in O(1).
 // Targets without a landed backend get the deterministic synthetic
 // clip, so the playback path still runs and tests.
-fn mediaVideoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+fn mediaVideoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, image_module: ?*std.Build.Module) *std.Build.Module {
     const apple = target.result.os.tag == .macos or target.result.os.tag == .ios;
+    // Android decodes through AMediaExtractor + AMediaCodec and converts the
+    // codec's YUV output to BGRA through the image adapter, so it needs that
+    // module; without it (every other caller) the stub stands in.
+    const android = target.result.abi.isAndroid() and image_module != null;
     const root = if (apple)
         "adapters/media/video.zig"
+    else if (android)
+        "adapters/media/video_android.zig"
     else
         "adapters/media/video_stub.zig";
     const module = b.createModule(.{
         .root_source_file = b.path(root),
         .target = target,
         .optimize = optimize,
+        .imports = if (android) &.{.{ .name = "image", .module = image_module.? }} else &.{},
     });
     if (apple) {
         module.addCSourceFile(.{
@@ -3943,7 +3952,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("jpeg", jpegModule(b, ios_target, optimize));
     abi_ios.addImport("color", colorModule(b, ios_target, optimize));
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
-    abi_ios.addImport("media_video", mediaVideoModule(b, ios_target, optimize));
+    abi_ios.addImport("media_video", mediaVideoModule(b, ios_target, optimize, null));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     abi_ios.addImport("audio_mix", audioMixModule(b, ios_target, optimize));
@@ -4598,7 +4607,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("jpeg", jpegModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("color", colorModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("media_video", mediaVideoModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("media_video", mediaVideoModule(b, em_target, .ReleaseSmall, null));
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_mix", audioMixModule(b, em_target, .ReleaseSmall));

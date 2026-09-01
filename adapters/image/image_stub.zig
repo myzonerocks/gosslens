@@ -98,3 +98,18 @@ pub fn bgraToRgb(src: [*]const u8, src_stride: u32, dst: [*]u8, dst_stride: u32,
         }
     }
 }
+
+pub const Yuv420 = enum { nv12, nv21, i420 };
+
+pub fn yuv420ToBgra(kind: Yuv420, y: [*]const u8, src_stride_y: u32, uv: [*]const u8, src_stride_uv: u32, dst: [*]u8, dst_stride: u32, width: u32, height: u32) ConvertError!void {
+    _ = kind;
+    _ = y;
+    _ = src_stride_y;
+    _ = uv;
+    _ = src_stride_uv;
+    _ = dst;
+    _ = dst_stride;
+    _ = width;
+    _ = height;
+    return error.ConversionFailed;
+}
