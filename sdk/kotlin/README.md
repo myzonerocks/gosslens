@@ -86,7 +86,7 @@ capability tour is in the [root README](../../README.md#what-you-get).
 
 [`demo/`](demo/) is a real Android app; see [`demo/README.md`](demo/README.md).
 
-## TODO
+## Tests
 
-- Add a `src/test/` suite. Conformance runs through the demo app's
-  `ConformanceRunner` and [`harness/`](../../harness/) for now.
+Conformance runs through the demo app's `ConformanceRunner` and
+[`harness/`](../../harness/).

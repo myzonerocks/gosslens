@@ -90,7 +90,7 @@ The full cross-platform capability tour is in the
 
 [`demo/`](demo/) is a real iOS app; see [`demo/README.md`](demo/README.md).
 
-## TODO
+## Tests
 
-- Add a `Tests/` target. Conformance runs through the demo app's
-  `-GossConformance` launch argument and [`harness/`](../../harness/) for now.
+Conformance runs through the demo app's `-GossConformance` launch argument and
+[`harness/`](../../harness/).
