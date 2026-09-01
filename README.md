@@ -49,7 +49,8 @@ bun add @myzonerocks/gosslens
 
 Set `X.Y.Z` to the latest [release](https://github.com/myzonerocks/gosslens/releases).
 Then wire the render loop with the guide for your platform:
-[iOS](sdk/swift/README.md), [Android](sdk/kotlin/README.md), [Web](sdk/ts/README.md).
+[iOS](sdk/swift/README.md), [Android](sdk/kotlin/README.md), [Web](sdk/ts/README.md),
+or the [C SDK](sdk/c/README.md) for any other language with a C FFI.
 
 ## What you get
 
