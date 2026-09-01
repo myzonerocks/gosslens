@@ -1051,6 +1051,7 @@ pub fn build(b: *std.Build) void {
     }
     addIosStep(b, optimize, shaderc_exe, flatc_exe);
     addIosSimulatorStep(b, optimize, shaderc_exe, flatc_exe);
+    addIosSimulatorX86Step(b, optimize, shaderc_exe, flatc_exe);
     addAndroidStep(b, optimize, shaderc_exe, flatc_exe);
 
     // Separate from wasm_step: needs the opt-in emscripten vendors most builds never touch.
@@ -3844,7 +3845,24 @@ fn addIosSimulatorStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shader
     });
 }
 
+/// The Intel simulator slice, so the XCFramework's simulator platform
+/// runs on an x86_64 Mac too, not only Apple silicon. The release lipos
+/// this with the arm64 sim archives into one universal simulator slice.
+fn addIosSimulatorX86Step(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
+    addIosStepImpl(b, optimize, shaderc_exe, flatc_exe, .{
+        .cpu_arch = .x86_64,
+        .abi = .simulator,
+        .sdk_option_name = "ios-simulator-x86-sdk",
+        .sdk_name = "iPhoneSimulator",
+        .xcrun_sdk = "iphonesimulator",
+        .install_dir = "ios-simulator-x86_64",
+        .step_name = "ios-simulator-x86",
+        .step_description = "Build gosslens and bgfx static libraries for the iOS Simulator (x86_64, Intel Macs)",
+    });
+}
+
 const IosStepConfig = struct {
+    cpu_arch: std.Target.Cpu.Arch = .aarch64,
     abi: std.Target.Abi,
     sdk_option_name: []const u8,
     sdk_name: []const u8,
@@ -3887,11 +3905,16 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         ios_step.dependOn(&missing.step);
         return;
     }
-    const ios_target = b.resolveTargetQuery(.{
-        .cpu_arch = .aarch64,
+    var ios_query: std.Target.Query = .{
+        .cpu_arch = config.cpu_arch,
         .os_tag = .ios,
         .abi = config.abi,
-    });
+    };
+    // bx's x86 SIMD needs SSE4.1, which the bare x86_64 baseline lacks;
+    // pin the v2 level for the simulator's Intel slice, the same fix the
+    // android x86_64 abi uses.
+    if (config.cpu_arch == .x86_64) ios_query.cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v2 };
+    const ios_target = b.resolveTargetQuery(ios_query);
 
     const math_ios = b.createModule(.{
         .root_source_file = b.path("core/math/math.zig"),

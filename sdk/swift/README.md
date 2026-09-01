@@ -53,8 +53,11 @@ LIBRARY_SEARCH_PATHS[sdk=iphoneos*]        = .../gosslens/zig-out/ios
 LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = .../gosslens/zig-out/ios-simulator
 ```
 
-The simulator slice is arm64 only, so build with `ONLY_ACTIVE_ARCH=YES` against
-a concrete simulator. Auto-link warnings for `AudioUnit`, `CoreAudioTypes`, or
+Each simulator arch builds on its own (`zig build ios-simulator` for arm64,
+`ios-simulator-x86` for Intel); the released XCFramework lipos both into one
+universal simulator slice, so it runs on Apple-silicon and Intel Macs alike.
+Build a from-source checkout with `ONLY_ACTIVE_ARCH=YES` against a concrete
+simulator. Auto-link warnings for `AudioUnit`, `CoreAudioTypes`, or
 `UIUtilities` at the final link are expected and benign.
 
 </details>
