@@ -25,6 +25,8 @@ concurrency:
 
 permissions:
   contents: write
+  # Required for npm publish --provenance to mint its signed attestation.
+  id-token: write
 
 jobs:
   android:
@@ -234,6 +236,12 @@ jobs:
           fi
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
+      - name: set up jdk 21 for gradle
+        if: ${{ env.HAS_MAVEN == 'true' }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       - name: publish to maven central
         if: ${{ env.HAS_MAVEN == 'true' }}
         env:
