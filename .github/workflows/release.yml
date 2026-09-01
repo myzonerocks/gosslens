@@ -275,7 +275,9 @@ jobs:
           set -euo pipefail
           target=()
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # Clear any stale tag of this name, then tag the current commit.
+            # Clear any prior release and tag of this name so a re-run recreates
+            # them cleanly on the current commit.
+            gh release delete "${RELEASE_TAG}" --yes --cleanup-tag 2>/dev/null || true
             git push origin ":refs/tags/${RELEASE_TAG}" 2>/dev/null || true
             target=(--target "${GITHUB_SHA}")
           fi
@@ -325,7 +327,9 @@ jobs:
         run: |
           set -euo pipefail
           # Restore the CI-built .so where gradle's jniLibs srcDir expects it, so
-          # the published AAR carries the prebuilt binary.
+          # the published AAR carries the prebuilt binary. The fresh checkout has
+          # no zig-out, so create it before unzipping into it.
+          mkdir -p zig-out/android
           unzip -o dist/android/gosslens-android-jniLibs.zip -d zig-out/android
           cd sdk/kotlin
           ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache -PVERSION_NAME="${RELEASE_TAG#v}"
