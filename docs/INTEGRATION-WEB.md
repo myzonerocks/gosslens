@@ -1,7 +1,8 @@
 # Integrating gosslens on the web
 
-The path from a checkout to a camera preview with a lens on it in a web app.
-The [TypeScript SDK](../sdk/ts/README.md) is the surface; the
+The path from `npm install` to a camera preview with a lens on it in a web app.
+You write TypeScript; the engine is a prebuilt wasm you host and hand the SDK.
+The [TypeScript SDK](../sdk/ts/README.md) is the surface, and the
 [demo](../sdk/ts/demo) is a full working page.
 
 The engine runs as WebAssembly. You write TypeScript and `npm install` the SDK;

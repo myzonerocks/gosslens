@@ -1,7 +1,8 @@
 # Integrating gosslens on Android
 
-The path from a checkout to a camera preview with a lens on it in your own
-app. The [Kotlin SDK](../sdk/kotlin/README.md) is the surface; the
+The path from adding one Gradle coordinate to a camera preview with a lens on
+it. You write Kotlin; the AAR carries the prebuilt engine, so there's no Zig and
+no NDK. The [Kotlin SDK](../sdk/kotlin/README.md) is the surface, and the
 [demo](../sdk/kotlin/demo) is a full working reference for the frame loop.
 
 The engine ships as one shared library, `libgosslens.so`, that links the whole
