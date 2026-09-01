@@ -20,9 +20,11 @@ zig build c
 
 stages, under `zig-out/c/`:
 
-    include/gosslens.h        the frozen C ABI, copied from include/
-    lib/libgosslens.dylib     the shared library (.so on Linux)
-    lib/libgosslens.a         the static archive of the engine's own objects
+```c
+include/gosslens.h        the frozen C ABI, copied from include/
+lib/libgosslens.dylib     the shared library (.so on Linux)
+lib/libgosslens.a         the static archive of the engine's own objects
+```
 
 The shared library is self-contained: the CPU image path (libyuv), physics
 (Jolt), scripting (QuickJS), audio mixing (miniaudio), and the platform media
