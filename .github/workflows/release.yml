@@ -66,9 +66,10 @@ jobs:
                 [ "$((align))" -ge 16384 ] || { echo "FAIL: $so LOAD alignment $align is below 16 KB"; exit 1; } ;;
               *) echo "note: $abi is emulator-only; 16 KB alignment not enforced" ;;
             esac
-            # The ABI entrypoint must be exported for any SDK to bind the slice.
-            readelf -W --dyn-syms "$so" | awk '{print $NF}' | grep -qx goss_abi_version \
-              || { echo "FAIL: $so does not export goss_abi_version"; exit 1; }
+            # The android .so exposes the JNI entry points the kotlin SDK binds,
+            # not the raw C ABI, so check a Java_com_gosslens_ export is present.
+            readelf -W --dyn-syms "$so" | awk '{print $NF}' | grep -q '^Java_com_gosslens_' \
+              || { echo "FAIL: $so exports no Java_com_gosslens_ JNI entry point"; exit 1; }
           done
           [ "$found" = 1 ] || { echo "FAIL: no libgosslens.so was built"; exit 1; }
       - name: package jniLibs
