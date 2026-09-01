@@ -291,34 +291,43 @@ jobs:
           assets=(dist/android/gosslens-android-jniLibs.zip dist/apple/GosslensKit.xcframework.zip dist/web/*.tgz)
           [ -f dist/web/gosslens-web-engine.zip ] && assets+=(dist/web/gosslens-web-engine.zip)
           gh release create "${RELEASE_TAG}" "${target[@]}" "${assets[@]}" --title "${RELEASE_TAG}" --notes "$notes"
-      # Pin SwiftPM to the XCFramework this release just published, so Swift
-      # consumers get the prebuilt engine with no Zig. Best effort: if main is
-      # protected the push is skipped and the values are printed to pin by hand.
-      - name: pin the swift binary target on main
-        # Best effort: pinning commits to protected main, so never let it block
-        # the registry publishes that follow.
-        continue-on-error: true
+      # A SwiftPM consumer resolves the version tag, so the pin lives in the
+      # commit the tag points at: rebuild the tag on a commit carrying the
+      # pinned Package.swift. Tags sit outside the branch rule, so the built-in
+      # token moves the tag with no bypass; this path must not be swallowed.
+      - name: pin the swift binary target in the release tag
         env:
           GH_TOKEN: ${{ github.token }}
-          # A PAT that bypasses main's branch rule lets the pin self-commit; add
-          # RELEASE_PAT as a secret and to the ruleset's bypass list. Without it
-          # the default token push is rejected and the pin is a one-line PR.
-          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -euo pipefail
           checksum=$(cat dist/apple/GosslensKit.checksum.txt)
           git config user.name avosa
           git config user.email avosa.developer@gmail.com
-          git fetch origin main && git checkout main
           tools/pin-swift-xcframework.sh "${RELEASE_TAG}" "${checksum}"
-          if git diff --quiet sdk/swift/Package.swift; then exit 0; fi
           git add sdk/swift/Package.swift
           git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
-          if [ -n "${RELEASE_PAT:-}" ]; then
-            git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
-          else
-            git push origin main || echo "note: no RELEASE_PAT and the branch rule blocks the token push; pin via a one-line PR (tools/pin-swift-xcframework.sh)"
-          fi
+          git tag -f "${RELEASE_TAG}" HEAD
+          git push -f origin "refs/tags/${RELEASE_TAG}"
+      # Carry the same pin onto main so a `branch: "main"` consumer and the next
+      # release both start from the current binary. Main is ruleset-protected, so
+      # this is best effort: with RELEASE_PAT it self-commits, without it the pin
+      # is a one-line follow-up PR and the tag above already serves consumers.
+      - name: carry the pin onto main
+        continue-on-error: true
+        env:
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          [ -n "${RELEASE_PAT:-}" ] || { echo "no RELEASE_PAT; main pin is a follow-up PR, the tag already carries it"; exit 0; }
+          git fetch origin main
+          git checkout -B main-pin origin/main
+          checksum=$(cat dist/apple/GosslensKit.checksum.txt)
+          tools/pin-swift-xcframework.sh "${RELEASE_TAG}" "${checksum}"
+          git diff --quiet sdk/swift/Package.swift && { echo "main already pinned"; exit 0; }
+          git add sdk/swift/Package.swift
+          git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
+          git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main \
+            || echo "main pin push declined by the branch rule; pin via a one-line PR, the tag already serves consumers"
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
       - name: set up jdk 21 for gradle
