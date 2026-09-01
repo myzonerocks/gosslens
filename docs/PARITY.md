@@ -15,7 +15,7 @@ CaptureOutput, Events.
 | Hand tracking (landmarks, handedness, gestures) | proven in the host harness | built, no hardware yet | demonstrated in browser, the hand pipeline on the wasm tracking module, read through a GossHandTracker |
 | Multi-person face and body results (submit, count, per-index read-back) | proven in the host harness: a face-anchored model fans out to every submitted face and a body-anchored model to every submitted body, with the kept count read back each frame | built, no hardware yet | built |
 | Beauty effects | demonstrated on device | built, no hardware yet | demonstrated in browser |
-| Lens runtime | demonstrated on device | built, no hardware yet | demonstrated in browser, beauty-baseline only |
+| Lens runtime | demonstrated on device | built, no hardware yet | demonstrated in browser: manifest-JSON lenses including the beauty chain and the built-in filter passes (blur, grade, bloom); the directory-bundle path with compiled shader and lut resources is native-only |
 | Photo capture (deterministic PNG) | proven in the host harness | built, no hardware yet | engine path not wired; the web SDK exports a PNG off the composited canvas (captureFrame) |
 | Video recording | proven in the host harness on the Apple encoder | built on MediaCodec, no hardware yet | engine encoder native-only; the web SDK records through the browser MediaRecorder (captureStream + engine-normalized policy) |
 | Photo formats (JPEG built-in, HEIC platform) | JPEG and HEIC proven in the host harness | JPEG from the engine's own encoder, built; HEIC backend not built | JPEG from the engine's own encoder, built; HEIC backend not built |
