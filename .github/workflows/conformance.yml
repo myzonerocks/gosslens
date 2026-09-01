@@ -1,0 +1,46 @@
+name: conformance
+
+# The pixel conformance suite is an on-screen runner: it opens a window and
+# renders through bgfx/Metal, so it needs a Mac with a live display session.
+# Hosted macos-latest is a headless VM and fails at device setup, so this
+# lane runs on demand against a runner that can present, not on every push.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: runs-on label of a macOS runner with a display session
+        default: macos-latest
+        type: string
+
+jobs:
+  macos-conformance:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .local/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .vendor
+            .vendor-archives
+          key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
+      - name: vendor sync
+        run: zig build vendor-sync
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: models-${{ hashFiles('third_party/models.lock') }}
+      - name: fetch models
+        run: zig build fetch-models
+      - name: conformance
+        run: zig build conformance
+        env:
+          GOSS_PROBES: "1"
