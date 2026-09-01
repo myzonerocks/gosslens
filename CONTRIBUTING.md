@@ -13,10 +13,12 @@ Use the project toolchain. Do not substitute a global Zig installation.
 git hooks. The pinned compiler lives in `.zigversion`; `build.zig` rejects a
 different version, so the toolchain question has exactly one answer.
 
-    tools/toolchain-sync
-    zig build test               # all unit tests
-    zig build gate -- --tree     # the source gate over tracked files
-    zig build ci                 # tests, source gate, abi, vendor check, provenance
+```sh
+tools/toolchain-sync
+zig build test               # all unit tests
+zig build gate -- --tree     # the source gate over tracked files
+zig build ci                 # tests, source gate, abi, vendor check, provenance
+```
 
 `zig build ci` is the whole local bar in one command. Green here is green
 upstream, so never push and let CI find a failure the local run would have.
@@ -47,11 +49,33 @@ beta; tick "Show Package Details" and take the pinned version.
 machine wants more memory than an 8 GB host has; it dies with `LLVM ERROR: out
 of memory`. Pass `-j4` there on a machine that small.
 
+## Repository layout
+
+```text
+build.zig  build.zig.zon    one build system for Zig, C, and C++, all targets
+.zigversion                 the pinned Zig version
+include/gosslens.h          the C ABI
+core/                       frame graph, lens runtime, tracking, media, math
+adapters/                   native/vendor backends behind engine boundaries
+sdk/                        c, swift, kotlin, ts packages and demo apps
+lenses/                     the .glens format: spec, validator, reference lenses
+harness/                    headless conformance runner
+third_party/                pinned vendor dependencies
+tools/                      toolchain bootstrap and the source gate
+```
+
+The checked-out layout is authoritative. Existing subsystems stay where they
+are; new work extends the nearest existing boundary. The lens file format,
+published as a forkable standard, is [docs/LENS-FORMAT.md](docs/LENS-FORMAT.md);
+toolchain decisions are logged in [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md).
+
 ## Watch it draw
 
-    zig build harness              # run a lens through the real graph, drawn on screen
-    zig build conformance          # run a reference lens through the ABI twice, proving bit-stable output
-    zig build conformance -- --watch  # the same run, holding and labelling each proof's render on screen
+```sh
+zig build harness              # run a lens through the real graph, drawn on screen
+zig build conformance          # run a reference lens through the ABI twice, proving bit-stable output
+zig build conformance -- --watch  # the same run, holding and labelling each proof's render on screen
+```
 
 The harness runs a lens through the real graph and draws it on screen, the same
 pipeline the SDKs drive, the fastest way to see an effect move before a device
@@ -64,8 +88,10 @@ frame; it is display only and leaves the pinned output unchanged.
 
 ## Shaders and lenses
 
-    zig build test -Dlens-shaders=true    # compile every shader on all backends
-    zig build lens-validate -- <bundle>   # validate one bundle
+```sh
+zig build test -Dlens-shaders=true    # compile every shader on all backends
+zig build lens-validate -- <bundle>   # validate one bundle
+```
 
 The shader build compiles each pass to Metal, SPIR-V, GLSL ES, and WGSL, so a
 shader that only builds on one backend fails here rather than on a device. The
@@ -78,11 +104,11 @@ Every capability ships on all three platforms or it does not ship, and
 [docs/PARITY.md](docs/PARITY.md) is the table of what is proven where.
 
 - iOS: `zig build ios` and `zig build ios-simulator`; the demo under
-  `sdk/swift/demo` runs it. See [docs/INTEGRATION-iOS.md](docs/INTEGRATION-iOS.md).
+  `sdk/swift/demo` runs it. See [sdk/swift/README.md](sdk/swift/README.md).
 - Android: `zig build android`; the demo under `sdk/kotlin/demo` runs it. See
-  [docs/INTEGRATION-ANDROID.md](docs/INTEGRATION-ANDROID.md).
+  [sdk/kotlin/README.md](sdk/kotlin/README.md).
 - Web: `zig build wasm`; the demo under `sdk/ts/demo` runs it. See
-  [docs/INTEGRATION-WEB.md](docs/INTEGRATION-WEB.md).
+  [sdk/ts/README.md](sdk/ts/README.md).
 
 When a capability moves from built to demonstrated on a platform, update its row
 in [docs/PARITY.md](docs/PARITY.md) in the same change.

@@ -1,5 +1,12 @@
 # Android demo
 
+> [!TIP]
+> Building your own app? You don't need any of this. Add
+> `io.github.avosa:gosslens` and follow the
+> [Kotlin SDK README](../README.md) - no Zig,
+> no NDK. This is an in-repo reference that builds the engine from the checkout
+> so it always matches the SDK source.
+
 An Activity with a live front-camera preview through the real ABI - CameraX
 capture, zero-copy into a GLES-backed renderer via AHardwareBuffer, with the
 copy path as the fallback. Layered over the preview are the shared showcase

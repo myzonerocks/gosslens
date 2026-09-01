@@ -20,9 +20,11 @@ zig build c
 
 stages, under `zig-out/c/`:
 
-    include/gosslens.h        the frozen C ABI, copied from include/
-    lib/libgosslens.dylib     the shared library (.so on Linux)
-    lib/libgosslens.a         the static archive of the engine's own objects
+```text
+include/gosslens.h        the frozen C ABI, copied from include/
+lib/libgosslens.dylib     the shared library (.so on Linux)
+lib/libgosslens.a         the static archive of the engine's own objects
+```
 
 The shared library is self-contained: the CPU image path (libyuv), physics
 (Jolt), scripting (QuickJS), audio mixing (miniaudio), and the platform media
@@ -85,8 +87,3 @@ builds `c`, compiles the example against the shared library, and runs it.
 External projects that build with CMake can consume the staged library through
 [`CMakeLists.txt`](CMakeLists.txt), which imports it rather than rebuilding the
 engine.
-
-## TODO
-
-- Tag a release so a consumer can pin a versioned `libgosslens` rather than
-  building it from a checkout.

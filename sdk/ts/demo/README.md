@@ -1,5 +1,12 @@
 # Web demo
 
+> [!TIP]
+> Building your own app? You don't need any of this. Install the SDK with `bun
+> add @myzonerocks/gosslens`, host the prebuilt engine attached to any release,
+> and follow the [TypeScript SDK README](../README.md). No Zig.
+> This page is an in-repo reference that imports `src/` and builds the engine
+> from the checkout so it always matches the SDK source.
+
 A browser page with a live camera preview, real-time face tracking, the six
 beauty sliders, post-effect filter lenses, a photo capture, and a virtual
 background driven by the selfie segmenter. It runs the wasm core through a

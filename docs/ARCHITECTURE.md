@@ -20,55 +20,57 @@ into a cleaner-looking tree for its own sake.
 
 ## Shape
 
-    include/gosslens.h          the single C ABI
+```text
+include/gosslens.h          the single C ABI
 
-    core/
-      abi/                      C ABI exports
-      graph/                    frame graph, scheduling, pools, degradation
-      lens/                     .glens parsing, triggers, animation, runtime
-      material/                 node-based material graph lowered to shaders
-      math/                     vectors, matrices, poses, color math
-      tracking/                 engine-owned tracking models and logic
-      particles/                GPU particles and SPH fluids
-      nav/                      navmesh build and pathfinding
-      stroke/                   screen brush and world-anchored AR brush
-      composite/                multi-source layout and screen-share geometry
-      geo/                      geofence membership math
-      text/                     built-in bitmap font and rasterizer
-      media/                    image codecs, audio mix and analysis, media contracts
+core/
+  abi/                      C ABI exports
+  graph/                    frame graph, scheduling, pools, degradation
+  lens/                     .glens parsing, triggers, animation, runtime
+  material/                 node-based material graph lowered to shaders
+  math/                     vectors, matrices, poses, color math
+  tracking/                 engine-owned tracking models and logic
+  particles/                GPU particles and SPH fluids
+  nav/                      navmesh build and pathfinding
+  stroke/                   screen brush and world-anchored AR brush
+  composite/                multi-source layout and screen-share geometry
+  geo/                      geofence membership math
+  text/                     built-in bitmap font and rasterizer
+  media/                    image codecs, audio mix and analysis, media contracts
 
-    adapters/
-      android/                  Android/JNI bridge
-      angle/                    ANGLE integration and support
-      asset/                    asset boundary
-      audio/                    miniaudio playback backend
-      beauty/                   GPUPixel and beauty interop
-      bgfx/                     rendering backend and shader plumbing
-      gltf/                     cgltf asset loading
-      image/                    CPU image operations over vendored libyuv
-      media/                    portable codec/container and recording backends
-      physics/                  Jolt rigid bodies, cloth, and hair behind a C shim
-      script/                   sandboxed QuickJS lens scripting
-      tracking/                 tracking/inference vendor boundary
+adapters/
+  android/                  Android/JNI bridge
+  angle/                    ANGLE integration and support
+  asset/                    asset boundary
+  audio/                    miniaudio playback backend
+  beauty/                   GPUPixel and beauty interop
+  bgfx/                     rendering backend and shader plumbing
+  gltf/                     cgltf asset loading
+  image/                    CPU image operations over vendored libyuv
+  media/                    portable codec/container and recording backends
+  physics/                  Jolt rigid bodies, cloth, and hair behind a C shim
+  script/                   sandboxed QuickJS lens scripting
+  tracking/                 tracking/inference vendor boundary
 
-    sdk/
-      swift/                    iOS API and platform-only backends
-      kotlin/                   Android API and platform-only backends
-      ts/                       web API and platform-only backends
-      c/                        libgosslens and the C ABI header, full parity
+sdk/
+  swift/                    iOS API and platform-only backends
+  kotlin/                   Android API and platform-only backends
+  ts/                       web API and platform-only backends
+  c/                        libgosslens and the C ABI header, full parity
 
-    lenses/
-      reference/                reference .glens bundles
-      shaders/                  lens/effect shaders
-      validator/                .glens validation
-      SPEC.md                   public lens-format contract
+lenses/
+  reference/                reference .glens bundles
+  shaders/                  lens/effect shaders
+  validator/                .glens validation
+  SPEC.md                   public lens-format contract
 
-    harness/                    desktop and conformance runners
-    third_party/                pinned vendor sources and metadata
-    tools/                      toolchain bootstrap and repository gates
-    docs/                       public project documentation
-      API.md                    canonical public SDK naming/shape contract
-    docs/private/               local-only engineering material; never tracked
+harness/                    desktop and conformance runners
+third_party/                pinned vendor sources and metadata
+tools/                      toolchain bootstrap and repository gates
+docs/                       public project documentation
+  API.md                    canonical public SDK naming/shape contract
+docs/private/               local-only engineering material; never tracked
+```
 
 The media rail landed additively. It did not rename or relocate `adapters/image`,
 `adapters/tracking`, `adapters/beauty`, `adapters/bgfx`, `core/tracking`,
@@ -107,11 +109,15 @@ trees. Targets link only the backends they require.
 
 The preferred path is native and zero-copy:
 
-    camera buffer -> graph/effects -> native/GPU consumer
+```text
+camera buffer -> graph/effects -> native/GPU consumer
+```
 
 CPU materialization is a fallback:
 
-    camera/native buffer -> adapters/image -> libyuv -> CPU consumer
+```text
+camera/native buffer -> adapters/image -> libyuv -> CPU consumer
+```
 
 libyuv, vendored as part of the media rail, is the single CPU
 image-conversion authority. CPU YUV/RGB conversion, scaling, and rotation go
@@ -298,11 +304,13 @@ and passes every affected gate.
 
 The media rail landed as additions the earlier tree did not have:
 
-    core/media/               image codecs, audio mix and analysis
-    adapters/media/           portable codec/container and recording backends
-    adapters/image/           CPU image conversion over vendored libyuv
-    media vendor entries under third_party/
-    platform-media implementation files under sdk/swift, sdk/kotlin, sdk/ts
+```text
+core/media/               image codecs, audio mix and analysis
+adapters/media/           portable codec/container and recording backends
+adapters/image/           CPU image conversion over vendored libyuv
+media vendor entries under third_party/
+platform-media implementation files under sdk/swift, sdk/kotlin, sdk/ts
+```
 
 Everything else stays where it is unless the change fixes a concrete structural
 defect.
