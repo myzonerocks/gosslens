@@ -463,7 +463,10 @@ audioTrack.send(mixed)   // publish; pass mic: nil for lens sound over silence
 ```
 
 `pullAudio` still pulls the lens sound on its own for local playback with no
-call in progress; in a call, `mixOutputAudio` replaces it.
+call in progress; in a call, `mixOutputAudio` replaces it. `GossAudioOutput`
+routes that local playback to the speaker for you: `start()` it once after the
+session exists and call `pump()` each frame beside `tickLens`, and lens sounds
+play through an `AVAudioEngine` source it owns.
 
 When the lens carries an `audio.infer` node with a caption binding, the engine
 runs on-device ASR over the mic and `captionText` reads the decoded text by the

@@ -81,7 +81,9 @@ export class GossAudioOutput {
   }
 
   /// Pulls the next mixer block and hands it to the worklet. Call once
-  /// per frame from the same loop that ticks the lens.
+  /// per frame from the same loop that ticks the lens. The post
+  /// transfers the block's buffer, which detaches it, so each pump is
+  /// one fresh small block by design rather than a reusable buffer.
   pump(frames = 800): void {
     const node = this.node;
     if (!node) return;

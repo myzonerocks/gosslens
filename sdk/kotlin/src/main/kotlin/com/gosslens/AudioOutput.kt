@@ -18,6 +18,9 @@ class GossAudioOutput(private val session: GossSession) {
     private val lock = Object()
     private val pullBuffer: ByteBuffer =
         ByteBuffer.allocateDirect(PULL_FRAMES * 2).order(ByteOrder.nativeOrder())
+    // One view over the pull buffer, created once so pump() allocates
+    // nothing per frame.
+    private val pullShorts = pullBuffer.asShortBuffer()
     private val chunk = ShortArray(CHUNK_FRAMES)
     private var track: AudioTrack? = null
     private var writer: Thread? = null
@@ -76,12 +79,11 @@ class GossAudioOutput(private val session: GossSession) {
         val count = minOf(frames, PULL_FRAMES)
         pullBuffer.clear()
         if (!session.pullAudio(pullBuffer, count)) return
-        val shorts = pullBuffer.asShortBuffer()
         synchronized(lock) {
             for (i in 0 until count) {
                 val next = (writeIndex + 1) % RING_FRAMES
                 if (next == readIndex) break
-                ring[writeIndex] = shorts.get(i)
+                ring[writeIndex] = pullShorts.get(i)
                 writeIndex = next
             }
         }

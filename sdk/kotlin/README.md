@@ -392,6 +392,10 @@ engine.submitAudio(session, pcm, frameCount, sampleRate = 48000, channels = 1, t
 engine.stopRecording()
 ```
 
+`GossAudioOutput` routes lens sounds to the speaker: `start()` it once after
+the session exists and call `pump()` each frame beside `tickLens`, and the
+mixer plays through an `AudioTrack` it owns; `stop()` releases it.
+
 `GossRecordingPolicy` and `GossCaptureUi` from Camera controls carry the clip
 cap, timer, night mode and the rest for your recorder and capture chrome; the
 engine stores the intent and you read it back and apply it.
