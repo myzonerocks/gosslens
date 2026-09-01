@@ -431,6 +431,13 @@ pub fn build(b: *std.Build) void {
     const sfx_tests = b.addTest(.{ .root_module = sfxModule(b, target, optimize) });
     const music_tests = b.addTest(.{ .root_module = musicModule(b, target, optimize) });
     const barcode_tests = b.addTest(.{ .root_module = barcodeModule(b, target, optimize) });
+    // The PCM conversion the Android AAC encoder input consumes, proven
+    // on the host since the NDK codec itself only exists on device.
+    const pcm_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("adapters/media/pcm.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
     const medialib_tests = b.addTest(.{ .root_module = medialibModule(b, target, optimize) });
     const qr_tests = b.addTest(.{ .root_module = qrModule(b, target, optimize) });
     const flash_tests = b.addTest(.{ .root_module = flashModule(b, target, optimize) });
@@ -489,6 +496,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(sfx_tests).step);
     test_step.dependOn(&b.addRunArtifact(music_tests).step);
     test_step.dependOn(&b.addRunArtifact(barcode_tests).step);
+    test_step.dependOn(&b.addRunArtifact(pcm_tests).step);
     test_step.dependOn(&b.addRunArtifact(medialib_tests).step);
     test_step.dependOn(&b.addRunArtifact(qr_tests).step);
     test_step.dependOn(&b.addRunArtifact(flash_tests).step);

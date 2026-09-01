@@ -2854,3 +2854,4 @@ export class GossPreviewSession {
 
 export { GossWebXRWorldSource } from "./world";
 export type { GossXRFrameLike } from "./world";
+export { GossAudioOutput } from "./audio-output";
