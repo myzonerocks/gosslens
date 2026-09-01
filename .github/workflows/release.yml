@@ -68,7 +68,9 @@ jobs:
             esac
             # The android .so exposes the JNI entry points the kotlin SDK binds,
             # not the raw C ABI, so check a Java_com_gosslens_ export is present.
-            readelf -W --dyn-syms "$so" | awk '{print $NF}' | grep -q '^Java_com_gosslens_' \
+            # awk consumes the whole dump: grep -q would quit at the first hit,
+            # SIGPIPE readelf mid-write, and fail the check under pipefail.
+            readelf -W --dyn-syms "$so" | awk '$NF ~ /^Java_com_gosslens_/ { found = 1 } END { exit !found }' \
               || { echo "FAIL: $so exports no Java_com_gosslens_ JNI entry point"; exit 1; }
           done
           [ "$found" = 1 ] || { echo "FAIL: no libgosslens.so was built"; exit 1; }
