@@ -49,33 +49,26 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          # The runner has no llvm-objdump on PATH; prefer the NDK's llvm tools,
-          # which read the android ELF, and fall back to GNU binutils.
-          ndkbin=$(ls -d "${ANDROID_NDK_LATEST_HOME:-/nonexistent}"/toolchains/llvm/prebuilt/*/bin 2>/dev/null | head -1)
-          objdump_bin=$([ -x "$ndkbin/llvm-objdump" ] && echo "$ndkbin/llvm-objdump" || echo objdump)
-          nm_bin=$([ -x "$ndkbin/llvm-nm" ] && echo "$ndkbin/llvm-nm" || echo nm)
+          # readelf ships with binutils and reads any-arch ELF headers, so it
+          # avoids the llvm-objdump the runner lacks. LOAD align is the last field
+          # (hex); a dynamic symbol's name is the last field of a dyn-syms row.
           found=0
           for so in zig-out/android/*/libgosslens.so; do
             found=1
             abi=$(basename "$(dirname "$so")")
-            align=$("$objdump_bin" -p "$so" | awk '/LOAD/ {print $NF; exit}')
+            align=$(readelf -lW "$so" | awk '/LOAD/ {print $NF; exit}')
             echo "== $so ($abi) LOAD align $align =="
+            [ -n "$align" ] || { echo "FAIL: could not read the LOAD alignment of $so"; exit 1; }
             # 16 KB pages are an arm64 device requirement; x86_64 is emulator-only
             # and links at 4 KB, so enforce alignment only on the arm ABIs.
             case "$abi" in
               arm64-v8a|armeabi-v7a)
-                case "$align" in
-                  2\*\*14|2\*\*15|2\*\*16) : ;;
-                  *) echo "FAIL: $so LOAD alignment $align is below 2**14 (16 KB)"; exit 1 ;;
-                esac ;;
+                [ "$((align))" -ge 16384 ] || { echo "FAIL: $so LOAD alignment $align is below 16 KB"; exit 1; } ;;
               *) echo "note: $abi is emulator-only; 16 KB alignment not enforced" ;;
             esac
             # The ABI entrypoint must be exported for any SDK to bind the slice.
-            "$nm_bin" -D --defined-only "$so" | awk '{print $NF}' | grep -q '^goss_abi_version$' \
+            readelf -W --dyn-syms "$so" | awk '{print $NF}' | grep -qx goss_abi_version \
               || { echo "FAIL: $so does not export goss_abi_version"; exit 1; }
-            # Diagnostic: any export beyond goss_*, for tightening the visibility
-            # of the vendored C++ slices in review.
-            "$nm_bin" -D --defined-only "$so" | awk '{print $NF}' | grep -vE '^(goss_|__|_init$|_fini$)' | sed "s#^#note $so exports: #" | head || true
           done
           [ "$found" = 1 ] || { echo "FAIL: no libgosslens.so was built"; exit 1; }
       - name: package jniLibs
