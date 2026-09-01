@@ -235,6 +235,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - name: set up the android sdk for gradle
+        if: ${{ env.HAS_MAVEN == 'true' }}
+        uses: android-actions/setup-android@v3
       - name: publish to maven central
         if: ${{ env.HAS_MAVEN == 'true' }}
         env:
