@@ -29,11 +29,11 @@ Inside this monorepo, consume it from the workspace instead:
 and `types` there); run it once so `dist/` exists before a workspace
 consumer resolves it.
 
-This package is the JS wrapper only. `zig build wasm-emscripten` builds
-the WebGL2 `gosslens_web.js`/`.wasm` pair; `zig build
-wasm-emscripten-webgpu` builds the WebGPU pair. `pickEngineUrl` picks
-between them at load, so `wasmJsUrl` points at whichever one it selects.
-They are separate artifacts, not bundled.
+This package is the JavaScript wrapper you `npm install` and write TypeScript
+against. The engine it drives is the prebuilt WebGL2 and WebGPU `gosslens_web`
+builds attached to every release, which you host and hand the SDK; `pickEngineUrl`
+selects one at load. Building those from source is an engine-maintainer path -
+see the [web integration guide](../../docs/INTEGRATION-WEB.md).
 
 ## Use
 

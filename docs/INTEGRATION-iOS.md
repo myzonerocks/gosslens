@@ -1,42 +1,15 @@
 # Integrating gosslens on iOS
 
-This is the path from a checkout to a camera preview with a lens on it in
-your own app. The [Swift SDK](../sdk/swift/README.md) is the surface; the
+The path from adding a Swift package to a camera preview with a lens on it. You
+write Swift and `import Gosslens`; the engine ships prebuilt inside the package,
+so there is no toolchain to install and nothing to build. The
+[Swift SDK](../sdk/swift/README.md) is the whole surface you touch, and the
 [demo](../sdk/swift/demo) is a full working reference for the frame loop.
-
-## Build the engine slices
-
-The SDK is thin Swift over a static engine. Build the engine for the slices
-you target; the output lands in `zig-out`.
-
-```sh
-zig build ios
-zig build ios-simulator
-```
-
-On a Mac with Xcode both steps find their SDK through `xcrun` on their own;
-pass `-Dios-sdk`/`-Dios-simulator-sdk` (or `--sysroot`) only to point at a
-specific one. Each step writes `libgosslens.a` and the vendored archives
-(bgfx, the inference stack, ANGLE, QuickJS, Jolt) into `zig-out/ios` and
-`zig-out/ios-simulator`, all aligned and ready to link.
-
-The simulator slice is arm64 only. On an Apple-silicon Mac build with
-`ONLY_ACTIVE_ARCH=YES` against a concrete simulator, not a universal
-destination that would also ask for an x86_64 half.
-
-At the app's final link you may see auto-link warnings for `AudioUnit`,
-`CoreAudioTypes`, or `UIUtilities`. They are expected and benign - those
-umbrella frameworks are not standalone link targets on iOS, the requests come
-from inside the vendored libraries, and the engine links what it actually needs
-explicitly. Nothing is missing; the app links and runs.
 
 ## Add the package
 
-### Released package (recommended)
-
 Each release attaches a prebuilt `GosslensKit.xcframework` and pins
-`Package.swift` to it, so you add one SwiftPM dependency and `import Gosslens`
-with no Zig and no build step:
+`Package.swift` to it, so you add one SwiftPM dependency and `import Gosslens`:
 
 ```swift
 .package(url: "https://github.com/myzonerocks/gosslens", from: "0.9.0")
@@ -45,19 +18,18 @@ with no Zig and no build step:
 > [!TIP]
 > The XCFramework carries the merged static engine and the C ABI module, and its
 > checksum is pinned per release, so SwiftPM verifies the download. Nothing to
-> link by hand.
+> link by hand, no search paths, no build step.
 
-### Local development (source target)
+<details>
+<summary>Building the engine from source (engine maintainers only)</summary>
 
-To build against your own checkout, run the two slice builds first:
+You only need this if you are changing the engine itself. Build the two slices,
+point SwiftPM at your checkout, and set the per-slice search paths:
 
 ```sh
 zig build ios
 zig build ios-simulator
 ```
-
-then point SwiftPM at the local path and set the two search paths on your app
-target so it finds each slice's archives:
 
 ```swift
 .package(path: "../gosslens")
@@ -68,9 +40,11 @@ LIBRARY_SEARCH_PATHS[sdk=iphoneos*]        = .../gosslens/zig-out/ios
 LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = .../gosslens/zig-out/ios-simulator
 ```
 
-The `Gosslens` product carries the whole `-l` list and the frameworks it needs
-in its own linker settings, and the header comes from the package's C module, so
-there is nothing else to wire.
+The simulator slice is arm64 only, so build with `ONLY_ACTIVE_ARCH=YES` against
+a concrete simulator. Auto-link warnings for `AudioUnit`, `CoreAudioTypes`, or
+`UIUtilities` at the final link are expected and benign.
+
+</details>
 
 ## The render loop
 

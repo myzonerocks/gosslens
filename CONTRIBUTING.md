@@ -13,10 +13,12 @@ Use the project toolchain. Do not substitute a global Zig installation.
 git hooks. The pinned compiler lives in `.zigversion`; `build.zig` rejects a
 different version, so the toolchain question has exactly one answer.
 
-    tools/toolchain-sync
-    zig build test               # all unit tests
-    zig build gate -- --tree     # the source gate over tracked files
-    zig build ci                 # tests, source gate, abi, vendor check, provenance
+```sh
+tools/toolchain-sync
+zig build test               # all unit tests
+zig build gate -- --tree     # the source gate over tracked files
+zig build ci                 # tests, source gate, abi, vendor check, provenance
+```
 
 `zig build ci` is the whole local bar in one command. Green here is green
 upstream, so never push and let CI find a failure the local run would have.
@@ -49,9 +51,11 @@ of memory`. Pass `-j4` there on a machine that small.
 
 ## Watch it draw
 
-    zig build harness              # run a lens through the real graph, drawn on screen
-    zig build conformance          # run a reference lens through the ABI twice, proving bit-stable output
-    zig build conformance -- --watch  # the same run, holding and labelling each proof's render on screen
+```sh
+zig build harness              # run a lens through the real graph, drawn on screen
+zig build conformance          # run a reference lens through the ABI twice, proving bit-stable output
+zig build conformance -- --watch  # the same run, holding and labelling each proof's render on screen
+```
 
 The harness runs a lens through the real graph and draws it on screen, the same
 pipeline the SDKs drive, the fastest way to see an effect move before a device
@@ -64,8 +68,10 @@ frame; it is display only and leaves the pinned output unchanged.
 
 ## Shaders and lenses
 
-    zig build test -Dlens-shaders=true    # compile every shader on all backends
-    zig build lens-validate -- <bundle>   # validate one bundle
+```sh
+zig build test -Dlens-shaders=true    # compile every shader on all backends
+zig build lens-validate -- <bundle>   # validate one bundle
+```
 
 The shader build compiles each pass to Metal, SPIR-V, GLSL ES, and WGSL, so a
 shader that only builds on one backend fails here rather than on a device. The

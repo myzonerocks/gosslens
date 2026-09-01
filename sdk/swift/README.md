@@ -26,13 +26,11 @@ minimal render loop.
 Resolved from the [root manifest](../../Package.swift); `cd sdk/swift &&
 swift build` uses this directory's own for development.
 
-The package alone doesn't link the engine. `zig build ios`/`ios-simulator`
-produces the native `.a` archives under `zig-out/`. The engine's `-l` list
-and frameworks ride on the package's `linkerSettings`, so an app target
-inherits them by depending on the package; only `LIBRARY_SEARCH_PATHS`,
-which the package can't know, stays per-target. See
-[`demo/project.yml`](demo/project.yml) for the search paths and
-[`Package.swift`](Package.swift) for the link list.
+A released package carries the prebuilt engine as an XCFramework, so you add
+the SwiftPM dependency, `import Gosslens`, and write Swift - nothing to build or
+link by hand. Building the engine from source (`zig build ios`/`ios-simulator`)
+is only for engine maintainers; the [iOS integration guide](../../docs/INTEGRATION-iOS.md)
+covers that path.
 
 ## Use
 

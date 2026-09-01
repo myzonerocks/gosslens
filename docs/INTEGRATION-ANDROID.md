@@ -4,23 +4,10 @@ The path from a checkout to a camera preview with a lens on it in your own
 app. The [Kotlin SDK](../sdk/kotlin/README.md) is the surface; the
 [demo](../sdk/kotlin/demo) is a full working reference for the frame loop.
 
-Unlike the static-archive story on iOS, the engine ships here as one shared
-library. `libgosslens.so` links the whole engine - the inference stack,
-QuickJS, Jolt, everything - into itself, so there is nothing for a consumer to
-resolve by hand. The one thing to get right is that the `.so` is present when
-gradle packages your app.
-
-## Build the native library
-
-```sh
-zig build android
-```
-
-This writes `zig-out/android/arm64-v8a/libgosslens.so` and
-`zig-out/android/x86_64/libgosslens.so`. arm64-v8a covers every current device
-and the arm64 emulator an Apple-silicon machine runs by default; x86_64 covers
-an Intel-host emulator. gradle picks the right one per ABI, so a device and
-either emulator all link and run the engine.
+The engine ships as one shared library, `libgosslens.so`, that links the whole
+engine - the inference stack, QuickJS, Jolt, everything - into itself. You add a
+Gradle coordinate and the `.so` arrives prebuilt inside the AAR; you write Kotlin
+and never run Zig or the NDK.
 
 ## Add the SDK
 
@@ -65,10 +52,11 @@ dependencies {
 > Central ships the binary our CI already built, which is why it is the
 > recommended path.
 
-### Local development (included build)
+<details>
+<summary>Building the engine from source (engine maintainers only)</summary>
 
-To build against your own checkout with no registry at all, run
-`zig build android` once, then substitute the module for the coordinate:
+You only need this if you are changing the engine itself. Run `zig build android`
+once, then substitute the local module for the coordinate:
 
 ```kotlin
 // settings.gradle.kts
@@ -82,6 +70,8 @@ dependencies {
 
 The SDK's gradle reads `jniLibs.srcDir("../../zig-out/android")`, so the AAR it
 produces carries the native library you just built.
+
+</details>
 
 ## The render loop
 

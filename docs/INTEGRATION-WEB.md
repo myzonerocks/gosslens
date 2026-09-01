@@ -4,25 +4,11 @@ The path from a checkout to a camera preview with a lens on it in a web app.
 The [TypeScript SDK](../sdk/ts/README.md) is the surface; the
 [demo](../sdk/ts/demo) is a full working page.
 
-The web build is different from the native ones in one way worth stating up
-front: the engine is WebAssembly, and the browser will not let a package fetch
-a `.wasm` from inside `node_modules` the way a native app links an archive. So
-`@myzonerocks/gosslens` ships the JavaScript wrapper only, and you host the wasm and
-model assets yourself and hand the SDK their URLs. The SDK never guesses a
-path.
-
-## Build the assets
-
-```sh
-zig build wasm-emscripten           # gosslens_web.js/.wasm, WebGL2
-zig build wasm-emscripten-webgpu     # gosslens_web.js/.wasm, WebGPU
-zig build tracking-wasm              # gosslens_tracking.wasm
-zig build fetch-models               # the ML .task/.tflite bundles
-```
-
-WebGPU and WebGL2 are two separate engine artifacts, not a runtime switch.
-Serve both, plus the tracking module and whichever model bundles your lenses
-use, from your own static host.
+The engine runs as WebAssembly. You write TypeScript and `npm install` the SDK;
+because the browser cannot fetch a `.wasm` out of `node_modules` the way a native
+app links an archive, you serve the prebuilt engine files - attached to every
+release - from your own static host and hand the SDK their URLs. The SDK never
+guesses a path.
 
 ## Install
 
@@ -30,33 +16,35 @@ The npm package is the JavaScript wrapper; the engine it drives is the
 emscripten `gosslens_web.js`/`.wasm` (a WebGL2 and a WebGPU build) plus
 `gosslens_tracking.wasm`, which you host next to your app.
 
-### Released package
-
 ```sh
 bun add @myzonerocks/gosslens        # or: npm install @myzonerocks/gosslens
 ```
 
-Then serve the engine files. Each release attaches `gosslens-web-engine.zip` -
-the two `gosslens_web` builds and the tracking wasm - so unzip it into your
-static assets, or build them yourself:
+Then serve the engine files: every release attaches `gosslens-web-engine.zip` -
+the two `gosslens_web` builds (WebGPU and WebGL2 are separate artifacts) and the
+tracking wasm - so unzip it into your static assets. `pickEngineUrl` picks the
+WebGL2 or WebGPU build at load time from the URLs you point it at.
+
+<details>
+<summary>Building the engine and the SDK from source (engine maintainers only)</summary>
+
+You only need this if you are changing the engine or the SDK itself. Build the
+engine artifacts, or consume this checkout as a workspace dependency:
 
 ```sh
 zig build wasm-emscripten
 zig build wasm-emscripten-webgpu
 zig build tracking-wasm
+zig build fetch-models
 ```
-
-`pickEngineUrl` picks the WebGL2 or WebGPU build at load time from the URLs you
-point it at.
-
-### Local development
-
-Consume this checkout as a workspace dependency (the demo does), running
-`bun run build` in `sdk/ts` first so `dist/` exists:
 
 ```json
 { "dependencies": { "@myzonerocks/gosslens": "workspace:*" } }
 ```
+
+Run `bun run build` in `sdk/ts` first so `dist/` exists.
+
+</details>
 
 ## The render loop
 
