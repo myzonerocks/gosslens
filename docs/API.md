@@ -291,7 +291,7 @@ wasm engine by default) returns `unsupported`, and the web producer path
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_session_enable_beauty` | `enableBeauty(resourceDir)` | supported SDKs |
+| `goss_session_enable_beauty` | `enableBeauty(resourceDir)` | supported SDKs (returns `unsupported` on a host whose GL context cannot be created, and on builds without the effects engine) |
 | `goss_session_disable_beauty` | `disableBeauty()` | supported SDKs |
 | `goss_session_set_beauty` | `setBeauty(effect, amount)` | supported SDKs |
 | convenience | `setWhiten(amount)` | supported SDKs |
