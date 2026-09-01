@@ -33,11 +33,10 @@ Set `X.Y.Z` to a released version like `0.9.0`; the latest is on the
 > checksum is pinned per release, so SwiftPM verifies the download. Nothing to
 > link by hand, no search paths, no build step.
 
-<details>
-<summary>Building the engine from source (engine maintainers only)</summary>
+### Building from source
 
-You only need this if you are changing the engine itself. Build the two slices,
-point SwiftPM at your checkout, and set the per-slice search paths:
+Prefer compiling the engine yourself, from a clone or your own fork? Build the
+two slices, point SwiftPM at your checkout, and set the per-slice search paths:
 
 ```sh
 zig build ios
@@ -59,8 +58,6 @@ universal simulator slice, so it runs on Apple-silicon and Intel Macs alike.
 Build a from-source checkout with `ONLY_ACTIVE_ARCH=YES` against a concrete
 simulator. Auto-link warnings for `AudioUnit`, `CoreAudioTypes`, or
 `UIUtilities` at the final link are expected and benign.
-
-</details>
 
 ## The render loop
 
