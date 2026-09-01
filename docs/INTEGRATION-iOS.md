@@ -9,8 +9,10 @@ your own app. The [Swift SDK](../sdk/swift/README.md) is the surface; the
 The SDK is thin Swift over a static engine. Build the engine for the slices
 you target; the output lands in `zig-out`.
 
-    zig build ios
-    zig build ios-simulator
+```sh
+zig build ios
+zig build ios-simulator
+```
 
 On a Mac with Xcode both steps find their SDK through `xcrun` on their own;
 pass `-Dios-sdk`/`-Dios-simulator-sdk` (or `--sysroot`) only to point at a
@@ -75,15 +77,17 @@ there is nothing else to wire.
 Create the engine and a session once, then submit and render per frame. Submit
 and render run on the same thread.
 
-    let engine = try GossEngine.create()
-    try engine.initRenderer(surface: metalLayer, width: w, height: h)
-    let session = try GossSession.create(engine: engine)
+```swift
+let engine = try GossEngine.create()
+try engine.initRenderer(surface: metalLayer, width: w, height: h)
+let session = try GossSession.create(engine: engine)
 
-    // per camera frame
-    let desc = GossFrameDesc(width: w, height: h, pixelFormat: .nv12,
-                             rotationDegrees: 90, timestampUs: ts)
-    try session.submitFrame(desc: desc, planes: [yTextureHandle, uvTextureHandle])
-    try engine.renderFrame(session: session)
+// per camera frame
+let desc = GossFrameDesc(width: w, height: h, pixelFormat: .nv12,
+                         rotationDegrees: 90, timestampUs: ts)
+try session.submitFrame(desc: desc, planes: [yTextureHandle, uvTextureHandle])
+try engine.renderFrame(session: session)
+```
 
 `submitFrame` takes platform texture handles for the zero-copy path;
 `submitFrameCopy` is the CPU fallback from an NV12 byte buffer.
@@ -97,15 +101,17 @@ the NV12 to Metal-texture handoff.
 The engine never drives camera hardware. It holds declarative intent you set,
 normalizes it, and hands it back for you to apply to `AVCaptureDevice`:
 
-    var controls = goss_camera_controls()
-    controls.flash_mode = 2      // 0 off, 1 on, 2 auto
-    controls.zoom_factor = 2      // >= 1, clamped to the device ceiling
-    try session.setCameraControls(controls)
+```swift
+var controls = goss_camera_controls()
+controls.flash_mode = 2      // 0 off, 1 on, 2 auto
+controls.zoom_factor = 2      // >= 1, clamped to the device ceiling
+try session.setCameraControls(controls)
 
-    let applied = try session.cameraControls   // normalized; lock and apply
-    try device.lockForConfiguration()
-    device.videoZoomFactor = CGFloat(applied.zoom_factor)
-    device.unlockForConfiguration()
+let applied = try session.cameraControls   // normalized; lock and apply
+try device.lockForConfiguration()
+device.videoZoomFactor = CGFloat(applied.zoom_factor)
+device.unlockForConfiguration()
+```
 
 `goss_camera_controls` also carries torch, focus and exposure mode and points,
 the exposure bias, and the front-camera mirror-save policy. Two companions
@@ -119,22 +125,28 @@ engine validates and clamps every field; you read it back and apply it.
 
 A lens is a manifest plus its assets. Activate one on the session:
 
-    try session.activateLens(manifestJson: manifestData)
+```swift
+try session.activateLens(manifestJson: manifestData)
+```
 
 A lens that reads face, hand, or pose landmarks needs the matching ML model
 enabled first, or it loads and renders nothing with no error. Each worker stands
 up from its own task bundle and runs off the frames you already submit:
 
-    try session.enableFaceTracking(taskBundle: faceTaskData, threads: 2)
-    try session.enableHandTracking(taskBundle: gestureTaskData, threads: 2)
-    try session.enablePoseTracking(taskBundle: poseTaskData, threads: 2)
+```swift
+try session.enableFaceTracking(taskBundle: faceTaskData, threads: 2)
+try session.enableHandTracking(taskBundle: gestureTaskData, threads: 2)
+try session.enablePoseTracking(taskBundle: poseTaskData, threads: 2)
+```
 
 Hand tracking publishes up to two hands, scoring the canned gesture classes when
 the bundle carries them; pose tracking publishes one 33-point body. For a selfie
 framed with the legs out of shot, `setPoseUpperBody(true)` drops the lower-body
 joints so the tracker is not fighting for knees and ankles it cannot see:
 
-    try session.setPoseUpperBody(true)
+```swift
+try session.setPoseUpperBody(true)
+```
 
 The `.task` bundles (`face_landmarker.task`, `gesture_recognizer.task`,
 `pose_landmarker_full.task`) are separate resources you ship with your app;
@@ -153,25 +165,31 @@ signals and its script nodes run in a sandboxed JS runtime, so one manifest can
 react to a face, a tap, a beat, or an event you raise. Activating a lens from its
 directory compiles a program for every `shader.pass` node it splices:
 
-    try session.activateLensFromDirectory(bundlePath: path)
+```swift
+try session.activateLensFromDirectory(bundlePath: path)
+```
 
 Advance it once per frame with the elapsed time and the signals it reads.
 `GossLensSignals` carries whether a face and hands are present, a tap, the world
 tracking state, the audio level, and the face blendshapes; leave a field at its
 default and the triggers that read it stay false:
 
-    var signals = GossLensSignals(hasFace: n > 0, handsPresent: hands,
-                                  tap: tapped, audioLevel: level,
-                                  blendshapes: face.blendshapes)
-    try session.tickLens(dtUs: dt, signals: signals)
+```swift
+var signals = GossLensSignals(hasFace: n > 0, handsPresent: hands,
+                              tap: tapped, audioLevel: level,
+                              blendshapes: face.blendshapes)
+try session.tickLens(dtUs: dt, signals: signals)
+```
 
 `fireEvent` raises a named event the next tick delivers to the lens's
 `event('name')` triggers for one tick, so an app moment drives an on-screen
 effect; the engine knows the name, never its meaning. `parameterValue` reads a
 live parameter back, including whatever a script node last wrote to it:
 
-    try session.fireEvent("celebrate")
-    let intensity = try session.parameterValue("intensity")
+```swift
+try session.fireEvent("celebrate")
+let intensity = try session.parameterValue("intensity")
+```
 
 ## Multiple faces
 
@@ -180,31 +198,41 @@ lens rides it. To fan that lens out across every face in frame, hand the engine
 the faces you tracked this frame and it instances the anchored render across all
 of them:
 
-    try session.submitFaces(results)          // up to GOSS_FACE_MAX; empty clears
-    let n = try session.faceCount()
-    for i in 0..<n { try session.faceResult(at: i, into: face) }
+```swift
+try session.submitFaces(results)          // up to GOSS_FACE_MAX; empty clears
+let n = try session.faceCount()
+for i in 0..<n { try session.faceResult(at: i, into: face) }
+```
 
 `submitBodies` is the multi-person equivalent, so a body-anchored lens reaches
 every tracked figure:
 
-    try session.submitBodies(bodies)          // up to GOSS_BODY_MAX; empty clears
-    for i in 0..<(try session.bodyCount()) { try session.bodyResult(at: i, into: body) }
+```swift
+try session.submitBodies(bodies)          // up to GOSS_BODY_MAX; empty clears
+for i in 0..<(try session.bodyCount()) { try session.bodyResult(at: i, into: body) }
+```
 
 To pin content to a spot on the face, `faceRegion` returns the tracked point of a
 named attach point - forehead, glabella, nose tip, chin, an eye, a cheek, an ear,
 or a mouth corner:
 
-    let (x, y, _) = try session.faceRegion(.forehead)
+```swift
+let (x, y, _) = try session.faceRegion(.forehead)
+```
 
 `bodyJoint` is the body-skeleton equivalent, pinning to a shoulder, wrist, or
 knee of the tracked figure:
 
-    let joint = try session.bodyJoint(.leftWrist)
+```swift
+let joint = try session.bodyJoint(.leftWrist)
+```
 
 `handJoint` is the hand equivalent, pinning to a fingertip or the wrist of the
 tracked hand:
 
-    let tip = try session.handJoint(.indexTip)
+```swift
+let tip = try session.handJoint(.indexTip)
+```
 
 ## Depth
 
@@ -212,9 +240,11 @@ If the device reports scene depth - LiDAR, or ARKit's smoothed estimate - feed i
 each frame so a depth-aware lens can occlude content behind real geometry. The
 map is metres per pixel, row major, with the near and far range it spans:
 
-    let map = frame.sceneDepth?.depthMap       // ARFrame.sceneDepth
-    // lock the pixel buffer, copy its Float32 plane into `depth`, then:
-    try session.submitDepth(depth, width: w, height: h, near: 0.1, far: 5.0)
+```swift
+let map = frame.sceneDepth?.depthMap       // ARFrame.sceneDepth
+// lock the pixel buffer, copy its Float32 plane into `depth`, then:
+try session.submitDepth(depth, width: w, height: h, near: 0.1, far: 5.0)
+```
 
 An empty array clears it. The engine keeps the latest map for the occlusion pass.
 
@@ -224,8 +254,10 @@ If the camera reports its calibration, feed it once so an `undistort.pass` can
 straighten wide-angle lens distortion. The focal lengths and principal point are
 in pixels of the submitted frame, followed by the radial coefficients (k1, k2):
 
-    let m = frame.camera.intrinsics          // ARCamera.intrinsics, column major
-    try session.submitCameraIntrinsics(fx: m[0][0], fy: m[1][1], cx: m[2][0], cy: m[2][1], distortion: [k1, k2])
+```swift
+let m = frame.camera.intrinsics          // ARCamera.intrinsics, column major
+try session.submitCameraIntrinsics(fx: m[0][0], fy: m[1][1], cx: m[2][0], cy: m[2][1], distortion: [k1, k2])
+```
 
 An empty array clears them, leaving an `undistort.pass` inert.
 
@@ -247,7 +279,9 @@ For a gallery still rather than a camera frame, `submitSegmentationImage` runs
 one host-provided RGBA image through the running segmenter, so a saved photo
 picks up a mask the way a live frame would:
 
-    try session.submitSegmentationImage(rgba, width: w, height: h)
+```swift
+try session.submitSegmentationImage(rgba, width: w, height: h)
+```
 
 The `segmentationChannels` and `setSegmentationClassMask` controls belong to the
 web SDK's analysis-producer path, where the tracking module produces masks off a
@@ -261,10 +295,12 @@ frame. Enable it once from the directory that holds its resources - the engine
 appends `res/` to the root you pass - then set each effect's strength from zero
 to one:
 
-    try session.enableBeauty(resourceDir: bundleRoot)
-    try session.setSmooth(0.4)
-    try session.setWhiten(0.2)
-    try session.setThinFace(0.3)
+```swift
+try session.enableBeauty(resourceDir: bundleRoot)
+try session.setSmooth(0.4)
+try session.setWhiten(0.2)
+try session.setThinFace(0.3)
+```
 
 `setBigEye`, `setLipstick`, and `setBlush` round out the set, and
 `setBeauty(effect:amount:)` is the generic form the named setters wrap. A lens
@@ -276,7 +312,9 @@ colour per part - you pass the reference image and its 478 landmarks - so a
 `tint.pass` set to the reference source paints the live face in that colour; an
 empty landmark array clears it:
 
-    try session.setMakeupReference(rgba, width: w, height: h, landmarks: refLandmarks)
+```swift
+try session.setMakeupReference(rgba, width: w, height: h, landmarks: refLandmarks)
+```
 
 `beautifyFrame` is the one-shot CPU path: it runs the beauty pass over a single
 RGBA buffer into an output buffer you own, for a still with no renderer in the
@@ -288,9 +326,11 @@ texture-upload path and throw `.unsupported` on iOS.
 A lens can gate on place. Feed a location fix and describe the region the lens
 belongs to; the engine decides membership on-device and the fix never leaves it:
 
-    try session.submitLocation(latitude: lat, longitude: lon,
-                               accuracyM: acc, timestampUs: ts)
-    try session.setGeofence(latitude: lat, longitude: lon, radiusM: 150)
+```swift
+try session.submitLocation(latitude: lat, longitude: lon,
+                           accuracyM: acc, timestampUs: ts)
+try session.setGeofence(latitude: lat, longitude: lon, radiusM: 150)
+```
 
 `setGeofenceBBox` and `setGeofencePolygon` describe a box or a ring instead;
 `setGeoAccuracy` sets the worst fix that still counts as inside, and
@@ -303,12 +343,14 @@ Freehand strokes composite over the frame. Open a stroke, push normalized points
 as the finger moves, and close it; the engine keeps the undo/redo stack and hands
 back the ribbon (x, y, r, g, b, a per vertex) for your renderer:
 
-    try session.setBrushStyle(red: 1, green: 0.4, blue: 0.6, alpha: 1, width: 0.01)
-    try session.setBrushMode(.neon)     // pen, highlighter, marker, neon
-    try session.beginStroke()
-    try session.addStrokePoint(x: nx, y: ny)
-    try session.endStroke()
-    let ribbon = try session.brushVertices()
+```swift
+try session.setBrushStyle(red: 1, green: 0.4, blue: 0.6, alpha: 1, width: 0.01)
+try session.setBrushMode(.neon)     // pen, highlighter, marker, neon
+try session.beginStroke()
+try session.addStrokePoint(x: nx, y: ny)
+try session.endStroke()
+let ribbon = try session.brushVertices()
+```
 
 `setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x:y:z:)`/`endARStroke` are the
 world-anchored twin: points are pushed in the world frame world tracking reports,
@@ -321,8 +363,10 @@ composited output `renderFrame` presents. `capturePhoto` returns deterministic
 PNG bytes - the same composited pixels give the same file - and `capturePhoto(as:)`
 returns a platform JPEG or HEIC instead:
 
-    let (png, w, h) = try engine.capturePhoto(session: session)
-    let (jpeg, _, _) = try engine.capturePhoto(session: session, as: .jpeg, quality: 90)
+```swift
+let (png, w, h) = try engine.capturePhoto(session: session)
+let (jpeg, _, _) = try engine.capturePhoto(session: session, as: .jpeg, quality: 90)
+```
 
 `captureStill` is the high-resolution path, decoupled from the preview swap chain
 so a full-sensor still is not clamped to preview size. Its config carries the
@@ -330,16 +374,20 @@ target resolution, a supersample factor for photo-grade edges, the file format,
 the colour space, and the bit depth; a still past the GPU's texture ceiling is
 composited in tiles and stitched:
 
-    let config = GossEngine.StillConfig(supersample: 2, format: .heic, colorSpace: .displayP3)
-    let (data, _, _) = try engine.captureStill(session: session, config: config)
+```swift
+let config = GossEngine.StillConfig(supersample: 2, format: .heic, colorSpace: .displayP3)
+let (data, _, _) = try engine.captureStill(session: session, config: config)
+```
 
 `startRecording` writes every rendered frame, effects baked in, into an MP4 (or
 HEVC) until `stopRecording`. Feed `submitAudio` alongside it and the engine muxes
 that PCM as the recording's audio track:
 
-    try engine.startRecording(session: session, path: url.path, hevc: true)
-    // render frames as usual
-    try engine.stopRecording()
+```swift
+try engine.startRecording(session: session, path: url.path, hevc: true)
+// render frames as usual
+try engine.stopRecording()
+```
 
 `requestScreenshot` writes the next presented frame to a `.tga` file for debug
 and test tooling.
@@ -350,16 +398,20 @@ The camera is the base layer, source 0, but a session can composite more: a gues
 feed for a duet, a grid of callers, a shared screen. Register a named source,
 upload its frames as RGBA, and pick a layout:
 
-    try session.defineSource("guest")
-    try session.submitSourceFrame("guest", rgba: pixels, width: w, height: h, stride: w * 4)
-    try session.setLayout(1)   // 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid
+```swift
+try session.defineSource("guest")
+try session.submitSourceFrame("guest", rgba: pixels, width: w, height: h, stride: w * 4)
+try session.setLayout(1)   // 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid
+```
 
 `setSourceComposite` sets a source's opacity and keying - a matte from its own
 alpha, or a chroma key with a colour and a match tolerance - so a green-screen
 guest drops onto the camera cleanly. The name `camera` addresses the live base:
 
-    try session.setSourceComposite("guest", opacity: 1, key: 2,
-                                   chroma: (0, 1, 0), similarity: 0.2)
+```swift
+try session.setSourceComposite("guest", opacity: 1, key: 2,
+                               chroma: (0, 1, 0), similarity: 0.2)
+```
 
 `defineScreenShare` registers a source whose frames letterbox to their cell
 instead of stretching, for a shared screen that keeps its aspect. `removeSource`
@@ -373,12 +425,14 @@ it renders the composited frame straight into an IOSurface-backed BGRA pixel
 buffer - no readback - which VideoToolbox then encodes from the same surface.
 Create one per broadcast on the renderer's `MTLDevice` (your `CAMetalLayer`'s):
 
-    let live = GossLiveOutput(engine: engine, device: metalLayer.device!, width: w, height: h)!
+```swift
+let live = GossLiveOutput(engine: engine, device: metalLayer.device!, width: w, height: h)!
 
-    // per tick
-    if let buffer = live.nextFrame(session: session) {
-        capturer.capture(buffer)   // publish; show the same buffer locally too
-    }
+// per tick
+if let buffer = live.nextFrame(session: session) {
+    capturer.capture(buffer)   // publish; show the same buffer locally too
+}
+```
 
 `nextFrame` renders once per call, so a broadcast source needs no separate
 preview render - display the same buffer locally. It returns nil to skip a
@@ -396,9 +450,11 @@ block you are about to publish and hands back the mixed interleaved s16 - the
 engine resamples the lens sound to your track's rate and sums it in, so there
 is nothing to hand-mix:
 
-    let mixed = try session.mixOutputAudio(mic: micSamples, frameCount: n,
-                                           sampleRate: 48000, channels: 1)
-    audioTrack.send(mixed)   // publish; pass mic: nil for lens sound over silence
+```swift
+let mixed = try session.mixOutputAudio(mic: micSamples, frameCount: n,
+                                       sampleRate: 48000, channels: 1)
+audioTrack.send(mixed)   // publish; pass mic: nil for lens sound over silence
+```
 
 `pullAudio` still pulls the lens sound on its own for local playback with no
 call in progress; in a call, `mixOutputAudio` replaces it.
@@ -407,7 +463,9 @@ When the lens carries an `audio.infer` node with a caption binding, the engine
 runs on-device ASR over the mic and `captionText` reads the decoded text by the
 node's id, for the app to draw as a live subtitle:
 
-    if let line = session.captionText("caption") { subtitleLabel.text = line }
+```swift
+if let line = session.captionText("caption") { subtitleLabel.text = line }
+```
 
 ## Method names
 

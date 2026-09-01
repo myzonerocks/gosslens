@@ -12,7 +12,9 @@ gradle packages your app.
 
 ## Build the native library
 
-    zig build android
+```sh
+zig build android
+```
 
 This writes `zig-out/android/arm64-v8a/libgosslens.so` and
 `zig-out/android/x86_64/libgosslens.so`. arm64-v8a covers every current device
@@ -86,14 +88,16 @@ produces carries the native library you just built.
 Create the engine and a session once, then submit and render per frame. Submit
 and render run on the same thread.
 
-    val engine = GossEngine.create()
-    engine.initRenderer(surface, width, height)
-    val session = GossSession.create(engine)
+```kotlin
+val engine = GossEngine.create()
+engine.initRenderer(surface, width, height)
+val session = GossSession.create(engine)
 
-    // per camera frame
-    session.submitFrameCopy(yBuffer, yStride, uvBuffer, uvStride, width, height,
-                            rotationDegrees = 90, mirrored = false, timestampUs)
-    engine.renderFrame(session)
+// per camera frame
+session.submitFrameCopy(yBuffer, yStride, uvBuffer, uvStride, width, height,
+                        rotationDegrees = 90, mirrored = false, timestampUs)
+engine.renderFrame(session)
+```
 
 `submitHardwareBuffer` is the zero-copy path for an `AHardwareBuffer`; any
 non-OK status falls back to `submitFrameCopy`.
@@ -105,10 +109,12 @@ is the copy-pasteable version of this, including the surface and camera wiring.
 The engine never drives camera hardware. It holds declarative intent you set,
 normalizes it, and hands it back for you to apply through CameraX:
 
-    session.setCameraControls(GossCameraControls(flashMode = 2, zoomFactor = 2f))
+```kotlin
+session.setCameraControls(GossCameraControls(flashMode = 2, zoomFactor = 2f))
 
-    val applied = session.cameraControls() ?: return
-    cameraControl.setZoomRatio(applied.zoomFactor)
+val applied = session.cameraControls() ?: return
+cameraControl.setZoomRatio(applied.zoomFactor)
+```
 
 `GossCameraControls` also carries torch, focus and exposure mode and points, the
 exposure bias, and the front-camera mirror-save policy. Two companions round-trip
@@ -122,12 +128,16 @@ and clamps every field; you read it back and apply it.
 
 A lens is a manifest plus its assets. Activate one on the session:
 
-    session.activateLens(manifestJson)
+```kotlin
+session.activateLens(manifestJson)
+```
 
 A lens that reads face, hand, or pose landmarks needs the matching ML model
 enabled first, or it loads and renders nothing with no error:
 
-    session.enableFaceTracking(taskBundle, threads = 2)
+```kotlin
+session.enableFaceTracking(taskBundle, threads = 2)
+```
 
 The `.task` bundles (`face_landmarker.task`, `gesture_recognizer.task`,
 `pose_landmarker_full.task`) are separate resources you ship with your app;
@@ -146,10 +156,12 @@ clock. Tick it once per render frame with the live signals it evaluates its
 triggers and script nodes against, and it drives whatever effect values, ramps,
 and QuickJS logic the manifest declares:
 
-    val signals = GossLensSignals()
-    signals.set(hasFace, handsPresent, tap = false,
-                worldTrackingState = 0.0, audioLevel = 0.0, blendshapes)
-    session.tickLens(dtUs, signals)
+```kotlin
+val signals = GossLensSignals()
+signals.set(hasFace, handsPresent, tap = false,
+            worldTrackingState = 0.0, audioLevel = 0.0, blendshapes)
+session.tickLens(dtUs, signals)
+```
 
 Tick every frame even when no new tracking result landed, so the lens's own
 animation ramps advance at display rate rather than tracking cadence.
@@ -165,43 +177,55 @@ running backend, and `deactivateLens` unsplices whatever is active.
 lens rides it. To fan that lens out across every face in frame, hand the engine
 the faces you tracked this frame:
 
-    session.submitFaces(results)              // up to FACE_MAX; empty clears
-    for (i in 0 until session.faceCount()) session.faceResultAt(i, face)
+```kotlin
+session.submitFaces(results)              // up to FACE_MAX; empty clears
+for (i in 0 until session.faceCount()) session.faceResultAt(i, face)
+```
 
 `submitBodies` is the multi-person equivalent, reaching every tracked figure:
 
-    session.submitBodies(bodies)              // up to BODY_MAX; empty clears
-    for (i in 0 until session.bodyCount()) session.bodyResultAt(i, body)
+```kotlin
+session.submitBodies(bodies)              // up to BODY_MAX; empty clears
+for (i in 0 until session.bodyCount()) session.bodyResultAt(i, body)
+```
 
 To pin content to a spot on the face, `faceRegion` returns the tracked point of a
 named attach point - forehead, glabella, nose tip, chin, an eye, a cheek, an ear,
 or a mouth corner:
 
-    val p = session.faceRegion(Gosslens.FACE_REGION_FOREHEAD) ?: return
+```kotlin
+val p = session.faceRegion(Gosslens.FACE_REGION_FOREHEAD) ?: return
+```
 
 `bodyJoint` is the body-skeleton equivalent, pinning to a shoulder, wrist, or
 knee of the tracked figure:
 
-    val joint = session.bodyJoint(Gosslens.BODY_JOINT_LEFT_WRIST) ?: return
+```kotlin
+val joint = session.bodyJoint(Gosslens.BODY_JOINT_LEFT_WRIST) ?: return
+```
 
 `handJoint` is the hand equivalent, pinning to a fingertip or the wrist of the
 tracked hand:
 
-    val tip = session.handJoint(Gosslens.HAND_JOINT_INDEX_TIP) ?: return
+```kotlin
+val tip = session.handJoint(Gosslens.HAND_JOINT_INDEX_TIP) ?: return
+```
 
 ## Hands and pose
 
 `enableFaceTracking` has hand and pose twins. Each stands its own worker up from
 a `.task` bundle and publishes a reusable result you read back per frame:
 
-    session.enableHandTracking(handTask, threads = 2)
-    session.enablePoseTracking(poseTask, threads = 2)
+```kotlin
+session.enableHandTracking(handTask, threads = 2)
+session.enablePoseTracking(poseTask, threads = 2)
 
-    val hands = GossHandResult()
-    if (session.handResult(hands)) { /* hands.handCount, landmarks, gestures */ }
+val hands = GossHandResult()
+if (session.handResult(hands)) { /* hands.handCount, landmarks, gestures */ }
 
-    val pose = GossPoseResult()
-    if (session.poseResult(pose)) { /* pose.landmarkCount, pose.landmarks */ }
+val pose = GossPoseResult()
+if (session.poseResult(pose)) { /* pose.landmarkCount, pose.landmarks */ }
+```
 
 A `gesture_recognizer.task` bundle additionally scores each hand's canned gesture
 into `hands.gestures` - open palm, fist, victory, and the rest; a plain hand
@@ -221,16 +245,20 @@ To run the segmenter over a still you hold rather than the live camera frame,
 hand it in as RGBA8 and its mask reaches the active lens the way a camera
 frame's would:
 
-    session.submitSegmentationImage(rgba, width, height)
+```kotlin
+session.submitSegmentationImage(rgba, width, height)
+```
 
 ## Beauty and makeup
 
 The beauty chain is a separate effect stack you stand up from a directory of its
 shader and image assets, then drive one effect at a time:
 
-    session.enableBeauty(resourceDir)
-    session.setSmooth(0.6f)
-    session.setLipstick(0.4f)
+```kotlin
+session.enableBeauty(resourceDir)
+session.setSmooth(0.6f)
+session.setLipstick(0.4f)
+```
 
 `setSmooth`, `setWhiten`, `setThinFace`, `setBigEye`, `setLipstick` and
 `setBlush` each clamp to zero and one and are the named face of
@@ -244,7 +272,9 @@ lips, eyes, brows, and a cheek-and-forehead skin patch, so a tint.pass with a
 `face_skin` matches the reference's skin tone. Pass the photo as RGBA8 with its
 own 478-point face landmarks; an empty array clears it:
 
-    session.setMakeupReference(rgba, width, height, referenceLandmarks)
+```kotlin
+session.setMakeupReference(rgba, width, height, referenceLandmarks)
+```
 
 `beautifyFrame` runs the whole chain over one RGBA frame on the calling thread,
 the CPU path for a still you hold outside the render loop.
@@ -255,9 +285,11 @@ If the device supports the ARCore Depth API, feed the depth image each frame so 
 depth-aware lens can occlude content behind real geometry. The map is metres per
 pixel, row major, with the near and far range it spans:
 
-    val image = frame.acquireDepthImage16Bits()   // millimetres; convert to metres
-    // copy into a FloatArray, then:
-    session.submitDepth(depth, w, h, 0.1f, 5.0f)
+```kotlin
+val image = frame.acquireDepthImage16Bits()   // millimetres; convert to metres
+// copy into a FloatArray, then:
+session.submitDepth(depth, w, h, 0.1f, 5.0f)
+```
 
 An empty array clears it. The engine keeps the latest map for the occlusion pass.
 
@@ -267,8 +299,10 @@ If the camera reports its calibration, feed it once so an `undistort.pass` can
 straighten wide-angle lens distortion. The focal lengths and principal point are
 in pixels of the submitted frame, followed by the radial coefficients (k1, k2):
 
-    val i = frame.camera.imageIntrinsics       // CameraIntrinsics
-    session.submitCameraIntrinsics(i.focalLength[0], i.focalLength[1], i.principalPoint[0], i.principalPoint[1], floatArrayOf(k1, k2))
+```kotlin
+val i = frame.camera.imageIntrinsics       // CameraIntrinsics
+session.submitCameraIntrinsics(i.focalLength[0], i.focalLength[1], i.principalPoint[0], i.principalPoint[1], floatArrayOf(k1, k2))
+```
 
 An empty array clears them, leaving an `undistort.pass` inert.
 
@@ -277,8 +311,10 @@ An empty array clears them, leaving an `undistort.pass` inert.
 A lens can gate on place. Feed a location fix and describe the region the lens
 belongs to; the engine decides membership on-device and the fix never leaves it:
 
-    session.submitLocation(latitude, longitude, accuracyM, timestampUs)
-    session.setGeofence(latitude, longitude, radiusM = 150.0)
+```kotlin
+session.submitLocation(latitude, longitude, accuracyM, timestampUs)
+session.setGeofence(latitude, longitude, radiusM = 150.0)
+```
 
 `setGeofenceBBox` and `setGeofencePolygon` describe a box or a ring instead;
 `setGeoAccuracy` sets the worst fix that still counts as inside, and
@@ -291,12 +327,14 @@ Freehand strokes composite over the frame. Open a stroke, push normalized points
 and close it; the engine keeps the undo/redo stack and hands back the ribbon
 (x, y, r, g, b, a per vertex):
 
-    session.setBrushStyle(1f, 0.4f, 0.6f, 1f, 0.01f)
-    session.setBrushMode(GossSession.BrushMode.NEON)
-    session.beginStroke()
-    session.addStrokePoint(nx, ny)
-    session.endStroke()
-    val ribbon = session.brushVertices()
+```kotlin
+session.setBrushStyle(1f, 0.4f, 0.6f, 1f, 0.01f)
+session.setBrushMode(GossSession.BrushMode.NEON)
+session.beginStroke()
+session.addStrokePoint(nx, ny)
+session.endStroke()
+val ribbon = session.brushVertices()
+```
 
 `setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x, y, z)`/`endARStroke` are the
 world-anchored twin: points are pushed in the world frame world tracking reports,
@@ -308,16 +346,20 @@ The camera is the base layer; register more RGBA sources and arrange them into a
 split, grid, or picture-in-picture. Define a source, push frames into it, and
 set the layout:
 
-    session.defineSource("guest")
-    session.submitSourceFrameRgba("guest", rgba, width, height, stride)
-    session.setLayout(3)   // 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid, 5 overlay
+```kotlin
+session.defineSource("guest")
+session.submitSourceFrameRgba("guest", rgba, width, height, stride)
+session.setLayout(3)   // 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid, 5 overlay
+```
 
 `setSourceComposite` gives a source its own blend: opacity, a matte from its
 alpha (key mode 1), or a chroma key against a color within a similarity
 threshold (key mode 2); the name "camera" addresses the base:
 
-    session.setSourceComposite("guest", opacity = 0.9f, keyMode = 2,
-                               keyG = 1f, similarity = 0.3f)
+```kotlin
+session.setSourceComposite("guest", opacity = 0.9f, keyMode = 2,
+                           keyG = 1f, similarity = 0.3f)
+```
 
 `defineScreenShare` registers a source that letterboxes to fit its cell instead
 of stretching. `removeSource` drops one, and `clearLayout` returns to the camera
@@ -329,16 +371,20 @@ alone.
 deterministic - the same pixels give the same bytes - for a share sheet or a
 saved still:
 
-    val png = engine.capturePhoto(session) ?: return
+```kotlin
+val png = engine.capturePhoto(session) ?: return
+```
 
 `captureStill` is the high-resolution path: the frame at its own or a requested
 size, encoded PNG, JPEG or HEIC, with a color-space tag and an optional 16-bit
 PNG. `startRecording` opens an MP4 the renderer appends each rendered frame to,
 effects baked in, until `stopRecording`:
 
-    engine.startRecording(session, path, hevc = true)
-    // render frames as usual...
-    engine.stopRecording()
+```kotlin
+engine.startRecording(session, path, hevc = true)
+// render frames as usual...
+engine.stopRecording()
+```
 
 `GossRecordingPolicy` and `GossCaptureUi` from Camera controls carry the clip
 cap, timer, night mode and the rest for your recorder and capture chrome; the
@@ -351,9 +397,11 @@ video source fed one frame per tick. `captureLiveFrame` renders the composited
 frame and returns it in a WebRTC format (BGRA by default), so you build a
 `VideoFrame` for the source with no channel swizzle of your own:
 
-    val frame = engine.captureLiveFrame(session, width, height) ?: return
-    // wrap frame (BGRA, width x height) in a VideoFrame and hand it to the
-    // custom VideoSource you publish; show the same frame locally too
+```kotlin
+val frame = engine.captureLiveFrame(session, width, height) ?: return
+// wrap frame (BGRA, width x height) in a VideoFrame and hand it to the
+// custom VideoSource you publish; show the same frame locally too
+```
 
 It renders once per call, so a broadcast source needs no separate preview
 render. For audio, `submitAudio` feeds the mic in so audio-reactive lenses
@@ -368,7 +416,9 @@ When the lens carries an `audio.infer` node with a caption binding, the engine
 runs on-device ASR over the mic and `captionText` reads the decoded text by the
 node's id, for the app to draw as a live subtitle:
 
-    session.captionText("caption")?.let { subtitle.text = it }
+```kotlin
+session.captionText("caption")?.let { subtitle.text = it }
+```
 
 ## Method names
 
