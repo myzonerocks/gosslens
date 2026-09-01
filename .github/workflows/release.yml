@@ -9,10 +9,15 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
-  # Manual dry run: builds and gates every slice and uploads the artifacts
-  # without creating a Release or pushing to any registry (the publish job is
-  # tag-only), so the pipeline is verifiable before a real tag is cut.
-  workflow_dispatch: {}
+  # Manual trigger. With an empty version it is a dry run: builds and gates
+  # every slice, publishes nothing. With a version it is a full release: it
+  # creates the vX.Y.Z tag on the current commit and publishes everything.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version like 0.9.0 to tag, build, and publish. Empty runs a dry run that publishes nothing."
+        required: false
+        default: ""
 
 concurrency:
   group: release-${{ github.ref }}
@@ -20,6 +25,8 @@ concurrency:
 
 permissions:
   contents: write
+  # Required for npm publish --provenance to mint its signed attestation.
+  id-token: write
 
 jobs:
   android:
@@ -27,6 +34,28 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      # The pinned toolchain, the synced vendors, and zig's incremental caches:
+      # a pin change rebuilds from scratch, anything else restores warm.
+      - uses: actions/cache@v4
+        with:
+          path: .local/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .vendor
+            .vendor-archives
+          key: vendor-android-${{ runner.os }}-${{ hashFiles('third_party/**') }}
+          restore-keys: |
+            vendor-android-${{ runner.os }}-
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zigbuild-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+          restore-keys: |
+            zigbuild-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: toolchain
         run: |
           tools/toolchain-sync
@@ -37,27 +66,33 @@ jobs:
         run: zig build android
       # 16 KB page alignment is a hard Play gate: an unaligned .so fails to mmap
       # on a 16 KB-page device. Fail the release unless every LOAD segment aligns
-      # to at least 2**14, and confirm only the goss_* entrypoints are exported.
+      # to at least 2**14, and confirm a Java_com_gosslens_ JNI export is present.
       - name: alignment and symbol gates
         run: |
           set -euo pipefail
           shopt -s nullglob
+          # readelf ships with binutils and reads any-arch ELF headers, so it
+          # avoids the llvm-objdump the runner lacks. LOAD align is the last field
+          # (hex); a dynamic symbol's name is the last field of a dyn-syms row.
           found=0
           for so in zig-out/android/*/libgosslens.so; do
             found=1
-            echo "== $so =="
-            align=$(llvm-objdump -p "$so" | awk '/LOAD/ {print $NF; exit}')
-            echo "LOAD align: $align"
-            case "$align" in
-              2\*\*14|2\*\*15|2\*\*16) : ;;
-              *) echo "FAIL: $so LOAD alignment $align is below 2**14 (16 KB)"; exit 1 ;;
+            abi=$(basename "$(dirname "$so")")
+            align=$(readelf -lW "$so" | awk '/LOAD/ {print $NF; exit}')
+            echo "== $so ($abi) LOAD align $align =="
+            [ -n "$align" ] || { echo "FAIL: could not read the LOAD alignment of $so"; exit 1; }
+            # 16 KB pages are an arm64 device requirement; x86_64 is emulator-only
+            # and links at 4 KB, so enforce alignment only on the arm ABIs.
+            case "$abi" in
+              arm64-v8a|armeabi-v7a)
+                [ "$((align))" -ge 16384 ] || { echo "FAIL: $so LOAD alignment $align is below 16 KB"; exit 1; } ;;
+              *) echo "note: $abi is emulator-only; 16 KB alignment not enforced" ;;
             esac
-            # The ABI entrypoint must be exported for any SDK to bind the slice.
-            nm -D --defined-only "$so" | awk '{print $NF}' | grep -q '^goss_abi_version$' \
-              || { echo "FAIL: $so does not export goss_abi_version"; exit 1; }
-            # Diagnostic: any export beyond goss_*, for tightening the visibility
-            # of the vendored C++ slices in review.
-            nm -D --defined-only "$so" | awk '{print $NF}' | grep -vE '^(goss_|__|_init$|_fini$)' | sed "s#^#note $so exports: #" | head || true
+            # The android .so exposes the JNI entry points the kotlin SDK binds.
+            # awk consumes the whole dump: grep -q would quit at the first hit,
+            # SIGPIPE readelf mid-write, and fail the check under pipefail.
+            readelf -W --dyn-syms "$so" | awk '$NF ~ /^Java_com_gosslens_/ { found = 1 } END { exit !found }' \
+              || { echo "FAIL: $so exports no Java_com_gosslens_ JNI entry point"; exit 1; }
           done
           [ "$found" = 1 ] || { echo "FAIL: no libgosslens.so was built"; exit 1; }
       - name: package jniLibs
@@ -75,6 +110,28 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      # The pinned toolchain, the synced vendors, and zig's incremental caches:
+      # a pin change rebuilds from scratch, anything else restores warm.
+      - uses: actions/cache@v4
+        with:
+          path: .local/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .vendor
+            .vendor-archives
+          key: vendor-apple-${{ runner.os }}-${{ hashFiles('third_party/**') }}
+          restore-keys: |
+            vendor-apple-${{ runner.os }}-
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zigbuild-apple-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+          restore-keys: |
+            zigbuild-apple-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: toolchain
         run: |
           tools/toolchain-sync
@@ -127,12 +184,40 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # The pinned toolchain, the synced vendors, and zig's incremental caches:
+      # a pin change rebuilds from scratch, anything else restores warm. The
+      # vendor cache carries the emscripten SDK, the web job's largest fetch.
+      - uses: actions/cache@v4
+        with:
+          path: .local/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .vendor
+            .vendor-archives
+          key: vendor-web-${{ runner.os }}-${{ hashFiles('third_party/**') }}
+          restore-keys: |
+            vendor-web-${{ runner.os }}-
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zigbuild-web-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+          restore-keys: |
+            zigbuild-web-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: toolchain
         run: |
           tools/toolchain-sync
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - name: vendor sync
-        run: zig build vendor-sync
+        # emscripten and emscripten-python are excluded from the default sync
+        # (large, single-use), but the web engine build requires them.
+        run: |
+          zig build vendor-sync
+          zig build vendor-sync -- --only emscripten
+          zig build vendor-sync -- --only emscripten-python
       - uses: oven-sh/setup-bun@v2
       - name: pack the js wrapper
         run: |
@@ -166,16 +251,18 @@ jobs:
 
   publish:
     needs: [android, apple, web]
-    # Only a real vX.Y.Z tag publishes; a manual dispatch stops after the build
-    # and gate jobs, so verifying the pipeline never creates a Release.
-    if: startsWith(github.ref, 'refs/tags/')
+    # Publishes on a real vX.Y.Z tag, or on a manual dispatch that named a
+    # version. A dispatch with no version stops after the build and gate jobs.
+    if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.version != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Secrets are not readable in step `if:`, so surface their presence through
-    # job env the steps can test.
+    # job env the steps can test. RELEASE_TAG is the tag from a tag push, or
+    # v<version> from a dispatched release.
     env:
       HAS_MAVEN: ${{ secrets.OSSRH_USERNAME != '' }}
       HAS_NPM: ${{ secrets.NPM_TOKEN != '' }}
+      RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', inputs.version) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -186,30 +273,57 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          target=()
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Clear any prior release and tag of this name so a re-run recreates
+            # them cleanly on the current commit.
+            gh release delete "${RELEASE_TAG}" --yes --cleanup-tag 2>/dev/null || true
+            git push origin ":refs/tags/${RELEASE_TAG}" 2>/dev/null || true
+            target=(--target "${GITHUB_SHA}")
+          fi
           notes="SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
           assets=(dist/android/gosslens-android-jniLibs.zip dist/apple/GosslensKit.xcframework.zip dist/web/*.tgz)
           [ -f dist/web/gosslens-web-engine.zip ] && assets+=(dist/web/gosslens-web-engine.zip)
-          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --title "${GITHUB_REF_NAME}" --notes "$notes"
+          gh release create "${RELEASE_TAG}" "${target[@]}" "${assets[@]}" --title "${RELEASE_TAG}" --notes "$notes"
       # Pin SwiftPM to the XCFramework this release just published, so Swift
       # consumers get the prebuilt engine with no Zig. Best effort: if main is
       # protected the push is skipped and the values are printed to pin by hand.
       - name: pin the swift binary target on main
+        # Best effort: pinning commits to protected main, so never let it block
+        # the registry publishes that follow.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          # A PAT that bypasses main's branch rule lets the pin self-commit; add
+          # RELEASE_PAT as a secret and to the ruleset's bypass list. Without it
+          # the default token push is rejected and the pin is a one-line PR.
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -euo pipefail
           checksum=$(cat dist/apple/GosslensKit.checksum.txt)
           git config user.name avosa
           git config user.email avosa.developer@gmail.com
           git fetch origin main && git checkout main
-          tools/pin-swift-xcframework.sh "${GITHUB_REF_NAME}" "${checksum}"
-          if ! git diff --quiet sdk/swift/Package.swift; then
-            git add sdk/swift/Package.swift
-            git commit -m "release ${GITHUB_REF_NAME}: pin the swift xcframework binary target"
-            git push origin main || echo "note: push to main was rejected (branch protection); run tools/pin-swift-xcframework.sh with the values above and open a PR"
+          tools/pin-swift-xcframework.sh "${RELEASE_TAG}" "${checksum}"
+          if git diff --quiet sdk/swift/Package.swift; then exit 0; fi
+          git add sdk/swift/Package.swift
+          git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
+          if [ -n "${RELEASE_PAT:-}" ]; then
+            git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          else
+            git push origin main || echo "note: no RELEASE_PAT and the branch rule blocks the token push; pin via a one-line PR (tools/pin-swift-xcframework.sh)"
           fi
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
+      - name: set up jdk 21 for gradle
+        if: ${{ env.HAS_MAVEN == 'true' }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: set up the android sdk for gradle
+        if: ${{ env.HAS_MAVEN == 'true' }}
+        uses: android-actions/setup-android@v3
       - name: publish to maven central
         if: ${{ env.HAS_MAVEN == 'true' }}
         env:
@@ -220,10 +334,12 @@ jobs:
         run: |
           set -euo pipefail
           # Restore the CI-built .so where gradle's jniLibs srcDir expects it, so
-          # the published AAR carries the prebuilt binary.
+          # the published AAR carries the prebuilt binary. The fresh checkout has
+          # no zig-out, so create it before unzipping into it.
+          mkdir -p zig-out/android
           unzip -o dist/android/gosslens-android-jniLibs.zip -d zig-out/android
           cd sdk/kotlin
-          ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache -PVERSION_NAME="${GITHUB_REF_NAME#v}"
+          ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache -PVERSION_NAME="${RELEASE_TAG#v}"
       - name: publish to npm
         if: ${{ env.HAS_NPM == 'true' }}
         env:
