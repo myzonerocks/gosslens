@@ -37,6 +37,7 @@ final class PreviewViewController: UIViewController {
 
     private var engine: GossEngine?
     private var session: GossSession?
+    private var audioOutput: GossAudioOutput?
     private var displayLink: CADisplayLink?
 
     private var renderedFrames = 0
@@ -456,6 +457,12 @@ final class PreviewViewController: UIViewController {
         }
         session = newSession
 
+        // Lens sounds reach the speaker through the platform engine; the
+        // render tick pumps the mixer on the same thread that ticks the lens.
+        let output = GossAudioOutput(session: newSession)
+        try? output.start()
+        audioOutput = output
+
         camera.start(session: newSession)
 
         let link = CADisplayLink(target: self, selector: #selector(renderTick))
@@ -620,6 +627,7 @@ final class PreviewViewController: UIViewController {
             blendshapes: trackedFace.blendshapes
         )
         try? session.tickLens(dtUs: dtUs, signals: signals)
+        try? audioOutput?.pump()
     }
 
     @objc private func appDidEnterBackground() {

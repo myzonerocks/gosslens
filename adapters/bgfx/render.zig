@@ -1586,6 +1586,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.lash_shape_uniform);
         c.bgfx_destroy_uniform(r.face_points_uniform);
         c.bgfx_destroy_uniform(r.model_color_uniform);
+        c.bgfx_destroy_uniform(r.light_uniform);
+        c.bgfx_destroy_uniform(r.material_uniform);
         c.bgfx_destroy_uniform(r.particle_cool_uniform);
         c.bgfx_destroy_uniform(r.particle_size_uniform);
         c.bgfx_destroy_uniform(r.particle_fx_uniform);
@@ -1670,6 +1672,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.face_swap_program);
         c.bgfx_destroy_program(r.lash_program);
         c.bgfx_destroy_program(r.model_program);
+        c.bgfx_destroy_program(r.model_lit_program);
         c.bgfx_destroy_program(r.model_instanced_program);
         c.bgfx_destroy_program(r.billboard_program);
         c.bgfx_destroy_program(r.splat_program);

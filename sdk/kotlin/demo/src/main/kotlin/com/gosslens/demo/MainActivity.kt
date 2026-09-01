@@ -28,6 +28,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.gosslens.GossAudioOutput
 import com.gosslens.GossEngine
 import com.gosslens.GossLensSignals
 import com.gosslens.GossSession
@@ -46,6 +47,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private lateinit var overlay: FaceOverlayView
     private var engine: GossEngine? = null
     private var session: GossSession? = null
+    private var audioOutput: GossAudioOutput? = null
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     private val uiExecutor by lazy { ContextCompat.getMainExecutor(this) }
 
@@ -145,6 +147,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         engine = created
         val createdSession = GossSession.create(created)
         session = createdSession
+
+        // Lens sounds reach the speaker through AudioTrack; the render
+        // tick pumps the mixer on the same thread that ticks the lens.
+        val output = GossAudioOutput(createdSession)
+        output.start()
+        audioOutput = output
         Log.i(tag, "renderer up ${width}x$height")
         enableTracker(createdSession, "face_landmarker.task", "face") { b -> createdSession.enableFaceTracking(b, 0) }
         enableTracker(createdSession, "gesture_recognizer.task", "hand") { b -> createdSession.enableHandTracking(b, 0) }
@@ -191,11 +199,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private fun tickLens(session: GossSession, dtUs: Int) {
         lensSignals.set(overlay.facePresent, overlay.handCount > 0, false, 0.0, 0.0, overlay.latestFaceResult.blendshapes)
         session.tickLens(dtUs, lensSignals)
+        audioOutput?.pump()
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         session?.close()
         engine?.close()
+        audioOutput?.stop()
+        audioOutput = null
         session = null
         engine = null
     }

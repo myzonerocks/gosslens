@@ -1,4 +1,4 @@
-import { GOSS_SEGMENTATION_MASK_SIDE, GossFaceRegion, GossPreviewSession, pickEngineUrl } from "../src/index.ts";
+import { GOSS_SEGMENTATION_MASK_SIDE, GossAudioOutput, GossFaceRegion, GossPreviewSession, pickEngineUrl } from "../src/index.ts";
 import { GOSS_FACE_LANDMARK_COUNT } from "../src/tracking.ts";
 
 const status = document.getElementById("status")!;
@@ -299,6 +299,7 @@ async function startTracking(preview: GossPreviewSession): Promise<void> {
   // tracking result's signals, the same rhythm the iOS demo drives -
   // paused (a frozen still-photo test) means the prover owns ticking.
   let lastLensTick = performance.now();
+  let audioOutput: GossAudioOutput | null = null;
   const lensTick = () => {
     requestAnimationFrame(lensTick);
     const now = performance.now();
@@ -316,6 +317,7 @@ async function startTracking(preview: GossPreviewSession): Promise<void> {
       hasFace: (lastReply?.presence ?? 0) >= 0.5 && (lastReply?.landmarkCount ?? 0) > 0,
       blendshapes: lastReply?.blendshapes,
     });
+    audioOutput?.pump();
   };
   requestAnimationFrame(lensTick);
 
@@ -400,6 +402,20 @@ async function run(): Promise<void> {
       }
     },
   });
+
+  // Lens sounds route to the speakers; browsers gate audio behind a
+  // gesture, so the first tap stands the worklet up and the lens tick
+  // loop pumps it each frame.
+  window.addEventListener(
+    "pointerdown",
+    () => {
+      const output = new GossAudioOutput(preview.session);
+      output.start().then(() => {
+        audioOutput = output;
+      });
+    },
+    { once: true },
+  );
   await preview.start();
   // Persisted across reloads: a camera that hands the browser
   // pre-rotated frames does so every time, not just this once. Default

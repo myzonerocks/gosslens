@@ -21,6 +21,9 @@ extern fn ABGRToARGB(src: [*]const u8, src_stride: c_int, dst: [*]u8, dst_stride
 extern fn ARGBRotate(src: [*]const u8, src_stride: c_int, dst: [*]u8, dst_stride: c_int, src_width: c_int, src_height: c_int, mode: c_int) c_int;
 extern fn ARGBMirror(src: [*]const u8, src_stride: c_int, dst: [*]u8, dst_stride: c_int, width: c_int, height: c_int) c_int;
 extern fn ARGBToRAW(src_argb: [*]const u8, src_stride: c_int, dst_raw: [*]u8, dst_stride: c_int, width: c_int, height: c_int) c_int;
+extern fn NV12ToARGB(src_y: [*]const u8, src_stride_y: c_int, src_uv: [*]const u8, src_stride_uv: c_int, dst_argb: [*]u8, dst_stride: c_int, width: c_int, height: c_int) c_int;
+extern fn NV21ToARGB(src_y: [*]const u8, src_stride_y: c_int, src_vu: [*]const u8, src_stride_vu: c_int, dst_argb: [*]u8, dst_stride: c_int, width: c_int, height: c_int) c_int;
+extern fn I420ToARGB(src_y: [*]const u8, src_stride_y: c_int, src_u: [*]const u8, src_stride_u: c_int, src_v: [*]const u8, src_stride_v: c_int, dst_argb: [*]u8, dst_stride: c_int, width: c_int, height: c_int) c_int;
 
 // libyuv's RGB-to-YUV coefficient tables, C-linkage globals picked by
 // standard and range. We only pass their address; the layout mirrors
@@ -261,4 +264,31 @@ pub fn argbMirror(src: [*]const u8, src_stride: u32, dst: [*]u8, dst_stride: u32
 pub fn bgraToRgb(src: [*]const u8, src_stride: u32, dst: [*]u8, dst_stride: u32, width: u32, height: u32, flip: bool) ConvertError!void {
     const h: c_int = if (flip) -@as(c_int, @intCast(height)) else @intCast(height);
     if (ARGBToRAW(src, @intCast(src_stride), dst, @intCast(dst_stride), @intCast(width), h) != 0) return error.ConversionFailed;
+}
+
+/// The chroma layout a decoder's YUV420 output carries: NV12 interleaves
+/// UV, NV21 interleaves VU, I420 keeps three planes. A codec reports which.
+pub const Yuv420 = enum { nv12, nv21, i420 };
+
+/// Converts a decoder's YUV420 frame to tightly packed BGRA (libyuv ARGB
+/// byte order), the pixel order the video texture uploads. `src_stride_y`
+/// and `src_stride_uv` are the codec's own plane strides; for I420 the U
+/// and V planes follow Y at half stride. BT.601, the camera/video default.
+pub fn yuv420ToBgra(kind: Yuv420, y: [*]const u8, src_stride_y: u32, uv: [*]const u8, src_stride_uv: u32, dst: [*]u8, dst_stride: u32, width: u32, height: u32) ConvertError!void {
+    const w: c_int = @intCast(width);
+    const h: c_int = @intCast(height);
+    const sy: c_int = @intCast(src_stride_y);
+    const suv: c_int = @intCast(src_stride_uv);
+    const ds: c_int = @intCast(dst_stride);
+    const rc = switch (kind) {
+        .nv12 => NV12ToARGB(y, sy, uv, suv, dst, ds, w, h),
+        .nv21 => NV21ToARGB(y, sy, uv, suv, dst, ds, w, h),
+        .i420 => blk: {
+            // I420's U and V are separate half-height planes packed after Y.
+            const u = y + (src_stride_y * height);
+            const v = u + (src_stride_uv * ((height + 1) / 2));
+            break :blk I420ToARGB(y, sy, u, suv, v, suv, dst, ds, w, h);
+        },
+    };
+    if (rc != 0) return error.ConversionFailed;
 }

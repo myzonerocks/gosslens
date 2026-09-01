@@ -53,8 +53,11 @@ LIBRARY_SEARCH_PATHS[sdk=iphoneos*]        = .../gosslens/zig-out/ios
 LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = .../gosslens/zig-out/ios-simulator
 ```
 
-The simulator slice is arm64 only, so build with `ONLY_ACTIVE_ARCH=YES` against
-a concrete simulator. Auto-link warnings for `AudioUnit`, `CoreAudioTypes`, or
+Each simulator arch builds on its own (`zig build ios-simulator` for arm64,
+`ios-simulator-x86` for Intel); the released XCFramework lipos both into one
+universal simulator slice, so it runs on Apple-silicon and Intel Macs alike.
+Build a from-source checkout with `ONLY_ACTIVE_ARCH=YES` against a concrete
+simulator. Auto-link warnings for `AudioUnit`, `CoreAudioTypes`, or
 `UIUtilities` at the final link are expected and benign.
 
 </details>
@@ -460,7 +463,10 @@ audioTrack.send(mixed)   // publish; pass mic: nil for lens sound over silence
 ```
 
 `pullAudio` still pulls the lens sound on its own for local playback with no
-call in progress; in a call, `mixOutputAudio` replaces it.
+call in progress; in a call, `mixOutputAudio` replaces it. `GossAudioOutput`
+routes that local playback to the speaker for you: `start()` it once after the
+session exists and call `pump()` each frame beside `tickLens`, and lens sounds
+play through an `AVAudioEngine` source it owns.
 
 When the lens carries an `audio.infer` node with a caption binding, the engine
 runs on-device ASR over the mic and `captionText` reads the decoded text by the

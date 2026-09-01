@@ -432,7 +432,12 @@ lens's own sound into the mic block you are about to publish and returns the mix
 interleaved s16 for your outgoing WebRTC audio track: it resamples the lens sound
 to your track's rate and sums it in, so there is nothing to hand-mix (pass `null`
 for the mic to send the lens sound over silence). `pullAudio` still pulls the lens
-sound alone for local WebAudio playback with no call in progress.
+sound alone for local WebAudio playback with no call in progress; `GossAudioOutput`
+wraps that playback (an `AudioWorklet` it owns, `start()` from a gesture, `pump()`
+each frame beside `tickLens`). `GossMicInput` captures the microphone into
+`submitAudio` so level and beat triggers fire in the browser, and
+`GossVideoTexture` plays an MP4 through the browser's decoder into a named
+source a lens composites.
 
 When the lens carries an `audio.infer` node with a caption binding, the engine
 runs on-device ASR over the mic and `captionText` reads the decoded text by the

@@ -1,0 +1,119 @@
+name: cold
+
+# The from-scratch audit lane: no cache restore anywhere, so a warm run
+# that only passed because a derived key omitted an input diverges here.
+# A cold failure on a sha whose warm gates were green is an incident.
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  pull_request:
+    paths:
+      - ".zigversion"
+      - "third_party/**"
+      - "tools/abi-baseline.txt"
+
+concurrency:
+  group: cold-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: vendor sync
+        run: zig build vendor-sync
+      - name: fetch models
+        run: zig build fetch-models
+      - name: gate suite, cold
+        run: zig build ci
+      - name: divergence note
+        if: failure()
+        run: echo "cold diverged from warm on ${{ github.sha }}; a derived cache key omitted an input. Treat as an incident." >> "$GITHUB_STEP_SUMMARY"
+
+  tracking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: vendor sync
+        run: zig build vendor-sync
+      - name: fetch models
+        run: zig build fetch-models
+      - name: tracking harness
+        run: zig build tracking-harness
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: vendor sync
+        run: zig build vendor-sync
+      - name: fetch models
+        run: zig build fetch-models
+      - name: build and test
+        run: zig build test --summary all
+        env:
+          GOSS_PROBES: "1"
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: vendor sync
+        run: zig build vendor-sync
+      - name: android library
+        run: zig build android
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: install
+        run: cd sdk/ts && bun install
+      - name: build
+        run: cd sdk/ts && bun run build
+      - name: test
+        run: cd sdk/ts && bun test
+
+  lens-shaders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: vendor sync
+        run: zig build vendor-sync
+      - name: lens validator shader tests
+        run: zig build test -Dlens-shaders=true
+      - name: validate reference lenses
+        run: zig build lens-validate-reference
