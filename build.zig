@@ -4406,15 +4406,25 @@ const EmToolchain = struct {
 fn emscriptenToolchain(b: *std.Build) ?EmToolchain {
     const present = blk: {
         b.build_root.handle.access(b.graph.io, ".vendor/emscripten/emscripten/em++", .{}) catch break :blk false;
-        b.build_root.handle.access(b.graph.io, ".vendor/emscripten-python/bin/python3", .{}) catch break :blk false;
         break :blk true;
     };
     if (!present) return null;
+    // emscripten-python is a mac-only vendor (host_optional in its pin;
+    // upstream ships no linux python dep - emsdk on linux runs on the
+    // system interpreter), so where its sync was legitimately skipped,
+    // fall back to PATH's python3 instead of failing forever.
+    const em_python = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/emscripten-python/bin/python3", .{}) catch {
+            const system_python = b.findProgram(&.{"python3"}, &.{}) catch return null;
+            break :blk system_python;
+        };
+        break :blk b.pathFromRoot(".vendor/emscripten-python/bin/python3");
+    };
     const node_exe = b.findProgram(&.{"node"}, &.{}) catch return null;
     return .{
         .em_plus_plus = b.pathFromRoot(".vendor/emscripten/emscripten/em++"),
         .em_root = b.pathFromRoot(".vendor/emscripten"),
-        .em_python = b.pathFromRoot(".vendor/emscripten-python/bin/python3"),
+        .em_python = em_python,
         .em_llvm_root = b.pathFromRoot(".vendor/emscripten/bin"),
         .em_config = b.pathFromRoot("adapters/bgfx/em_config_empty"),
         .node_exe = node_exe,
