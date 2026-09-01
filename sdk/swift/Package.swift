@@ -4,7 +4,7 @@ import PackageDescription
 // The engine links as static archives `zig build ios` / `ios-simulator`
 // install into zig-out. Naming them here means a consumer points
 // LIBRARY_SEARCH_PATHS at that directory per slice instead of hand-copying
-// the -l list out of the demo; docs/INTEGRATION-iOS.md is the guide.
+// the -l list out of the demo; the SDK README is the guide.
 let engineLinkerSettings: [LinkerSetting] = [
     .linkedLibrary("gosslens", .when(platforms: [.iOS])),
     .linkedLibrary("gpupixel", .when(platforms: [.iOS])),

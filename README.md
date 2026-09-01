@@ -22,8 +22,10 @@ and nothing a camera sees ever leaves the device.
 
 ## Install
 
-Each SDK carries the compiled engine as a native artifact - a `.so`, an
-XCFramework, a `.wasm` - so you add a coordinate and never run a build step.
+iOS and Android carry the compiled engine inside the package - an XCFramework, a
+`.so` - so you add a coordinate and never run a build step. On web you add the
+wrapper and host the prebuilt wasm engine from the release. Either way there is
+no toolchain.
 
 **iOS - Swift**
 
@@ -46,9 +48,8 @@ bun add @myzonerocks/gosslens
 ```
 
 Set `X.Y.Z` to the latest [release](https://github.com/myzonerocks/gosslens/releases).
-Then wire the render loop with the integration guide for your platform:
-[iOS](docs/INTEGRATION-iOS.md), [Android](docs/INTEGRATION-ANDROID.md),
-[Web](docs/INTEGRATION-WEB.md).
+Then wire the render loop with the guide for your platform:
+[iOS](sdk/swift/README.md), [Android](sdk/kotlin/README.md), [Web](sdk/ts/README.md).
 
 ## What you get
 
@@ -58,8 +59,8 @@ Then wire the render loop with the integration guide for your platform:
 - **World and AR** - anchor content in space from ARKit, ARCore, or WebXR frames, and raycast a tap onto a scanned world mesh.
 - **Capture** - photos, video, and multi-source compositing through each platform's native media APIs.
 
-Every capability ships on all three platforms or it does not ship. The proof
-table is [docs/PARITY.md](docs/PARITY.md).
+Every capability targets all three platforms; [docs/PARITY.md](docs/PARITY.md)
+is the honest table of what is proven where.
 
 ## SDKs
 

@@ -2,8 +2,8 @@
 
 > [!TIP]
 > Building your own app? You don't need any of this. Add
-> `io.github.avosa:gosslens` and follow
-> [docs/INTEGRATION-ANDROID.md](../../../docs/INTEGRATION-ANDROID.md) - no Zig,
+> `io.github.avosa:gosslens` and follow the
+> [Kotlin SDK README](../README.md) - no Zig,
 > no NDK. This is an in-repo reference that builds the engine from the checkout
 > so it always matches the SDK source.
 

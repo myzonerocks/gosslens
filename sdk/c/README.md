@@ -20,7 +20,7 @@ zig build c
 
 stages, under `zig-out/c/`:
 
-```c
+```text
 include/gosslens.h        the frozen C ABI, copied from include/
 lib/libgosslens.dylib     the shared library (.so on Linux)
 lib/libgosslens.a         the static archive of the engine's own objects

@@ -2,7 +2,7 @@
 
 > [!TIP]
 > Building your own app? You don't need any of this. Add the SwiftPM package and
-> follow [docs/INTEGRATION-iOS.md](../../../docs/INTEGRATION-iOS.md) - no Zig, no
+> follow the [Swift SDK README](../README.md) - no Zig, no
 > Xcode build settings. This is an in-repo reference that links the SDK from the
 > checkout so it always matches the SDK source.
 

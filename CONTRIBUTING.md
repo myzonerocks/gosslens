@@ -104,11 +104,11 @@ Every capability ships on all three platforms or it does not ship, and
 [docs/PARITY.md](docs/PARITY.md) is the table of what is proven where.
 
 - iOS: `zig build ios` and `zig build ios-simulator`; the demo under
-  `sdk/swift/demo` runs it. See [docs/INTEGRATION-iOS.md](docs/INTEGRATION-iOS.md).
+  `sdk/swift/demo` runs it. See [sdk/swift/README.md](sdk/swift/README.md).
 - Android: `zig build android`; the demo under `sdk/kotlin/demo` runs it. See
-  [docs/INTEGRATION-ANDROID.md](docs/INTEGRATION-ANDROID.md).
+  [sdk/kotlin/README.md](sdk/kotlin/README.md).
 - Web: `zig build wasm`; the demo under `sdk/ts/demo` runs it. See
-  [docs/INTEGRATION-WEB.md](docs/INTEGRATION-WEB.md).
+  [sdk/ts/README.md](sdk/ts/README.md).
 
 When a capability moves from built to demonstrated on a platform, update its row
 in [docs/PARITY.md](docs/PARITY.md) in the same change.

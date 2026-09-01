@@ -3,7 +3,7 @@
 > [!TIP]
 > Building your own app? You don't need any of this. Install the SDK with `bun
 > add @myzonerocks/gosslens`, host the prebuilt engine attached to any release,
-> and follow [docs/INTEGRATION-WEB.md](../../../docs/INTEGRATION-WEB.md). No Zig.
+> and follow the [TypeScript SDK README](../README.md). No Zig.
 > This page is an in-repo reference that imports `src/` and builds the engine
 > from the checkout so it always matches the SDK source.
 
