@@ -529,6 +529,20 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "abi", .module = abi_module }},
     });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lifecycle_proof_module })).step);
+    // The same scenario as a standalone binary, so the scheduled leak lane
+    // can wrap it in the platform malloc leak checker and watch the C and
+    // C++ heaps the debug allocator in the test variant cannot see.
+    const leak_scenario_exe = b.addExecutable(.{
+        .name = "gosslens-leak-scenario",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("harness/leak_scenario.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "lifecycle_proof", .module = lifecycle_proof_module }},
+        }),
+    });
+    const leak_scenario_step = b.step("leak-scenario", "Build the headless lifecycle scenario for the native-heap leak lane");
+    leak_scenario_step.dependOn(&b.addInstallArtifact(leak_scenario_exe, .{}).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
     test_step.dependOn(&b.addRunArtifact(vendor_sync_tests).step);
     test_step.dependOn(&b.addRunArtifact(fetch_models_tests).step);

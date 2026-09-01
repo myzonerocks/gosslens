@@ -23,6 +23,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: actions/cache@v4
+        id: zigtool
         with:
           path: .local/zig
           key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
@@ -38,6 +39,7 @@ jobs:
           printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr_body.txt"
           zig build gate -- --pr-body "$RUNNER_TEMP/pr_body.txt"
       - uses: actions/cache@v4
+        id: vendor
         with:
           path: |
             .vendor
@@ -46,12 +48,14 @@ jobs:
       - name: vendor sync
         run: zig build vendor-sync
       - uses: actions/cache@v4
+        id: models
         with:
           path: .models
           key: models-${{ hashFiles('third_party/models.lock') }}
       - name: fetch models
         run: zig build fetch-models
       - uses: actions/cache/restore@v4
+        id: zigcache
         with:
           path: |
             .zig-cache
@@ -70,6 +74,12 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zigcache-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+      - name: cache health
+        if: always()
+        run: |
+          {
+            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   tracking:
     runs-on: ubuntu-latest
@@ -77,6 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
+        id: zigtool
         with:
           path: .local/zig
           key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
@@ -85,6 +96,7 @@ jobs:
           tools/toolchain-sync
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
+        id: vendor
         with:
           path: |
             .vendor
@@ -93,12 +105,14 @@ jobs:
       - name: vendor sync
         run: zig build vendor-sync
       - uses: actions/cache@v4
+        id: models
         with:
           path: .models
           key: models-${{ hashFiles('third_party/models.lock') }}
       - name: fetch models
         run: zig build fetch-models
       - uses: actions/cache/restore@v4
+        id: zigcache
         with:
           path: |
             .zig-cache
@@ -115,6 +129,12 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zigcache-tracking-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+      - name: cache health
+        if: always()
+        run: |
+          {
+            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   macos-build:
     runs-on: macos-latest
@@ -122,6 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
+        id: zigtool
         with:
           path: .local/zig
           key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
@@ -130,6 +151,7 @@ jobs:
           tools/toolchain-sync
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
+        id: vendor
         with:
           path: |
             .vendor
@@ -138,12 +160,14 @@ jobs:
       - name: vendor sync
         run: zig build vendor-sync
       - uses: actions/cache@v4
+        id: models
         with:
           path: .models
           key: models-${{ hashFiles('third_party/models.lock') }}
       - name: fetch models
         run: zig build fetch-models
       - uses: actions/cache/restore@v4
+        id: zigcache
         with:
           path: |
             .zig-cache
@@ -166,6 +190,12 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zigcache-conformance-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+      - name: cache health
+        if: always()
+        run: |
+          {
+            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   android:
     runs-on: ubuntu-latest
@@ -173,6 +203,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
+        id: zigtool
         with:
           path: .local/zig
           key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
@@ -181,6 +212,7 @@ jobs:
           tools/toolchain-sync
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
+        id: vendor
         with:
           path: |
             .vendor
@@ -189,6 +221,7 @@ jobs:
       - name: vendor sync
         run: zig build vendor-sync
       - uses: actions/cache/restore@v4
+        id: zigcache
         with:
           path: |
             .zig-cache
@@ -205,6 +238,12 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zigcache-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+      - name: cache health
+        if: always()
+        run: |
+          {
+            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   web:
     runs-on: ubuntu-latest
@@ -228,6 +267,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
+        id: zigtool
         with:
           path: .local/zig
           key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
@@ -236,6 +276,7 @@ jobs:
           tools/toolchain-sync
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
+        id: vendor
         with:
           path: |
             .vendor
@@ -244,6 +285,7 @@ jobs:
       - name: vendor sync
         run: zig build vendor-sync
       - uses: actions/cache/restore@v4
+        id: zigcache
         with:
           path: |
             .zig-cache
@@ -262,3 +304,9 @@ jobs:
             .zig-cache
             ~/.cache/zig
           key: zigcache-lens-shaders-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+      - name: cache health
+        if: always()
+        run: |
+          {
+            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
