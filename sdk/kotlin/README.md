@@ -10,12 +10,35 @@ tracking. The frame graph, lens runtime, and effect pipeline live in the
 core.
 
 [docs/INTEGRATION-ANDROID.md](../../docs/INTEGRATION-ANDROID.md) is the
-start-to-finish guide: build the native library, add the SDK as an included
-build, and the minimal render loop.
+start-to-finish guide: add the coordinate and run the minimal render loop.
 
 ## Install
 
-Building against a checkout of this repository:
+Add the Maven Central coordinate. The AAR carries the prebuilt `.so`, so there
+is no Zig and no NDK:
+
+```kotlin
+dependencies {
+    implementation("io.github.avosa:gosslens:X.Y.Z")
+}
+```
+
+Set `X.Y.Z` to a released version like `0.9.0`; the latest is on the
+[releases page](https://github.com/myzonerocks/gosslens/releases).
+
+<details>
+<summary>JitPack, or a local checkout (engine maintainers)</summary>
+
+[JitPack](https://jitpack.io) builds the AAR from a tag (heavier, from source):
+
+```kotlin
+repositories { maven { url = uri("https://jitpack.io") } }
+dependencies {
+    implementation("com.github.myzonerocks:gosslens:vX.Y.Z")
+}
+```
+
+Against your own checkout, after `zig build android`:
 
 ```kotlin
 dependencies {
@@ -23,17 +46,7 @@ dependencies {
 }
 ```
 
-Over [JitPack](https://jitpack.io) once a tag exists (see the native-`.so`
-caveat in TODO below):
-
-```kotlin
-repositories {
-    maven { url = uri("https://jitpack.io") }
-}
-dependencies {
-    implementation("com.myzonerocks:gosslens:0.9.0")
-}
-```
+</details>
 
 ## Use
 
@@ -76,12 +89,5 @@ capability tour is in the [root README](../../README.md#using-gosslens).
 
 ## TODO
 
-- Tag a `0.1.0` release; JitPack needs a real tag to resolve.
-- JitPack's build doesn't run `zig build android` first, so today's
-  JitPack artifact would carry no native `.so` and crash on
-  `System.loadLibrary`. Needs a real CI step that cross-compiles the
-  native library (NDK-dependent, not something JitPack's own
-  environment can do) before publishing. The included-build path
-  above is the only one that works right now.
 - Add a `src/test/` suite. Conformance runs through the demo app's
   `ConformanceRunner` and [`harness/`](../../harness/) for now.
