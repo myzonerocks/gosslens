@@ -2000,10 +2000,10 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         if (!isBehaviorNode(node.type)) composite_count += 1;
     }
     const nodes = try gpa.alloc(LensNode, composite_count);
-    const node_hidden = try gpa.alloc(bool, composite_count);
-    @memset(node_hidden, false);
-    errdefer gpa.free(node_hidden);
     errdefer gpa.free(nodes);
+    const node_hidden = try gpa.alloc(bool, composite_count);
+    errdefer gpa.free(node_hidden);
+    @memset(node_hidden, false);
     var spliced_count: usize = 0;
     errdefer for (nodes[0..spliced_count]) |n| g.removeNode(n.graph_index);
 
@@ -2190,6 +2190,13 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     defer logic_diag.deinit();
     const logic_graphs = try compileLogicGraphs(logic_arena.allocator(), logic_diag.allocator(), lens_manifest, param_names);
 
+    const timer_names_owned = try timer_names.toOwnedSlice(gpa);
+    errdefer {
+        for (timer_names_owned) |name| gpa.free(name);
+        gpa.free(timer_names_owned);
+    }
+    const counter_names_owned = try counter_names.toOwnedSlice(gpa);
+
     return .{
         .gpa = gpa,
         .manifest = lens_manifest,
@@ -2199,10 +2206,10 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .ramps = ramps,
         .nodes = nodes,
         .node_hidden = node_hidden,
-        .timer_names = try timer_names.toOwnedSlice(gpa),
+        .timer_names = timer_names_owned,
         .timer_elapsed_us = timer_elapsed_us,
         .tick_timer_values = tick_timer_values,
-        .counter_names = try counter_names.toOwnedSlice(gpa),
+        .counter_names = counter_names_owned,
         .counter_values = counter_values,
         .tick_counter_values = tick_counter_values,
         .tick_touched = tick_touched,

@@ -56,7 +56,9 @@ fn bandEdge(b: usize) usize {
 fn toCanonicalMono(gpa: std.mem.Allocator, samples: []const f32, frame_count: u32, sample_rate: u32, channels: u32) ![]f32 {
     if (frame_count == 0 or sample_rate == 0 or channels == 0) return gpa.alloc(f32, 0);
     const ch: usize = channels;
-    const out_n: usize = @intCast(@as(u64, frame_count) * canonical_rate / sample_rate);
+    const out_wide = @as(u64, frame_count) * canonical_rate / sample_rate;
+    if (out_wide > std.math.maxInt(usize)) return error.OutOfMemory;
+    const out_n: usize = @intCast(out_wide);
     if (out_n == 0) return gpa.alloc(f32, 0);
     const out = try gpa.alloc(f32, out_n);
     const ratio = @as(f64, @floatFromInt(sample_rate)) / @as(f64, @floatFromInt(canonical_rate));
