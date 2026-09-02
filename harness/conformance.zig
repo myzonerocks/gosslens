@@ -2537,11 +2537,80 @@ fn proveHighResCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 /// composited tile by tile and stitched, and the result is byte-identical
 /// to the same capture as a single target. Tiling breaks the texture-size
 /// ceiling on a full-sensor still without ever changing a pixel.
-/// The live-broadcast egress: goss_engine_capture_live_frame vends the baked
-/// composite in the three WebRTC formats a publisher hands to an encoder.
-/// Proves each format's size contract and that the three describe the same
-/// picture, so a broadcast lane cannot silently publish a swizzled or
-/// mis-sized frame.
+fn proveTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
+        std.debug.print("conformance: FAIL tiled capture lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const cfg = abi.CaptureConfig{ .width = 400, .height = 300, .supersample = 0, .format = 0, .quality = 0 };
+    const buf_cap = 400 * 300 * 4 + 4096;
+
+    // The reference: the whole 400x300 output composited in one target.
+    const whole = try gpa.alloc(u8, buf_cap);
+    defer gpa.free(whole);
+    var whole_len: usize = 0;
+    var ow: u32 = 0;
+    var oh: u32 = 0;
+    session.capture_tile_cap = 0;
+    if (abi.goss_engine_capture_still(engine, session, &cfg, whole.ptr, whole.len, &whole_len, &ow, &oh) != .ok or ow != 400 or oh != 300) {
+        std.debug.print("conformance: FAIL single-target capture for the tiling compare\n", .{});
+        return false;
+    }
+
+    // Two lowered caps forcing different grids: 200 -> 2x2, 150 -> 3x2.
+    // Each stitched result must match the single-target bytes exactly.
+    const caps = [_]u32{ 200, 150 };
+    for (caps) |tcap| {
+        const tiled = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(tiled);
+        var tiled_len: usize = 0;
+        session.capture_tile_cap = tcap;
+        const status = abi.goss_engine_capture_still(engine, session, &cfg, tiled.ptr, tiled.len, &tiled_len, &ow, &oh);
+        session.capture_tile_cap = 0;
+        if (status != .ok or ow != 400 or oh != 300) {
+            std.debug.print("conformance: FAIL tiled capture at cap {d}\n", .{tcap});
+            return false;
+        }
+        if (!std.mem.eql(u8, whole[0..whole_len], tiled[0..tiled_len])) {
+            std.debug.print("conformance: FAIL tiled capture at cap {d} is not byte-identical to the single target\n", .{tcap});
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF tiled composition stitches byte-identical to a single-target render (2x2 and 3x2 grids)\n", .{});
+    return true;
+}
+
+/// Proves the live-broadcast egress: the composite comes back in all three
+/// WebRTC formats at one size and describes one picture, so a publisher
+/// cannot ship a swizzled or mis-sized frame, and an unknown format or a
+/// short buffer is refused rather than guessed at.
 fn proveLiveFrameEgress(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -2644,76 +2713,6 @@ fn proveLiveFrameEgress(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
 
     std.debug.print("conformance: live frame egress rgba/bgra/nv12 agree at {d}x{d} over {d} pixels, worst luma delta {d}\n", .{ w, h, checked, worst });
-    return true;
-}
-
-fn proveTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
-    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
-    defer abi.destroySession(session);
-    defer settle(engine);
-
-    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
-        std.debug.print("conformance: FAIL tiled capture lens activation\n", .{});
-        return false;
-    }
-    const corpus = try loadCorpusFrame(gpa, corpus_path);
-    defer corpus.deinit();
-    const planes = try rgbaToNv12(gpa, corpus.frame);
-    defer planes.deinit(gpa);
-    const desc: abi.FrameDesc = .{
-        .width = planes.width,
-        .height = planes.height,
-        .pixel_format = 0,
-        .color_standard = 0,
-        .color_range = 1,
-        .flags = 0,
-        .timestamp_us = 1000,
-    };
-    const half_w = (planes.width + 1) / 2;
-    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
-        return error.SubmitFailed;
-    }
-    for (0..5) |_| {
-        _ = abi.goss_engine_render_frame(engine, session);
-        c.glfwPollEvents();
-    }
-
-    const cfg = abi.CaptureConfig{ .width = 400, .height = 300, .supersample = 0, .format = 0, .quality = 0 };
-    const buf_cap = 400 * 300 * 4 + 4096;
-
-    // The reference: the whole 400x300 output composited in one target.
-    const whole = try gpa.alloc(u8, buf_cap);
-    defer gpa.free(whole);
-    var whole_len: usize = 0;
-    var ow: u32 = 0;
-    var oh: u32 = 0;
-    session.capture_tile_cap = 0;
-    if (abi.goss_engine_capture_still(engine, session, &cfg, whole.ptr, whole.len, &whole_len, &ow, &oh) != .ok or ow != 400 or oh != 300) {
-        std.debug.print("conformance: FAIL single-target capture for the tiling compare\n", .{});
-        return false;
-    }
-
-    // Two lowered caps forcing different grids: 200 -> 2x2, 150 -> 3x2.
-    // Each stitched result must match the single-target bytes exactly.
-    const caps = [_]u32{ 200, 150 };
-    for (caps) |tcap| {
-        const tiled = try gpa.alloc(u8, buf_cap);
-        defer gpa.free(tiled);
-        var tiled_len: usize = 0;
-        session.capture_tile_cap = tcap;
-        const status = abi.goss_engine_capture_still(engine, session, &cfg, tiled.ptr, tiled.len, &tiled_len, &ow, &oh);
-        session.capture_tile_cap = 0;
-        if (status != .ok or ow != 400 or oh != 300) {
-            std.debug.print("conformance: FAIL tiled capture at cap {d}\n", .{tcap});
-            return false;
-        }
-        if (!std.mem.eql(u8, whole[0..whole_len], tiled[0..tiled_len])) {
-            std.debug.print("conformance: FAIL tiled capture at cap {d} is not byte-identical to the single target\n", .{tcap});
-            return false;
-        }
-    }
-
-    std.debug.print("conformance: PROOF tiled composition stitches byte-identical to a single-target render (2x2 and 3x2 grids)\n", .{});
     return true;
 }
 
