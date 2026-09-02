@@ -61,15 +61,17 @@ consumer resolves it.
 call - most apps want this:
 
 ```typescript
-import { GossPreviewSession, pickEngineUrl } from "@myzonerocks/gosslens";
+import { GossPreviewSession } from "@myzonerocks/gosslens";
 
-const wasmJsUrl = await pickEngineUrl(webgpuUrl, webgl2Url);
-const preview = await GossPreviewSession.create(canvas, wasmJsUrl);
+const preview = await GossPreviewSession.create(canvas, webgl2Url);
 preview.activateLens(manifestJson);
 ```
 
-`pickEngineUrl` confirms a real WebGPU adapter before choosing, and falls back to
-the WebGL2 URL. `create` takes an optional third `events` argument for the
+Point it at the WebGL2 build. The WebGPU build renders, tracks, and runs
+beauty, but lens activation currently crashes its Asyncify-instrumented
+engine, so hold it back until that is fixed; `pickEngineUrl(webgpuUrl,
+webgl2Url)` remains available and confirms a real WebGPU adapter before
+choosing, falling back to the WebGL2 URL. `create` takes an optional third `events` argument for the
 capture-loop callbacks. If you drive the loop yourself, the pieces are public too:
 
 ```typescript

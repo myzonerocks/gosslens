@@ -362,13 +362,13 @@ async function startTracking(preview: GossPreviewSession): Promise<void> {
 async function run(): Promise<void> {
   const webgpuUrl = new URL("./webgpu/gosslens_web.js", import.meta.url);
   const webgl2Url = new URL("./gosslens_web.js", import.meta.url);
-  // ?engine=webgpu|webgl2 forces a specific build for testing both
-  // paths independently - real Chrome always has a working adapter,
-  // so the auto-detect in pickEngineUrl alone can never exercise the
-  // WebGL2 fallback here.
+  // ?engine=webgpu|webgl2 forces a specific build for testing both paths
+  // independently. The demo defaults to WebGL2: the WebGPU build renders,
+  // tracks, and runs beauty, but lens activation currently crashes its
+  // Asyncify-instrumented engine, so auto-pick stays off until that closes.
   const forcedEngine = new URLSearchParams(location.search).get("engine");
-  const wasmJsUrl =
-    forcedEngine === "webgpu" ? webgpuUrl : forcedEngine === "webgl2" ? webgl2Url : await pickEngineUrl(webgpuUrl, webgl2Url);
+  void pickEngineUrl;
+  const wasmJsUrl = forcedEngine === "webgpu" ? webgpuUrl : webgl2Url;
   const preview = await GossPreviewSession.create(canvas, wasmJsUrl, {
     onState(state) {
       status.textContent = `capture ${state}`;
@@ -590,7 +590,9 @@ async function run(): Promise<void> {
   // read back agrees with the bound parameter.
   (window as unknown as Record<string, unknown>).mlProve = () => {
     try {
+      console.log("mlProve: stage");
       preview.session.provideLensAsset("probe.onnx", onnxProbe());
+      console.log("mlProve: activate");
       preview.activateLens(JSON.stringify({
         glf: "1.0",
         id: "goss.web.ml-probe",
@@ -605,14 +607,20 @@ async function run(): Promise<void> {
       const side = 64;
       const uv = new Uint8Array((side / 2) * (side / 2) * 2).fill(128);
       const bright = new Uint8Array(side * side).fill(200);
+      console.log("mlProve: track bright");
       preview.session.trackFrame(bright, side, uv, side, side, side);
+      console.log("mlProve: tick 1");
       preview.tickLens(16000);
+      console.log("mlProve: read score");
       const score = preview.session.parameterValue("score");
+      console.log("mlProve: mlOutput");
       const tensor = preview.session.mlOutput("byo");
       const dark = new Uint8Array(side * side).fill(40);
+      console.log("mlProve: track dark");
       preview.session.trackFrame(dark, side, uv, side, side, side);
       preview.tickLens(16000);
       const darkScore = preview.session.parameterValue("score");
+      console.log("mlProve: deactivate");
       preview.deactivateLens();
       return JSON.stringify({ score, darkScore, tensor: tensor ? Array.from(tensor) : null });
     } catch (err) {

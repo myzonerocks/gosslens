@@ -8,7 +8,7 @@ CaptureOutput, Events.
 | Capability | iOS | Android | Web |
 |------------|-----|---------|-----|
 | Live capture | demonstrated on device | built, no hardware yet | demonstrated in browser |
-| Preview render | demonstrated on device | built, no hardware yet | demonstrated in browser |
+| Preview render | demonstrated on device | built, no hardware yet | demonstrated in browser on the WebGL2 build; the WebGPU build renders and tracks but lens activation crashes its Asyncify-instrumented engine today |
 | Face tracking | demonstrated on device | built, no hardware yet | demonstrated in browser |
 | Segmentation | proven in the host harness, multiclass with per-class lens channels | built, no hardware yet | demonstrated in browser, the sync segmentation core on the wasm tracking module, subject and per-class channels fed back through set_segmentation_mask and set_segmentation_class_mask |
 | Pose tracking | proven in the host harness | built, no hardware yet | demonstrated in browser, the pose pipeline on the wasm tracking module, read through a GossPoseTracker |
