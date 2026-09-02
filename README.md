@@ -39,14 +39,14 @@ to the newest release on its own:
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "0.10.2")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.11.0")
 ```
 
 **Android - Kotlin**
 
 ```kotlin
 // build.gradle.kts
-implementation("io.github.avosa:gosslens:0.10.2")
+implementation("io.github.avosa:gosslens:0.11.0")
 ```
 
 **Web - TypeScript**
