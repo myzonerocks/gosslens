@@ -1,7 +1,8 @@
 #!/bin/sh
-# Run the required gates before any branch leaves the desktop, so a push that
-# would fail hosted CI never spends runner minutes. main stays PR-only. Set
-# GOSS_PREPUSH_FULL=1 to also cross-build android and web; --no-verify skips.
+# Every lane hosted CI runs, run here first: runner minutes are billed and
+# this desk is not. Lanes run one at a time, which is also this machine's
+# memory rule, behind a lock so two runs cannot race into the hang that
+# concurrent conformance causes. Bypassing this hook is not a workflow.
 set -e
 
 root="$(git rev-parse --show-toplevel)"
@@ -11,12 +12,11 @@ zig="$root/.local/zig/current/zig"
 
 # Provenance pattern for outgoing commit messages, assembled from halves so
 # this file never contains the literal strings it bans. Mirrors gate.zig's
-# message tokens; the scan is pure git+grep so it runs in milliseconds and
-# works even when the toolchain is absent or the heavy gates would hang.
+# message tokens; the scan is pure git and grep so it runs in milliseconds and
+# works even when the toolchain is absent.
 prov="co-auth:ored-by|generated: with|generated:-by|assisted:-by|co-devel:oped-by|ai-gen:erated|cla:ude|anthro:pic|chat:gpt|open:ai|copi:lot|gem:ini|deep:seek|cur:sor|cod:ex|winds:urf|aid:er|dev:in|qw:en|mist:ral|lla:ma|openro:uter|perple:xity|language: model|coding: agent|coding: assistant|ai: agent"
 prov_re="$(printf '%s' "$prov" | tr -d ':')"
 
-# Scans one outgoing rev range and refuses the push on a provenance hit.
 scan_messages() {
   hits="$(git log --format='%B' "$@" < /dev/null 2>/dev/null | grep -iE "$prov_re" | head -3 || true)"
   if [ -n "$hits" ]; then
@@ -27,6 +27,7 @@ scan_messages() {
 }
 
 gate_needed=0
+range=""
 while read -r local_ref local_sha remote_ref remote_sha; do
   # A deletion pushes the all-zero sha; there is nothing to gate.
   case "$local_sha" in *[!0]*) ;; *) continue ;; esac
@@ -41,25 +42,77 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   # The message scan runs first and per ref: no toolchain, no build, nothing
   # that can hang. A hit refuses the push before any heavy work.
   case "$remote_sha" in
-    *[!0]*) scan_messages "$remote_sha..$local_sha" ;;
-    *) scan_messages "$local_sha" --not --remotes=origin ;;
+    *[!0]*) scan_messages "$remote_sha..$local_sha"; range="$remote_sha..$local_sha" ;;
+    *) scan_messages "$local_sha" --not --remotes=origin; range="origin/main..$local_sha" ;;
   esac
 done
 
 [ "$gate_needed" = 1 ] || exit 0
 
 cd "$root"
-echo "pre-push: running the required gates locally (ci + tracking); --no-verify to skip" >&2
-"$zig" build ci
-"$zig" build tracking-harness
 
-if [ "${GOSS_PREPUSH_FULL:-}" = 1 ]; then
-  # Opt-in: the platform lanes are heavier and are not required checks, so they
-  # stay off the default push and run only when asked. Conformance is left to CI
-  # because it can hang when it races another gate process on this machine.
-  echo "pre-push: GOSS_PREPUSH_FULL set, also building android and web" >&2
-  "$zig" build android
-  ( cd sdk/ts && bun install --silent && bun run build && bun test )
+# One gate run at a time on this machine. A second push waits rather than
+# racing the first into a wedged conformance run.
+lock="$root/.zig-cache/pre-push.lock"
+mkdir -p "$root/.zig-cache"
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "pre-push: another gate run holds the lock at $lock" >&2
+  echo "pre-push: wait for it, or remove that directory if no run is alive" >&2
+  exit 1
+fi
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT INT TERM
+
+# The gate suite compares against origin/main, so a stale ref gates the wrong
+# range. Refresh it before anything reads it.
+git fetch --quiet origin main 2>/dev/null || echo "pre-push: could not refresh origin/main; gating against the local ref" >&2
+
+# A push touching only prose still gets the gate suite, which carries the
+# provenance and comment-hygiene scans; it does not need the build lanes.
+changed="$(git diff --name-only "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)" HEAD 2>/dev/null || echo unknown)"
+docs_only=1
+for f in $changed; do
+  case "$f" in
+    *.md|LICENSE|NOTICE) ;;
+    *) docs_only=0 ;;
+  esac
+done
+[ -n "$changed" ] || docs_only=0
+
+step() {
+  name="$1"; shift
+  printf 'pre-push: %s\n' "$name" >&2
+  start=$(date +%s)
+  if ! "$@"; then
+    echo "pre-push: FAILED at $name" >&2
+    echo "pre-push: re-run just this lane with: $*" >&2
+    exit 1
+  fi
+  printf 'pre-push: %s ok (%ss)\n' "$name" "$(( $(date +%s) - start ))" >&2
+}
+
+# Vendored sources and models are inputs to the lanes below; syncing first
+# keeps a lane from failing for a missing dependency rather than a real fault.
+step "vendor sync" "$zig" build vendor-sync
+step "fetch models" "$zig" build fetch-models
+
+# The gate suite: tree scan, commit provenance and comment hygiene over the
+# outgoing range, plus the test suite. Exported rather than prefixed, since a
+# prefix on a shell function does not portably reach the command it runs; the
+# hosted lane sets it, and without it the probe tests silently skip.
+export GOSS_PROBES=1
+step "gate suite (probes on)" "$zig" build ci
+
+if [ "$docs_only" = 1 ]; then
+  echo "pre-push: prose-only push, build lanes skipped" >&2
+  echo "pre-push: gates green" >&2
+  exit 0
 fi
 
-echo "pre-push: gates green" >&2
+step "tracking harness" "$zig" build tracking-harness
+step "lens shaders" "$zig" build test -Dlens-shaders=true
+step "leak scenario" "$zig" build leak-scenario
+step "conformance" "$zig" build conformance
+step "android cross-build" "$zig" build android
+step "web sdk" sh -c 'cd sdk/ts && bun install --silent && bun run build && bun test'
+
+echo "pre-push: every hosted lane passed locally" >&2

@@ -6118,7 +6118,8 @@ pub const CaptureConfig = extern struct {
     /// still is not clamped to the preview swap chain.
     width: u32,
     height: u32,
-    /// Reserved for the supersample factor; 0 or 1 means 1:1 today.
+    /// The supersample factor: 0 or 1 render 1:1, 2 and 4 render larger
+    /// then box-downsample. Any other value is refused.
     supersample: u32,
     /// 0 = PNG, 1 = JPEG, 2 = HEIC (the photo format enum).
     format: u32,
