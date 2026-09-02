@@ -1,4 +1,4 @@
-import type { GossSession } from "./index";
+import type { GossSession } from "./index.js";
 
 /// Plays an MP4 through a hidden video element, the browser's own
 /// decoder, and feeds each frame to a named engine source a lens

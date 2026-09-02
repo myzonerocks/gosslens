@@ -2852,8 +2852,8 @@ export class GossPreviewSession {
   }
 }
 
-export { GossWebXRWorldSource } from "./world";
-export type { GossXRFrameLike } from "./world";
-export { GossAudioOutput } from "./audio-output";
-export { GossMicInput } from "./mic-input";
-export { GossVideoTexture } from "./video-texture";
+export { GossWebXRWorldSource } from "./world.js";
+export type { GossXRFrameLike } from "./world.js";
+export { GossAudioOutput } from "./audio-output.js";
+export { GossMicInput } from "./mic-input.js";
+export { GossVideoTexture } from "./video-texture.js";

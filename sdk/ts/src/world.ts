@@ -2,7 +2,7 @@
 /// planes, and tracked anchors off each XR frame and feeds them into
 /// the session. The page owns the XR session; this source only reads.
 
-import type { GossSession, GossWorldPlane, GossWorldAnchorInput } from "./index";
+import type { GossSession, GossWorldPlane, GossWorldAnchorInput } from "./index.js";
 
 // WebXR's types live outside the DOM lib; the narrow slice this source
 // reads is declared here so no type package enters the build.
