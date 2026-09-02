@@ -259,10 +259,22 @@ fn processFrame(tracking: *PoseTracking, frame: *const PendingFrame) void {
         // Symmetric input, the pose detector's own tensor range - the
         // face detector's convention, not the palm detector's.
         sampler.sampleRegion(image, square, .symmetric, tracking.detector_side, tracking.detector_tensor);
-        tracking.detector_engine.writeInput(0, std.mem.sliceAsBytes(tracking.detector_tensor)) catch return;
-        tracking.detector_engine.invoke() catch return;
-        const raw_boxes = tracking.detector_engine.outputFloats(0) catch return;
-        const raw_scores = tracking.detector_engine.outputFloats(1) catch return;
+        tracking.detector_engine.writeInput(0, std.mem.sliceAsBytes(tracking.detector_tensor)) catch {
+            publishEmpty(tracking, frame.timestamp_us);
+            return;
+        };
+        tracking.detector_engine.invoke() catch {
+            publishEmpty(tracking, frame.timestamp_us);
+            return;
+        };
+        const raw_boxes = tracking.detector_engine.outputFloats(0) catch {
+            publishEmpty(tracking, frame.timestamp_us);
+            return;
+        };
+        const raw_scores = tracking.detector_engine.outputFloats(1) catch {
+            publishEmpty(tracking, frame.timestamp_us);
+            return;
+        };
         var candidates: [max_candidates]detector.pose.Detection = undefined;
         const found = detector.pose.decode(raw_boxes, raw_scores, tracking.anchors, @floatFromInt(tracking.detector_side), 0.5, &candidates);
         if (found.len == 0) {
@@ -275,10 +287,23 @@ fn processFrame(tracking: *PoseTracking, frame: *const PendingFrame) void {
     };
 
     sampler.sampleRegion(image, crop, .unit, tracking.landmark_side, tracking.landmark_tensor);
-    tracking.landmarks_engine.writeInput(0, std.mem.sliceAsBytes(tracking.landmark_tensor)) catch return;
-    tracking.landmarks_engine.invoke() catch return;
-    const raw_landmarks = tracking.landmarks_engine.outputFloats(0) catch return;
-    const presence = score01((tracking.landmarks_engine.outputFloats(1) catch return)[0]);
+    tracking.landmarks_engine.writeInput(0, std.mem.sliceAsBytes(tracking.landmark_tensor)) catch {
+        publishEmpty(tracking, frame.timestamp_us);
+        return;
+    };
+    tracking.landmarks_engine.invoke() catch {
+        publishEmpty(tracking, frame.timestamp_us);
+        return;
+    };
+    const raw_landmarks = tracking.landmarks_engine.outputFloats(0) catch {
+        publishEmpty(tracking, frame.timestamp_us);
+        return;
+    };
+    const presence_out = tracking.landmarks_engine.outputFloats(1) catch {
+        publishEmpty(tracking, frame.timestamp_us);
+        return;
+    };
+    const presence = score01(presence_out[0]);
     if (presence < presence_floor) {
         tracking.lock = null;
         publishEmpty(tracking, frame.timestamp_us);

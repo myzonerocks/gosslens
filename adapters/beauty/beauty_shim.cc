@@ -4,7 +4,9 @@
 // lipstick, blusher; runs on the caller's thread, one frame at a time.
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <new>
 #include <vector>
@@ -222,13 +224,45 @@ void ApplyLandmarks(BeautyContext* context, const float* landmarks106) {
   context->blusher->SetFaceLandmarks(context->makeup_points);
 }
 
+// gpupixel logs and continues when its GL context cannot be created (a
+// headless host, an inactive app); every filter then compiles no program
+// and a live-looking chain passes frames through untouched. On the GL
+// worker thread a dead context reads GL_VERSION as null: refuse it there.
+bool glContextAlive() {
+  bool alive = false;
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext(
+      [&] { alive = glGetString(GL_VERSION) != nullptr; });
+  return alive;
+}
+
+// The vendored filters swallow a missing makeup or whiten image into a
+// silent no-op, so name every absent required file once at create.
+void warnMissingResources(const char* resource_path) {
+  static const char* const kRequired[] = {
+      "res/mouth.png",        "res/blusher.png",     "res/lookup_gray.png",
+      "res/lookup_origin.png", "res/lookup_skin.png", "res/lookup_light.png",
+  };
+  for (const char* rel : kRequired) {
+    std::error_code ec;
+    if (!std::filesystem::exists(std::filesystem::path(resource_path) / rel,
+                                 ec)) {
+      std::fprintf(stderr, "gosslens beauty: resource missing: %s/%s\n",
+                   resource_path, rel);
+    }
+  }
+}
+
 }  // namespace
 
 extern "C" {
 
 void* goss_beauty_create(const char* resource_path) {
+  if (!glContextAlive()) {
+    return nullptr;
+  }
   if (resource_path != nullptr) {
     gpupixel::GPUPixel::SetResourcePath(resource_path);
+    warnMissingResources(resource_path);
   }
   auto* context = new (std::nothrow) BeautyContext();
   if (context == nullptr) {

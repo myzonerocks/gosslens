@@ -178,8 +178,13 @@ fn renderOnceWith(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []co
     // activation applies the lens's own default effect values to
     // whatever chain is already live, and a chain enabled afterward
     // would silently miss them.
-    if (abi.goss_session_enable_beauty(session, beauty_resource_path) != .ok) {
-        return error.EnableBeautyFailed;
+    switch (abi.goss_session_enable_beauty(session, beauty_resource_path)) {
+        .ok => {},
+        .unsupported => {
+            if (!g_beauty_unsupported) std.debug.print("conformance: beauty chain unsupported on this host - beauty passes render un-beautified\n", .{});
+            g_beauty_unsupported = true;
+        },
+        else => return error.EnableBeautyFailed,
     }
 
     const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
@@ -9047,8 +9052,7 @@ fn writeTriangleGltf(gpa: std.mem.Allocator, base: [3]f32, emissive: [3]f32) ![]
     @memcpy(buf[36..42], std.mem.sliceAsBytes(&idx));
     var b64: [64]u8 = undefined;
     const enc = std.base64.standard.Encoder.encode(&b64, &buf);
-    return std.fmt.allocPrint(gpa,
-        "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0}}]," ++
+    return std.fmt.allocPrint(gpa, "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0}}]," ++
         "\"meshes\":[{{\"primitives\":[{{\"attributes\":{{\"POSITION\":0}},\"indices\":1,\"material\":0}}]}}]," ++
         "\"materials\":[{{\"pbrMetallicRoughness\":{{\"baseColorFactor\":[{d},{d},{d},1.0],\"metallicFactor\":0.0,\"roughnessFactor\":1.0}},\"emissiveFactor\":[{d},{d},{d}]}}]," ++
         "\"accessors\":[{{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"min\":[-0.6,-0.6,0],\"max\":[0.6,0.6,0]}},{{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}}]," ++
@@ -9613,8 +9617,14 @@ fn proveLayoutComposite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const src = try gpa.alloc(u8, sw * sh * 4);
     defer gpa.free(src);
     for (0..sw * sh) |p| {
-        cam[p * 4 + 0] = 255; cam[p * 4 + 1] = 0; cam[p * 4 + 2] = 0; cam[p * 4 + 3] = 255; // red
-        src[p * 4 + 0] = 0; src[p * 4 + 1] = 255; src[p * 4 + 2] = 0; src[p * 4 + 3] = 255; // green
+        cam[p * 4 + 0] = 255;
+        cam[p * 4 + 1] = 0;
+        cam[p * 4 + 2] = 0;
+        cam[p * 4 + 3] = 255; // red
+        src[p * 4 + 0] = 0;
+        src[p * 4 + 1] = 255;
+        src[p * 4 + 2] = 0;
+        src[p * 4 + 3] = 255; // green
     }
     const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
 
@@ -12881,6 +12891,14 @@ fn proveFullStack(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         defer settle(engine);
 
         if (lens_pkg) |pkg| {
+            // studio-full carries a beauty.face node; without a live chain
+            // it composes only grade, bloom and particles, so the chain is
+            // enabled here the way every renderOnce session enables it.
+            switch (abi.goss_session_enable_beauty(session, beauty_resource_path)) {
+                .ok => {},
+                .unsupported => g_beauty_unsupported = true,
+                else => return error.EnableBeautyFailed,
+            }
             if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
                 std.debug.print("conformance: FAIL studio-full lens activation\n", .{});
                 return false;
@@ -12927,7 +12945,11 @@ fn proveFullStack(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     defer png_bytes.deinit(gpa);
     try png.encodeRgba(gpa, &png_bytes, shots[1], 400, 300);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-studio-full.png", .data = png_bytes.items });
-    std.debug.print("conformance: PROOF beauty, grade, bloom and a fading particle fountain compose in one lens deterministically, differing from the plain frame\n", .{});
+    if (g_beauty_unsupported) {
+        std.debug.print("conformance: PROOF grade, bloom and a fading particle fountain compose in one lens deterministically, differing from the plain frame - beauty chain unsupported on this host\n", .{});
+    } else {
+        std.debug.print("conformance: PROOF beauty, grade, bloom and a fading particle fountain compose in one lens deterministically, differing from the plain frame\n", .{});
+    }
     return true;
 }
 
@@ -20059,6 +20081,13 @@ const identity_pose = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 var g_watch_window: ?*c.GLFWwindow = null;
 var g_watch = false;
 
+// Sticks once any session's enable_beauty reports unsupported (no GL
+// context on this host). Beauty passes render un-beautified, so the
+// beauty-baseline hash is not the beautified render and is left out of
+// the pinned-baseline compare; every other proof still runs and gates.
+var g_beauty_unsupported = false;
+const beauty_lens_name = "beauty-baseline";
+
 // In watch mode, hold each proof's final frame on screen and title the
 // window with its name, so the run reads as a live sequence of real
 // renders instead of one frozen frame. A no-op in the default run.
@@ -20110,10 +20139,20 @@ pub fn main(init_args: std.process.Init) !u8 {
     defer current.deinit();
     for (reference_lenses) |lens| {
         const hash = try checkDeterminism(gpa, engine, lens.name, lens.segmentation_model) orelse return 1;
+        // The flag settles during this lens's own renders, so re-check
+        // after: an un-beautified hash never enters the compare buffer.
+        if (g_beauty_unsupported and std.mem.eql(u8, lens.name, beauty_lens_name)) {
+            std.debug.print("conformance: {s} hash skipped - beauty chain unsupported on this host\n", .{lens.name});
+            continue;
+        }
         try current.writer.print("{s} {s}\n", .{ lens.name, hash });
     }
 
     if (print_mode) {
+        if (g_beauty_unsupported) {
+            std.debug.print("conformance: refusing --print - {s} has no beautified hash on this host, regenerate on a host with a GL context\n", .{beauty_lens_name});
+            return 1;
+        }
         var out_buf: [4096]u8 = undefined;
         var stdout = std.Io.File.stdout().writer(init_args.io, &out_buf);
         try stdout.interface.writeAll(current.writer.buffered());
@@ -20126,14 +20165,28 @@ pub fn main(init_args: std.process.Init) !u8 {
         return 1;
     };
     defer gpa.free(baseline);
-    if (!std.mem.eql(u8, baseline, current.writer.buffered())) {
+    // The pinned file always carries every lens; a host without a GL
+    // context compares against it minus the beauty-baseline line.
+    var expected: std.Io.Writer.Allocating = .init(gpa);
+    defer expected.deinit();
+    var baseline_lines = std.mem.splitScalar(u8, baseline, '\n');
+    while (baseline_lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (g_beauty_unsupported and std.mem.startsWith(u8, line, beauty_lens_name ++ " ")) continue;
+        try expected.writer.print("{s}\n", .{line});
+    }
+    if (!std.mem.eql(u8, expected.writer.buffered(), current.writer.buffered())) {
         std.debug.print(
             "conformance: output differs from {s}\n---- current ----\n{s}---- baseline ----\n{s}An intended change must update the baseline (zig build conformance -- --print > {s}).\n",
-            .{ baseline_path, current.writer.buffered(), baseline, baseline_path },
+            .{ baseline_path, current.writer.buffered(), expected.writer.buffered(), baseline_path },
         );
         return 1;
     }
-    std.debug.print("conformance: PROOF all reference lenses match the pinned baseline\n", .{});
+    if (g_beauty_unsupported) {
+        std.debug.print("conformance: PROOF all reference lenses but {s} match the pinned baseline - beauty chain unsupported on this host\n", .{beauty_lens_name});
+    } else {
+        std.debug.print("conformance: PROOF all reference lenses match the pinned baseline\n", .{});
+    }
 
     // A focused run exercises one proof (or a small group) without the full
     // suite, so a single proof can be iterated at its own cost. It reads its
