@@ -2,8 +2,8 @@
 
 # Gosslens
 
-**A camera and AR engine: beauty, face, hand and body tracking, segmentation,
-world anchoring, scripted lenses, and capture, every frame on device.**
+**A camera and AR engine that runs real-time beauty, tracking and AR effects on
+device, and lets any app or model draw into the live camera view.**
 
 [![gates](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml/badge.svg)](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
@@ -14,11 +14,9 @@ world anchoring, scripted lenses, and capture, every frame on device.**
 
 </div>
 
-Beauty and makeup, face, hand, and body tracking, segmentation, world
-anchoring, scripted and physics-driven lenses, and photo and video capture. It
-runs on iOS, Android, and the web from one engine, and the compiled engine
-ships inside each package, so there is no toolchain to install. Every frame is
-processed on the device and none of it leaves.
+Retouching and makeup, face, hand and body tracking, background removal, AR
+effects, and capture, on iOS, Android and the web. It hands you each frame and
+composites what you draw back, ships compiled, and makes no network calls.
 
 ## Install
 
