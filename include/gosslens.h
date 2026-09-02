@@ -33,11 +33,28 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 95u
+#define GOSS_ABI_MINOR 100u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
 uint32_t goss_abi_version(void);
+
+/* Which capabilities this build compiled real, as GOSS_CAP_* bits. The stub
+ * and full libraries share a filename and an abi version, so this is how a
+ * consumer tells them apart before feeding real bytes to an enable op. */
+#define GOSS_CAP_TRACKING (1ull << 0)
+#define GOSS_CAP_SEGMENTATION (1ull << 1)
+#define GOSS_CAP_ML_INFER (1ull << 2)
+#define GOSS_CAP_DIFFUSION (1ull << 3)
+#define GOSS_CAP_BEAUTY (1ull << 4)
+#define GOSS_CAP_PHYSICS (1ull << 5)
+#define GOSS_CAP_VIDEO_TEXTURES (1ull << 6)
+#define GOSS_CAP_PHOTO_CAPTURE (1ull << 7)
+#define GOSS_CAP_RECORDING (1ull << 8)
+#define GOSS_CAP_FILE_IO (1ull << 9)
+
+/* Any-thread. */
+uint64_t goss_capabilities(void);
 
 /* Any-thread. Scratch allocation inside the module for embedders that
  * cannot address its memory directly, the wasm host in particular. Free
@@ -554,6 +571,25 @@ goss_status goss_session_enable_segmentation(goss_session *session, const uint8_
  * enabling the worker. */
 goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest);
 goss_status goss_session_clear_model_allowlist(goss_session *session);
+
+/* Graph thread. Hands the engine one bundle asset's bytes under its
+ * manifest name ahead of a JSON lens activation, so a filesystem-less host
+ * (the web) runs the heavy inference nodes from memory. The name must stay
+ * bundle-relative; zero-length bytes remove a previously staged name. */
+goss_status goss_session_provide_lens_asset(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *bytes, size_t len);
+
+/* Graph thread. Copies one ml.infer node's whole published output tensor
+ * into caller memory, the element count written to out_len. capacity is in
+ * floats and must cover the tensor; a short buffer still reports the needed
+ * count, so a detection, embedding, or logits read sizes itself in two
+ * calls. GOSS_AGAIN before the model's first publish. */
+goss_status goss_session_ml_output(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint32_t tensor, float *out, size_t capacity, size_t *out_len);
+
+/* Graph thread. Copies one ml.infer node's mask-bound output into caller
+ * memory, freshly read and resampled to the fixed segmentation plane the
+ * compositor samples; out_len reports that plane's float count.
+ * GOSS_INVALID_ARGUMENT when the node has no mask binding. */
+goss_status goss_session_ml_mask(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out, size_t capacity, size_t *out_len);
 void goss_session_disable_segmentation(goss_session *session);
 
 /* Graph thread. Feeds one NV12 frame to the tracking worker. The planes
@@ -603,6 +639,13 @@ goss_status goss_session_face_track_id(goss_session *session, uint32_t index, ui
  * path. count past GOSS_BODY_MAX is clamped; zero clears the path. Bodies
  * below the tracked presence or with no landmarks drop. */
 goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count);
+
+/* Graph thread. Submits the hands tracked this frame from the host's own
+ * tracker, so hand signals, gestures, and joints work with no built-in
+ * worker; host-submitted hands win over the worker while set. Hands past
+ * GOSS_HAND_MAX or below the presence threshold drop; NULL clears the path
+ * back to the built-in worker. */
+goss_status goss_session_submit_hands(goss_session *session, const goss_hand_result *hands);
 
 /* Graph thread. Writes how many bodies the last goss_session_submit_bodies
  * kept, zero to GOSS_BODY_MAX. */

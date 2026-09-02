@@ -1103,7 +1103,13 @@ composite chain; it carries an `"ml"` block whose `"model"` names a file under
 `assets/` in the bundle. The file is a TFLite (LiteRT) or ONNX net, chosen by
 its own bytes, and it takes one square RGB image the engine fills by sampling
 the camera frame into the model's input at whichever channel order the model
-declares. Inference runs off the frame thread, so a heavy model never blocks
+declares. The input must be a rank-4 square three-channel image tensor (NHWC
+or NCHW); anything else fails to load. By default the sampled values are RGB
+in [0,1]. A model exported with different preprocessing declares it:
+`"input_range": "symmetric"` samples to [-1,1] instead, and `"input_mean"` /
+`"input_std"` (three finite numbers each, std strictly positive) subtract and
+divide per channel afterward, so an ImageNet-style export reads the numbers
+it was trained on rather than silently wrong ones. Inference runs off the frame thread, so a heavy model never blocks
 the render loop; the bindings below read the newest completed result and hold
 their default until the first one lands. An author model is untrusted content
 like the rest of the bundle: its size, tensor count, and tensor sizes are

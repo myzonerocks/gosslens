@@ -22,8 +22,27 @@ pub fn detectSquareRgb(in_dims: []const i32) ?Square {
 /// Samples the frame square into nhwc_scratch (interleaved RGB in [0,1]) and
 /// writes it to input `index` in the model's layout.
 pub fn writeFrame(engine: *ml_engine.Engine, index: usize, sq: Square, frame: sampler.Frame, nhwc_scratch: []f32, nchw_scratch: []f32) anyerror!void {
-    sampler.sampleRegion(frame, sampler.frameSquare(frame.width, frame.height), .unit, sq.side, nhwc_scratch);
+    try writeFrameNormalized(engine, index, sq, frame, nhwc_scratch, nchw_scratch, .unit, .{ 0, 0, 0 }, .{ 1, 1, 1 });
+}
+
+/// writeFrame with the model's declared input contract: the sampled range and
+/// a per-channel mean/std applied afterward, so an ImageNet-style or [-1,1]
+/// export reads the numbers it was trained on.
+pub fn writeFrameNormalized(engine: *ml_engine.Engine, index: usize, sq: Square, frame: sampler.Frame, nhwc_scratch: []f32, nchw_scratch: []f32, range: sampler.Range, mean: [3]f32, std_dev: [3]f32) anyerror!void {
+    sampler.sampleRegion(frame, sampler.frameSquare(frame.width, frame.height), range, sq.side, nhwc_scratch);
+    applyMeanStd(nhwc_scratch, mean, std_dev);
     try writeSampled(engine, index, sq, nhwc_scratch, nchw_scratch);
+}
+
+/// Subtracts the per-channel mean and divides by the per-channel deviation in
+/// place over an interleaved RGB plane; the identity pair is a no-op.
+pub fn applyMeanStd(nhwc: []f32, mean: [3]f32, std_dev: [3]f32) void {
+    if (mean[0] == 0 and mean[1] == 0 and mean[2] == 0 and
+        std_dev[0] == 1 and std_dev[1] == 1 and std_dev[2] == 1) return;
+    var i: usize = 0;
+    while (i + 3 <= nhwc.len) : (i += 3) {
+        inline for (0..3) |c| nhwc[i + c] = (nhwc[i + c] - mean[c]) / std_dev[c];
+    }
 }
 
 /// Writes an already-sampled interleaved RGB plane to input `index`; an NCHW

@@ -82,3 +82,15 @@ AllowProcessEvents).
 
 Not yet filed upstream - same bkaradzic/bgfx repo as 0001/0002 above,
 once confirmed.
+
+0004-webgpu-canvas-texture-per-task.patch
+Real, verified finding (2026-09-02): a canvas surface's current texture is
+only valid within the JS task that acquired it - the compositor destroys it
+when the task yields - but SwapChainWGPU cached the next frame's texture
+view across present() (and configure() cached the first frame's during
+init), so on wasm32-emscripten every frame submitted against a destroyed
+swapchain texture (Dawn: "Destroyed texture ... used in a submit"). The
+patch acquires the view lazily inside the frame that renders with it
+(currentTextureView()), drops the eager acquires on emscripten, and also
+invalidates a view cached by a frame that skipped its present, since the
+acquired texture dies at the task boundary either way.

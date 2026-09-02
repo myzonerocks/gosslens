@@ -27,6 +27,8 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: toolchain
         run: |
           tools/toolchain-sync
@@ -46,6 +48,8 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: toolchain
         run: |
           tools/toolchain-sync
@@ -62,6 +66,8 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: toolchain
         run: |
           tools/toolchain-sync
@@ -80,6 +86,8 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: toolchain
         run: |
           tools/toolchain-sync
@@ -94,6 +102,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       - name: install
         run: cd sdk/ts && bun install
@@ -107,6 +117,8 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: toolchain
         run: |
           tools/toolchain-sync

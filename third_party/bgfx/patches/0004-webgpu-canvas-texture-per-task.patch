@@ -1,0 +1,102 @@
+--- a/src/renderer_webgpu.cpp
++++ b/src/renderer_webgpu.cpp
+@@ -2085,7 +2085,7 @@
+ 			WGPURenderPassColorAttachment colorAttachment =
+ 			{
+ 				.nextInChain   = NULL,
+-				.view          = m_backBuffer.m_swapChain.m_textureView,
++				.view          = m_backBuffer.m_swapChain.currentTextureView(),
+ 				.depthSlice    = WGPU_DEPTH_SLICE_UNDEFINED,
+ 				.resolveTarget = NULL,
+ 				.loadOp        = WGPULoadOp_Load,
+@@ -4616,10 +4616,12 @@
+ 
+ 		WGPU_CHECK(wgpuSurfaceConfigure(m_surface, &m_surfaceConfig) );
+ 
++#if !BX_PLATFORM_EMSCRIPTEN
+ 		WGPUSurfaceTexture surfaceTexture = WGPU_SURFACE_TEXTURE_INIT;
+ 		WGPU_CHECK(wgpuSurfaceGetCurrentTexture(m_surface, &surfaceTexture) );
+ 		m_textureView = WGPU_CHECK(wgpuTextureCreateView(surfaceTexture.texture, NULL) );
+ 		wgpuRelease(surfaceTexture.texture);
++#endif // !BX_PLATFORM_EMSCRIPTEN
+ 
+ 		const uint32_t msaa = s_msaa[(_resolution.reset&BGFX_RESET_MSAA_MASK)>>BGFX_RESET_MSAA_SHIFT];
+ 
+@@ -4917,12 +4919,32 @@
+ 		return NULL != m_surface;
+ 	}
+ 
++	WGPUTextureView SwapChainWGPU::currentTextureView()
++	{
++		// gosslens patch: a canvas surface's current texture is only valid
++		// within the JS task that acquired it - the compositor destroys it
++		// when the task yields - so the view is acquired lazily inside the
++		// frame that renders with it, never cached across a present.
++		if (NULL == m_textureView)
++		{
++			WGPUSurfaceTexture surfaceTexture = WGPU_SURFACE_TEXTURE_INIT;
++			wgpuSurfaceGetCurrentTexture(m_surface, &surfaceTexture);
++			if (NULL != surfaceTexture.texture)
++			{
++				m_textureView = WGPU_CHECK(wgpuTextureCreateView(surfaceTexture.texture, NULL) );
++				wgpuRelease(surfaceTexture.texture);
++			}
++		}
++
++		return m_textureView;
++	}
++
+ 	void SwapChainWGPU::present()
+ 	{
+ 		wgpuRelease(m_textureView);
++		m_textureView = NULL;
+ #if !BX_PLATFORM_EMSCRIPTEN
+ 		WGPU_CHECK(wgpuSurfacePresent(m_surface) );
+-#endif // !BX_PLATFORM_EMSCRIPTEN
+ 
+ 		WGPUSurfaceTexture surfaceTexture = WGPU_SURFACE_TEXTURE_INIT;
+ 		wgpuSurfaceGetCurrentTexture(m_surface, &surfaceTexture);
+@@ -4949,6 +4971,7 @@
+ 
+ 		m_textureView = WGPU_CHECK(wgpuTextureCreateView(surfaceTexture.texture, NULL) );
+ 		wgpuRelease(surfaceTexture.texture);
++#endif // !BX_PLATFORM_EMSCRIPTEN
+ 	}
+ 
+ 	void FrameBufferWGPU::create(uint8_t _num, const Attachment* _attachment)
+@@ -5077,6 +5100,16 @@
+ 			m_swapChain.present();
+ 			m_needPresent = false;
+ 		}
++#if BX_PLATFORM_EMSCRIPTEN
++		else if (NULL != m_swapChain.m_textureView)
++		{
++			// gosslens patch: an acquired canvas texture dies when the task
++			// yields whether or not it was drawn to, so a view cached on a
++			// frame that skipped its present must not survive either.
++			wgpuRelease(m_swapChain.m_textureView);
++			m_swapChain.m_textureView = NULL;
++		}
++#endif // BX_PLATFORM_EMSCRIPTEN
+ 	}
+ 
+ 	void FrameBufferWGPU::resolve(WGPUCommandEncoder _cmdEncoder)
+@@ -6037,7 +6070,7 @@
+ 					for (uint32_t ii = 0; ii < numColorAttachments; ++ii)
+ 					{
+ 						WGPUTextureView colorTextureView = isSwapChain
+-							? fb.m_swapChain.m_textureView
++							? fb.m_swapChain.currentTextureView()
+ 							: (0 < fb.m_numColorAttachments ? fb.m_textureView[ii] : NULL)
+ 							;
+ 						WGPUTextureView msaaTextureView = isSwapChain
+--- a/src/renderer_webgpu.h
++++ b/src/renderer_webgpu.h
+@@ -677,6 +677,7 @@
+ 		bool createSurface(void* _nwh);
+ 
+ 		bool configure(const Resolution& _resolution);
++		WGPUTextureView currentTextureView();
+ 		void present();
+ 
+ 		void* m_nwh;

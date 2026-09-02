@@ -835,7 +835,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ml_infer_core", .module = ml_infer_core_module },
             },
         });
-        const diffusion_module = diffusionModule(b, target, optimize, ml_engine_module, ml_sample_module, sampler_module, math_module, ml_tensor_module);
+        const diffusion_module = diffusionModule(b, target, optimize, ml_engine_module, ml_sample_module, sampler_module, math_module, ml_tensor_module, false);
         const beauty_real_module = b.createModule(.{
             .root_source_file = b.path("adapters/beauty/beauty.zig"),
             .target = target,
@@ -1141,8 +1141,9 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         const stub_ml_tensor_wasm = mlTensorModule(b, wasm_target, .ReleaseSmall);
-        abi_wasm.addImport("ml_infer", mlInferStubModule(b, wasm_target, .ReleaseSmall, math_wasm, stub_ml_tensor_wasm));
-        abi_wasm.addImport("diffusion", diffusionStubModule(b, wasm_target, .ReleaseSmall, math_wasm, stub_ml_tensor_wasm));
+        const sync_chain_wasm = syncMlChain(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.sampler);
+        abi_wasm.addImport("ml_infer", mlInferSyncModule(b, wasm_target, .ReleaseSmall, math_wasm, stub_ml_tensor_wasm, tracking_cores_wasm.sampler, sync_chain_wasm));
+        abi_wasm.addImport("diffusion", diffusionModule(b, wasm_target, .ReleaseSmall, sync_chain_wasm.engine, sync_chain_wasm.sample, tracking_cores_wasm.sampler, math_wasm, stub_ml_tensor_wasm, true));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
         const lens_manifest_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/manifest.zig"),
@@ -1427,7 +1428,7 @@ pub fn build(b: *std.Build) void {
             const ml_tensor_conformance = mlTensorModule(b, target, optimize);
             const ml_engine_conformance = mlEngineModule(b, target, optimize, runtime_conformance);
             const ml_sample_conformance = mlSampleModule(b, target, optimize, sampler_module, ml_engine_conformance);
-            const diffusion_conformance = diffusionModule(b, target, optimize, ml_engine_conformance, ml_sample_conformance, sampler_module, math_module, ml_tensor_conformance);
+            const diffusion_conformance = diffusionModule(b, target, optimize, ml_engine_conformance, ml_sample_conformance, sampler_module, math_module, ml_tensor_conformance, false);
             const ml_infer_core_conformance = b.createModule(.{
                 .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
                 .target = target,
@@ -1852,7 +1853,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         const ml_tensor_android = mlTensorModule(b, android_target, optimize);
         const ml_engine_android = mlEngineModule(b, android_target, optimize, runtime_android);
         const ml_sample_android = mlSampleModule(b, android_target, optimize, tracking_cores_android.sampler, ml_engine_android);
-        const diffusion_android = diffusionModule(b, android_target, optimize, ml_engine_android, ml_sample_android, tracking_cores_android.sampler, math_android, ml_tensor_android);
+        const diffusion_android = diffusionModule(b, android_target, optimize, ml_engine_android, ml_sample_android, tracking_cores_android.sampler, math_android, ml_tensor_android, false);
         const ml_infer_core_android = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
             .target = android_target,
@@ -2546,7 +2547,7 @@ fn mlSampleModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
 
 /// The diffusion restyle worker over the shared engine, sampling, and schedule.
 /// Returns the worker module; the schedule and core live under it.
-fn diffusionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ml_engine_mod: *std.Build.Module, ml_sample_mod: *std.Build.Module, sampler_mod: *std.Build.Module, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module) *std.Build.Module {
+fn diffusionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ml_engine_mod: *std.Build.Module, ml_sample_mod: *std.Build.Module, sampler_mod: *std.Build.Module, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module, sync: bool) *std.Build.Module {
     const schedule_mod = b.createModule(.{
         .root_source_file = b.path("core/tracking/diffusion_schedule.zig"),
         .target = target,
@@ -2571,7 +2572,7 @@ fn diffusionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         },
     });
     return b.createModule(.{
-        .root_source_file = b.path("adapters/tracking/diffusion.zig"),
+        .root_source_file = b.path(if (sync) "adapters/tracking/diffusion_sync.zig" else "adapters/tracking/diffusion.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -2591,6 +2592,51 @@ fn diffusionStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .imports = &.{
             .{ .name = "math", .module = math_mod },
             .{ .name = "ml_tensor", .module = ml_tensor_mod },
+        },
+    });
+}
+
+/// The synchronous byo-ml rail for targets with no threads (the web): the
+/// real inference core over the pure-Zig ONNX engine, with the TFLite
+/// backend stubbed so a .tflite model degrades to an inert node instead of
+/// dragging the C++ runtime into a build that cannot host it.
+const SyncMlChain = struct { engine: *std.Build.Module, sample: *std.Build.Module };
+
+/// The onnx-only engine chain both synchronous web rails (ml_infer_sync and
+/// diffusion_sync) share on a wasm target.
+fn syncMlChain(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sampler_mod: *std.Build.Module) SyncMlChain {
+    const runtime_stub = b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/runtime_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const engine = mlEngineModule(b, target, optimize, runtime_stub);
+    return .{ .engine = engine, .sample = mlSampleModule(b, target, optimize, sampler_mod, engine) };
+}
+
+fn mlInferSyncModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module, sampler_mod: *std.Build.Module, chain: SyncMlChain) *std.Build.Module {
+    const engine = chain.engine;
+    const sample = chain.sample;
+    const core = b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ml_engine", .module = engine },
+            .{ .name = "ml_sample", .module = sample },
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+        },
+    });
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_infer_sync.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "math", .module = math_mod },
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+            .{ .name = "ml_infer_core", .module = core },
         },
     });
 }
@@ -4141,7 +4187,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         const ml_tensor_ios = mlTensorModule(b, ios_target, optimize);
         const ml_engine_ios = mlEngineModule(b, ios_target, optimize, runtime_ios);
         const ml_sample_ios = mlSampleModule(b, ios_target, optimize, tracking_cores_ios.sampler, ml_engine_ios);
-        const diffusion_ios = diffusionModule(b, ios_target, optimize, ml_engine_ios, ml_sample_ios, tracking_cores_ios.sampler, math_ios, ml_tensor_ios);
+        const diffusion_ios = diffusionModule(b, ios_target, optimize, ml_engine_ios, ml_sample_ios, tracking_cores_ios.sampler, math_ios, ml_tensor_ios, false);
         const ml_infer_core_ios = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
             .target = ios_target,
@@ -4674,8 +4720,9 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     const stub_ml_tensor_em = mlTensorModule(b, em_target, .ReleaseSmall);
-    abi_em.addImport("ml_infer", mlInferStubModule(b, em_target, .ReleaseSmall, math_em, stub_ml_tensor_em));
-    abi_em.addImport("diffusion", diffusionStubModule(b, em_target, .ReleaseSmall, math_em, stub_ml_tensor_em));
+    const sync_chain_em = syncMlChain(b, em_target, .ReleaseSmall, tracking_cores_em.sampler);
+    abi_em.addImport("ml_infer", mlInferSyncModule(b, em_target, .ReleaseSmall, math_em, stub_ml_tensor_em, tracking_cores_em.sampler, sync_chain_em));
+    abi_em.addImport("diffusion", diffusionModule(b, em_target, .ReleaseSmall, sync_chain_em.engine, sync_chain_em.sample, tracking_cores_em.sampler, math_em, stub_ml_tensor_em, true));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
     // Web's own beauty.reshape dispatch needs the 106-point
     // contour directly (no gpupixel bridge to hand raw
@@ -4720,18 +4767,31 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em, gltf_stub_em));
     abi_em.addImport("gltf", gltf_stub_em);
 
-    const gosslens_em_obj = b.addObject(.{ .name = "gosslens_web", .root_module = abi_em });
+    // A static library, not addObject: with C++ in the module graph,
+    // addObject emits an archive that drops the Zig object itself, so the
+    // em++ link pulled no goss_* symbol and shipped an engine-less wasm;
+    // --whole-archive keeps lazy linking from discarding the exports.
+    const gosslens_em_lib = b.addLibrary(.{ .name = "gosslens_web", .root_module = abi_em, .linkage = .static });
     const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{}, webgpu);
     const link = b.addSystemCommand(&.{em.?.em_plus_plus});
     setEmEnv(link, em.?);
-    link.addFileArg(gosslens_em_obj.getEmittedBin());
+    link.addArg("-Wl,--whole-archive");
+    link.addFileArg(gosslens_em_lib.getEmittedBin());
+    link.addArg("-Wl,--no-whole-archive");
+    // The module graph's dependent static libraries do not fold into the
+    // emitted archive, so the link takes them alongside, lazily.
+    link.addFileArg(buildJoltLib(b, em_target, .ReleaseSmall).getEmittedBin());
+    link.addFileArg(buildQuickjsLib(b, em_target, .ReleaseSmall).getEmittedBin());
     for (bgfx_objects.items) |obj| link.addFileArg(obj);
     if (webgpu) {
         // emdawnwebgpu is this pinned Emscripten's WebGPU port
         // (-sUSE_WEBGPU=1 is gone); ASYNCIFY lets bgfx_init block on
         // Dawn's async adapter/device request. No WebGL2 flags - this
         // artifact only ships after the TS SDK confirms an adapter.
-        link.addArgs(&.{ "--use-port=emdawnwebgpu", "-sASYNCIFY=1" });
+        // Asyncify keeps a separate buffer for the unwound call stack
+        // (default 4KB); the engine's activation tree is far deeper than
+        // that, so the rewind state gets real room.
+        link.addArgs(&.{ "--use-port=emdawnwebgpu", "-sASYNCIFY=1", "-sASYNCIFY_STACK_SIZE=1048576" });
     } else {
         link.addArgs(&.{ "-sUSE_WEBGL2=1", "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", "-sFULL_ES3=1" });
     }
@@ -4751,6 +4811,9 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // is close enough to the old budget to be worth the
         // headroom.
         "-sINITIAL_MEMORY=268435456",
+        // The render chain's Zig frames outgrow emscripten's 64KB default
+        // stack; a real engine stack keeps frame submission off the guard.
+        "-sSTACK_SIZE=4194304",
         // Every goss_* entry point is a real call site the TS SDK
         // reaches dynamically, so EXPORT_ALL keeps them all
         // reachable rather than hand-listing EXPORTED_FUNCTIONS.
@@ -4786,8 +4849,21 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     // output is the demo's actual input, keeping it from silently
     // testing a stale binary a manual `cp` forgot to re-run.
     const wasm_out = js_out.dirname().path(b, "gosslens_web.wasm");
+
+    // A lazy archive link can silently drop the engine object and still exit
+    // zero, shipping a wasm whose first ccall aborts; the export check makes
+    // that a build failure instead of a runtime discovery.
+    const exports_check_tool = b.addExecutable(.{
+        .name = "wasm_exports_check",
+        .root_module = b.createModule(.{ .root_source_file = b.path("tools/wasm_exports_check.zig"), .target = b.graph.host, .optimize = .Debug }),
+    });
+    const exports_check = b.addRunArtifact(exports_check_tool);
+    exports_check.addFileArg(wasm_out);
+    step.dependOn(&exports_check.step);
+
     const demo_subdir = if (webgpu) "sdk/ts/demo/webgpu/" else "sdk/ts/demo/";
     const demo_copy = b.addUpdateSourceFiles();
+    demo_copy.step.dependOn(&exports_check.step);
     demo_copy.addCopyFileToSource(js_out, b.fmt("{s}gosslens_web.js", .{demo_subdir}));
     demo_copy.addCopyFileToSource(wasm_out, b.fmt("{s}gosslens_web.wasm", .{demo_subdir}));
     step.dependOn(&demo_copy.step);

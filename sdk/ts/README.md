@@ -61,15 +61,17 @@ consumer resolves it.
 call - most apps want this:
 
 ```typescript
-import { GossPreviewSession, pickEngineUrl } from "@myzonerocks/gosslens";
+import { GossPreviewSession } from "@myzonerocks/gosslens";
 
-const wasmJsUrl = await pickEngineUrl(webgpuUrl, webgl2Url);
-const preview = await GossPreviewSession.create(canvas, wasmJsUrl);
+const preview = await GossPreviewSession.create(canvas, webgl2Url);
 preview.activateLens(manifestJson);
 ```
 
-`pickEngineUrl` confirms a real WebGPU adapter before choosing, and falls back to
-the WebGL2 URL. `create` takes an optional third `events` argument for the
+Point it at the WebGL2 build. The WebGPU build renders, tracks, and runs
+beauty, but lens activation currently crashes its Asyncify-instrumented
+engine, so hold it back until that is fixed; `pickEngineUrl(webgpuUrl,
+webgl2Url)` remains available and confirms a real WebGPU adapter before
+choosing, falling back to the WebGL2 URL. `create` takes an optional third `events` argument for the
 capture-loop callbacks. If you drive the loop yourself, the pieces are public too:
 
 ```typescript
@@ -147,6 +149,28 @@ advances triggers with no `when` gate. `fireEvent(name)` delivers a named event
 to the lens's `event('name')` triggers for the next tick, and
 `parameterValue(name)` reads a live lens parameter back, including whatever a
 script node last wrote.
+
+### Bring-your-own models
+
+A lens's `ml.infer`, `audio.infer`, `temporal.fuse`, `splat.cloud`, and
+`diffusion` nodes run real inference in the page through the engine's
+synchronous web rail. Stage each model file under the name the manifest uses
+before activating, then feed frames with `trackFrame` and read results back:
+
+```typescript
+session.provideLensAsset("net.onnx", modelBytes);
+session.activateLens(manifestJson);
+session.trackFrame(y, yStride, uv, uvStride, width, height);
+session.tickLens(dtUs);
+const tensor = session.mlOutput("nodeId");   // the whole output tensor
+const mask = session.mlMask("nodeId");       // a mask binding, resampled
+```
+
+ONNX models run on this rail; a TFLite file needs the native targets today and
+degrades to an inert node here. `gosslens.capabilities()` reports which rails
+the loaded build compiled real as `GOSS_CAP_*` bits. `submitHands` accepts the
+`GossHandTracker` result directly, so `hands.gesture` and `hands.pinch` lenses
+and `handJoint` work from the page's own tracker.
 
 ## Beauty and makeup
 

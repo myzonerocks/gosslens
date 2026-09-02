@@ -44,6 +44,15 @@ pub fn shapeFromDims(dims: []const i32) Shape {
     return s;
 }
 
+/// How an ml.infer input plane is normalized, matching how the model was
+/// exported: symmetric maps rgb to [-1,1] instead of [0,1], and mean/std_dev
+/// subtract and divide per channel afterward (an ImageNet-style export).
+pub const Norm = struct {
+    symmetric: bool = false,
+    mean: [3]f32 = .{ 0, 0, 0 },
+    std_dev: [3]f32 = .{ 1, 1, 1 },
+};
+
 /// The sandbox an author model runs under. A model past any bound never loads,
 /// so a lens cannot smuggle in a net that exhausts memory or stalls the frame.
 pub const Bounds = struct {

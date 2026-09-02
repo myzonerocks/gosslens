@@ -1,4 +1,4 @@
-abi 0.95
+abi 0.100
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -105,6 +105,7 @@ type abi.CaptureGuidance size=24 align=4
   field splat_count offset=16 size=4
   field next_yaw offset=20 size=4
 fn uint32_t goss_abi_version(void)
+fn uint64_t goss_capabilities(void)
 fn void *goss_alloc(size_t size)
 fn void goss_free(void *ptr, size_t size)
 fn goss_status goss_engine_create(const goss_engine_config *config, goss_engine **out_engine)
@@ -205,6 +206,9 @@ fn goss_status goss_session_face_region(goss_session *session, uint32_t region, 
 fn goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)
 fn goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest)
 fn goss_status goss_session_clear_model_allowlist(goss_session *session)
+fn goss_status goss_session_provide_lens_asset(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *bytes, size_t len)
+fn goss_status goss_session_ml_output(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint32_t tensor, float *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_ml_mask(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out, size_t capacity, size_t *out_len)
 fn void goss_session_disable_segmentation(goss_session *session)
 fn goss_status goss_session_set_segmentation_mask(goss_session *session, const float *mask, uint32_t mask_len)
 fn uint32_t goss_session_segmentation_channels(goss_session *session)
@@ -218,6 +222,7 @@ fn goss_status goss_session_face_count(goss_session *session, uint32_t *out_coun
 fn goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result)
 fn goss_status goss_session_face_track_id(goss_session *session, uint32_t index, uint32_t *out_id)
 fn goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count)
+fn goss_status goss_session_submit_hands(goss_session *session, const goss_hand_result *hands)
 fn goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)
 fn goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)
 fn goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)

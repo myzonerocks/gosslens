@@ -148,6 +148,17 @@ A lens's triggers can also react to signals you already feed: `camera.zoom`,
 `head.nod`/`head.shake`/`head.tilt` follow the face tracker. The full grammar is
 in [the lens spec](../../lenses/SPEC.md).
 
+### Bring-your-own models
+
+A lens's `ml.infer` and companion nodes load their model files from the bundle
+directory, or from memory: `provideLensAsset(name, bytes)` stages a model
+under the name the manifest uses ahead of a JSON activation, `mlOutput(nodeId,
+tensor)` reads a node's whole published output tensor back, and
+`mlMask(nodeId)` reads a mask binding resampled to the segmentation plane.
+`Gosslens.capabilities()` reports which rails this build compiled real.
+`submitHands` feeds hands from your own tracker (fill a `GossHandResult` and
+`pack()` it), so hand-driven lenses run with no built-in worker.
+
 ## Scripted lenses
 
 `activateLens` splices a manifest's nodes in; the lens then runs on its own

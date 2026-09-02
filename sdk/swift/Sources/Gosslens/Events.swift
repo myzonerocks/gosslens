@@ -121,6 +121,50 @@ public final class GossHandResult {
         landmarks = [Float](repeating: 0, count: Self.maxHands * Self.landmarkCount * 3)
     }
 
+    /// One hand an app's own tracker fills for submitHands: the model's
+    /// presence and right-hand scores, an optional recognized gesture, and
+    /// 21 (x, y, z) landmarks in frame pixels.
+    public struct SubmittedHand {
+        public var presence: Float
+        public var handedness: Float
+        public var gesture: GossGesture
+        public var gestureScore: Float
+        public var landmarks: [Float]
+        public init(presence: Float = 1, handedness: Float = 0.5, gesture: GossGesture = .none, gestureScore: Float = 0, landmarks: [Float]) {
+            self.presence = presence
+            self.handedness = handedness
+            self.gesture = gesture
+            self.gestureScore = gestureScore
+            self.landmarks = landmarks
+        }
+    }
+
+    /// Builds a submittable result from an app's own tracker, keeping up to
+    /// maxHands entries, so submitHands drives the same signals the built-in
+    /// worker would.
+    public convenience init(hands: [SubmittedHand], timestampUs: Int64 = 0) {
+        self.init()
+        raw.timestamp_us = timestampUs
+        let landmark_floats = Self.landmarkCount * 3
+        var count: UInt32 = 0
+        withUnsafeMutableBytes(of: &raw.hands) { dest in
+            for (at, one) in hands.prefix(Self.maxHands).enumerated() {
+                let base = at * MemoryLayout<goss_hand>.stride
+                dest.storeBytes(of: one.presence, toByteOffset: base, as: Float.self)
+                dest.storeBytes(of: one.handedness, toByteOffset: base + 4, as: Float.self)
+                dest.storeBytes(of: one.gesture.rawValue, toByteOffset: base + 8, as: UInt32.self)
+                dest.storeBytes(of: one.gestureScore, toByteOffset: base + 12, as: Float.self)
+                let floats = min(one.landmarks.count, landmark_floats)
+                one.landmarks.withUnsafeBytes { src in
+                    dest.baseAddress!.advanced(by: base + 16).copyMemory(from: src.baseAddress!, byteCount: floats * 4)
+                }
+                count += 1
+            }
+        }
+        raw.hand_count = count
+        parse()
+    }
+
     /// Lifts raw's fields into the preallocated arrays - no per-frame
     /// allocation as long as the caller reuses one instance.
     func parse() {
@@ -232,6 +276,18 @@ extension GossSession {
         }
         var raws = bodies.map { $0.raw }
         try checked(goss_session_submit_bodies(handle, &raws, UInt32(raws.count)))
+    }
+
+    /// Submits the hands tracked this frame from the app's own tracker, so
+    /// hand signals, gestures, and joints work with no built-in worker; the
+    /// submitted hands win over the worker while set. Pass nil to clear the
+    /// path back to the built-in worker.
+    public func submitHands(_ hands: GossHandResult?) throws {
+        guard let hands else {
+            try checked(goss_session_submit_hands(handle, nil))
+            return
+        }
+        try checked(goss_session_submit_hands(handle, &hands.raw))
     }
 
     /// Submits one frame's depth map from the host AR backend (ARKit scene
@@ -346,6 +402,35 @@ extension GossSession {
         var written: Int = 0
         guard goss_session_caption_text(handle, id, id.count, &out, out.count, &written) == GOSS_OK else { return nil }
         return String(decoding: out[0..<written], as: UTF8.self)
+    }
+
+    /// One ml.infer node's whole published output tensor, by the node's id
+    /// and tensor index, or nil before the model's first publish or when the
+    /// node or tensor does not exist. A length probe sizes the buffer, so a
+    /// detection, embedding, or logits vector reads back at its own length.
+    public func mlOutput(_ nodeId: String, tensor: UInt32 = 0) -> [Float]? {
+        let id = Array(nodeId.utf8)
+        var needed: Int = 0
+        _ = goss_session_ml_output(handle, id, id.count, tensor, nil, 0, &needed)
+        guard needed > 0 else { return nil }
+        var out = [Float](repeating: 0, count: needed)
+        var written: Int = 0
+        guard goss_session_ml_output(handle, id, id.count, tensor, &out, out.count, &written) == GOSS_OK else { return nil }
+        return out
+    }
+
+    /// One ml.infer node's mask-bound output resampled to the fixed
+    /// segmentation plane, or nil when the node has no mask binding or the
+    /// model has not published yet.
+    public func mlMask(_ nodeId: String) -> [Float]? {
+        let id = Array(nodeId.utf8)
+        var needed: Int = 0
+        _ = goss_session_ml_mask(handle, id, id.count, nil, 0, &needed)
+        guard needed > 0 else { return nil }
+        var out = [Float](repeating: 0, count: needed)
+        var written: Int = 0
+        guard goss_session_ml_mask(handle, id, id.count, &out, out.count, &written) == GOSS_OK else { return nil }
+        return out
     }
 
     /// One diarized caption segment: the times it spanned, the speaker who spoke

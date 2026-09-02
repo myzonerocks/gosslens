@@ -254,6 +254,35 @@ let lens = "";
   await evaluate("window.resumeCamera()");
 }
 
+// The byo-ml pass: a staged ONNX net runs real inference through the web
+// rail; two different frames land two different finite scores and the read
+// tensor agrees with the bound parameter.
+let ml = "";
+{
+  const evaluate = async (expression: string) =>
+    (await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true })) as {
+      result?: { value?: unknown };
+    };
+  const raw = (await evaluate("window.mlProve()")).result?.value as string | undefined;
+  let parsed: { score?: number | null; darkScore?: number | null; tensor?: number[] | null; error?: string } = {};
+  try {
+    parsed = raw ? JSON.parse(raw) : {};
+  } catch {
+    parsed = { error: `unparseable ${raw}` };
+  }
+  const score = parsed.score ?? null;
+  const darkScore = parsed.darkScore ?? null;
+  const tensor = parsed.tensor ?? null;
+  const finite = typeof score === "number" && Number.isFinite(score) && typeof darkScore === "number" && Number.isFinite(darkScore);
+  const responds = finite && Math.abs((score as number) - (darkScore as number)) > 1e-3;
+  const agrees = tensor !== null && tensor.length === 1 && tensor[0] === score;
+  if (!parsed.error && finite && responds && agrees) {
+    ml = `GOSSWEB ml: staged onnx net scored ${score} bright vs ${darkScore} dark, tensor readback agrees`;
+  } else {
+    ml = `FAIL ml: ${raw}`;
+  }
+}
+
 // The tracking pass: wait for the worker, then one corpus portrait must
 // track and the control frame must not.
 let tracking = "";
@@ -322,6 +351,8 @@ if (
   !makeup.startsWith("FAIL") &&
   lens &&
   !lens.startsWith("FAIL") &&
+  ml &&
+  !ml.startsWith("FAIL") &&
   tracking &&
   !tracking.startsWith("FAIL")
 ) {
@@ -331,6 +362,7 @@ if (
   console.log(reshape);
   console.log(makeup);
   console.log(lens);
+  console.log(ml);
   console.log(tracking);
   console.log(`status: ${statusResult.result?.value}`);
   process.exit(0);
@@ -349,6 +381,9 @@ if (makeup) {
 }
 if (lens) {
   console.log(lens);
+}
+if (ml) {
+  console.log(ml);
 }
 if (tracking) {
   console.log(tracking);

@@ -58,6 +58,17 @@ extension GossSession {
         }
     }
 
+    /// Hands the engine one bundle asset's bytes under its manifest name
+    /// ahead of a JSON activateLens, so a lens's models and label files load
+    /// from memory with no bundle directory. Empty data removes a previously
+    /// staged name; the engine keeps its own copy.
+    public func provideLensAsset(name: String, bytes: Data) throws {
+        let id = Array(name.utf8)
+        try bytes.withUnsafeBytes { buffer in
+            try checked(goss_session_provide_lens_asset(handle, id, id.count, buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count))
+        }
+    }
+
     /// Same activation activateLens performs, from
     /// bundlePath/manifest.json, plus compiling a program for every
     /// shader.pass node the lens splices.
@@ -348,7 +359,7 @@ extension GossSession {
     public func clearStrokes() throws { try checked(goss_session_brush_clear(handle)) }
 
     /// The brush preset the next stroke opens with.
-    public enum BrushMode: UInt32 { case pen = 0, highlighter = 1, marker = 2, neon = 3 }
+    public enum BrushMode: UInt32 { case pen = 0, highlighter = 1, marker = 2, neon = 3, stamp = 4 }
 
     public func setBrushMode(_ mode: BrushMode) throws { try checked(goss_session_brush_set_mode(handle, mode.rawValue)) }
 
