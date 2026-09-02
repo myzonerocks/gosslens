@@ -413,7 +413,7 @@ goss_status goss_session_hit_test(goss_session *session, float screen_x, float s
 typedef struct goss_capture_config {
   uint32_t width;       /* 0 = the submitted frame's own resolution */
   uint32_t height;
-  uint32_t supersample; /* reserved; 0 or 1 is 1:1 today */
+  uint32_t supersample; /* 0 or 1 = 1:1, 2 or 4 = render larger then downsample */
   uint32_t format;      /* 0 = PNG, 1 = JPEG, 2 = HEIC */
   uint32_t quality;     /* 1..100 for lossy formats, 0 = backend default */
   uint32_t color_space; /* 0 = sRGB, 1 = Display-P3, 2 = Rec2020 */

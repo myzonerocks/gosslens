@@ -2537,6 +2537,116 @@ fn proveHighResCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 /// composited tile by tile and stitched, and the result is byte-identical
 /// to the same capture as a single target. Tiling breaks the texture-size
 /// ceiling on a full-sensor still without ever changing a pixel.
+/// The live-broadcast egress: goss_engine_capture_live_frame vends the baked
+/// composite in the three WebRTC formats a publisher hands to an encoder.
+/// Proves each format's size contract and that the three describe the same
+/// picture, so a broadcast lane cannot silently publish a swizzled or
+/// mis-sized frame.
+fn proveLiveFrameEgress(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const cap = 4096 * 4096 * 4;
+    const rgba = try gpa.alloc(u8, cap);
+    defer gpa.free(rgba);
+    const bgra = try gpa.alloc(u8, cap);
+    defer gpa.free(bgra);
+    const nv12 = try gpa.alloc(u8, cap);
+    defer gpa.free(nv12);
+
+    var w: u32 = 0;
+    var h: u32 = 0;
+    if (abi.goss_engine_capture_live_frame(engine, session, 4, rgba.ptr, rgba.len, &w, &h) != .ok or w == 0 or h == 0) {
+        std.debug.print("conformance: FAIL live frame rgba\n", .{});
+        return false;
+    }
+    var bw: u32 = 0;
+    var bh: u32 = 0;
+    if (abi.goss_engine_capture_live_frame(engine, session, 3, bgra.ptr, bgra.len, &bw, &bh) != .ok or bw != w or bh != h) {
+        std.debug.print("conformance: FAIL live frame bgra\n", .{});
+        return false;
+    }
+    var nw: u32 = 0;
+    var nh: u32 = 0;
+    if (abi.goss_engine_capture_live_frame(engine, session, 0, nv12.ptr, nv12.len, &nw, &nh) != .ok or nw != w or nh != h) {
+        std.debug.print("conformance: FAIL live frame nv12\n", .{});
+        return false;
+    }
+
+    // An unknown format is refused rather than guessed at.
+    var jw: u32 = 0;
+    var jh: u32 = 0;
+    if (abi.goss_engine_capture_live_frame(engine, session, 7, rgba.ptr, rgba.len, &jw, &jh) != .invalid_argument) {
+        std.debug.print("conformance: FAIL live frame accepted an unknown format\n", .{});
+        return false;
+    }
+    // A buffer too small for the format is refused, not overrun.
+    var sw: u32 = 0;
+    var sh: u32 = 0;
+    if (abi.goss_engine_capture_live_frame(engine, session, 4, rgba.ptr, 16, &sw, &sh) != .invalid_argument) {
+        std.debug.print("conformance: FAIL live frame accepted a short buffer\n", .{});
+        return false;
+    }
+
+    const pixels: usize = @as(usize, w) * h;
+    // BGRA is the RGBA readback with red and blue exchanged, pixel for pixel.
+    for (0..pixels) |i| {
+        const r_off = i * 4;
+        if (rgba[r_off] != bgra[r_off + 2] or rgba[r_off + 1] != bgra[r_off + 1] or rgba[r_off + 2] != bgra[r_off] or rgba[r_off + 3] != bgra[r_off + 3]) {
+            std.debug.print("conformance: FAIL live frame bgra is not the rgba swizzle at pixel {d}\n", .{i});
+            return false;
+        }
+    }
+
+    // The NV12 luma must track the RGBA luminance: a broadcast frame that
+    // packed a different picture would diverge here even where a size check
+    // passes. BT.709 video range, matching the packer.
+    var checked: usize = 0;
+    var worst: i32 = 0;
+    for (0..pixels) |i| {
+        const off = i * 4;
+        const rf: f32 = @floatFromInt(rgba[off]);
+        const gf: f32 = @floatFromInt(rgba[off + 1]);
+        const bf: f32 = @floatFromInt(rgba[off + 2]);
+        const luma = 0.2126 * rf + 0.7152 * gf + 0.0722 * bf;
+        const expect: i32 = @intFromFloat(@round(16.0 + luma * (219.0 / 255.0)));
+        const got: i32 = nv12[i];
+        const diff = if (got > expect) got - expect else expect - got;
+        if (diff > worst) worst = diff;
+        checked += 1;
+    }
+    if (worst > 3) {
+        std.debug.print("conformance: FAIL live frame nv12 luma diverges from rgba by {d}\n", .{worst});
+        return false;
+    }
+
+    std.debug.print("conformance: live frame egress rgba/bgra/nv12 agree at {d}x{d} over {d} pixels, worst luma delta {d}\n", .{ w, h, checked, worst });
+    return true;
+}
+
 fn proveTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
@@ -20532,6 +20642,8 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (!try proveHostileManifest(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "manifest-fuzz")) {
             if (!try proveManifestFuzz(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "live-frame-egress")) {
+            if (!try proveLiveFrameEgress(gpa, engine)) return 1;
         } else {
             std.debug.print("conformance: unknown conf-only selector {s}\n", .{only});
             return 1;
@@ -20754,6 +20866,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("high res capture");
     if (!try proveTiledCapture(gpa, engine)) return 1;
     watchHold("tiled capture");
+    if (!try proveLiveFrameEgress(gpa, engine)) return 1;
+    watchHold("live frame egress");
     if (!try prove3DTiledCapture(gpa, engine)) return 1;
     watchHold("d tiled capture");
     if (!try proveColorManagedCapture(gpa, engine)) return 1;
