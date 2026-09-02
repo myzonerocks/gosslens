@@ -304,7 +304,7 @@ jobs:
           git config user.name avosa
           git config user.email avosa.developer@gmail.com
           tools/pin-swift-xcframework.sh "${RELEASE_TAG}" "${checksum}"
-          git add sdk/swift/Package.swift
+          git add Package.swift
           git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
           git tag -f "${RELEASE_TAG}" HEAD
           git push -f origin "refs/tags/${RELEASE_TAG}"
@@ -315,6 +315,7 @@ jobs:
       - name: carry the pin onto main
         continue-on-error: true
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
         run: |
           set -euo pipefail
@@ -323,11 +324,22 @@ jobs:
           git checkout -B main-pin origin/main
           checksum=$(cat dist/apple/GosslensKit.checksum.txt)
           tools/pin-swift-xcframework.sh "${RELEASE_TAG}" "${checksum}"
-          git diff --quiet sdk/swift/Package.swift && { echo "main already pinned"; exit 0; }
-          git add sdk/swift/Package.swift
-          git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
-          git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main \
-            || echo "main pin push declined by the branch rule; pin via a one-line PR, the tag already serves consumers"
+          # The install docs carry a real version a reader can paste; stamp it
+          # here so it names this release rather than drifting behind it.
+          tools/stamp-doc-versions.sh "${RELEASE_TAG}"
+          git diff --quiet Package.swift README.md sdk/swift/README.md sdk/kotlin/README.md && { echo "main already current"; exit 0; }
+          git add Package.swift README.md sdk/swift/README.md sdk/kotlin/README.md
+          git commit -m "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs"
+          # The branch rule declines a direct push even with the PAT, so fall
+          # back to a branch and a pull request rather than dropping the pin.
+          if ! git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
+            branch="release-pin-${RELEASE_TAG}"
+            git push -f "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
+            gh pr create --base main --head "${branch}" \
+              --title "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs" \
+              --body "The ${RELEASE_TAG} XCFramework pin and the install-doc versions, carried onto main. The tag already serves consumers; this keeps a reader of main current." \
+              || echo "pin PR already open"
+          fi
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
       - name: set up jdk 21 for gradle

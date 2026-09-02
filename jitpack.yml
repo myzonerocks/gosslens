@@ -7,4 +7,4 @@ jdk:
 install:
   - tools/toolchain-sync
   - export PATH="$PWD/.local/zig/current:$PATH" && zig build vendor-sync && zig build android
-  - cd sdk/kotlin && ./gradlew publishToMavenLocal -x signMavenPublication
+  - cd sdk/kotlin && ./gradlew publishToMavenLocal

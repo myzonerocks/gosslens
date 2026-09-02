@@ -1,7 +1,7 @@
 # Gosslens - Swift SDK
 
-Swift SDK for [Gosslens](../../include/gosslens.h), a camera engine behind one
-C ABI. Wraps it as `GossEngine`, `GossSession`, and `Gosslens`, the same names
+Swift SDK for [Gosslens](../../include/gosslens.h), a camera and AR engine
+behind one C ABI. Wraps it as `GossEngine`, `GossSession`, and `Gosslens`, the same names
 the [Kotlin](../kotlin/README.md) and [TypeScript](../ts/README.md) SDKs use.
 
 You write Swift and `import Gosslens`; the engine ships prebuilt inside the
@@ -13,19 +13,29 @@ is in the [root README](../../README.md#what-you-get).
 
 ## Install
 
-Add the SwiftPM package. Each release attaches a prebuilt, checksummed
-`GosslensKit.xcframework` and pins `Package.swift` to it, so there is no Zig and
-no build step:
+Each release attaches a prebuilt, checksummed `GosslensKit.xcframework` and
+pins the package manifest to it, so there is no Zig and no build step.
+
+In Xcode, File > Add Package Dependencies, and paste the repository URL:
+
+```
+https://github.com/myzonerocks/gosslens
+```
+
+Xcode offers the newest release and writes the version rule for you. For a
+`Package.swift`, name the oldest version you support and SwiftPM resolves
+forward to the newest release on its own, so this line stays correct as new
+versions ship:
 
 ```swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "X.Y.Z")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.10.2")
 ```
 
 ```swift
 .product(name: "Gosslens", package: "gosslens")
 ```
 
-Set `X.Y.Z` to a released version like `0.9.0`; the latest is on the
+Every published version is on the
 [releases page](https://github.com/myzonerocks/gosslens/releases).
 
 > [!TIP]

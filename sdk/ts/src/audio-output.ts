@@ -1,4 +1,4 @@
-import type { GossSession } from "./index";
+import type { GossSession } from "./index.js";
 
 /// The worklet drains chunks the page posts it, so the audio thread
 /// never touches the wasm heap and the engine's graph-thread pull

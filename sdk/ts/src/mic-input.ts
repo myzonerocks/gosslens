@@ -1,4 +1,4 @@
-import type { GossSession } from "./index";
+import type { GossSession } from "./index.js";
 
 /// Captures the microphone and feeds it to the engine's audio analysis,
 /// so the level and beat triggers a lens reads fire on web the same way

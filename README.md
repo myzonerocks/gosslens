@@ -2,8 +2,8 @@
 
 # Gosslens
 
-**A camera and AR engine you add to your app in one line.**
-Beauty, tracking, lenses, world anchoring, and capture - every frame on the device.
+**A camera and AR engine that runs real-time beauty, tracking and AR effects on
+device, and lets any app or model draw into the live camera view.**
 
 [![gates](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml/badge.svg)](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
@@ -14,11 +14,9 @@ Beauty, tracking, lenses, world anchoring, and capture - every frame on the devi
 
 </div>
 
-Add one dependency, write Swift, Kotlin, or TypeScript, and your app has the
-camera surface people expect: beauty and makeup, face, hand, and body tracking,
-segmentation, world anchoring, scripted and physics-driven lenses, and capture.
-The engine ships prebuilt inside each SDK, so there is no toolchain to install,
-and nothing a camera sees ever leaves the device.
+Retouching and makeup, face, hand and body tracking, background removal, AR
+effects, and capture, on iOS, Android and the web. It hands you each frame and
+composites what you draw back, ships compiled, and makes no network calls.
 
 ## Install
 
@@ -29,16 +27,26 @@ no toolchain.
 
 **iOS - Swift**
 
+In Xcode, File > Add Package Dependencies, and paste the repository URL:
+
+```
+https://github.com/myzonerocks/gosslens
+```
+
+Xcode fills in the newest release for you. In a `Package.swift`, ask for the
+same thing by naming the oldest version you support; SwiftPM resolves forward
+to the newest release on its own:
+
 ```swift
 // Package.swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "X.Y.Z")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.10.2")
 ```
 
 **Android - Kotlin**
 
 ```kotlin
 // build.gradle.kts
-implementation("io.github.avosa:gosslens:X.Y.Z")
+implementation("io.github.avosa:gosslens:0.10.2")
 ```
 
 **Web - TypeScript**
@@ -47,7 +55,6 @@ implementation("io.github.avosa:gosslens:X.Y.Z")
 bun add @myzonerocks/gosslens
 ```
 
-Set `X.Y.Z` to the latest [release](https://github.com/myzonerocks/gosslens/releases).
 Then wire the render loop with the guide for your platform:
 [iOS](sdk/swift/README.md), [Android](sdk/kotlin/README.md), [Web](sdk/ts/README.md),
 or the [C SDK](sdk/c/README.md) for any other language with a C FFI.
