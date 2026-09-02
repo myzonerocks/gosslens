@@ -9,6 +9,29 @@ public enum Gosslens {
         goss_abi_version()
     }
 
+    /// The capabilities this build compiled real. A stub library shares the
+    /// full one's filename and abi version, so check the rail you need here
+    /// before feeding real bytes to an enable call.
+    public struct Capabilities: OptionSet, Sendable {
+        public let rawValue: UInt64
+        public init(rawValue: UInt64) { self.rawValue = rawValue }
+        public static let tracking = Capabilities(rawValue: 1 << 0)
+        public static let segmentation = Capabilities(rawValue: 1 << 1)
+        public static let mlInference = Capabilities(rawValue: 1 << 2)
+        public static let diffusion = Capabilities(rawValue: 1 << 3)
+        public static let beauty = Capabilities(rawValue: 1 << 4)
+        public static let physics = Capabilities(rawValue: 1 << 5)
+        public static let videoTextures = Capabilities(rawValue: 1 << 6)
+        public static let photoCapture = Capabilities(rawValue: 1 << 7)
+        public static let recording = Capabilities(rawValue: 1 << 8)
+        public static let fileIo = Capabilities(rawValue: 1 << 9)
+    }
+
+    /// Any-thread. Which capabilities this build compiled real.
+    public static func capabilities() -> Capabilities {
+        Capabilities(rawValue: goss_capabilities())
+    }
+
     /// Any-thread, pure. The YCbCr to RGB conversion for a standard and
     /// range as one column-major homogeneous matrix.
     public static func yuvToRgb(colorStandard: GossColorStandard, colorRange: GossColorRange) throws -> [Float] {

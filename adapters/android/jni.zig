@@ -30,6 +30,12 @@ export fn Java_com_gosslens_Gosslens_nativeAbiVersion(env: *JniEnv, cls: jobject
     return @bitCast(abi.goss_abi_version());
 }
 
+export fn Java_com_gosslens_Gosslens_nativeCapabilities(env: *JniEnv, cls: jobject) i64 {
+    _ = env;
+    _ = cls;
+    return @bitCast(abi.goss_capabilities());
+}
+
 export fn Java_com_gosslens_Gosslens_nativeEngineCreate(env: *JniEnv, cls: jobject, texture_pool_capacity: i32, staging_pool_capacity: i32) i64 {
     _ = env;
     _ = cls;
@@ -705,6 +711,46 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitBodies(env: *JniEnv, cls: jobje
     const bytes = getDirectBufferAddress(env, bodies_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const bodies: [*]const abi.PoseResult = @ptrCast(@alignCast(bytes));
     return @intFromEnum(abi.goss_session_submit_bodies(sessionFromHandle(session), bodies, @intCast(@max(count, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSubmitHands(env: *JniEnv, cls: jobject, session: i64, hands_buffer: jobject) i32 {
+    _ = cls;
+    if (hands_buffer == null) return @intFromEnum(abi.goss_session_submit_hands(sessionFromHandle(session), null));
+    const bytes = getDirectBufferAddress(env, hands_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const hands: *const abi.HandResult = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_submit_hands(sessionFromHandle(session), hands));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeProvideLensAsset(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, bytes_buffer: jobject, len: i64) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    if (len == 0) return @intFromEnum(abi.goss_session_provide_lens_asset(sessionFromHandle(session), @ptrCast(name), @intCast(@max(name_len, 0)), null, 0));
+    const bytes = getDirectBufferAddress(env, bytes_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_provide_lens_asset(sessionFromHandle(session), @ptrCast(name), @intCast(@max(name_len, 0)), @ptrCast(bytes), @intCast(@max(len, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMlOutput(env: *JniEnv, cls: jobject, session: i64, node_id_buffer: jobject, node_id_len: i32, tensor: i32, out_buffer: jobject, capacity: i64, len_buffer: jobject) i32 {
+    _ = cls;
+    const node_id = getDirectBufferAddress(env, node_id_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_len: *align(1) u64 = @ptrCast(len_bytes);
+    const out: ?[*]u8 = getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_session_ml_output(sessionFromHandle(session), @ptrCast(node_id), @intCast(@max(node_id_len, 0)), @intCast(@max(tensor, 0)), @ptrCast(@alignCast(out)), @intCast(@max(capacity, 0)), &written);
+    out_len.* = written;
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMlMask(env: *JniEnv, cls: jobject, session: i64, node_id_buffer: jobject, node_id_len: i32, out_buffer: jobject, capacity: i64, len_buffer: jobject) i32 {
+    _ = cls;
+    const node_id = getDirectBufferAddress(env, node_id_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_len: *align(1) u64 = @ptrCast(len_bytes);
+    const out: ?[*]u8 = getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_session_ml_mask(sessionFromHandle(session), @ptrCast(node_id), @intCast(@max(node_id_len, 0)), @ptrCast(@alignCast(out)), @intCast(@max(capacity, 0)), &written);
+    out_len.* = written;
+    return @intFromEnum(status);
 }
 
 export fn Java_com_gosslens_Gosslens_nativeSubmitDepth(env: *JniEnv, cls: jobject, session: i64, depth_buffer: jobject, width: i32, height: i32, near: f32, far: f32) i32 {

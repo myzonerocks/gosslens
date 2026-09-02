@@ -15,6 +15,7 @@ object Gosslens {
     }
 
     internal external fun nativeAbiVersion(): Int
+    internal external fun nativeCapabilities(): Long
     internal external fun nativeEngineCreate(texturePoolCapacity: Int, stagingPoolCapacity: Int): Long
     internal external fun nativeEngineDestroy(engine: Long)
     internal external fun nativeInitRenderer(engine: Long, surface: Surface, width: Int, height: Int): Int
@@ -115,6 +116,10 @@ object Gosslens {
     internal external fun nativeFaceResultAt(session: Long, index: Int, resultBuffer: ByteBuffer): Int
     internal external fun nativeFaceTrackId(session: Long, index: Int): Int
     internal external fun nativeSubmitBodies(session: Long, bodies: ByteBuffer, count: Int): Int
+    internal external fun nativeSubmitHands(session: Long, hands: ByteBuffer?): Int
+    internal external fun nativeProvideLensAsset(session: Long, name: ByteBuffer, nameLen: Int, bytes: ByteBuffer, len: Long): Int
+    internal external fun nativeMlOutput(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, tensor: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
+    internal external fun nativeMlMask(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer, capacity: Long, outLen: ByteBuffer): Int
     internal external fun nativeSubmitDepth(session: Long, depth: ByteBuffer, width: Int, height: Int, near: Float, far: Float): Int
     internal external fun nativeSubmitCameraIntrinsics(session: Long, fx: Float, fy: Float, cx: Float, cy: Float, distortion: ByteBuffer, distortionLen: Int): Int
     internal external fun nativeSubmitOrientation(session: Long, gravityX: Float, gravityY: Float, gravityZ: Float, timestampUs: Long): Int
@@ -297,6 +302,22 @@ object Gosslens {
     const val STATUS_AGAIN = 7
 
     fun abiVersion(): Int = nativeAbiVersion()
+
+    /** Which capabilities this build compiled real, as CAP_* bits. A stub
+     * library shares the full one's filename and abi version, so check the
+     * rail you need here before feeding real bytes to an enable call. */
+    fun capabilities(): Long = nativeCapabilities()
+
+    const val CAP_TRACKING = 1L shl 0
+    const val CAP_SEGMENTATION = 1L shl 1
+    const val CAP_ML_INFER = 1L shl 2
+    const val CAP_DIFFUSION = 1L shl 3
+    const val CAP_BEAUTY = 1L shl 4
+    const val CAP_PHYSICS = 1L shl 5
+    const val CAP_VIDEO_TEXTURES = 1L shl 6
+    const val CAP_PHOTO_CAPTURE = 1L shl 7
+    const val CAP_RECORDING = 1L shl 8
+    const val CAP_FILE_IO = 1L shl 9
 
     /** The 4x4 YUV-to-RGB conversion matrix for a color standard and
      * range, column-major, sixteen floats. */
@@ -876,6 +897,27 @@ class GossHandResult {
             buffer.position(buffer.position() + Gosslens.HAND_LANDMARK_COUNT * 3 * 4)
         }
     }
+
+    /** Writes the public arrays back into the frozen C layout, so an app's
+     * own tracker fills presences, handednesses, gestures, and landmarks and
+     * submits this result through submitHands. */
+    fun pack(hands: Int, timestampUs: Long = 0L) {
+        buffer.rewind()
+        buffer.putLong(frameSerial)
+        buffer.putLong(timestampUs)
+        buffer.putInt(hands.coerceIn(0, Gosslens.HAND_MAX))
+        buffer.putInt(0)
+        for (handAt in 0 until Gosslens.HAND_MAX) {
+            buffer.putFloat(presences[handAt])
+            buffer.putFloat(handednesses[handAt])
+            buffer.putInt(gestures[handAt])
+            buffer.putFloat(gestureScores[handAt])
+            val floats = buffer.asFloatBuffer()
+            floats.put(landmarks, handAt * Gosslens.HAND_LANDMARK_COUNT * 3, Gosslens.HAND_LANDMARK_COUNT * 3)
+            buffer.position(buffer.position() + Gosslens.HAND_LANDMARK_COUNT * 3 * 4)
+        }
+        buffer.rewind()
+    }
 }
 
 /** One reusable pose tracking readout. The buffer mirrors the frozen C
@@ -1321,6 +1363,70 @@ class GossSession private constructor(
         }
         packed.rewind()
         return Gosslens.nativeSubmitBodies(handle, packed, bodies.size) == 0
+    }
+
+    /** Submits the hands tracked this frame from the app's own tracker (fill
+     * a GossHandResult and pack() it), so hand signals, gestures, and joints
+     * work with no built-in worker; the submitted hands win over the worker
+     * while set. Null clears the path back to the built-in worker. */
+    fun submitHands(hands: GossHandResult?): Boolean {
+        if (hands == null) return Gosslens.nativeSubmitHands(handle, null) == 0
+        return Gosslens.nativeSubmitHands(handle, hands.buffer) == 0
+    }
+
+    /** Hands the engine one bundle asset's bytes under its manifest name
+     * ahead of a JSON activateLens, so a lens's models and label files load
+     * from memory with no bundle directory. An empty array removes a
+     * previously staged name; the engine keeps its own copy. */
+    fun provideLensAsset(name: String, bytes: ByteArray): Boolean {
+        val idBytes = name.toByteArray(Charsets.UTF_8)
+        val idBuf = ByteBuffer.allocateDirect(maxOf(idBytes.size, 1))
+        idBuf.put(idBytes)
+        idBuf.rewind()
+        val payload = ByteBuffer.allocateDirect(maxOf(bytes.size, 1))
+        payload.put(bytes)
+        payload.rewind()
+        return Gosslens.nativeProvideLensAsset(handle, idBuf, idBytes.size, payload, bytes.size.toLong()) == 0
+    }
+
+    /** One ml.infer node's whole published output tensor, by the node's id
+     * and tensor index, or null before the model's first publish or when the
+     * node or tensor does not exist. A length probe sizes the buffer. */
+    fun mlOutput(nodeId: String, tensor: Int = 0): FloatArray? {
+        val idBytes = nodeId.toByteArray(Charsets.UTF_8)
+        val idBuf = ByteBuffer.allocateDirect(maxOf(idBytes.size, 1))
+        idBuf.put(idBytes)
+        idBuf.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        Gosslens.nativeMlOutput(handle, idBuf, idBytes.size, tensor, probe, 0L, len)
+        val needed = len.getLong(0).toInt()
+        if (needed <= 0) return null
+        val out = ByteBuffer.allocateDirect(needed * 4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeMlOutput(handle, idBuf, idBytes.size, tensor, out, needed.toLong(), len) != 0) return null
+        val result = FloatArray(needed)
+        out.asFloatBuffer().get(result)
+        return result
+    }
+
+    /** One ml.infer node's mask-bound output resampled to the fixed
+     * segmentation plane, or null when the node has no mask binding or the
+     * model has not published yet. */
+    fun mlMask(nodeId: String): FloatArray? {
+        val idBytes = nodeId.toByteArray(Charsets.UTF_8)
+        val idBuf = ByteBuffer.allocateDirect(maxOf(idBytes.size, 1))
+        idBuf.put(idBytes)
+        idBuf.rewind()
+        val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        Gosslens.nativeMlMask(handle, idBuf, idBytes.size, probe, 0L, len)
+        val needed = len.getLong(0).toInt()
+        if (needed <= 0) return null
+        val out = ByteBuffer.allocateDirect(needed * 4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeMlMask(handle, idBuf, idBytes.size, out, needed.toLong(), len) != 0) return null
+        val result = FloatArray(needed)
+        out.asFloatBuffer().get(result)
+        return result
     }
 
     /** Submits one frame's depth map from the host AR backend (ARCore Depth
@@ -1833,7 +1939,7 @@ class GossSession private constructor(
     fun clearStrokes(): Boolean = Gosslens.nativeBrushClear(handle) == 0
 
     /** The brush preset the next stroke opens with. */
-    enum class BrushMode(val raw: Int) { PEN(0), HIGHLIGHTER(1), MARKER(2), NEON(3) }
+    enum class BrushMode(val raw: Int) { PEN(0), HIGHLIGHTER(1), MARKER(2), NEON(3), STAMP(4) }
 
     fun setBrushMode(mode: BrushMode): Boolean = Gosslens.nativeBrushSetMode(handle, mode.raw) == 0
 

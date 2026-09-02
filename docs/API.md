@@ -136,6 +136,7 @@ file must move together.
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_abi_version` | `Gosslens.abiVersion()` | all SDKs |
+| `goss_capabilities` | `Gosslens.capabilities()`, which rails this build compiled real as `GOSS_CAP_*` bits, so a stub library is told apart from the full one before any bytes are fed | all SDKs |
 | `goss_color_yuv_to_rgb` | `Gosslens.yuvToRgb(colorStandard, colorRange)`, returning the conversion matrix | all SDKs |
 | `goss_solve_two_bone_ik` | `Gosslens.solveTwoBoneIk(root, upperLen, lowerLen, target, pole)`, analytic two-bone IK returning the mid joint and end positions; an out-of-reach target extends the limb straight at it | all SDKs |
 | `goss_alloc` | ABI buffer plumbing for the wasm boundary; no public SDK operation | web internal |
@@ -245,6 +246,7 @@ TS; only the underlying worker differs by build.
 | `goss_session_face_result_at` | `faceResultAt(index, result)`, reads the index-th submitted face; a caller loops zero to the count to visit every face | native tracking path |
 | `goss_session_face_track_id` | `faceTrackId(index)`, the stable id of the index-th face, kept with the same person across frames as the submission order shuffles | native tracking path |
 | `goss_session_submit_bodies` | `submitBodies(bodies, count)`, submits the bodies tracked this frame for the multi-person path; count past `GOSS_BODY_MAX` clamps, zero clears the path, and a body below the tracked presence or with no landmarks drops | native tracking path |
+| `goss_session_submit_hands` | `submitHands(hands)`, submits the hands the host's own tracker found so hand signals, gestures, and joints work with no built-in worker; submitted hands win over the worker while set, and null clears the path | all SDKs |
 | `goss_session_body_count` | `bodyCount()`, how many bodies the last `submitBodies` kept, zero to `GOSS_BODY_MAX` | native tracking path |
 | `goss_session_body_result_at` | `bodyResultAt(index, result)`, reads the index-th submitted body; a caller loops zero to the count to visit every body | native tracking path |
 | `goss_session_submit_depth` | `submitDepth(depth, width, height, near, far)`, submits one frame's depth map (metres per pixel, row major) from the host AR backend (ARKit scene depth, ARCore Depth API, WebXR depth-sensing); an empty map clears it, kept for depth occlusion | native + web depth path |
@@ -285,7 +287,10 @@ wasm engine by default) returns `unsupported`, and the web producer path
 |---|---|---|
 | `goss_session_enable_segmentation` | `enableSegmentation(model, threads)`, runs the in-engine segmenter on the camera frames | all SDKs (web returns `unsupported` without an inference stack) |
 | `goss_session_disable_segmentation` | `disableSegmentation()`, tears the segmenter down | all SDKs |
-| `goss_session_allow_model_digest` / `_clear_model_allowlist` | `allowModelDigest(digest)` / `clearModelAllowlist()`, allowlist a bring-your-own model by its 32-byte SHA-256 so an unlisted net is refused at enable time; none set admits any model | all SDKs |
+| `goss_session_allow_model_digest` / `_clear_model_allowlist` | `allowModelDigest(digest)` / `clearModelAllowlist()`, allowlist a bring-your-own model by its 32-byte SHA-256 so an unlisted net is refused at enable time and at every lens model loader; none set admits any model | all SDKs |
+| `goss_session_provide_lens_asset` | `provideLensAsset(name, bytes)`, stages one bundle asset's bytes in memory under its manifest name ahead of a JSON activation, so a filesystem-less host runs ml.infer, audio.infer, temporal.fuse, splat.cloud, and diffusion nodes from memory; empty bytes remove the name | all SDKs |
+| `goss_session_ml_output` | `mlOutput(nodeId, tensor)`, one ml.infer node's whole published output tensor into caller memory (a length probe sizes it), so a detection, embedding, or logits vector leaves the engine | all SDKs |
+| `goss_session_ml_mask` | `mlMask(nodeId)`, one ml.infer node's mask-bound output resampled to the fixed segmentation plane; refused when the node binds no mask | all SDKs |
 
 ### Beauty
 
@@ -355,16 +360,16 @@ ribbon for the renderer to draw.
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_session_brush_set_style` | `brushSetStyle(r, g, b, a, width)`, colour and width for the next stroke | all SDKs |
-| `goss_session_brush_set_mode` | `brushSetMode(mode)`, preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon (additive), 4 stamp | all SDKs |
+| `goss_session_brush_set_style` | `setBrushStyle(r, g, b, a, width)`, colour and width for the next stroke | all SDKs |
+| `goss_session_brush_set_mode` | `setBrushMode(mode)`, preset for the next stroke: 0 pen, 1 highlighter, 2 marker, 3 neon (additive), 4 stamp | all SDKs |
 | `goss_session_brush_set_stamp` | `setBrushStamp(rgba, width, height)`, the RGBA sprite a stamp-mode stroke lays along its length (an emoji or icon the host rasterizes) | all SDKs |
-| `goss_session_brush_begin` / `_point` / `_end` | `brushBegin()` / `brushPoint(x, y)` / `brushEnd()`, a stroke in normalized screen space | all SDKs |
-| `goss_session_brush_undo` / `_redo` / `_clear` | `brushUndo()` / `brushRedo()` / `brushClear()`, the stroke stacks | all SDKs |
-| `goss_session_brush_erase_at` | `brushEraseAt(x, y, radius)`, removes committed strokes within radius of a point (refused mid-stroke), returning the count | all SDKs |
+| `goss_session_brush_begin` / `_point` / `_end` | `beginStroke()` / `addStrokePoint(x, y)` / `endStroke()`, a stroke in normalized screen space | all SDKs |
+| `goss_session_brush_undo` / `_redo` / `_clear` | `undoStroke()` / `redoStroke()` / `clearStrokes()`, the stroke stacks | all SDKs |
+| `goss_session_brush_erase_at` | `eraseStrokes(x, y, radius)`, removes committed strokes within radius of a point (refused mid-stroke), returning the count | all SDKs |
 | `goss_session_brush_vertices` | `brushVertices(out, capacityFloats)`, pulls the triangle ribbon (x, y, r, g, b, a per vertex); a null out reports the float count to size for | all SDKs |
-| `goss_session_ar_brush_set_style` / `_set_mode` | `arBrushSetStyle(r, g, b, a, width)` / `arBrushSetMode(mode)`, the world-anchored brush's style and preset | world-tracking SDKs |
-| `goss_session_ar_brush_begin` / `_point` / `_end` | `arBrushBegin()` / `arBrushPoint(x, y, z)` / `arBrushEnd()`, a stroke in the world frame the platform reports poses in; nothing draws without live world tracking | world-tracking SDKs |
-| `goss_session_ar_brush_undo` / `_clear` | `arBrushUndo()` / `arBrushClear()`, the world-brush stacks | world-tracking SDKs |
+| `goss_session_ar_brush_set_style` / `_set_mode` | `setARBrushStyle(r, g, b, a, width)` / `setARBrushMode(mode)`, the world-anchored brush's style and preset | world-tracking SDKs |
+| `goss_session_ar_brush_begin` / `_point` / `_end` | `beginARStroke()` / `addARStrokePoint(x, y, z)` / `endARStroke()`, a stroke in the world frame the platform reports poses in; nothing draws without live world tracking | world-tracking SDKs |
+| `goss_session_ar_brush_undo` / `_clear` | `undoARStroke()` / `clearARStrokes()`, the world-brush stacks | world-tracking SDKs |
 | `goss_session_touch` | `touch(phase, pointerId, x, y)` feeds one screen touch event per finger (phase 0 began, 1 moved, 2 ended, 3 cancelled; x and y normalized 0..1) so the engine recognizes the gestures a lens reacts to (tap, double tap, long press, swipe, pinch, rotate, drag) and the pointer position, delivered to the lens at the next `tickLens` | all SDKs |
 | `goss_session_pull_haptic` | `pullHaptic()` drains one haptic a `haptic` trigger queued this tick (a style index 0 light..7 failure and a 0..1 intensity), reporting none-left so the host loops it after `tickLens` and buzzes the device; the engine names the buzz, the platform makes it | all SDKs |
 | `goss_session_grab` / `_release` | `grab(x, y, z)` grabs the nearest dynamic physics body to a world point and drags it there, driving it kinematically so it gathers throw velocity; `release()` lets it fly off dynamic again | all SDKs |

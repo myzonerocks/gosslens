@@ -163,6 +163,28 @@ export interface GossPoseOut {
 
 export const GOSS_HAND_LANDMARK_COUNT = 21;
 export const GOSS_HAND_MAX = 2;
+
+export const GOSS_CAP_TRACKING = 1 << 0;
+export const GOSS_CAP_SEGMENTATION = 1 << 1;
+export const GOSS_CAP_ML_INFER = 1 << 2;
+export const GOSS_CAP_DIFFUSION = 1 << 3;
+export const GOSS_CAP_BEAUTY = 1 << 4;
+export const GOSS_CAP_PHYSICS = 1 << 5;
+export const GOSS_CAP_VIDEO_TEXTURES = 1 << 6;
+export const GOSS_CAP_PHOTO_CAPTURE = 1 << 7;
+export const GOSS_CAP_RECORDING = 1 << 8;
+export const GOSS_CAP_FILE_IO = 1 << 9;
+
+/// A hand handed to submitHands: the tracker's presence, handedness, gesture,
+/// and GOSS_HAND_LANDMARK_COUNT * 3 frame-pixel landmark floats. The shape
+/// GossHandTracker.process returns plugs in directly.
+export interface GossHandInput {
+  presence?: number;
+  handedness?: number;
+  gesture?: number;
+  gestureScore?: number;
+  landmarks: Float32Array | number[];
+}
 const HAND_RESULT_BYTES = 560;
 const HAND_ONE_BYTES = 268;
 
@@ -369,6 +391,13 @@ export class Gosslens {
   /// GOSS_ABI_MAJOR before creating anything - load() already has.
   abiVersion(): number {
     return this.version;
+  }
+
+  /// Which capabilities this build compiled real, as GOSS_CAP_* bits. A stub
+  /// build shares the full one's filename and abi version, so check the rail
+  /// you need here before feeding real bytes to an enable call.
+  capabilities(): number {
+    return this.mod.ccall("goss_capabilities", "number", [], []) as number;
   }
 
   /// Loads gosslens_web.js and checks its ABI major version. A
@@ -1635,7 +1664,7 @@ export class GossSession {
     this.mod.ccall("goss_session_brush_clear", "number", ["number"], [this.handle]);
   }
 
-  /// The brush preset the next stroke opens with: 0 pen, 1 highlighter, 2 marker, 3 neon.
+  /// The brush preset the next stroke opens with: 0 pen, 1 highlighter, 2 marker, 3 neon, 4 stamp.
   setBrushMode(mode: number): void {
     this.mod.ccall("goss_session_brush_set_mode", "number", ["number", "number"], [this.handle, mode]);
   }
@@ -1879,6 +1908,34 @@ export class GossSession {
     this.mod.ccall("goss_session_submit_bodies", "number", ["number", "number", "number"], [this.handle, ptr, bodies.length]);
   }
 
+  /// Submits the hands tracked this frame from the page's own tracker (the
+  /// GossHandTracker's result plugs in directly), so hands.gesture and
+  /// hands.pinch lenses and handJoint work with no in-engine worker; the
+  /// submitted hands win over the worker while set. Null clears the path.
+  submitHands(hands: { hands: GossHandInput[]; timestampUs?: bigint } | null): void {
+    if (hands === null) {
+      this.mod.ccall("goss_session_submit_hands", "number", ["number", "number"], [this.handle, 0]);
+      return;
+    }
+    const ptr = this.scratch(HAND_RESULT_BYTES);
+    this.mod.HEAPU8.fill(0, ptr, ptr + HAND_RESULT_BYTES);
+    const dv = new DataView(this.mod.HEAPU8.buffer, ptr, HAND_RESULT_BYTES);
+    dv.setBigInt64(8, hands.timestampUs ?? 0n, true);
+    const list = hands.hands.slice(0, GOSS_HAND_MAX);
+    dv.setUint32(16, list.length, true);
+    for (let i = 0; i < list.length; i += 1) {
+      const off = 24 + i * HAND_ONE_BYTES;
+      const h = list[i]!;
+      dv.setFloat32(off, h.presence ?? 1, true);
+      dv.setFloat32(off + 4, h.handedness ?? 0.5, true);
+      dv.setUint32(off + 8, h.gesture ?? 0, true);
+      dv.setFloat32(off + 12, h.gestureScore ?? 0, true);
+      const floats = Math.min(h.landmarks.length, GOSS_HAND_LANDMARK_COUNT * 3);
+      for (let k = 0; k < floats; k += 1) dv.setFloat32(off + 16 + k * 4, h.landmarks[k]!, true);
+    }
+    this.mod.ccall("goss_session_submit_hands", "number", ["number", "number"], [this.handle, ptr]);
+  }
+
   /// Submits one frame's depth map from the host AR backend (WebXR depth-
   /// sensing): width by height metres per pixel, row major, with the near and
   /// far metres that bound it. An empty array clears it. Kept for depth
@@ -2033,6 +2090,75 @@ export class GossSession {
       const written = readLen();
       if (status === 0) result = new TextDecoder().decode(this.mod.HEAPU8.slice(outPtr, outPtr + written));
       this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [idPtr, id.length || 1]);
+    return result;
+  }
+
+  /// Hands the engine one bundle asset's bytes under its manifest name ahead
+  /// of activateLens, so a lens's models, references, and label files load
+  /// from memory - the door the web's inference nodes activate through. An
+  /// empty array removes a staged name; the engine keeps its own copy.
+  provideLensAsset(name: string, bytes: Uint8Array): void {
+    const id = new TextEncoder().encode(name);
+    const idPtr = this.mod.ccall("goss_alloc", "number", ["number"], [id.length || 1]) as number;
+    this.mod.HEAPU8.set(id, idPtr);
+    let bytesPtr = 0;
+    if (bytes.length > 0) {
+      bytesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+      this.mod.HEAPU8.set(bytes, bytesPtr);
+    }
+    const args = ["number", "number", "number", "number", "number"];
+    const status = this.mod.ccall("goss_session_provide_lens_asset", "number", args, [this.handle, idPtr, id.length, bytesPtr, bytes.length]) as number;
+    if (bytesPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [bytesPtr, bytes.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [idPtr, id.length || 1]);
+    if (status !== 0) throw new Error(`provideLensAsset failed (${status})`);
+  }
+
+  /// One ml.infer node's whole published output tensor, by the node's id and
+  /// tensor index, or null before the model's first publish or when the node
+  /// or tensor does not exist. A length probe sizes the read, so detections,
+  /// embeddings, and logits come back at their own length.
+  mlOutput(nodeId: string, tensor = 0): Float32Array | null {
+    const id = new TextEncoder().encode(nodeId);
+    const idPtr = this.mod.ccall("goss_alloc", "number", ["number"], [id.length || 1]) as number;
+    this.mod.HEAPU8.set(id, idPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const readLen = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number", "number"];
+    this.mod.ccall("goss_session_ml_output", "number", args, [this.handle, idPtr, id.length, tensor, 0, 0, lenPtr]);
+    const needed = readLen();
+    let result: Float32Array | null = null;
+    if (needed > 0) {
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed * 4]) as number;
+      const status = this.mod.ccall("goss_session_ml_output", "number", args, [this.handle, idPtr, id.length, tensor, outPtr, needed, lenPtr]) as number;
+      if (status === 0) result = this.mod.HEAPF32.slice(outPtr >> 2, (outPtr >> 2) + needed);
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed * 4]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [idPtr, id.length || 1]);
+    return result;
+  }
+
+  /// One ml.infer node's mask-bound output resampled to the fixed
+  /// segmentation plane, or null when the node has no mask binding or the
+  /// model has not published yet.
+  mlMask(nodeId: string): Float32Array | null {
+    const id = new TextEncoder().encode(nodeId);
+    const idPtr = this.mod.ccall("goss_alloc", "number", ["number"], [id.length || 1]) as number;
+    this.mod.HEAPU8.set(id, idPtr);
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const readLen = () => new DataView(this.mod.HEAPU8.buffer, lenPtr, 4).getUint32(0, true);
+    const args = ["number", "number", "number", "number", "number", "number"];
+    this.mod.ccall("goss_session_ml_mask", "number", args, [this.handle, idPtr, id.length, 0, 0, lenPtr]);
+    const needed = readLen();
+    let result: Float32Array | null = null;
+    if (needed > 0) {
+      const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed * 4]) as number;
+      const status = this.mod.ccall("goss_session_ml_mask", "number", args, [this.handle, idPtr, id.length, outPtr, needed, lenPtr]) as number;
+      if (status === 0) result = this.mod.HEAPF32.slice(outPtr >> 2, (outPtr >> 2) + needed);
+      this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed * 4]);
     }
     this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
     this.mod.ccall("goss_free", null, ["number", "number"], [idPtr, id.length || 1]);
