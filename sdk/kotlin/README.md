@@ -427,6 +427,15 @@ val frame = engine.captureLiveFrame(session, width, height) ?: return
 // custom VideoSource you publish; show the same frame locally too
 ```
 
+A steady broadcast loop keeps one `ByteArray` and passes it as `into`, so no
+frame-sized array is allocated per published frame; the overload returns the
+byte count, or -1 when the renderer is away or the array is too short:
+
+```kotlin
+val bytes = engine.captureLiveFrame(session, width, height, into = reusable)
+if (bytes > 0) publish(reusable, bytes)
+```
+
 It renders once per call, so a broadcast source needs no separate preview
 render. For audio, `submitAudio` feeds the mic in so audio-reactive lenses
 respond. For the outgoing track, `mixOutputAudio` folds the lens's own sound
