@@ -82,6 +82,32 @@ const banned_tokens = [_][]const u8{
     "ai-gen" ++ "erated",
 };
 
+// Messages get a wider net than files: these tool and vendor names
+// collide with ordinary source ("cursor: pointer") but have no place
+// in a commit message or PR body, so they are banned there outright.
+const banned_message_tokens = [_][]const u8{
+    "cur" ++ "sor",
+    "cod" ++ "ex",
+    "dev" ++ "in",
+    "aid" ++ "er",
+    "winds" ++ "urf",
+    "qw" ++ "en",
+    "gr" ++ "ok",
+    "lla" ++ "ma",
+    "mist" ++ "ral",
+    "gp" ++ "t",
+    "openro" ++ "uter",
+    "perple" ++ "xity",
+    "assisted" ++ "-by",
+    "generated" ++ "-by",
+    "co-devel" ++ "oped-by",
+    "pair-progr" ++ "ammed",
+    "language " ++ "model",
+    "ai " ++ "agent",
+    "coding " ++ "agent",
+    "coding " ++ "assistant",
+};
+
 // A comment states what the code does and why; it never narrates the
 // investigation that led here (what was checked, how confident the
 // author is, when it happened) or cites a planning document. These
@@ -281,6 +307,12 @@ const Gate = struct {
     fn checkMessage(g: *Gate, message: []const u8, context: []const u8) !void {
         if (findBannedToken(message)) |tok| {
             try g.flag("provenance: {s} contains banned token '{s}'", .{ context, tok });
+        }
+        for (banned_message_tokens) |tok| {
+            if (std.ascii.indexOfIgnoreCase(message, tok) != null) {
+                try g.flag("provenance: {s} contains banned token '{s}'", .{ context, tok });
+                break;
+            }
         }
         if (findPhaseNomenclature(message)) |hit| {
             try g.flag("internal-plan: {s} names an internal delivery phase ('{s}'); describe the change, not the roadmap", .{ context, hit });
