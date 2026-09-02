@@ -27,13 +27,19 @@ publishes the signed artifact to Maven Central. Add one coordinate:
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.github.avosa:gosslens:X.Y.Z")
+    implementation("io.github.avosa:gosslens:0.10.2")
 }
 ```
 
-Set `X.Y.Z` to a released version like `0.9.0`; the latest is on the
-[releases page](https://github.com/myzonerocks/gosslens/releases). No repository
-declaration, no toolchain - the frictionless path.
+No repository declaration, no toolchain - the frictionless path. Every
+published version is on the
+[releases page](https://github.com/myzonerocks/gosslens/releases).
+
+Gradle also accepts a dynamic version such as `latest.release` or `0.10.+`,
+which resolves to the newest match at build time. It costs reproducibility:
+two machines resolving a day apart can compile against different versions,
+Gradle caches the answer for 24 hours, and Android lint flags a bare `+`.
+Name the version you want and raise it deliberately.
 
 ### JitPack (alternative)
 
@@ -48,7 +54,7 @@ dependencyResolutionManagement {
 
 // build.gradle.kts
 dependencies {
-    implementation("com.github.myzonerocks:gosslens:vX.Y.Z")
+    implementation("com.github.myzonerocks:gosslens:v0.10.2")
 }
 ```
 

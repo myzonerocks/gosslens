@@ -29,16 +29,26 @@ no toolchain.
 
 **iOS - Swift**
 
+In Xcode, File > Add Package Dependencies, and paste the repository URL:
+
+```
+https://github.com/myzonerocks/gosslens
+```
+
+Xcode fills in the newest release for you. In a `Package.swift`, ask for the
+same thing by naming the oldest version you support; SwiftPM resolves forward
+to the newest release on its own:
+
 ```swift
 // Package.swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "X.Y.Z")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.10.2")
 ```
 
 **Android - Kotlin**
 
 ```kotlin
 // build.gradle.kts
-implementation("io.github.avosa:gosslens:X.Y.Z")
+implementation("io.github.avosa:gosslens:0.10.2")
 ```
 
 **Web - TypeScript**
@@ -47,7 +57,6 @@ implementation("io.github.avosa:gosslens:X.Y.Z")
 bun add @myzonerocks/gosslens
 ```
 
-Set `X.Y.Z` to the latest [release](https://github.com/myzonerocks/gosslens/releases).
 Then wire the render loop with the guide for your platform:
 [iOS](sdk/swift/README.md), [Android](sdk/kotlin/README.md), [Web](sdk/ts/README.md),
 or the [C SDK](sdk/c/README.md) for any other language with a C FFI.
