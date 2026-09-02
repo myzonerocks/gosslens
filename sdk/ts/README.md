@@ -1,7 +1,7 @@
 # Gosslens - TypeScript SDK
 
-TypeScript SDK for [Gosslens](../../include/gosslens.h), a camera engine behind
-one C ABI, compiled to `wasm32`. It wraps the engine as `GossEngine`,
+TypeScript SDK for [Gosslens](../../include/gosslens.h), a camera and AR engine
+behind one C ABI, compiled to `wasm32`. It wraps the engine as `GossEngine`,
 `GossSession`, and `Gosslens`, the same names the [Swift](../swift/README.md) and
 [Kotlin](../kotlin/README.md) SDKs use.
 
