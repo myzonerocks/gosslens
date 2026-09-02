@@ -590,9 +590,7 @@ async function run(): Promise<void> {
   // read back agrees with the bound parameter.
   (window as unknown as Record<string, unknown>).mlProve = () => {
     try {
-      console.log("mlProve: stage");
       preview.session.provideLensAsset("probe.onnx", onnxProbe());
-      console.log("mlProve: activate");
       preview.activateLens(JSON.stringify({
         glf: "1.0",
         id: "goss.web.ml-probe",
@@ -607,20 +605,14 @@ async function run(): Promise<void> {
       const side = 64;
       const uv = new Uint8Array((side / 2) * (side / 2) * 2).fill(128);
       const bright = new Uint8Array(side * side).fill(200);
-      console.log("mlProve: track bright");
       preview.session.trackFrame(bright, side, uv, side, side, side);
-      console.log("mlProve: tick 1");
       preview.tickLens(16000);
-      console.log("mlProve: read score");
       const score = preview.session.parameterValue("score");
-      console.log("mlProve: mlOutput");
       const tensor = preview.session.mlOutput("byo");
       const dark = new Uint8Array(side * side).fill(40);
-      console.log("mlProve: track dark");
       preview.session.trackFrame(dark, side, uv, side, side, side);
       preview.tickLens(16000);
       const darkScore = preview.session.parameterValue("score");
-      console.log("mlProve: deactivate");
       preview.deactivateLens();
       return JSON.stringify({ score, darkScore, tensor: tensor ? Array.from(tensor) : null });
     } catch (err) {

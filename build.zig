@@ -4788,7 +4788,10 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // (-sUSE_WEBGPU=1 is gone); ASYNCIFY lets bgfx_init block on
         // Dawn's async adapter/device request. No WebGL2 flags - this
         // artifact only ships after the TS SDK confirms an adapter.
-        link.addArgs(&.{ "--use-port=emdawnwebgpu", "-sASYNCIFY=1" });
+        // Asyncify keeps a separate buffer for the unwound call stack
+        // (default 4KB); the engine's activation tree is far deeper than
+        // that, so the rewind state gets real room.
+        link.addArgs(&.{ "--use-port=emdawnwebgpu", "-sASYNCIFY=1", "-sASYNCIFY_STACK_SIZE=1048576" });
     } else {
         link.addArgs(&.{ "-sUSE_WEBGL2=1", "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", "-sFULL_ES3=1" });
     }
