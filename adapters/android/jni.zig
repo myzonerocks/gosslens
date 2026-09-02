@@ -913,21 +913,21 @@ export fn Java_com_gosslens_Gosslens_nativeFaceRegion(env: *JniEnv, cls: jobject
     _ = cls;
     const bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const out: *[3]f32 = @ptrCast(@alignCast(bytes));
-    return @intFromEnum(abi.goss_session_face_region(sessionFromHandle(session), @intCast(region), out));
+    return @intFromEnum(abi.goss_session_face_region(sessionFromHandle(session), @intCast(@max(region, 0)), out));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeBodyJoint(env: *JniEnv, cls: jobject, session: i64, joint: i32, out_buffer: jobject) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const out: *[3]f32 = @ptrCast(@alignCast(bytes));
-    return @intFromEnum(abi.goss_session_body_joint(sessionFromHandle(session), @intCast(joint), out));
+    return @intFromEnum(abi.goss_session_body_joint(sessionFromHandle(session), @intCast(@max(joint, 0)), out));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeHandJoint(env: *JniEnv, cls: jobject, session: i64, hand_index: i32, joint: i32, out_buffer: jobject) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const out: *[3]f32 = @ptrCast(@alignCast(bytes));
-    return @intFromEnum(abi.goss_session_hand_joint(sessionFromHandle(session), @intCast(hand_index), @intCast(joint), out));
+    return @intFromEnum(abi.goss_session_hand_joint(sessionFromHandle(session), @intCast(@max(hand_index, 0)), @intCast(@max(joint, 0)), out));
 }
 
 /// info_buffer receives {encoded_len: u64, width: u32, height: u32};
@@ -1063,7 +1063,7 @@ export fn Java_com_gosslens_Gosslens_nativeBeautifyFrame(
 export fn Java_com_gosslens_Gosslens_nativeActivateLens(env: *JniEnv, cls: jobject, session: i64, manifest_buffer: jobject, manifest_len: i32) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, manifest_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    return @intFromEnum(abi.goss_session_activate_lens(sessionFromHandle(session), bytes, @intCast(manifest_len)));
+    return @intFromEnum(abi.goss_session_activate_lens(sessionFromHandle(session), bytes, @intCast(@max(manifest_len, 0))));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeDeactivateLens(env: *JniEnv, cls: jobject, session: i64) void {
@@ -1076,7 +1076,7 @@ export fn Java_com_gosslens_Gosslens_nativeTickLens(env: *JniEnv, cls: jobject, 
     _ = cls;
     const bytes = getDirectBufferAddress(env, signals_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const signals: *const abi.LensSignals = @ptrCast(@alignCast(bytes));
-    return @intFromEnum(abi.goss_session_tick_lens(sessionFromHandle(session), @intCast(dt_us), signals));
+    return @intFromEnum(abi.goss_session_tick_lens(sessionFromHandle(session), @intCast(@max(dt_us, 0)), signals));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeParameterValue(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, out_buffer: jobject) i32 {
@@ -1084,7 +1084,7 @@ export fn Java_com_gosslens_Gosslens_nativeParameterValue(env: *JniEnv, cls: job
     const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const out: *f32 = @ptrCast(@alignCast(out_bytes));
-    return @intFromEnum(abi.goss_session_parameter_value(sessionFromHandle(session), name, @intCast(name_len), out));
+    return @intFromEnum(abi.goss_session_parameter_value(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), out));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeHitTest(env: *JniEnv, cls: jobject, session: i64, screen_x: f32, screen_y: f32, out_buffer: jobject) i32 {
@@ -1117,7 +1117,7 @@ export fn Java_com_gosslens_Gosslens_nativePullAudio(env: *JniEnv, cls: jobject,
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const out: [*]i16 = @ptrCast(@alignCast(out_bytes));
-    return @intFromEnum(abi.goss_session_pull_audio(sessionFromHandle(session), out, @intCast(frames)));
+    return @intFromEnum(abi.goss_session_pull_audio(sessionFromHandle(session), out, @intCast(@max(frames, 0))));
 }
 
 /// mic_buffer may be null to mix the lens sound over silence; out_buffer packs
@@ -1472,5 +1472,5 @@ export fn Java_com_gosslens_Gosslens_nativeEraseCollider(env: *JniEnv, cls: jobj
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;
-    return abi.goss_session_report_frame(sessionFromHandle(session), @intCast(frame_time_us), thermal);
+    return abi.goss_session_report_frame(sessionFromHandle(session), @intCast(@max(frame_time_us, 0)), thermal);
 }

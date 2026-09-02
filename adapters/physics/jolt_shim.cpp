@@ -361,7 +361,9 @@ extern "C" uint32_t goss_physics_body_add_hull(void* handle, const float* points
   JPH::Array<JPH::Vec3> hull_points;
   hull_points.reserve(point_count);
   for (uint32_t i = 0; i < point_count; ++i) {
-    hull_points.push_back(JPH::Vec3(points[i * 3], points[i * 3 + 1], points[i * 3 + 2]));
+    const float x = points[i * 3], y = points[i * 3 + 1], z = points[i * 3 + 2];
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return UINT32_MAX;
+    hull_points.push_back(JPH::Vec3(x, y, z));
   }
   JPH::ConvexHullShapeSettings settings(hull_points);
   JPH::ShapeSettings::ShapeResult result = settings.Create();

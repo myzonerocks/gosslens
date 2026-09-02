@@ -61,6 +61,10 @@ pub fn decode(gpa: std.mem.Allocator, png_bytes: []const u8) DecodeError!Image {
     if (err != 0) return error.InvalidPng;
     defer std.c.free(decoded);
 
+    // A dimension past the u16 texture bound (a 100000x1 strip fits the
+    // compressed byte limits) is refused here, the one decode choke point,
+    // so no consumer's u16 cast can trap on untrusted content.
+    if (width == 0 or width > 65535 or height == 0 or height > 65535) return error.InvalidPng;
     const byte_count = @as(usize, width) * height * 4;
     const owned = try gpa.alloc(u8, byte_count);
     @memcpy(owned, decoded[0..byte_count]);

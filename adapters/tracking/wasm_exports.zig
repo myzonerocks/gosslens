@@ -179,7 +179,7 @@ fn presenceScore(raw: f32) f32 {
 pub export fn goss_tracking_process(instance: ?*Instance, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
     const tracking = instance orelse return status_invalid;
     const pixels = rgba orelse return status_invalid;
-    if (width == 0 or height == 0) return status_invalid;
+    if (width == 0 or width > 65535 or height == 0 or height > 65535) return status_invalid;
 
     const image: sampler.Frame = .{
         .width = width,
@@ -285,7 +285,7 @@ pub export fn goss_segmentation_class_count(core: ?*segmentation_core.Core) u32 
 pub export fn goss_segmentation_process(core: ?*segmentation_core.Core, rgba: ?[*]const u8, width: u32, height: u32) i32 {
     const c = core orelse return status_invalid;
     const pixels = rgba orelse return status_invalid;
-    if (width == 0 or height == 0) return status_invalid;
+    if (width == 0 or width > 65535 or height == 0 or height > 65535) return status_invalid;
     const frame: sampler.Frame = .{
         .width = width,
         .height = height,
@@ -423,7 +423,7 @@ fn poseEmpty(p: *PoseInstance, timestamp_us: i64) void {
 pub export fn goss_pose_process(instance: ?*PoseInstance, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
     const p = instance orelse return status_invalid;
     const pixels = rgba orelse return status_invalid;
-    if (width == 0 or height == 0) return status_invalid;
+    if (width == 0 or width > 65535 or height == 0 or height > 65535) return status_invalid;
     const image: sampler.Frame = .{
         .width = width,
         .height = height,
@@ -726,7 +726,7 @@ fn handGesture(p: *HandInstance, landmarks: *const [hand.landmark_count]hand.Lan
 pub export fn goss_hand_process(instance: ?*HandInstance, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
     const p = instance orelse return status_invalid;
     const pixels = rgba orelse return status_invalid;
-    if (width == 0 or height == 0) return status_invalid;
+    if (width == 0 or width > 65535 or height == 0 or height > 65535) return status_invalid;
     const image: sampler.Frame = .{
         .width = width,
         .height = height,
