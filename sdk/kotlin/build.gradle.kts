@@ -34,6 +34,11 @@ android {
 // and signing key come from the release job. JitPack builds it from a tag instead.
 mavenPublishing {
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
-    signAllPublications()
+    // Central requires signatures, and the release job supplies the key. A
+    // source build without one (JitPack, a fork) publishes unsigned instead
+    // of failing on the .asc artifacts the publication would otherwise name.
+    if (project.findProperty("signingInMemoryKey") != null) {
+        signAllPublications()
+    }
     coordinates("io.github.avosa", "gosslens", project.property("VERSION_NAME").toString())
 }
