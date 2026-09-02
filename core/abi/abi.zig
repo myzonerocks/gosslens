@@ -122,6 +122,7 @@ pub const abi_surface_types = .{ FrameDesc, Landmarks, EngineConfig, SessionConf
 
 pub const abi_functions = [_][]const u8{
     "uint32_t goss_abi_version(void)",
+    "uint64_t goss_capabilities(void)",
     "void *goss_alloc(size_t size)",
     "void goss_free(void *ptr, size_t size)",
     "goss_status goss_engine_create(const goss_engine_config *config, goss_engine **out_engine)",
@@ -222,6 +223,9 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)",
     "goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest)",
     "goss_status goss_session_clear_model_allowlist(goss_session *session)",
+    "goss_status goss_session_provide_lens_asset(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *bytes, size_t len)",
+    "goss_status goss_session_ml_output(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint32_t tensor, float *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_ml_mask(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out, size_t capacity, size_t *out_len)",
     "void goss_session_disable_segmentation(goss_session *session)",
     "goss_status goss_session_set_segmentation_mask(goss_session *session, const float *mask, uint32_t mask_len)",
     "uint32_t goss_session_segmentation_channels(goss_session *session)",
@@ -235,6 +239,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_face_result_at(goss_session *session, uint32_t index, goss_face_result *out_result)",
     "goss_status goss_session_face_track_id(goss_session *session, uint32_t index, uint32_t *out_id)",
     "goss_status goss_session_submit_bodies(goss_session *session, const goss_pose_result *bodies, uint32_t count)",
+    "goss_status goss_session_submit_hands(goss_session *session, const goss_hand_result *hands)",
     "goss_status goss_session_body_count(goss_session *session, uint32_t *out_count)",
     "goss_status goss_session_body_result_at(goss_session *session, uint32_t index, goss_pose_result *out_result)",
     "goss_status goss_session_submit_depth(goss_session *session, const float *depth, uint32_t width, uint32_t height, float near, float far)",
@@ -1099,6 +1104,14 @@ pub const Session = struct {
     /// SDK; the engine only decodes and mixes.
     audio_mixer: ?audio_playback.Mixer = null,
     sound_ids: std.StringHashMapUnmanaged(u32) = .{},
+    /// Host-staged bundle assets by manifest name, the in-memory door a
+    /// filesystem-less host (the web) feeds model, reference, and label bytes
+    /// through; keys and values are session-owned copies.
+    staged_assets: std.StringHashMapUnmanaged([]u8) = .{},
+    /// The newest host-submitted hands, preferred over the built-in worker so
+    /// a platform's own tracker drives the same hand signals and joints.
+    submitted_hands: hand.Result = std.mem.zeroes(hand.Result),
+    has_submitted_hands: bool = false,
     /// Keeps the lens-to-outgoing-track resampler continuous across
     /// goss_session_mix_output_audio calls when the outgoing rate differs
     /// from the mixer's 48 kHz.
@@ -2388,6 +2401,39 @@ fn fillReshapeContour(s: *Session, width: u16, height: u16, rotation: u32, mirro
         contour[at * 2 + 1] = out[1];
     }
     return true;
+}
+
+/// The newest full face landmark set as the flat plane the head-pose fit
+/// reads: host-submitted faces first, then the worker, then the web landmark
+/// path (copied into `scratch`). Null when no usable face holds.
+fn currentFaceLandmarks(s: *Session, result: *face.Result, scratch: *[face.landmark_count * 3]f32) ?*const [face.landmark_count * 3]f32 {
+    if (s.face_count > 0 and s.face_results[0].landmark_count_out == face.landmark_count and s.face_results[0].presence >= 0.5) {
+        return &s.face_results[0].landmarks;
+    }
+    if (s.face_tracking) |worker| {
+        if (tracking.readResult(worker, result) and result.landmark_count_out == face.landmark_count and result.presence >= 0.5) {
+            return &result.landmarks;
+        }
+    }
+    if (s.web_face_landmarks) |*landmarks| {
+        for (landmarks, 0..) |lm, i| {
+            scratch[i * 3] = lm.x;
+            scratch[i * 3 + 1] = lm.y;
+            scratch[i * 3 + 2] = lm.z;
+        }
+        return scratch;
+    }
+    return null;
+}
+
+/// The newest hands: host-submitted first, then the worker, so a platform
+/// with its own tracker drives the same signals. Null when neither holds.
+fn currentHands(s: *Session) ?hand.Result {
+    if (s.has_submitted_hands and s.submitted_hands.hand_count > 0) return s.submitted_hands;
+    const worker = s.hand_tracking orelse return null;
+    var result: hand.Result = undefined;
+    if (!tracking.hand_worker.readResult(worker, &result)) return null;
+    return result;
 }
 
 /// The screen position (0..1) of face-mesh landmark `idx` on the tracked face,
@@ -5089,6 +5135,12 @@ pub fn destroySession(session: *Session) void {
     session.diffusion_workers.deinit(session.engine.gpa);
     destroySplatWorkers(session);
     session.splat_workers.deinit(session.engine.gpa);
+    var staged_it = session.staged_assets.iterator();
+    while (staged_it.next()) |entry| {
+        session.engine.gpa.free(entry.key_ptr.*);
+        session.engine.gpa.free(entry.value_ptr.*);
+    }
+    session.staged_assets.deinit(session.engine.gpa);
     session.capture_poses.deinit(session.engine.gpa);
     session.recon_gaussians.deinit(session.engine.gpa);
     session.ml_style_textures.deinit(session.engine.gpa);
@@ -5209,6 +5261,24 @@ pub export fn goss_free(ptr: ?[*]u8, size: usize) void {
 
 pub export fn goss_abi_version() u32 {
     return (@as(u32, abi_major) << 16) | abi_minor;
+}
+
+/// Which capabilities this build compiled real, as GOSS_CAP_* bits. The stub
+/// and full libraries share a filename and an abi version, so this is how a
+/// consumer tells them apart before feeding real bytes to an enable_* op.
+pub export fn goss_capabilities() u64 {
+    var caps: u64 = 0;
+    if (tracking.supported) caps |= 1 << 0;
+    if (segmentation.supported) caps |= 1 << 1;
+    if (ml_infer.supported) caps |= 1 << 2;
+    if (diffusion.supported) caps |= 1 << 3;
+    if (beauty.supported) caps |= 1 << 4;
+    if (physics.supported) caps |= 1 << 5;
+    if (video.supported) caps |= 1 << 6;
+    if (photo.supported) caps |= 1 << 7;
+    if (media_recording.supported) caps |= 1 << 8;
+    if (has_file_io) caps |= 1 << 9;
+    return caps;
 }
 
 pub export fn goss_engine_create(config: ?*const EngineConfig, out_engine: ?**Engine) Status {
@@ -7939,6 +8009,31 @@ pub export fn goss_session_submit_bodies(session: ?*Session, bodies: ?[*]const p
     return .ok;
 }
 
+/// Submits the hands tracked this frame from the host's own tracker (the web
+/// SDK's), so hand signals, gestures, and joints work with no built-in
+/// worker. Hands past GOSS_HAND_MAX or below the presence threshold are
+/// dropped; null clears the path back to the built-in worker.
+pub export fn goss_session_submit_hands(session: ?*Session, hands: ?*const hand.Result) Status {
+    const s = session orelse return .invalid_argument;
+    const src = hands orelse {
+        s.has_submitted_hands = false;
+        return .ok;
+    };
+    var out: hand.Result = std.mem.zeroes(hand.Result);
+    out.frame_serial = src.frame_serial;
+    out.timestamp_us = src.timestamp_us;
+    var kept: u32 = 0;
+    for (src.hands[0..@min(src.hand_count, hand.max_hands)]) |h| {
+        if (h.presence < 0.5) continue;
+        out.hands[kept] = h;
+        kept += 1;
+    }
+    out.hand_count = kept;
+    s.submitted_hands = out;
+    s.has_submitted_hands = true;
+    return .ok;
+}
+
 /// How many bodies the last goss_session_submit_bodies kept, zero to
 /// GOSS_BODY_MAX. Zero also means the caller drives no multi-person path.
 pub export fn goss_session_body_count(session: ?*Session, out_count: ?*u32) Status {
@@ -8658,13 +8753,12 @@ fn depthOcclusionMask(s: *const Session, plane_metres: f32, out: []f32) usize {
     return count;
 }
 
-/// Reads the newest hand tracking result into caller memory. Reports
-/// again until the worker has published its first result.
+/// Reads the newest hands - host-submitted first, then the worker - into
+/// caller memory. Reports again until either path has published.
 pub export fn goss_session_hand_result(session: ?*Session, out_result: ?*hand.Result) Status {
     const s = session orelse return .invalid_argument;
     const out = out_result orelse return .invalid_argument;
-    const worker = s.hand_tracking orelse return .again;
-    if (!tracking.hand_worker.readResult(worker, out)) return .again;
+    out.* = currentHands(s) orelse return .again;
     return .ok;
 }
 
@@ -8676,9 +8770,7 @@ pub export fn goss_session_hand_joint(session: ?*Session, hand_index: u32, joint
     const s = session orelse return .invalid_argument;
     const out = out_xyz orelse return .invalid_argument;
     const j = hand.Joint.fromU32(joint) orelse return .invalid_argument;
-    const worker = s.hand_tracking orelse return .again;
-    var result: hand.Result = undefined;
-    if (!tracking.hand_worker.readResult(worker, &result)) return .again;
+    const result = currentHands(s) orelse return .again;
     if (hand_index >= result.hand_count or hand_index >= hand.max_hands) return .invalid_argument;
     const h = &result.hands[hand_index];
     if (h.presence < 0.5) return .again;
@@ -8718,40 +8810,36 @@ pub export fn goss_session_set_pose_upper_body(session: ?*Session, enabled: u32)
 pub export fn goss_session_pose_result(session: ?*Session, out_result: ?*pose.Result) Status {
     const s = session orelse return .invalid_argument;
     const out = out_result orelse return .invalid_argument;
-    const worker = s.pose_tracking orelse return .again;
-    if (!tracking.pose_worker.readResult(worker, out)) return .again;
+    out.* = currentBody(s) orelse return .again;
     applyPoseMode(s, out);
     return .ok;
 }
 
 /// Writes the tracked body's named skeleton joint point (x, y in frame
 /// pixels, z in the same scale) into out_xyz, so a lens pins content to a
-/// shoulder, a wrist, or a knee. invalid_argument on an unknown joint;
-/// again with no worker, no body, or presence below the tracked threshold.
+/// shoulder, a wrist, or a knee. Host-submitted bodies win over the worker.
+/// invalid_argument on an unknown joint; again with no usable body.
 pub export fn goss_session_body_joint(session: ?*Session, joint: u32, out_xyz: ?*[3]f32) Status {
     const s = session orelse return .invalid_argument;
     const out = out_xyz orelse return .invalid_argument;
     const j = pose.Joint.fromU32(joint) orelse return .invalid_argument;
-    const worker = s.pose_tracking orelse return .again;
-    var result: pose.Result = undefined;
-    if (!tracking.pose_worker.readResult(worker, &result)) return .again;
-    if (result.landmark_count_out == 0 or result.presence < 0.5) return .again;
+    const result = currentBody(s) orelse return .again;
     out.* = pose.jointPoint(&result.landmarks, j);
     return .ok;
 }
 
 /// Fits the canonical face onto the newest tracked landmarks and writes
 /// the head transform - canonical metric space into frame pixels - as a
-/// column-major 4x4. Reports again until a face is tracked or while the
+/// column-major 4x4. Host-submitted faces and the web landmark path feed the
+/// same fit as the worker. Reports again until a face holds or while the
 /// fit is degenerate.
 pub export fn goss_session_face_pose(session: ?*Session, out_matrix: ?*[16]f32) Status {
     const s = session orelse return .invalid_argument;
     const out = out_matrix orelse return .invalid_argument;
-    const worker = s.face_tracking orelse return .again;
     var result: face.Result = undefined;
-    if (!tracking.readResult(worker, &result)) return .again;
-    if (result.landmark_count_out == 0 or result.presence < 0.5) return .again;
-    const head = face_geometry.estimateHeadPose(&result.landmarks) orelse return .again;
+    var scratch: [face.landmark_count * 3]f32 = undefined;
+    const flat = currentFaceLandmarks(s, &result, &scratch) orelse return .again;
+    const head = face_geometry.estimateHeadPose(flat) orelse return .again;
     var at: usize = 0;
     for (head.cols) |col| {
         out[at] = col[0];
@@ -10455,6 +10543,20 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // path just means a glTF model's own asset never loads, degrading it,
     // while the fountain runs. A sprite image would need a directory.
     createModelLoaders(s, gpa, "") catch {};
+    // Text rasterizes from the built-in font and touches no file, and the
+    // audio-enhance state must reset here or a previous lens's echo and pitch
+    // settings would survive into this activation.
+    createTextTextures(s, gpa) catch {};
+    // The heavy inference loaders read through the staged-asset store first,
+    // so a JSON-activated lens (the web path) runs its models with no
+    // filesystem; an unstaged model just leaves that node inert.
+    s.ml_workers_loaded = 0;
+    createMlLoaders(s, gpa, "");
+    createTemporalLoaders(s, gpa, "");
+    createAudioLoaders(s, gpa, "");
+    resolveAudioEnhance(s);
+    createDiffusionLoaders(s, gpa, "");
+    createSplatLoaders(s, gpa, "");
     buildChainOrder(s, gpa) catch {};
     return .ok;
 }
@@ -11974,6 +12076,9 @@ const AudioWorker = struct {
 
 const MlWorker = struct {
     worker: *ml_infer.MlInfer,
+    /// The owning node's id, duped at load and freed with the worker, so the
+    /// host addresses this model's outputs by the name the manifest gave it.
+    node_id: []u8,
     outputs: []const manifest.MlOutput,
     /// A mask binding routes a whole output tensor to a mask channel; null when
     /// the node only drives parameters. mask_side is the model mask's square
@@ -12006,14 +12111,13 @@ const MlWorker = struct {
 /// node inert.
 fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
     const lens = if (session.active_lens) |*l| l else return;
-    const io = defaultIo();
     for (lens.manifest.nodes) |node| {
         const ml = node.ml orelse continue;
         if (session.ml_workers_loaded >= session.ml_worker_budget) {
             std.log.info("gosslens: ml.infer node over the {d}-worker budget left inert", .{session.ml_worker_budget});
             continue;
         }
-        const bytes = readBundleAsset(gpa, bundle_path, ml.model, 32 * 1024 * 1024) orelse continue;
+        const bytes = readBundleAsset(session, gpa, bundle_path, ml.model, 32 * 1024 * 1024) orelse continue;
         defer gpa.free(bytes);
         if (!modelAllowed(session, bytes)) {
             std.log.info("gosslens: ml.infer model {s} not on the digest allowlist, node inert", .{ml.model});
@@ -12031,13 +12135,9 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
                 };
             }
             if (ml.aux_reference.len > 0) {
-                if (!bundleNameOk(ml.aux_reference)) continue;
-                const ref_path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, ml.aux_reference }) catch continue;
-                defer gpa.free(ref_path);
-                const ref_bytes = std.Io.Dir.cwd().readFileAlloc(io, ref_path, gpa, .limited(4 * 1024 * 1024)) catch |err| {
-                    std.log.info("gosslens: ml.infer reference {s} unreadable ({t})", .{ ml.aux_reference, err });
-                    continue;
-                };
+                const ref_name = std.fmt.allocPrint(gpa, "{s}.png", .{ml.aux_reference}) catch continue;
+                defer gpa.free(ref_name);
+                const ref_bytes = readBundleAsset(session, gpa, bundle_path, ref_name, 4 * 1024 * 1024) orelse continue;
                 defer gpa.free(ref_bytes);
                 const dec = image.decode(gpa, ref_bytes) catch |err| {
                     std.log.info("gosslens: ml.infer reference {s} did not decode ({t})", .{ ml.aux_reference, err });
@@ -12053,6 +12153,10 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
                 std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                 continue;
             };
+        };
+        const node_id = gpa.dupe(u8, node.id) catch {
+            ml_infer.destroy(worker);
+            continue;
         };
 
         // A mask binding needs the bound tensor to be a square single-channel
@@ -12125,6 +12229,7 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
 
         session.ml_workers.append(gpa, .{
             .worker = worker,
+            .node_id = node_id,
             .outputs = ml.outputs,
             .mask = mask,
             .mask_side = mask_side,
@@ -12145,6 +12250,7 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             if (style_f32.len > 0) gpa.free(style_f32);
             if (style_bgra.len > 0) gpa.free(style_bgra);
             if (depth_src.len > 0) gpa.free(depth_src);
+            gpa.free(node_id);
             ml_infer.destroy(worker);
             return;
         };
@@ -12422,14 +12528,13 @@ fn tapAt(buf: *const [voice_delay_len]f32, wpos: usize, delay: f32) f32 {
 /// oversubscribe the device.
 fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
     const lens = if (session.active_lens) |*l| l else return;
-    const io = defaultIo();
     for (lens.manifest.nodes) |node| {
         const audio = node.audio orelse continue;
         if (session.ml_workers_loaded >= session.ml_worker_budget) {
             std.log.info("gosslens: audio.infer node over the {d}-worker budget left inert", .{session.ml_worker_budget});
             continue;
         }
-        const bytes = readBundleAsset(gpa, bundle_path, audio.model, 32 * 1024 * 1024) orelse continue;
+        const bytes = readBundleAsset(session, gpa, bundle_path, audio.model, 32 * 1024 * 1024) orelse continue;
         defer gpa.free(bytes);
         if (!modelAllowed(session, bytes)) {
             std.log.info("gosslens: audio.infer model {s} not on the digest allowlist, node inert", .{audio.model});
@@ -12449,7 +12554,7 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         var has_caption = false;
         var caption_tensor: u32 = 0;
         if (audio.caption) |cap| {
-            if (loadCaptionLabels(gpa, io, bundle_path, cap.labels)) |ls| {
+            if (loadCaptionLabels(session, gpa, bundle_path, cap.labels)) |ls| {
                 labels = ls;
                 has_caption = true;
                 caption_tensor = cap.tensor;
@@ -12493,7 +12598,7 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         var t_bos: u32 = 0;
         var t_eos: u32 = 1;
         if (audio.translate) |tr| tr_blk: {
-            const dec_bytes = readBundleAsset(gpa, bundle_path, tr.decoder, 32 * 1024 * 1024) orelse break :tr_blk;
+            const dec_bytes = readBundleAsset(session, gpa, bundle_path, tr.decoder, 32 * 1024 * 1024) orelse break :tr_blk;
             defer gpa.free(dec_bytes);
             if (!modelAllowed(session, dec_bytes)) {
                 std.log.info("gosslens: translate decoder {s} not on the digest allowlist, binding inert", .{tr.decoder});
@@ -12503,7 +12608,7 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 std.log.info("gosslens: translate decoder {s} left inert ({t})", .{ tr.decoder, err });
                 break :tr_blk;
             };
-            const toks = loadCaptionLabels(gpa, io, bundle_path, tr.tokens) orelse {
+            const toks = loadCaptionLabels(session, gpa, bundle_path, tr.tokens) orelse {
                 ml_infer.genericDestroy(dec);
                 break :tr_blk;
             };
@@ -12527,7 +12632,7 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         var dub_rate: u32 = 22050;
         var dub_chars: []f32 = &.{};
         if (audio.dub) |db| dub_blk: {
-            const tts_bytes = readBundleAsset(gpa, bundle_path, db.model, 32 * 1024 * 1024) orelse break :dub_blk;
+            const tts_bytes = readBundleAsset(session, gpa, bundle_path, db.model, 32 * 1024 * 1024) orelse break :dub_blk;
             defer gpa.free(tts_bytes);
             if (!modelAllowed(session, tts_bytes)) {
                 std.log.info("gosslens: dub model {s} not on the digest allowlist, binding inert", .{db.model});
@@ -12600,14 +12705,10 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
 
 /// Loads a caption node's vocab: assets/<stem>.txt, one label per line, the CTC
 /// blank first. Returns owned lines, or null when the file is missing or empty.
-fn loadCaptionLabels(gpa: std.mem.Allocator, io: std.Io, bundle_path: []const u8, stem: []const u8) ?[][]u8 {
-    if (!bundleNameOk(stem)) return null;
-    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.txt", .{ bundle_path, stem }) catch return null;
-    defer gpa.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024)) catch |err| {
-        std.log.info("gosslens: label file {s} unreadable ({t})", .{ stem, err });
-        return null;
-    };
+fn loadCaptionLabels(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, stem: []const u8) ?[][]u8 {
+    const rel = std.fmt.allocPrint(gpa, "{s}.txt", .{stem}) catch return null;
+    defer gpa.free(rel);
+    const bytes = readBundleAsset(session, gpa, bundle_path, rel, 64 * 1024) orelse return null;
     defer gpa.free(bytes);
     var lines: std.ArrayListUnmanaged([]u8) = .empty;
     var it = std.mem.splitScalar(u8, bytes, '\n');
@@ -13063,6 +13164,7 @@ fn pollMlStyle(session: *Session) void {
 fn destroyMlWorkers(session: *Session) void {
     const gpa = session.engine.gpa;
     for (session.ml_workers.items) |mw| {
+        gpa.free(mw.node_id);
         if (mw.mask_src.len > 0) gpa.free(mw.mask_src);
         if (mw.mask_dst.len > 0) gpa.free(mw.mask_dst);
         if (mw.style_f32.len > 0) gpa.free(mw.style_f32);
@@ -13101,7 +13203,7 @@ fn createTemporalLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path:
             std.log.info("gosslens: temporal.fuse node over the {d}-worker budget left inert", .{session.ml_worker_budget});
             continue;
         }
-        const bytes = readBundleAsset(gpa, bundle_path, tf.model, 32 * 1024 * 1024) orelse continue;
+        const bytes = readBundleAsset(session, gpa, bundle_path, tf.model, 32 * 1024 * 1024) orelse continue;
         defer gpa.free(bytes);
         if (!modelAllowed(session, bytes)) {
             std.log.info("gosslens: temporal.fuse model {s} not on the digest allowlist, node inert", .{tf.model});
@@ -13260,7 +13362,7 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             std.log.info("gosslens: splat.cloud node over the {d}-worker budget left inert", .{session.ml_worker_budget});
             continue;
         }
-        const bytes = readBundleAsset(gpa, bundle_path, node.model, 32 * 1024 * 1024) orelse continue;
+        const bytes = readBundleAsset(session, gpa, bundle_path, node.model, 32 * 1024 * 1024) orelse continue;
         defer gpa.free(bytes);
         if (!modelAllowed(session, bytes)) {
             std.log.info("gosslens: splat.cloud model {s} not on the digest allowlist, node inert", .{node.model});
@@ -13567,16 +13669,108 @@ fn bundleNameOk(name: []const u8) bool {
 }
 
 /// Reads a bundle asset by name up to `limit` bytes, or null if the name would
-/// escape the bundle or the file is missing or oversized, each refusal logged.
-/// The caller frees the returned bytes.
-fn readBundleAsset(gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8, limit: usize) ?[]u8 {
+/// escape the bundle or the asset is missing or oversized, each refusal logged.
+/// A host-staged copy wins over the bundle directory, so a filesystem-less
+/// build reads the same names from memory. The caller frees the returned bytes.
+fn readBundleAsset(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8, limit: usize) ?[]u8 {
     if (!bundleNameOk(name)) return null;
+    if (s.staged_assets.get(name)) |staged| {
+        if (staged.len > limit) {
+            std.log.info("gosslens: staged asset {s} over the {d}-byte bound, refused", .{ name, limit });
+            return null;
+        }
+        return gpa.dupe(u8, staged) catch null;
+    }
+    if (comptime !has_file_io) return null;
     const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch return null;
     defer gpa.free(path);
     return std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(limit)) catch |err| {
         std.log.info("gosslens: bundle asset {s} unreadable ({t})", .{ name, err });
         return null;
     };
+}
+
+/// Stages one bundle asset in memory under its manifest name, replacing any
+/// previous bytes for that name; a zero-length payload removes the name. The
+/// staged copies live until replaced or the session is destroyed.
+fn stageAsset(s: *Session, name: []const u8, bytes: []const u8) error{OutOfMemory}!void {
+    const gpa = s.engine.gpa;
+    if (s.staged_assets.fetchRemove(name)) |old| {
+        gpa.free(old.key);
+        gpa.free(old.value);
+    }
+    if (bytes.len == 0) return;
+    const owned_name = try gpa.dupe(u8, name);
+    errdefer gpa.free(owned_name);
+    const owned_bytes = try gpa.dupe(u8, bytes);
+    errdefer gpa.free(owned_bytes);
+    try s.staged_assets.put(gpa, owned_name, owned_bytes);
+}
+
+/// Hands the engine one bundle asset's bytes under its manifest name ahead
+/// of a JSON lens activation, so a filesystem-less host (the web) runs the
+/// heavy inference nodes from memory. The name must stay bundle-relative;
+/// zero-length bytes remove a previously staged name.
+pub export fn goss_session_provide_lens_asset(session: ?*Session, name: ?[*]const u8, name_len: usize, bytes: ?[*]const u8, len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const n = name orelse return .invalid_argument;
+    if (name_len == 0) return .invalid_argument;
+    if (!bundleRelative(n[0..name_len])) return .invalid_argument;
+    const payload: []const u8 = if (len == 0) &.{} else ((bytes orelse return .invalid_argument)[0..len]);
+    stageAsset(s, n[0..name_len], payload) catch return .out_of_memory;
+    return .ok;
+}
+
+/// Copies one ml.infer node's whole published output tensor into caller
+/// memory, its element count written to out_len. capacity is in floats; a
+/// short buffer still reports the needed count, so a detection, embedding,
+/// or logits read sizes itself in two calls. again before the first publish.
+pub export fn goss_session_ml_output(session: ?*Session, node_id: ?[*]const u8, node_id_len: usize, tensor: u32, out: ?[*]f32, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const n = node_id orelse return .invalid_argument;
+    const ol = out_len orelse return .invalid_argument;
+    ol.* = 0;
+    if (comptime !ml_infer.supported) return .unsupported;
+    if (node_id_len == 0) return .invalid_argument;
+    const id = n[0..node_id_len];
+    for (s.ml_workers.items) |*mw| {
+        if (!std.mem.eql(u8, mw.node_id, id)) continue;
+        const len = ml_infer.outputLen(mw.worker, tensor);
+        if (len == 0) return .invalid_argument;
+        ol.* = len;
+        if (capacity < len) return .invalid_argument;
+        const dst = (out orelse return .invalid_argument)[0..len];
+        if (!ml_infer.copyOutput(mw.worker, tensor, dst)) return .again;
+        return .ok;
+    }
+    return .invalid_argument;
+}
+
+/// Copies one ml.infer node's mask-bound output into caller memory, freshly
+/// read and resampled to the fixed segmentation plane the compositor samples;
+/// out_len reports that plane's float count. invalid_argument when the node
+/// has no mask binding; again before the model's first publish.
+pub export fn goss_session_ml_mask(session: ?*Session, node_id: ?[*]const u8, node_id_len: usize, out: ?[*]f32, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const n = node_id orelse return .invalid_argument;
+    const ol = out_len orelse return .invalid_argument;
+    ol.* = 0;
+    if (comptime !ml_infer.supported) return .unsupported;
+    if (node_id_len == 0) return .invalid_argument;
+    const id = n[0..node_id_len];
+    for (s.ml_workers.items) |*mw| {
+        if (!std.mem.eql(u8, mw.node_id, id)) continue;
+        const mask = mw.mask orelse return .invalid_argument;
+        if (mw.mask_src.len == 0 or mw.mask_dst.len < segmentation.mask_len) return .invalid_argument;
+        ol.* = segmentation.mask_len;
+        if (capacity < segmentation.mask_len) return .invalid_argument;
+        const dst = out orelse return .invalid_argument;
+        if (!ml_infer.copyOutput(mw.worker, mask.tensor, mw.mask_src)) return .again;
+        resampleMask(mw.mask_src, mw.mask_side, mw.mask_dst);
+        @memcpy(dst[0..segmentation.mask_len], mw.mask_dst[0..segmentation.mask_len]);
+        return .ok;
+    }
+    return .invalid_argument;
 }
 
 /// Builds a diffusion restyle worker for every diffusion node from its three
@@ -13592,13 +13786,13 @@ fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
         }
         // The encoder is optional: without one the loop starts from seeded noise
         // (text to image) rather than the camera frame (img2img).
-        const enc: []u8 = if (df.encoder.len > 0) (readBundleAsset(gpa, bundle_path, df.encoder, 64 * 1024 * 1024) orelse continue) else &.{};
+        const enc: []u8 = if (df.encoder.len > 0) (readBundleAsset(session, gpa, bundle_path, df.encoder, 64 * 1024 * 1024) orelse continue) else &.{};
         defer if (enc.len > 0) gpa.free(enc);
-        const unet = readBundleAsset(gpa, bundle_path, df.unet, 64 * 1024 * 1024) orelse continue;
+        const unet = readBundleAsset(session, gpa, bundle_path, df.unet, 64 * 1024 * 1024) orelse continue;
         defer gpa.free(unet);
-        const dec = readBundleAsset(gpa, bundle_path, df.decoder, 64 * 1024 * 1024) orelse continue;
+        const dec = readBundleAsset(session, gpa, bundle_path, df.decoder, 64 * 1024 * 1024) orelse continue;
         defer gpa.free(dec);
-        const emb: []u8 = if (df.text_embedding.len > 0) (readBundleAsset(gpa, bundle_path, df.text_embedding, 64 * 1024 * 1024) orelse &.{}) else &.{};
+        const emb: []u8 = if (df.text_embedding.len > 0) (readBundleAsset(session, gpa, bundle_path, df.text_embedding, 64 * 1024 * 1024) orelse &.{}) else &.{};
         defer if (emb.len > 0) gpa.free(emb);
         // Each of the three model files passes the allowlist; the embedding is
         // plain tensor data, not a model, so it rides outside the gate.
@@ -14304,6 +14498,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyMeshFaceState(s);
     destroyModelState(s);
     destroyMlWorkers(s);
+    destroyTemporalWorkers(s);
     destroyAudioWorkers(s);
     destroyDiffusionWorkers(s);
     destroySplatWorkers(s);
@@ -14472,13 +14667,13 @@ fn detectHeadGestures(s: *Session) struct { nod: bool, shake: bool } {
     return .{ .nod = nod, .shake = shake };
 }
 
-/// The head transform for the newest tracked face, or null with no face.
+/// The head transform for the newest usable face - host-submitted, tracked,
+/// or web-landmark-fed - or null with no face.
 fn currentHeadPose(s: *Session) ?math.Mat4 {
-    const worker = s.face_tracking orelse return null;
     var result: face.Result = undefined;
-    if (!tracking.readResult(worker, &result)) return null;
-    if (result.landmark_count_out == 0 or result.presence < 0.5) return null;
-    return face_geometry.estimateHeadPose(&result.landmarks);
+    var scratch: [face.landmark_count * 3]f32 = undefined;
+    const flat = currentFaceLandmarks(s, &result, &scratch) orelse return null;
+    return face_geometry.estimateHeadPose(flat);
 }
 
 /// The newest tracked pose landmarks, or null with no body.
@@ -15388,32 +15583,30 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
         live_signals.head_nod = gestures.nod;
         live_signals.head_shake = gestures.shake;
     }
-    // The hand gesture and pinch ride the hand worker: the first non-None
-    // gesture and whether any tracked hand is pinching, so a lens fires on
-    // `hands.gesture('Thumb_Up')` or `hands.pinch`.
-    if (s.hand_tracking) |worker| {
-        var hands: hand.Result = undefined;
-        if (tracking.hand_worker.readResult(worker, &hands)) {
-            const region = s.active_lens.?.manifest.region2d;
-            const gestures = s.active_lens.?.manifest.gestures;
-            for (hands.hands[0..@min(hands.hand_count, hand.max_hands)]) |*h| {
-                if (h.gesture != 0 and live_signals.hand_gesture == 0) live_signals.hand_gesture = h.gesture;
-                if (hand.isPinching(&h.landmarks)) live_signals.hand_pinch = true;
-                // The index fingertip against the lens's 2D trigger rectangle,
-                // both in the normalized frame, so a lens fires while the hand
-                // points into a screen zone. Any tracked hand inside sets it.
-                if (region) |reg| {
-                    const tip = hand.jointPoint(&h.landmarks, .index_tip);
-                    if (reg.contains(tip[0], tip[1])) live_signals.hand_in_region = true;
-                }
-                // The hand's finger poses against each lens-declared custom
-                // gesture: a match lights that gesture's bit for the trigger.
-                if (gestures.len > 0) {
-                    const ext = hand.fingerExtensions(&h.landmarks);
-                    for (gestures, 0..) |gd, gi| {
-                        const cg = hand.CustomGesture{ .mask = gd.mask, .want = gd.want };
-                        if (cg.matches(ext)) live_signals.hand_custom_gestures |= @as(u32, 1) << @intCast(gi);
-                    }
+    // The hand gesture and pinch ride the newest hands - host-submitted
+    // first, then the worker: the first non-None gesture and whether any
+    // tracked hand is pinching, so a lens fires on `hands.gesture('Thumb_Up')`
+    // or `hands.pinch` on every platform with either source.
+    if (currentHands(s)) |hands| {
+        const region = s.active_lens.?.manifest.region2d;
+        const gestures = s.active_lens.?.manifest.gestures;
+        for (hands.hands[0..@min(hands.hand_count, hand.max_hands)]) |*h| {
+            if (h.gesture != 0 and live_signals.hand_gesture == 0) live_signals.hand_gesture = h.gesture;
+            if (hand.isPinching(&h.landmarks)) live_signals.hand_pinch = true;
+            // The index fingertip against the lens's 2D trigger rectangle,
+            // both in the normalized frame, so a lens fires while the hand
+            // points into a screen zone. Any tracked hand inside sets it.
+            if (region) |reg| {
+                const tip = hand.jointPoint(&h.landmarks, .index_tip);
+                if (reg.contains(tip[0], tip[1])) live_signals.hand_in_region = true;
+            }
+            // The hand's finger poses against each lens-declared custom
+            // gesture: a match lights that gesture's bit for the trigger.
+            if (gestures.len > 0) {
+                const ext = hand.fingerExtensions(&h.landmarks);
+                for (gestures, 0..) |gd, gi| {
+                    const cg = hand.CustomGesture{ .mask = gd.mask, .want = gd.want };
+                    if (cg.matches(ext)) live_signals.hand_custom_gestures |= @as(u32, 1) << @intCast(gi);
                 }
             }
         }
@@ -16719,6 +16912,147 @@ test "a lens-bundled model off the digest allowlist leaves its node inert with n
     try t.expectEqual(Status.ok, goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
     try t.expectEqual(@as(usize, 0), session.ml_workers.items.len);
     goss_session_deactivate_lens(session);
+}
+
+test "a staged asset serves reads by its manifest name, replaces, and clears" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    // Staged bytes win over the (nonexistent) bundle directory.
+    try t.expectEqual(Status.ok, goss_session_provide_lens_asset(session, "net.onnx", "net.onnx".len, "model bytes", "model bytes".len));
+    const got = readBundleAsset(session, t.allocator, "no-such-bundle", "net.onnx", 1024) orelse return error.TestUnexpectedResult;
+    defer t.allocator.free(got);
+    try t.expectEqualStrings("model bytes", got);
+
+    // A staged asset over the caller's byte bound is refused, not truncated.
+    try t.expect(readBundleAsset(session, t.allocator, "no-such-bundle", "net.onnx", 4) == null);
+
+    // Replacing re-stages; a zero-length payload removes the name.
+    try t.expectEqual(Status.ok, goss_session_provide_lens_asset(session, "net.onnx", "net.onnx".len, "v2", 2));
+    const v2 = readBundleAsset(session, t.allocator, "no-such-bundle", "net.onnx", 1024) orelse return error.TestUnexpectedResult;
+    defer t.allocator.free(v2);
+    try t.expectEqualStrings("v2", v2);
+    try t.expectEqual(Status.ok, goss_session_provide_lens_asset(session, "net.onnx", "net.onnx".len, null, 0));
+    try t.expect(readBundleAsset(session, t.allocator, "no-such-bundle", "net.onnx", 1024) == null);
+
+    // A name that would escape the bundle is refused at the door.
+    try t.expectEqual(Status.invalid_argument, goss_session_provide_lens_asset(session, "../x", "../x".len, "b", 1));
+    try t.expectEqual(Status.invalid_argument, goss_session_provide_lens_asset(session, "n", 0, "b", 1));
+    try t.expectEqual(Status.invalid_argument, goss_session_provide_lens_asset(null, "n", 1, "b", 1));
+
+    // Second lifecycle: stage again after clearing, freed by destroySession.
+    try t.expectEqual(Status.ok, goss_session_provide_lens_asset(session, "again.bin", "again.bin".len, "x", 1));
+}
+
+test "a JSON-activated lens reads its staged model and resets audio enhance state" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    // The ml.infer loader now runs on the JSON path, pulling the staged bytes
+    // with no bundle directory; this build's stub rail leaves the node inert
+    // but the read, allowlist, and free path all execute leak-checked.
+    try t.expectEqual(Status.ok, goss_session_provide_lens_asset(session, "net.onnx", "net.onnx".len, "staged model", "staged model".len));
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, ml_bundle_manifest.ptr, ml_bundle_manifest.len));
+    try t.expectEqual(@as(usize, 0), session.ml_workers.items.len);
+
+    // This build resolves the rail to the stub, and the egress ops say so.
+    var out_len: usize = 0;
+    var buf: [4]f32 = undefined;
+    try t.expectEqual(Status.unsupported, goss_session_ml_output(session, "net", 3, 0, &buf, 4, &out_len));
+    try t.expectEqual(Status.unsupported, goss_session_ml_mask(session, "net", 3, &buf, 4, &out_len));
+
+    const enhance_manifest =
+        \\{"glf":"1.0","id":"e","version":"1.0.0","display_name":"E","engine_compat":">=0.5",
+        \\ "capabilities":[],"parameters":[],
+        \\ "nodes":[{"id":"clean","type":"audio.enhance","params":{},"enhance":{"strength":0.8}}],
+        \\ "triggers":[]}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, enhance_manifest.ptr, enhance_manifest.len));
+    try t.expectApproxEqAbs(@as(f32, 0.8), session.audio_enhance_strength, 1e-6);
+
+    // A following lens with no enhance node resets the state instead of
+    // inheriting the previous lens's cleaning.
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+    try t.expectApproxEqAbs(@as(f32, 0), session.audio_enhance_strength, 1e-6);
+    goss_session_deactivate_lens(session);
+}
+
+test "submitted hands drive hand_result, hand_joint, and the tick with no worker" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var back: hand.Result = undefined;
+    try t.expectEqual(Status.again, goss_session_hand_result(session, &back));
+
+    // One confident right hand, one too faint to keep.
+    var submitted: hand.Result = std.mem.zeroes(hand.Result);
+    submitted.hand_count = 2;
+    submitted.hands[0] = .{ .presence = 0.9, .handedness = 0.8, .gesture = 5, .gesture_score = 0.9, .landmarks = @splat(10.0) };
+    submitted.hands[1] = .{ .presence = 0.2, .handedness = 0.5, .gesture = 0, .gesture_score = 0, .landmarks = @splat(0) };
+    try t.expectEqual(Status.ok, goss_session_submit_hands(session, &submitted));
+
+    try t.expectEqual(Status.ok, goss_session_hand_result(session, &back));
+    try t.expectEqual(@as(u32, 1), back.hand_count);
+    try t.expectEqual(@as(u32, 5), back.hands[0].gesture);
+
+    var xyz: [3]f32 = undefined;
+    try t.expectEqual(Status.ok, goss_session_hand_joint(session, 0, 0, &xyz));
+    try t.expectEqual(@as(f32, 10.0), xyz[0]);
+    try t.expectEqual(Status.invalid_argument, goss_session_hand_joint(session, 1, 0, &xyz));
+
+    // The tick reads the submitted gesture into the hand signals.
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+    var signals = std.mem.zeroes(LensSignals);
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &signals));
+    goss_session_deactivate_lens(session);
+
+    // Null clears the path back to the (absent) worker.
+    try t.expectEqual(Status.ok, goss_session_submit_hands(session, null));
+    try t.expectEqual(Status.again, goss_session_hand_result(session, &back));
+}
+
+test "submitted bodies and faces feed body_joint, pose_result, and face_pose with no worker" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var xyz: [3]f32 = undefined;
+    try t.expectEqual(Status.again, goss_session_body_joint(session, 0, &xyz));
+    var body: PoseResult = std.mem.zeroes(PoseResult);
+    body.presence = 0.9;
+    body.landmark_count_out = pose.landmark_count;
+    body.landmarks = @splat(7.0);
+    body.visibilities = @splat(1);
+    body.presences = @splat(1);
+    try t.expectEqual(Status.ok, goss_session_submit_bodies(session, @ptrCast(&body), 1));
+    try t.expectEqual(Status.ok, goss_session_body_joint(session, 0, &xyz));
+    try t.expectEqual(@as(f32, 7.0), xyz[0]);
+    var pr: PoseResult = undefined;
+    try t.expectEqual(Status.ok, goss_session_pose_result(session, &pr));
+    try t.expectEqual(@as(f32, 7.0), pr.landmarks[0]);
+
+    // A face submitted through the multi-face path feeds the head-pose fit.
+    var matrix: [16]f32 = undefined;
+    try t.expectEqual(Status.again, goss_session_face_pose(session, &matrix));
+    var f: FaceResult = std.mem.zeroes(FaceResult);
+    f.presence = 0.9;
+    f.landmark_count_out = face.landmark_count;
+    // A flat plane of identical landmarks is degenerate; spread them so the
+    // canonical fit has geometry to lock onto.
+    for (0..face.landmark_count) |i| {
+        f.landmarks[i * 3] = @floatFromInt((i * 13) % 640);
+        f.landmarks[i * 3 + 1] = @floatFromInt((i * 29) % 480);
+        f.landmarks[i * 3 + 2] = @floatFromInt(i % 40);
+    }
+    try t.expectEqual(Status.ok, goss_session_submit_faces(session, @ptrCast(&f), 1));
+    _ = goss_session_face_pose(session, &matrix);
 }
 
 test "the ar brush projects a world stroke to screen and drops points behind the camera" {
