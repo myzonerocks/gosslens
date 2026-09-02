@@ -527,8 +527,12 @@ export class GossEngine {
     // itself, via emscripten_webgl_create_context - passing
     // webGLContextAttributes here has no effect regardless,
     // preserveDrawingBuffer stays false. Worked around in capturePixels.
-    const rendererStatus = await mod.ccall("goss_engine_init_renderer", "number", ["number", "number"], [this.handle, rendererDescPtr], { async: true });
-    mod.ccall("goss_free", null, ["number", "number"], [rendererDescPtr, 12]);
+    let rendererStatus: number;
+    try {
+      rendererStatus = await mod.ccall("goss_engine_init_renderer", "number", ["number", "number"], [this.handle, rendererDescPtr], { async: true });
+    } finally {
+      mod.ccall("goss_free", null, ["number", "number"], [rendererDescPtr, 12]);
+    }
     if (rendererStatus !== GOSS_OK) throw new Error(`renderer init failed: ${rendererStatus}`);
 
     // Emscripten's C++ side just created this canvas's own rendering
@@ -1132,7 +1136,8 @@ export class GossSession {
     if (bytes > this.scratchCapacity) {
       if (this.scratchPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [this.scratchPtr, this.scratchCapacity]);
       this.scratchPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
-      this.scratchCapacity = bytes;
+      this.scratchCapacity = this.scratchPtr === 0 ? 0 : bytes;
+      if (this.scratchPtr === 0) throw new Error("wasm allocation failed");
     }
     return this.scratchPtr;
   }
@@ -1293,7 +1298,7 @@ export class GossSession {
   /// muxed recording track, unused by the web preview path.
   submitAudio(samples: Float32Array, frameCount: number, sampleRate: number, channels: number, timestampUs: bigint = 0n): void {
     const bytes = samples.length * 4;
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const ptr = this.scratch(bytes);
     this.mod.HEAPF32.set(samples, ptr >> 2);
     this.mod.ccall(
       "goss_session_submit_audio",
@@ -1301,18 +1306,15 @@ export class GossSession {
       ["number", "number", "number", "number", "number", "number"],
       [this.handle, ptr, frameCount, sampleRate, channels, timestampUs],
     );
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
   /// Pulls the next block of mixed lens audio (frames interleaved s16) that
   /// play_sound triggers produced, for the page to feed into WebAudio.
   pullAudio(frames: number): Int16Array {
     const byteLen = frames * 2;
-    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLen]);
+    const ptr = this.scratch(byteLen);
     this.mod.ccall("goss_session_pull_audio", "number", ["number", "number", "number"], [this.handle, ptr, frames]);
-    const out = new Int16Array(this.mod.HEAP16.buffer, ptr, frames).slice();
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, byteLen]);
-    return out;
+    return new Int16Array(this.mod.HEAP16.buffer, ptr, frames).slice();
   }
 
   /// Folds the active lens sound into the caller's outgoing call/live track:
@@ -1321,12 +1323,12 @@ export class GossSession {
   /// mixed interleaved s16. Advances the mixer once, replacing `pullAudio`.
   mixOutputAudio(mic: Float32Array | null, frameCount: number, sampleRate: number, channels: number): Int16Array {
     const outLen = frameCount * channels;
-    const outBytes = outLen * 2;
-    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [outBytes]);
-    let micPtr = 0;
+    const outBytes = (outLen * 2 + 3) & ~3;
     const micBytes = mic ? mic.length * 4 : 0;
+    const outPtr = this.scratch(outBytes + micBytes);
+    let micPtr = 0;
     if (mic) {
-      micPtr = this.mod.ccall("goss_alloc", "number", ["number"], [micBytes]);
+      micPtr = outPtr + outBytes;
       this.mod.HEAPF32.set(mic, micPtr >> 2);
     }
     this.mod.ccall(
@@ -1335,10 +1337,7 @@ export class GossSession {
       ["number", "number", "number", "number", "number", "number"],
       [this.handle, micPtr, outPtr, frameCount, sampleRate, channels],
     );
-    const out = new Int16Array(this.mod.HEAP16.buffer, outPtr, outLen).slice();
-    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, outBytes]);
-    if (mic) this.mod.ccall("goss_free", null, ["number", "number"], [micPtr, micBytes]);
-    return out;
+    return new Int16Array(this.mod.HEAP16.buffer, outPtr, outLen).slice();
   }
 
   /// Stores validated camera-hardware intent; the engine normalizes it. Read it
@@ -1483,7 +1482,7 @@ export class GossSession {
   /// Uploads one RGBA/BGRA frame into a named source (pixelFormat 3 BGRA, 4 RGBA).
   submitSourceFrameRgba(name: string, rgba: Uint8Array, width: number, height: number, stride: number, pixelFormat: GossPixelFormat = GossPixelFormat.Rgba8): void {
     const byteLen = stride * height;
-    const rgbaPtr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLen]) as number;
+    const rgbaPtr = this.scratch(byteLen);
     this.mod.HEAPU8.set(rgba.subarray(0, byteLen), rgbaPtr);
     this.mod.setValue(this.frameDescPtr, width, "i32");
     this.mod.setValue(this.frameDescPtr + 4, height, "i32");
@@ -1495,7 +1494,6 @@ export class GossSession {
     this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
     this.withName(name, (ptr, len) =>
       this.mod.ccall("goss_session_submit_source_frame_rgba_copy", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, this.frameDescPtr, rgbaPtr, stride]));
-    this.mod.ccall("goss_free", null, ["number", "number"], [rgbaPtr, byteLen]);
   }
 
   /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid.
@@ -1798,7 +1796,7 @@ export class GossSession {
     }
     const scaleX = this.frameWidth / sourceWidth;
     const scaleY = this.frameHeight / sourceHeight;
-    const pointCount = landmarks.length / 3;
+    const pointCount = Math.min(landmarks.length / 3, GOSS_FACE_LANDMARK_COUNT);
     const base = this.landmarksPtr >> 2;
     for (let at = 0; at < pointCount; at += 1) {
       this.mod.HEAPF32[base + at * 3] = landmarks[at * 3]! * scaleX;
@@ -1829,15 +1827,15 @@ export class GossSession {
       const off = i * FACE_RESULT_BYTES;
       const base = ptr + off;
       const f = faces[i]!;
-      const count = f.landmarks.length / 3;
+      const count = Math.min(f.landmarks.length / 3, GOSS_FACE_LANDMARK_COUNT);
       dv.setBigUint64(off, BigInt(f.frameSerial ?? 0), true);
       dv.setBigInt64(off + 8, BigInt(f.timestampUs ?? 0), true);
       dv.setFloat32(off + 16, f.presence ?? 1, true);
       dv.setUint32(off + 20, count, true);
-      this.mod.HEAPF32.set(f.landmarks, (base + 24) >> 2);
+      this.mod.HEAPF32.set(f.landmarks.subarray(0, count * 3), (base + 24) >> 2);
       const bsStart = (base + 24 + GOSS_FACE_LANDMARK_COUNT * 3 * 4) >> 2;
       this.mod.HEAPF32.fill(0, bsStart, bsStart + GOSS_FACE_BLENDSHAPE_COUNT);
-      if (f.blendshapes) this.mod.HEAPF32.set(f.blendshapes, bsStart);
+      if (f.blendshapes) this.mod.HEAPF32.set(f.blendshapes.subarray(0, GOSS_FACE_BLENDSHAPE_COUNT), bsStart);
     }
     this.mod.ccall("goss_session_submit_faces", "number", ["number", "number", "number"], [this.handle, ptr, faces.length]);
   }
@@ -1894,16 +1892,16 @@ export class GossSession {
       const off = i * POSE_RESULT_BYTES;
       const base = ptr + off;
       const b = bodies[i]!;
-      const count = b.landmarks.length / 3;
+      const count = Math.min(b.landmarks.length / 3, GOSS_POSE_LANDMARK_COUNT);
       dv.setBigUint64(off, BigInt(b.frameSerial ?? 0), true);
       dv.setBigInt64(off + 8, BigInt(b.timestampUs ?? 0), true);
       dv.setFloat32(off + 16, b.presence ?? 1, true);
       dv.setUint32(off + 20, count, true);
-      this.mod.HEAPF32.set(b.landmarks, (base + 24) >> 2);
+      this.mod.HEAPF32.set(b.landmarks.subarray(0, count * 3), (base + 24) >> 2);
       const visStart = (base + 24 + GOSS_POSE_LANDMARK_COUNT * 3 * 4) >> 2;
       this.mod.HEAPF32.fill(0, visStart, visStart + GOSS_POSE_LANDMARK_COUNT * 2);
-      if (b.visibilities) this.mod.HEAPF32.set(b.visibilities, visStart);
-      if (b.presences) this.mod.HEAPF32.set(b.presences, visStart + GOSS_POSE_LANDMARK_COUNT);
+      if (b.visibilities) this.mod.HEAPF32.set(b.visibilities.subarray(0, GOSS_POSE_LANDMARK_COUNT), visStart);
+      if (b.presences) this.mod.HEAPF32.set(b.presences.subarray(0, GOSS_POSE_LANDMARK_COUNT), visStart + GOSS_POSE_LANDMARK_COUNT);
     }
     this.mod.ccall("goss_session_submit_bodies", "number", ["number", "number", "number"], [this.handle, ptr, bodies.length]);
   }
@@ -2215,9 +2213,9 @@ export class GossSession {
   /// Submits one NV12 exposure of an HDR bracket, fed to bracket-source
   /// temporal.fuse nodes. y and uv are the plane bytes as submitFrameCopy takes.
   submitFrameBracket(y: Uint8Array, yStride: number, uv: Uint8Array, uvStride: number, width: number, height: number, colorStandard = 1, colorRange = 0): void {
-    const yPtr = this.mod.ccall("goss_alloc", "number", ["number"], [y.length]) as number;
+    const yPtr = this.scratch(y.length + uv.length);
     this.mod.HEAPU8.set(y, yPtr);
-    const uvPtr = this.mod.ccall("goss_alloc", "number", ["number"], [uv.length]) as number;
+    const uvPtr = yPtr + y.length;
     this.mod.HEAPU8.set(uv, uvPtr);
     this.mod.setValue(this.frameDescPtr, width, "i32");
     this.mod.setValue(this.frameDescPtr + 4, height, "i32");
@@ -2228,14 +2226,12 @@ export class GossSession {
     this.mod.setValue(this.frameDescPtr + 24, 0, "i32");
     this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
     this.mod.ccall("goss_session_submit_frame_bracket", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, this.frameDescPtr, yPtr, yStride, uvPtr, uvStride]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [yPtr, y.length]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [uvPtr, uv.length]);
   }
 
   private submitPlanes(sym: string, y: Uint8Array, yStride: number, uv: Uint8Array, uvStride: number, width: number, height: number, colorStandard: number, colorRange: number): void {
-    const yPtr = this.mod.ccall("goss_alloc", "number", ["number"], [y.length]) as number;
+    const yPtr = this.scratch(y.length + uv.length);
     this.mod.HEAPU8.set(y, yPtr);
-    const uvPtr = this.mod.ccall("goss_alloc", "number", ["number"], [uv.length]) as number;
+    const uvPtr = yPtr + y.length;
     this.mod.HEAPU8.set(uv, uvPtr);
     this.mod.setValue(this.frameDescPtr, width, "i32");
     this.mod.setValue(this.frameDescPtr + 4, height, "i32");
@@ -2246,8 +2242,6 @@ export class GossSession {
     this.mod.setValue(this.frameDescPtr + 24, 0, "i32");
     this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
     this.mod.ccall(sym, "number", ["number", "number", "number", "number", "number", "number"], [this.handle, this.frameDescPtr, yPtr, yStride, uvPtr, uvStride]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [yPtr, y.length]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [uvPtr, uv.length]);
   }
 
   /// Feeds one NV12 frame to the in-engine trackers only (no render), for a host
@@ -2626,7 +2620,8 @@ export class GossSession {
     if (this.framePixelsCapacity >= byteLength) return;
     if (this.framePixelsPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [this.framePixelsPtr, this.framePixelsCapacity]);
     this.framePixelsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLength]);
-    this.framePixelsCapacity = byteLength;
+    this.framePixelsCapacity = this.framePixelsPtr === 0 ? 0 : byteLength;
+    if (this.framePixelsPtr === 0) throw new Error("wasm allocation failed");
   }
 
   /// rotationDegrees omitted means the setVideoFlip state decides (a
@@ -2729,7 +2724,8 @@ export class GossSession {
     if (this.worldScratchLen >= byteLength) return;
     if (this.worldScratchPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [this.worldScratchPtr, this.worldScratchLen]);
     this.worldScratchPtr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLength]);
-    this.worldScratchLen = byteLength;
+    this.worldScratchLen = this.worldScratchPtr === 0 ? 0 : byteLength;
+    if (this.worldScratchPtr === 0) throw new Error("wasm allocation failed");
   }
 
   /// Reports one finished frame: measured whole-pipeline time plus
@@ -2805,9 +2801,14 @@ export class GossPreviewSession {
   static async create(canvas: HTMLCanvasElement, wasmJsUrl: string | URL, events: GossSessionEvents = {}): Promise<GossPreviewSession> {
     const gosslens = await Gosslens.load(canvas, wasmJsUrl);
     const engine = GossEngine.create(gosslens);
-    await engine.initRenderer(canvas);
-    const session = GossSession.create(engine);
-    return new GossPreviewSession(gosslens, engine, session, events);
+    try {
+      await engine.initRenderer(canvas);
+      const session = GossSession.create(engine);
+      return new GossPreviewSession(gosslens, engine, session, events);
+    } catch (err) {
+      engine.destroy();
+      throw err;
+    }
   }
 
   abiVersion(): number {
@@ -2936,8 +2937,10 @@ export class GossPreviewSession {
       this.cameraFrames += 1;
       const width = this.video.videoWidth;
       const height = this.video.videoHeight;
-      this.scratchCanvas.width = width;
-      this.scratchCanvas.height = height;
+      if (this.scratchCanvas.width !== width || this.scratchCanvas.height !== height) {
+        this.scratchCanvas.width = width;
+        this.scratchCanvas.height = height;
+      }
       this.scratchCtx.drawImage(this.video, 0, 0, width, height);
       const pixels = this.scratchCtx.getImageData(0, 0, width, height);
       // Not mirrored here - the demo page's own CSS mirrors the canvas
