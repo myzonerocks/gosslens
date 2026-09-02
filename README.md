@@ -2,8 +2,8 @@
 
 # Gosslens
 
-**A camera and AR engine you add to your app in one line.**
-Beauty, tracking, lenses, world anchoring, and capture - every frame on the device.
+**A camera and AR engine: beauty, face, hand and body tracking, segmentation,
+world anchoring, scripted lenses, and capture, every frame on device.**
 
 [![gates](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml/badge.svg)](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)
@@ -14,11 +14,11 @@ Beauty, tracking, lenses, world anchoring, and capture - every frame on the devi
 
 </div>
 
-Add one dependency, write Swift, Kotlin, or TypeScript, and your app has the
-camera surface people expect: beauty and makeup, face, hand, and body tracking,
-segmentation, world anchoring, scripted and physics-driven lenses, and capture.
-The engine ships prebuilt inside each SDK, so there is no toolchain to install,
-and nothing a camera sees ever leaves the device.
+Beauty and makeup, face, hand, and body tracking, segmentation, world
+anchoring, scripted and physics-driven lenses, and photo and video capture. It
+runs on iOS, Android, and the web from one engine, and the compiled engine
+ships inside each package, so there is no toolchain to install. Every frame is
+processed on the device and none of it leaves.
 
 ## Install
 

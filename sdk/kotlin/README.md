@@ -1,7 +1,7 @@
 # Gosslens - Kotlin SDK
 
-Kotlin SDK for [Gosslens](../../include/gosslens.h), a camera engine behind one C
-ABI. It wraps the engine as `GossEngine`, `GossSession`, and `Gosslens`, the same
+Kotlin SDK for [Gosslens](../../include/gosslens.h), a camera and AR engine
+behind one C ABI. It wraps the engine as `GossEngine`, `GossSession`, and `Gosslens`, the same
 names the [Swift](../swift/README.md) and [TypeScript](../ts/README.md) SDKs use.
 
 The engine ships as one shared library, `libgosslens.so`, that links the whole
@@ -31,7 +31,7 @@ dependencies {
 }
 ```
 
-No repository declaration, no toolchain - the frictionless path. Every
+No repository declaration and no toolchain. Every
 published version is on the
 [releases page](https://github.com/myzonerocks/gosslens/releases).
 
