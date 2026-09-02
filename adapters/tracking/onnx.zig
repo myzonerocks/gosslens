@@ -1106,6 +1106,7 @@ fn reshape(ra: std.mem.Allocator, x: Tensor, shape_t: Tensor) Error!Tensor {
     var minus_one: ?usize = null;
     var known: usize = 1;
     for (shape_t.data, 0..) |v, i| {
+        if (!(v >= -9.0e15 and v <= 9.0e15)) return error.TensorShapeMismatch;
         const d: i64 = @intFromFloat(v);
         if (d == -1) {
             minus_one = i;
@@ -1206,9 +1207,12 @@ fn softmax(ra: std.mem.Allocator, x: Tensor, axis_in: i64) Error!Tensor {
 // ships that the original op set could not run ----
 
 /// Reads one element of an integer-carrying tensor (a starts/ends/axes/shape
-/// input, stored as f32 like every graph tensor) as an i64.
+/// input, stored as f32 like every graph tensor) as an i64, with a non-finite
+/// or out-of-range value from an untrusted model clamped to zero.
 fn intAt(t: Tensor, i: usize) i64 {
-    return @intFromFloat(t.data[i]);
+    const v = t.data[i];
+    if (!(v >= -9.0e15 and v <= 9.0e15)) return 0;
+    return @intFromFloat(v);
 }
 
 fn convTranspose(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnmanaged(Tensor)) Error!Tensor {
@@ -1316,7 +1320,7 @@ fn resize(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnm
     } else if (node.inputs.len > 2 and node.inputs[2].len != 0) {
         const scales = try get(table, node.inputs[2]);
         if (scales.data.len < 4) return error.TensorShapeMismatch;
-        if (!(scales.data[2] > 0) or !(scales.data[3] > 0)) return error.TensorShapeMismatch;
+        if (!(scales.data[2] > 0 and scales.data[2] <= 65536) or !(scales.data[3] > 0 and scales.data[3] <= 65536)) return error.TensorShapeMismatch;
         oh = @intFromFloat(@floor(@as(f32, @floatFromInt(h)) * scales.data[2]));
         ow = @intFromFloat(@floor(@as(f32, @floatFromInt(wd)) * scales.data[3]));
     } else return error.TensorShapeMismatch;
