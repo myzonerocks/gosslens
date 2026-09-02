@@ -28,7 +28,7 @@ forward to the newest release on its own, so this line stays correct as new
 versions ship:
 
 ```swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "0.11.0")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.11.1")
 ```
 
 ```swift
