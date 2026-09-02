@@ -8,6 +8,7 @@ const ml_tensor = @import("ml_tensor");
 
 pub const supported = false;
 
+pub const Norm = ml_tensor.Norm;
 pub const CreateError = error{ Unsupported, InvalidModel, ModelRejected, OutOfMemory };
 
 pub const max_outputs = 8;
@@ -145,11 +146,12 @@ pub fn audioInputLen(ai: *const AudioInfer) usize {
     return 0;
 }
 
-pub fn create(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*MlInfer {
+pub fn create(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, norm: ml_tensor.Norm, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*MlInfer {
     _ = gpa;
     _ = model_bytes;
     _ = bounds;
     _ = threads;
+    _ = norm;
     _ = aux_rgba;
     _ = aux_width;
     _ = aux_height;

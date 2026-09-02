@@ -10,6 +10,7 @@ const ml_tensor = @import("ml_tensor");
 const core_mod = @import("ml_infer_core");
 
 pub const supported = core_mod.supported;
+pub const Norm = ml_tensor.Norm;
 pub const CreateError = core_mod.CreateError;
 pub const Core = core_mod.Core;
 pub const max_outputs = core_mod.max_outputs;
@@ -95,11 +96,11 @@ pub const MlInfer = struct {
 };
 
 /// Stands the core up under the sandbox bounds and starts the worker.
-pub fn create(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*MlInfer {
+pub fn create(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, norm: ml_tensor.Norm, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*MlInfer {
     const ml = gpa.create(MlInfer) catch return error.OutOfMemory;
     errdefer gpa.destroy(ml);
 
-    const core = try Core.init(gpa, model_bytes, bounds, threads, aux_rgba, aux_width, aux_height, temporal);
+    const core = try Core.init(gpa, model_bytes, bounds, threads, norm, aux_rgba, aux_width, aux_height, temporal);
     errdefer core.deinit();
 
     ml.* = .{

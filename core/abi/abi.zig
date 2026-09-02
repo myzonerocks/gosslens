@@ -81,6 +81,20 @@ const is_android = builtin.os.tag == .linux and builtin.abi.isAndroid();
 const has_file_io = !builtin.cpu.arch.isWasm();
 var default_threaded_io: if (has_file_io) std.Io.Threaded else void =
     if (has_file_io) std.Io.Threaded.init_single_threaded else {};
+
+/// The wasm targets cannot host std.log's default writer (no threaded io on
+/// freestanding, and the emscripten arm of std.Io.Threaded does not compile),
+/// so the engine's diagnostic lines drop there; every other target keeps the
+/// default. Takes effect where this file is the root module.
+pub const std_options: std.Options = .{ .logFn = engineLog };
+fn engineLog(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
+    if (comptime builtin.cpu.arch.isWasm()) {
+        return;
+    } else {
+        std.log.defaultLog(level, scope, format, args);
+    }
+}
+
 fn defaultIo() std.Io {
     return default_threaded_io.io();
 }
@@ -12123,13 +12137,14 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             std.log.info("gosslens: ml.infer model {s} not on the digest allowlist, node inert", .{ml.model});
             continue;
         }
+        const norm: ml_infer.Norm = .{ .symmetric = ml.input_symmetric, .mean = ml.input_mean, .std_dev = ml.input_std };
         // A two-input model reads a second plane. A temporal model takes the
         // previous frame; a reference model conditions on a bundled image,
         // decoded here and sampled by the worker into input 1 (create copies
         // it, so the decode is freed on this return).
         const worker = blk: {
             if (ml.temporal) {
-                break :blk ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, true) catch |err| {
+                break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, null, 0, 0, true) catch |err| {
                     std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                     continue;
                 };
@@ -12144,12 +12159,12 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
                     continue;
                 };
                 defer gpa.free(dec.rgba);
-                break :blk ml_infer.create(gpa, bytes, .{}, 2, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch |err| {
+                break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch |err| {
                     std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                     continue;
                 };
             }
-            break :blk ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch |err| {
+            break :blk ml_infer.create(gpa, bytes, .{}, 2, norm, null, 0, 0, false) catch |err| {
                 std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
                 continue;
             };
@@ -13368,7 +13383,7 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             std.log.info("gosslens: splat.cloud model {s} not on the digest allowlist, node inert", .{node.model});
             continue;
         }
-        const worker = ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch |err| {
+        const worker = ml_infer.create(gpa, bytes, .{}, 2, .{}, null, 0, 0, false) catch |err| {
             std.log.info("gosslens: splat.cloud model {s} left inert ({t})", .{ node.model, err });
             continue;
         };

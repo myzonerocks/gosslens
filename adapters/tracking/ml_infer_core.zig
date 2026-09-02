@@ -106,6 +106,9 @@ pub const Core = struct {
     aux_pixels: []u8 = &.{},
     aux_width: u32 = 0,
     aux_height: u32 = 0,
+    /// The input contract the lens declared for this model: sampled range and
+    /// per-channel mean/std, applied to every image plane fed to it.
+    norm: ml_tensor.Norm = .{},
     /// Temporal mode: input 1 is the PREVIOUS frame, held here as the last
     /// frame's sampled NHWC plane and swapped in each compute, so a two-input
     /// model fuses the current and previous frame (interpolation, temporal
@@ -120,7 +123,7 @@ pub const Core = struct {
     /// Loads the model under the sandbox bounds. Rejects a model whose input is
     /// not one square RGB image (NHWC or NCHW), whose output count is outside
     /// the bound, or whose bytes or tensors exceed the bounds.
-    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*Core {
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, norm: ml_tensor.Norm, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*Core {
         const core = gpa.create(Core) catch return error.OutOfMemory;
         errdefer gpa.destroy(core);
 
@@ -216,6 +219,7 @@ pub const Core = struct {
             .aux_width = if (aux) |a| a.width else 0,
             .aux_height = if (aux) |a| a.height else 0,
             .temporal = temporal,
+            .norm = norm,
             .prev_input1 = if (temp) |t| t.prev else &.{},
             .output_count = @intCast(out_count),
             .outputs = outputs,
@@ -241,7 +245,8 @@ pub const Core = struct {
     /// leaving the result in the engine for publish(). Reuses the input plane,
     /// so a compute allocates nothing.
     pub fn compute(core: *Core, frame: sampler.Frame) bool {
-        ml_sample.writeFrame(&core.engine, 0, core.in_sq, frame, core.input_tensor, core.nchw_scratch) catch return false;
+        const range: sampler.Range = if (core.norm.symmetric) .symmetric else .unit;
+        ml_sample.writeFrameNormalized(&core.engine, 0, core.in_sq, frame, core.input_tensor, core.nchw_scratch, range, core.norm.mean, core.norm.std_dev) catch return false;
         if (core.aux_sq) |sq| {
             if (core.temporal) {
                 // Input 1 is the previous frame; the first frame is its own
@@ -250,7 +255,7 @@ pub const Core = struct {
                 ml_sample.writeSampled(&core.engine, 1, sq, src, core.aux_nchw_scratch) catch return false;
             } else {
                 const ref = sampler.Frame{ .pixels = .{ .rgba8 = core.aux_pixels }, .width = core.aux_width, .height = core.aux_height };
-                ml_sample.writeFrame(&core.engine, 1, sq, ref, core.aux_tensor, core.aux_nchw_scratch) catch return false;
+                ml_sample.writeFrameNormalized(&core.engine, 1, sq, ref, core.aux_tensor, core.aux_nchw_scratch, range, core.norm.mean, core.norm.std_dev) catch return false;
             }
         }
         core.engine.invoke() catch return false;

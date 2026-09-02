@@ -3626,6 +3626,202 @@ fn proveMlInferOnnx(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// The byo-ONNX manifest with an input contract block spliced into the ml
+/// block, for the range and mean/std proofs.
+fn writeOnnxContractLens(dir: []const u8, model: []const u8, contract: []const u8) !void {
+    const manifest_json = try std.fmt.allocPrint(std.heap.page_allocator,
+        \\{{"glf":"1.0","id":"goss.reference.ml-contract","version":"1.0.0","display_name":"BYO Contract","engine_compat":">=0.5","capabilities":[],
+        \\ "parameters":[{{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}}],
+        \\ "nodes":[{{"id":"byo","type":"ml.infer","params":{{}},
+        \\   "ml":{{"model":"model.onnx","outputs":[{{"tensor":0,"index":0,"param":"score"}}]{s}}}}}],
+        \\ "triggers":[]}}
+    , .{contract});
+    defer std.heap.page_allocator.free(manifest_json);
+    const manifest_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/manifest.json", .{dir});
+    defer std.heap.page_allocator.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = manifest_json });
+    const asset_path = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/assets/model.onnx", .{dir});
+    defer std.heap.page_allocator.free(asset_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = asset_path, .data = model });
+}
+
+/// Proves the declared input contract changes the numbers a model reads: the
+/// same net over the same frame lands different pinned scores under unit,
+/// symmetric, and a mean/std pair, so an export's own preprocessing is
+/// expressible instead of silently wrong.
+fn proveMlInputContract(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-contract-unit/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-contract-sym/assets");
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-contract-std/assets");
+    try writeOnnxContractLens("zig-out/ml-contract-unit", model, "");
+    try writeOnnxContractLens("zig-out/ml-contract-sym", model, ",\"input_range\":\"symmetric\"");
+    try writeOnnxContractLens("zig-out/ml-contract-std", model, ",\"input_mean\":[0.25,0.25,0.25],\"input_std\":[2.0,2.0,2.0]");
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const unit = try runMlInferOnce(engine, "zig-out/ml-contract-unit", "score", -999.0, person);
+    const sym = try runMlInferOnce(engine, "zig-out/ml-contract-sym", "score", -999.0, person);
+    const scaled = try runMlInferOnce(engine, "zig-out/ml-contract-std", "score", -999.0, person);
+    if (!std.math.isFinite(unit) or !std.math.isFinite(sym) or !std.math.isFinite(scaled)) {
+        std.debug.print("conformance: FAIL an input contract produced a non-finite score\n", .{});
+        return false;
+    }
+    // Symmetric doubles and shifts the sampled plane, and the mean/std pair
+    // shifts and halves it; both must land away from the unit score.
+    if (@abs(sym - unit) < 1e-3 or @abs(scaled - unit) < 1e-3) {
+        std.debug.print("conformance: FAIL the input contract did not change the model's numbers ({d} {d} {d})\n", .{ unit, sym, scaled });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a lens-declared input contract (range, mean, std) feeds a model the numbers its export trained on\n", .{});
+    return true;
+}
+
+const staged_ml_manifest =
+    \\{"glf":"1.0","id":"goss.reference.ml-staged","version":"1.0.0","display_name":"Staged","engine_compat":">=0.5","capabilities":[],
+    \\ "parameters":[{"name":"score","type":"float","default":-999.0,"min":-1000000.0,"max":1000000.0}],
+    \\ "nodes":[{"id":"byo","type":"ml.infer","params":{},
+    \\   "ml":{"model":"model.onnx","outputs":[{"tensor":0,"index":0,"param":"score"}]}}],
+    \\ "triggers":[]}
+;
+
+/// Proves the staged-asset door and the output egress in one pass: a lens
+/// activated from raw JSON runs its model from memory, the tensor reads back
+/// matching the bound parameter, the sizing call reports the needed count,
+/// and a second stage-activate-destroy lifecycle lands the same score.
+fn proveMlHostRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxProbe(arena.allocator());
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    var scores: [2]f32 = undefined;
+    for (&scores) |*score| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_provide_lens_asset(session, "model.onnx", "model.onnx".len, model.ptr, model.len) != .ok) {
+            std.debug.print("conformance: FAIL staging the model bytes\n", .{});
+            return false;
+        }
+        if (abi.goss_session_activate_lens(session, staged_ml_manifest.ptr, staged_ml_manifest.len) != .ok) {
+            std.debug.print("conformance: FAIL JSON activation with a staged model\n", .{});
+            return false;
+        }
+        const desc: abi.FrameDesc = .{ .width = person.width, .height = person.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+        const half_w = (person.width + 1) / 2;
+        const signals = std.mem.zeroes(abi.LensSignals);
+        var value: f32 = -999.0;
+        var polls: usize = 0;
+        while (value == -999.0) {
+            if (abi.goss_session_track_frame(session, &desc, person.y.ptr, person.width, person.uv.ptr, half_w * 2) != .ok) {
+                std.debug.print("conformance: FAIL feeding the staged model a frame\n", .{});
+                return false;
+            }
+            std.Thread.yield() catch {};
+            _ = abi.goss_session_tick_lens(session, 16000, &signals);
+            _ = abi.goss_session_parameter_value(session, "score", "score".len, &value);
+            polls += 1;
+            if (polls > 100_000_000) return error.MlInferTimedOut;
+        }
+        // The sizing call reports the tensor's element count, then the full
+        // read hands back the same number the parameter binding published.
+        var out_len: usize = 0;
+        if (abi.goss_session_ml_output(session, "byo", "byo".len, 0, null, 0, &out_len) != .invalid_argument or out_len != 1) {
+            std.debug.print("conformance: FAIL the ml output sizing call ({d})\n", .{out_len});
+            return false;
+        }
+        var buf: [1]f32 = undefined;
+        if (abi.goss_session_ml_output(session, "byo", "byo".len, 0, &buf, 1, &out_len) != .ok or out_len != 1) {
+            std.debug.print("conformance: FAIL the ml output read\n", .{});
+            return false;
+        }
+        if (buf[0] != value) {
+            std.debug.print("conformance: FAIL the read tensor disagrees with the bound parameter ({d} vs {d})\n", .{ buf[0], value });
+            return false;
+        }
+        // This node binds no mask, and the egress says so.
+        var mask_len: usize = 0;
+        if (abi.goss_session_ml_mask(session, "byo", "byo".len, null, 0, &mask_len) != .invalid_argument) {
+            std.debug.print("conformance: FAIL a maskless node accepted a mask read\n", .{});
+            return false;
+        }
+        score.* = value;
+    }
+    if (scores[0] != scores[1] or !std.math.isFinite(scores[0])) {
+        std.debug.print("conformance: FAIL the staged rail is not stable across lifecycles ({d} vs {d})\n", .{ scores[0], scores[1] });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a JSON-activated lens runs its staged model with no filesystem and its output tensor reads back, across two session lifecycles\n", .{});
+    return true;
+}
+
+/// Proves the mask egress: an author segmenter's mask-bound output reads back
+/// resampled to the fixed segmentation plane, finite everywhere, with no
+/// renderer in the loop.
+fn proveMlMaskEgress(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const model = buildOnnxSegProbe(arena.allocator());
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out/ml-mask-egress/assets");
+    try writeOnnxSegLens("zig-out/ml-mask-egress", model);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const person = try rgbaToNv12(gpa, corpus.frame);
+    defer person.deinit(gpa);
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const dir = "zig-out/ml-mask-egress";
+    if (abi.goss_session_activate_lens_from_directory(session, dir.ptr, dir.len) != .ok) {
+        std.debug.print("conformance: FAIL mask egress activation\n", .{});
+        return false;
+    }
+    var mask_len: usize = 0;
+    if (abi.goss_session_ml_mask(session, "seg", "seg".len, null, 0, &mask_len) != .invalid_argument or mask_len == 0) {
+        std.debug.print("conformance: FAIL the mask sizing call ({d})\n", .{mask_len});
+        return false;
+    }
+    const mask = try gpa.alloc(f32, mask_len);
+    defer gpa.free(mask);
+    const desc: abi.FrameDesc = .{ .width = person.width, .height = person.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1000 };
+    const half_w = (person.width + 1) / 2;
+    var polls: usize = 0;
+    var out_len: usize = 0;
+    while (abi.goss_session_ml_mask(session, "seg", "seg".len, mask.ptr, mask.len, &out_len) != .ok) {
+        if (abi.goss_session_track_frame(session, &desc, person.y.ptr, person.width, person.uv.ptr, half_w * 2) != .ok) {
+            std.debug.print("conformance: FAIL feeding the segmenter a frame\n", .{});
+            return false;
+        }
+        std.Thread.yield() catch {};
+        polls += 1;
+        if (polls > 100_000_000) return error.MlInferTimedOut;
+    }
+    if (out_len != mask_len) {
+        std.debug.print("conformance: FAIL the mask read length moved ({d} vs {d})\n", .{ out_len, mask_len });
+        return false;
+    }
+    for (mask) |v| {
+        if (!std.math.isFinite(v)) {
+            std.debug.print("conformance: FAIL the mask read a non-finite texel\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF an author segmenter's mask reads back at the fixed segmentation plane with no renderer\n", .{});
+    return true;
+}
+
 /// Emits an ONNX segmenter: a 1x1 conv collapses the three input channels to a
 /// single-channel mask the size of the input, the shape an author's own
 /// segmenter would produce for the mask slot.
@@ -20194,7 +20390,11 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conf-only.txt", gpa, .limited(64)) catch null) |raw| {
         defer gpa.free(raw);
         const only = std.mem.trim(u8, raw, " \n\r\t");
-        if (std.mem.eql(u8, only, "gpu-forces")) {
+        if (std.mem.eql(u8, only, "ml-host-rail")) {
+            if (!try proveMlInputContract(gpa, engine)) return 1;
+            if (!try proveMlHostRail(gpa, engine)) return 1;
+            if (!try proveMlMaskEgress(gpa, engine)) return 1;
+        } else if (std.mem.eql(u8, only, "gpu-forces")) {
             if (!try proveGpuParticles(gpa, engine)) return 1;
             if (!try proveGpuForces(gpa, engine)) return 1;
         } else if (std.mem.eql(u8, only, "2d-world")) {
@@ -20572,6 +20772,12 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("audio dub");
     if (!try proveMlInferOnnx(gpa, engine)) return 1;
     watchHold("ml infer onnx");
+    if (!try proveMlInputContract(gpa, engine)) return 1;
+    watchHold("ml input contract");
+    if (!try proveMlHostRail(gpa, engine)) return 1;
+    watchHold("ml host rail");
+    if (!try proveMlMaskEgress(gpa, engine)) return 1;
+    watchHold("ml mask egress");
     if (!try proveMlInferSegMask(gpa, engine)) return 1;
     watchHold("ml infer seg mask");
     if (!try proveMlInferSaliency(gpa, engine)) return 1;

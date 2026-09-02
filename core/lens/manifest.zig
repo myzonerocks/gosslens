@@ -1125,6 +1125,12 @@ pub const MlField = struct {
     /// recurrent pass that fuses across time (denoise, stabilize, upscale).
     /// Mutually exclusive with aux_reference.
     temporal: bool = false,
+    /// The input contract the model was exported with: symmetric samples rgb
+    /// to [-1,1] instead of [0,1], and mean/std divide per channel afterward,
+    /// so an ImageNet-style export reads the numbers it was trained on.
+    input_symmetric: bool = false,
+    input_mean: [3]f32 = .{ 0, 0, 0 },
+    input_std: [3]f32 = .{ 1, 1, 1 },
 };
 
 /// A temporal.fuse node's model slot: a net with `frames` square-RGB image
@@ -4478,6 +4484,21 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         try diags.add(path.slice(), "ml aux cannot set both reference and temporal", .{});
         temporal = false;
     }
+    var input_symmetric = false;
+    if (getField(object, "input_range")) |v| {
+        const name = try expectString(diags, path, v) orelse "";
+        if (std.mem.eql(u8, name, "symmetric")) {
+            input_symmetric = true;
+        } else if (name.len > 0 and !std.mem.eql(u8, name, "unit")) {
+            const mark = path.push("input_range");
+            try diags.add(path.slice(), "input_range names an unknown range '{s}'", .{name});
+            path.pop(mark);
+        }
+    }
+    var input_mean: [3]f32 = .{ 0, 0, 0 };
+    var input_std: [3]f32 = .{ 1, 1, 1 };
+    parseChannelTriple(diags, path, object, "input_mean", &input_mean, false) catch |err| return err;
+    parseChannelTriple(diags, path, object, "input_std", &input_std, true) catch |err| return err;
     return .{
         .model = try arena.dupe(u8, model),
         .input_width = input_width,
@@ -4488,7 +4509,37 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         .depth = depth,
         .aux_reference = try arena.dupe(u8, aux_reference),
         .temporal = temporal,
+        .input_symmetric = input_symmetric,
+        .input_mean = input_mean,
+        .input_std = input_std,
     };
+}
+
+/// Parses a three-number channel triple (an input mean or deviation) with
+/// every value finite - and strictly positive when `positive` - or leaves the
+/// caller's default in place with a diagnostic, since a lens is untrusted.
+fn parseChannelTriple(diags: *Diagnostics, path: *PathStack, object: std.json.ObjectMap, name: []const u8, out: *[3]f32, positive: bool) error{OutOfMemory}!void {
+    const v = getField(object, name) orelse return;
+    const mark = path.push(name);
+    defer path.pop(mark);
+    if (v != .array or v.array.items.len != 3) {
+        try diags.add(path.slice(), "expected three numbers", .{});
+        return;
+    }
+    var triple: [3]f32 = undefined;
+    for (v.array.items, 0..) |item, i| {
+        const n = numberOf(item) orelse {
+            try diags.add(path.slice(), "expected three numbers", .{});
+            return;
+        };
+        const f: f32 = @floatCast(n);
+        if (!std.math.isFinite(f) or (positive and !(f > 0))) {
+            try diags.add(path.slice(), "value {d} is out of range", .{i});
+            return;
+        }
+        triple[i] = f;
+    }
+    out.* = triple;
 }
 
 fn parseAction(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, object: std.json.ObjectMap) error{OutOfMemory}!?Action {

@@ -57,7 +57,10 @@ adds its own fields. The types group into a few families:
 - **Model slots**: `ml.infer` and the ONNX/TFLite variants - a bring-your-own
   model whose output binds to a parameter, a mask, a stylized image, or the
   scene depth. The engine runs the model; the lens names the file and the
-  binding, and any model that fits the slot plugs in.
+  binding, and any model that fits the slot plugs in. The slot's input is one
+  square three-channel RGB image, [0,1] by default, and the ml block's
+  `input_range`, `input_mean`, and `input_std` declare an export's own
+  preprocessing so its numbers arrive as trained.
 - **Logic**: `logic.graph` and the scripting node - deterministic per-tick
   computation with no ambient authority.
 
