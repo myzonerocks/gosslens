@@ -61,7 +61,9 @@ renderer or the in-engine inference stack. `goss_engine_init_renderer` reports
 `GOSS_ERROR_RENDERER_UNAVAILABLE`, so the calls that need a surface - frame
 submission, `goss_engine_render_frame`, and the capture paths - report the same;
 `goss_session_enable_face_tracking` and the other in-engine workers report
-`GOSS_ERROR_UNSUPPORTED`, and beauty reports it too. The render backend and the
+`GOSS_ERROR_UNSUPPORTED`, and beauty reports it too. `goss_capabilities()`
+reports which rails a given library compiled real as `GOSS_CAP_*` bits, so a
+consumer can tell this host build from a full one before feeding it bytes. The render backend and the
 inference runtime link in through the platform builds, `zig build ios`,
 `android`, and `wasm`.
 

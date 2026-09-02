@@ -148,6 +148,28 @@ to the lens's `event('name')` triggers for the next tick, and
 `parameterValue(name)` reads a live lens parameter back, including whatever a
 script node last wrote.
 
+### Bring-your-own models
+
+A lens's `ml.infer`, `audio.infer`, `temporal.fuse`, `splat.cloud`, and
+`diffusion` nodes run real inference in the page through the engine's
+synchronous web rail. Stage each model file under the name the manifest uses
+before activating, then feed frames with `trackFrame` and read results back:
+
+```typescript
+session.provideLensAsset("net.onnx", modelBytes);
+session.activateLens(manifestJson);
+session.trackFrame(y, yStride, uv, uvStride, width, height);
+session.tickLens(dtUs);
+const tensor = session.mlOutput("nodeId");   // the whole output tensor
+const mask = session.mlMask("nodeId");       // a mask binding, resampled
+```
+
+ONNX models run on this rail; a TFLite file needs the native targets today and
+degrades to an inert node here. `gosslens.capabilities()` reports which rails
+the loaded build compiled real as `GOSS_CAP_*` bits. `submitHands` accepts the
+`GossHandTracker` result directly, so `hands.gesture` and `hands.pinch` lenses
+and `handJoint` work from the page's own tracker.
+
 ## Beauty and makeup
 
 The beauty effects are direct session calls, each an amount in 0..1:
