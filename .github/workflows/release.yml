@@ -25,6 +25,8 @@ concurrency:
 
 permissions:
   contents: write
+  # The pin-carry step opens a pull request when main declines a direct push.
+  pull-requests: write
   # Required for npm publish --provenance to mint its signed attestation.
   id-token: write
 
@@ -335,10 +337,13 @@ jobs:
           if ! git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
             branch="release-pin-${RELEASE_TAG}"
             git push -f "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
-            gh pr create --base main --head "${branch}" \
-              --title "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs" \
-              --body "The ${RELEASE_TAG} XCFramework pin and the install-doc versions, carried onto main. The tag already serves consumers; this keeps a reader of main current." \
-              || echo "pin PR already open"
+            if gh pr view "${branch}" --json number >/dev/null 2>&1; then
+              echo "pin PR already open for ${branch}"
+            else
+              GH_TOKEN="${RELEASE_PAT}" gh pr create --base main --head "${branch}" \
+                --title "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs" \
+                --body "The ${RELEASE_TAG} XCFramework pin and the install-doc versions, carried onto main. The tag already serves consumers; this keeps a reader of main current."
+            fi
           fi
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
