@@ -1118,6 +1118,13 @@ pub const Session = struct {
     /// SDK; the engine only decodes and mixes.
     audio_mixer: ?audio_playback.Mixer = null,
     sound_ids: std.StringHashMapUnmanaged(u32) = .{},
+    /// The dub voice's current mixer sound, unloaded before the next
+    /// utterance loads, so a long dubbing session cannot exhaust the table.
+    dub_sound_id: ?u32 = null,
+    /// RGBA-to-NV12 conversion scratch the image-submitting ops reuse,
+    /// grown to the largest frame seen and freed at session destroy.
+    nv12_scratch_y: []u8 = &.{},
+    nv12_scratch_uv: []u8 = &.{},
     /// Host-staged bundle assets by manifest name, the in-memory door a
     /// filesystem-less host (the web) feeds model, reference, and label bytes
     /// through; keys and values are session-owned copies.
@@ -4125,7 +4132,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // wait until every frame has landed so the cycle is whole.
                     if (anim.loaded != anim.frames) continue;
                     const active_us = if (s.active_lens) |*lens| lens.elapsedUs() else 0;
-                    const frame_idx: u64 = @intFromFloat(@as(f64, @floatFromInt(active_us)) / 1_000_000.0 * @as(f64, anim.fps));
+                    const frames_f = @as(f64, @floatFromInt(active_us)) / 1_000_000.0 * @as(f64, anim.fps);
+                    if (!(frames_f >= 0 and frames_f <= 1e15)) continue;
+                    const frame_idx: u64 = @intFromFloat(frames_f);
                     sprite_texture = anim.textures[anim.frameAt(frame_idx)];
                 } else if (s.sprite_cutouts.get(entry.graph_index)) |co| {
                     // A cutout sprite lifts the live subject keyed by its channel
@@ -5071,6 +5080,7 @@ pub fn destroySession(session: *Session) void {
     if (session.cutout_source_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.inpaint_fresh_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.inpaint_prev_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (session.inpaint_coherent_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (session.hair_matte_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
@@ -5168,14 +5178,20 @@ pub fn destroySession(session: *Session) void {
         for (0..session.source_count) |i| {
             session.source_tex[i].deinit();
             if (session.source_mask_tex[i]) |tex| r.destroyTexture(tex);
-            if (session.source_segmenter[i]) |seg| segmentation.destroy(seg);
             session.source_seg_mask[i].deinit();
         }
         if (session.brush_stamp_texture) |tex| r.destroyTexture(tex);
     }
+    // A source segmenter needs no renderer to exist, so it must not need one
+    // to die: the worker thread and model memory release unconditionally.
+    for (0..session.source_count) |i| {
+        if (session.source_segmenter[i]) |seg| segmentation.destroy(seg);
+    }
     // The source-segmenter conversion scratch is plain host memory, freed
     // whether or not a renderer was ever attached.
     if (session.source_seg_tight.len > 0) session.engine.gpa.free(session.source_seg_tight);
+    if (session.nv12_scratch_y.len > 0) session.engine.gpa.free(session.nv12_scratch_y);
+    if (session.nv12_scratch_uv.len > 0) session.engine.gpa.free(session.nv12_scratch_uv);
     if (session.source_seg_y.len > 0) session.engine.gpa.free(session.source_seg_y);
     if (session.source_seg_uv.len > 0) session.engine.gpa.free(session.source_seg_uv);
     session.engine.gpa.destroy(session);
@@ -5329,6 +5345,7 @@ pub export fn goss_engine_init_renderer(engine: ?*Engine, desc: ?*const Renderer
 
 pub export fn goss_engine_resize(engine: ?*Engine, width: u32, height: u32) void {
     const e = engine orelse return;
+    if (!validDims(width, height)) return;
     if (e.renderer) |*r| r.resize(width, height);
 }
 
@@ -5740,7 +5757,7 @@ pub export fn goss_engine_render_to_live_texture(engine: ?*Engine, session: ?*Se
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
-    if (native_handle == 0 or width == 0 or height == 0) return .invalid_argument;
+    if (native_handle == 0 or !validDims(width, height)) return .invalid_argument;
 
     const w: u16 = @intCast(width);
     const h: u16 = @intCast(height);
@@ -5941,10 +5958,10 @@ pub export fn goss_session_submit_world(session: ?*Session, state: ?*const World
     s.world.state = st.*;
     s.world.plane_count = @min(plane_count, max_world_planes);
     if (planes) |p| @memcpy(s.world.planes[0..s.world.plane_count], p[0..s.world.plane_count]);
-    s.world.dropped_planes +|= @intCast(plane_count -| max_world_planes);
+    s.world.dropped_planes +|= std.math.lossyCast(u32, plane_count -| max_world_planes);
     s.world.anchor_count = @min(anchor_count, max_world_anchors);
     if (anchors) |a| @memcpy(s.world.anchors[0..s.world.anchor_count], a[0..s.world.anchor_count]);
-    s.world.dropped_anchors +|= @intCast(anchor_count -| max_world_anchors);
+    s.world.dropped_anchors +|= std.math.lossyCast(u32, anchor_count -| max_world_anchors);
     if (light) |l| s.world.light = l.*;
     s.world_engine_fed = true;
     return .ok;
@@ -6034,7 +6051,7 @@ pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, 
     const cfg: RecordingConfig = if (config) |c_| c_.* else .{ .width = 0, .height = 0, .bitrate_bps = 0, .codec = 0 };
     const width = (if (cfg.width == 0) @as(u32, r.width) else cfg.width) & ~@as(u32, 1);
     const height = (if (cfg.height == 0) @as(u32, r.height) else cfg.height) & ~@as(u32, 1);
-    if (width == 0 or height == 0 or cfg.codec > 1) return .invalid_argument;
+    if (!validDims(width, height) or cfg.codec > 1) return .invalid_argument;
 
     e.recording = media_recording.Recording.start(p[0..path_len], .{
         .width = width,
@@ -7795,15 +7812,12 @@ pub export fn goss_session_submit_avatar_source_rgba(session: ?*Session, rgba: ?
         }
     }
     if (!any) return .again;
-    const gpa = s.engine.gpa;
     const w: usize = width;
     const h: usize = height;
     const half_w = (w + 1) / 2;
-    const half_h = (h + 1) / 2;
-    const y_out = gpa.alloc(u8, w * h) catch return .out_of_memory;
-    defer gpa.free(y_out);
-    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return .out_of_memory;
-    defer gpa.free(uv_out);
+    const scratch = nv12Scratch(s, w, h) catch return .out_of_memory;
+    const y_out = scratch.y;
+    const uv_out = scratch.uv;
     image.argbToNv12(pixels[0 .. w * h * 4], @intCast(w), @intCast(h), .bt601, .full, y_out, uv_out) catch return .unsupported;
     const conversion = math.color.yuvToRgb(.bt601, .full);
     s.avatar_source_seq += 1;
@@ -7812,6 +7826,28 @@ pub export fn goss_session_submit_avatar_source_rgba(session: ?*Session, rgba: ?
         if (sw.worker) |sworker| ml_infer.submitNv12(sworker, width, height, s.avatar_source_seq, conversion, y_out.ptr, width, uv_out.ptr, @intCast(half_w * 2));
     }
     return .ok;
+}
+
+
+/// The session's reusable NV12 conversion planes, sized for width x height;
+/// grown when a larger frame arrives, never shrunk, freed at destroy.
+fn nv12Scratch(s: *Session, w: usize, h: usize) error{OutOfMemory}!struct { y: []u8, uv: []u8 } {
+    const gpa = s.engine.gpa;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    const y_need = w * h;
+    const uv_need = half_w * half_h * 2;
+    if (s.nv12_scratch_y.len < y_need) {
+        if (s.nv12_scratch_y.len > 0) gpa.free(s.nv12_scratch_y);
+        s.nv12_scratch_y = &.{};
+        s.nv12_scratch_y = try gpa.alloc(u8, y_need);
+    }
+    if (s.nv12_scratch_uv.len < uv_need) {
+        if (s.nv12_scratch_uv.len > 0) gpa.free(s.nv12_scratch_uv);
+        s.nv12_scratch_uv = &.{};
+        s.nv12_scratch_uv = try gpa.alloc(u8, uv_need);
+    }
+    return .{ .y = s.nv12_scratch_y[0..y_need], .uv = s.nv12_scratch_uv[0..uv_need] };
 }
 
 /// Reads the newest tracking result into caller memory. Reports again
@@ -8437,15 +8473,12 @@ pub export fn goss_session_submit_segmentation_image(session: ?*Session, rgba: ?
     const pixels = rgba orelse return .invalid_argument;
     if (!validDims(width, height)) return .invalid_argument;
     const worker = s.segmentation_worker orelse return .again;
-    const gpa = s.engine.gpa;
     const w: usize = width;
     const h: usize = height;
     const half_w = (w + 1) / 2;
-    const half_h = (h + 1) / 2;
-    const y_out = gpa.alloc(u8, w * h) catch return .out_of_memory;
-    defer gpa.free(y_out);
-    const uv_out = gpa.alloc(u8, half_w * half_h * 2) catch return .out_of_memory;
-    defer gpa.free(uv_out);
+    const scratch = nv12Scratch(s, w, h) catch return .out_of_memory;
+    const y_out = scratch.y;
+    const uv_out = scratch.uv;
     const conv = math.color.rgbToYuv(.bt601, .video);
     image.argbToNv12(pixels[0 .. w * h * 4], @intCast(w), @intCast(h), .bt601, .video, y_out, uv_out) catch return .unsupported;
     s.segmentation_image_seq += 1;
@@ -8477,7 +8510,7 @@ fn feedFlashDetector(s: *Session, y: [*]const u8, y_stride: u32, width: u32, hei
     var count: u64 = 0;
     var yy: u32 = 0;
     while (yy < height) : (yy += step_y) {
-        const row = y + yy * y_stride;
+        const row = y + @as(usize, yy) * y_stride;
         var xx: u32 = 0;
         while (xx < width) : (xx += step_x) {
             sum += row[xx];
@@ -9570,11 +9603,19 @@ fn destroyBlendState(session: *Session) void {
     session.parallax_params.clearRetainingCapacity();
     session.auto_frame_valid = false;
     session.audio_enhance_strength = 0;
+    session.audio_echo_strength = 0;
+    session.audio_echo_ms = 0;
+    session.audio_dereverb_strength = 0;
+    session.audio_dereverb_ms = 0;
     session.voice_pitch = 1;
     session.voice_formant = 1;
     for (session.voice_formant_chans) |*ch| ch.reset();
     session.voice_robot = 0;
     session.voice_robot_phase = 0;
+    // The diarized transcript belongs to the lens that produced it; the next
+    // lens must not read the previous one's speech back.
+    session.caption_seg_count = 0;
+    session.caption_seg_pos = 0;
     session.wants_person_mask = false;
     session.person_mask_valid = false;
     session.dof_params.clearRetainingCapacity();
@@ -10027,6 +10068,7 @@ const voice_delay_len: usize = 1024;
 
 /// Frees the lens mixer and its decoded sounds. Safe with no audio active.
 fn destroySounds(s: *Session) void {
+    s.dub_sound_id = null;
     if (s.audio_mixer) |*m| m.destroy();
     s.audio_mixer = null;
     s.mix_resampler.reset();
@@ -10154,7 +10196,7 @@ pub export fn goss_engine_generate_song(engine: ?*Engine, prompt: ?[*]const u8, 
     const e = engine orelse return .invalid_argument;
     const out_len_ptr = out_len orelse return .invalid_argument;
     if (prompt == null and prompt_len != 0) return .invalid_argument;
-    if (sample_rate == 0) return .invalid_argument;
+    if (sample_rate < 8000 or sample_rate > 192000) return .invalid_argument;
     const text: []const u8 = if (prompt) |p| p[0..prompt_len] else &.{};
     var params = music.paramsFromPrompt(text);
     if (seed != 0) params.seed = seed;
@@ -11527,6 +11569,11 @@ fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             std.log.info("gosslens: video.texture {s} left blank - {s} did not open on this decoder", .{ v.source, path });
             continue;
         };
+        if (!validDims(decoder.width, decoder.height)) {
+            std.log.info("gosslens: video.texture {s} left blank - {d}x{d} is out of range", .{ v.source, decoder.width, decoder.height });
+            decoder.close();
+            continue;
+        }
         const rgba = gpa.alloc(u8, @as(usize, decoder.width) * decoder.height * 4) catch {
             decoder.close();
             continue;
@@ -11565,7 +11612,9 @@ fn advanceVideo(s: *Session, vid: *VideoPlayback) void {
     if (vid.base_us == std.math.minInt(i64)) vid.base_us = current.desc.timestamp_us;
     const elapsed_us = current.desc.timestamp_us - vid.base_us;
     if (elapsed_us <= 0) return;
-    const target: u64 = @as(u64, @intFromFloat(@as(f64, @floatFromInt(elapsed_us)) / 1_000_000.0 * @as(f64, vid.fps))) + 1;
+    const target_f = @as(f64, @floatFromInt(elapsed_us)) / 1_000_000.0 * @as(f64, vid.fps);
+    if (!(target_f >= 0 and target_f <= 1e15)) return;
+    const target: u64 = @as(u64, @intFromFloat(target_f)) + 1;
     var budget: u32 = 512;
     while (vid.advanced < target and budget > 0) : (budget -= 1) {
         switch (vid.decoder.read(vid.rgba)) {
@@ -11657,7 +11706,8 @@ fn pollSpriteLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Alloca
 
 /// Formats seconds as mm:ss, or hh:mm:ss past an hour: the info-sticker clock.
 fn formatClock(buf: []u8, seconds: f64) []const u8 {
-    const total: u64 = @intFromFloat(@max(0.0, seconds));
+    const capped = if (seconds >= 0 and seconds <= 8.64e8) seconds else 0.0;
+    const total: u64 = @intFromFloat(capped);
     const h = total / 3600;
     const m = (total % 3600) / 60;
     const sec = total % 60;
@@ -12824,7 +12874,10 @@ fn speakPcm(s: *Session, pcm: []const f32, rate: u32) void {
         s.mix_resampler.reset();
     }
     const mixer = &s.audio_mixer.?;
+    if (s.dub_sound_id) |old_id| mixer.unload(old_id);
+    s.dub_sound_id = null;
     const id = mixer.loadMemory(wav) catch return;
+    s.dub_sound_id = id;
     mixer.play(id, false, 1.0);
 }
 
@@ -13087,6 +13140,10 @@ fn pollMlDepth(session: *Session) void {
         session.depth_near = 0;
         session.depth_far = 1;
         updateDepthTexture(session, gpa);
+        // One depth net drives the session depth; a second binding of a
+        // different side would otherwise reallocate the shared plane and
+        // recreate the texture every frame, flip-flopping between them.
+        return;
     }
 }
 
@@ -14398,6 +14455,8 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
                 if (morph_to_blendshape.len > 0) gpa.free(morph_to_blendshape);
                 if (morph_rest.len > 0) gpa.free(morph_rest);
                 if (morph_scratch.len > 0) gpa.free(morph_scratch);
+                if (lit_normals.len > 0) gpa.free(lit_normals);
+                if (lit_indices.len > 0) gpa.free(lit_indices);
             };
             finished.append(gpa, entry.key_ptr.*) catch {};
         } else if (loader.hasFailed()) {
