@@ -1141,7 +1141,7 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         const stub_ml_tensor_wasm = mlTensorModule(b, wasm_target, .ReleaseSmall);
-        abi_wasm.addImport("ml_infer", mlInferStubModule(b, wasm_target, .ReleaseSmall, math_wasm, stub_ml_tensor_wasm));
+        abi_wasm.addImport("ml_infer", mlInferSyncModule(b, wasm_target, .ReleaseSmall, math_wasm, stub_ml_tensor_wasm, tracking_cores_wasm.sampler));
         abi_wasm.addImport("diffusion", diffusionStubModule(b, wasm_target, .ReleaseSmall, math_wasm, stub_ml_tensor_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
         const lens_manifest_wasm = b.createModule(.{
@@ -2591,6 +2591,42 @@ fn diffusionStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .imports = &.{
             .{ .name = "math", .module = math_mod },
             .{ .name = "ml_tensor", .module = ml_tensor_mod },
+        },
+    });
+}
+
+/// The synchronous byo-ml rail for targets with no threads (the web): the
+/// real inference core over the pure-Zig ONNX engine, with the TFLite
+/// backend stubbed so a .tflite model degrades to an inert node instead of
+/// dragging the C++ runtime into a build that cannot host it.
+fn mlInferSyncModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module, sampler_mod: *std.Build.Module) *std.Build.Module {
+    const runtime_stub = b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/runtime_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const engine = mlEngineModule(b, target, optimize, runtime_stub);
+    const sample = mlSampleModule(b, target, optimize, sampler_mod, engine);
+    const core = b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ml_engine", .module = engine },
+            .{ .name = "ml_sample", .module = sample },
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+        },
+    });
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_infer_sync.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "math", .module = math_mod },
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+            .{ .name = "ml_infer_core", .module = core },
         },
     });
 }
@@ -4674,7 +4710,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     const stub_ml_tensor_em = mlTensorModule(b, em_target, .ReleaseSmall);
-    abi_em.addImport("ml_infer", mlInferStubModule(b, em_target, .ReleaseSmall, math_em, stub_ml_tensor_em));
+    abi_em.addImport("ml_infer", mlInferSyncModule(b, em_target, .ReleaseSmall, math_em, stub_ml_tensor_em, tracking_cores_em.sampler));
     abi_em.addImport("diffusion", diffusionStubModule(b, em_target, .ReleaseSmall, math_em, stub_ml_tensor_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
     // Web's own beauty.reshape dispatch needs the 106-point
@@ -4720,11 +4756,21 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em, gltf_stub_em));
     abi_em.addImport("gltf", gltf_stub_em);
 
-    const gosslens_em_obj = b.addObject(.{ .name = "gosslens_web", .root_module = abi_em });
+    // A static library, not addObject: with C++ in the module graph,
+    // addObject emits an archive that drops the Zig object itself, so the
+    // em++ link pulled no goss_* symbol and shipped an engine-less wasm;
+    // --whole-archive keeps lazy linking from discarding the exports.
+    const gosslens_em_lib = b.addLibrary(.{ .name = "gosslens_web", .root_module = abi_em, .linkage = .static });
     const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{}, webgpu);
     const link = b.addSystemCommand(&.{em.?.em_plus_plus});
     setEmEnv(link, em.?);
-    link.addFileArg(gosslens_em_obj.getEmittedBin());
+    link.addArg("-Wl,--whole-archive");
+    link.addFileArg(gosslens_em_lib.getEmittedBin());
+    link.addArg("-Wl,--no-whole-archive");
+    // The module graph's dependent static libraries do not fold into the
+    // emitted archive, so the link takes them alongside, lazily.
+    link.addFileArg(buildJoltLib(b, em_target, .ReleaseSmall).getEmittedBin());
+    link.addFileArg(buildQuickjsLib(b, em_target, .ReleaseSmall).getEmittedBin());
     for (bgfx_objects.items) |obj| link.addFileArg(obj);
     if (webgpu) {
         // emdawnwebgpu is this pinned Emscripten's WebGPU port
@@ -4751,6 +4797,9 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // is close enough to the old budget to be worth the
         // headroom.
         "-sINITIAL_MEMORY=268435456",
+        // The render chain's Zig frames outgrow emscripten's 64KB default
+        // stack; a real engine stack keeps frame submission off the guard.
+        "-sSTACK_SIZE=4194304",
         // Every goss_* entry point is a real call site the TS SDK
         // reaches dynamically, so EXPORT_ALL keeps them all
         // reachable rather than hand-listing EXPORTED_FUNCTIONS.

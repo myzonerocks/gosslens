@@ -505,6 +505,120 @@ async function run(): Promise<void> {
     preview.activateLens(manifestJson);
   };
   (window as unknown as Record<string, unknown>).deactivateLens = () => preview.deactivateLens();
+
+  // A hand-built ONNX probe (a 1x1 conv of ones then a global average), the
+  // same net the native conformance harness builds, so the byo-ml proof runs
+  // a real model through the web rail with no fixture download.
+  const onnxProbe = (): Uint8Array => {
+    const enc = new TextEncoder();
+    const varint = (out: number[], v: number) => {
+      let n = v;
+      do {
+        let b = n & 0x7f;
+        n = Math.floor(n / 128);
+        if (n > 0) b |= 0x80;
+        out.push(b);
+      } while (n > 0);
+    };
+    const bytesField = (out: number[], field: number, payload: number[] | Uint8Array) => {
+      varint(out, field * 8 + 2);
+      varint(out, payload.length);
+      for (const b of payload) out.push(b);
+    };
+    const varintField = (out: number[], field: number, v: number) => {
+      varint(out, field * 8 + 0);
+      varint(out, v);
+    };
+    const f32bytes = (vals: number[]) => {
+      const b = new Uint8Array(vals.length * 4);
+      const dv = new DataView(b.buffer);
+      vals.forEach((v, i) => dv.setFloat32(i * 4, v, true));
+      return b;
+    };
+    const attr = (name: string, ints: number[]) => {
+      const a: number[] = [];
+      bytesField(a, 1, enc.encode(name));
+      ints.forEach((v) => varintField(a, 8, v));
+      return a;
+    };
+    const node = (op: string, inputs: string[], outputs: string[], attrs: number[][]) => {
+      const n: number[] = [];
+      inputs.forEach((i) => bytesField(n, 1, enc.encode(i)));
+      outputs.forEach((o) => bytesField(n, 2, enc.encode(o)));
+      bytesField(n, 4, enc.encode(op));
+      attrs.forEach((a) => bytesField(n, 5, a));
+      return n;
+    };
+    const vi = (name: string, dims: number[]) => {
+      const shape: number[] = [];
+      dims.forEach((d) => {
+        const dim: number[] = [];
+        varintField(dim, 1, d);
+        bytesField(shape, 1, dim);
+      });
+      const tt: number[] = [];
+      bytesField(tt, 2, shape);
+      const typ: number[] = [];
+      bytesField(typ, 1, tt);
+      const v: number[] = [];
+      bytesField(v, 1, enc.encode(name));
+      bytesField(v, 2, typ);
+      return v;
+    };
+    const w: number[] = [];
+    [1, 3, 1, 1].forEach((d) => varintField(w, 1, d));
+    varintField(w, 2, 1);
+    bytesField(w, 9, f32bytes([1, 1, 1]));
+    bytesField(w, 8, enc.encode("W"));
+    const conv = node("Conv", ["x", "W"], ["h"], [attr("kernel_shape", [1, 1]), attr("strides", [1, 1]), attr("pads", [0, 0, 0, 0])]);
+    const pool = node("GlobalAveragePool", ["h"], ["y"], []);
+    const g: number[] = [];
+    bytesField(g, 1, conv);
+    bytesField(g, 1, pool);
+    bytesField(g, 5, w);
+    bytesField(g, 11, vi("x", [1, 3, 8, 8]));
+    bytesField(g, 11, vi("W", [1, 3, 1, 1]));
+    bytesField(g, 12, vi("y", [1, 1, 1, 1]));
+    const model: number[] = [];
+    varintField(model, 1, 7);
+    bytesField(model, 7, g);
+    return new Uint8Array(model);
+  };
+
+  // Runs a staged ONNX net through the real web inference rail: bright and
+  // dark frames land two different finite scores, and the full output tensor
+  // read back agrees with the bound parameter.
+  (window as unknown as Record<string, unknown>).mlProve = () => {
+    try {
+      preview.session.provideLensAsset("probe.onnx", onnxProbe());
+      preview.activateLens(JSON.stringify({
+        glf: "1.0",
+        id: "goss.web.ml-probe",
+        version: "1.0.0",
+        display_name: "ML Probe",
+        engine_compat: ">=0.5",
+        capabilities: [],
+        parameters: [{ name: "score", type: "float", default: -999, min: -1e6, max: 1e6 }],
+        nodes: [{ id: "byo", type: "ml.infer", params: {}, ml: { model: "probe.onnx", outputs: [{ tensor: 0, index: 0, param: "score" }] } }],
+        triggers: [],
+      }));
+      const side = 64;
+      const uv = new Uint8Array((side / 2) * (side / 2) * 2).fill(128);
+      const bright = new Uint8Array(side * side).fill(200);
+      preview.session.trackFrame(bright, side, uv, side, side, side);
+      preview.tickLens(16000);
+      const score = preview.session.parameterValue("score");
+      const tensor = preview.session.mlOutput("byo");
+      const dark = new Uint8Array(side * side).fill(40);
+      preview.session.trackFrame(dark, side, uv, side, side, side);
+      preview.tickLens(16000);
+      const darkScore = preview.session.parameterValue("score");
+      preview.deactivateLens();
+      return JSON.stringify({ score, darkScore, tensor: tensor ? Array.from(tensor) : null });
+    } catch (err) {
+      return JSON.stringify({ error: String(err) });
+    }
+  };
   (window as unknown as Record<string, unknown>).tickLens = (dtUs: number) => preview.tickLens(dtUs);
   // Pausing the video element stops the per-frame texture re-upload,
   // freezing whatever the shader is currently sampling.
