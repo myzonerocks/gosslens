@@ -9769,6 +9769,7 @@ fn loadScriptFile(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) 
     if (s.script_engine != null) return;
     const lens = if (s.active_lens) |*l| l else return;
     const file = lens.scriptFile() orelse return;
+    if (!bundleNameOk(file)) return;
     const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, file }) catch return;
     defer gpa.free(path);
     const src = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(256 * 1024)) catch return;
@@ -9964,6 +9965,7 @@ fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) vo
                 continue;
             };
         } else blk: {
+            if (!bundleNameOk(rel)) continue;
             const full = std.fmt.allocPrint(gpa, "{s}/{s}", .{ bundle_path, rel }) catch continue;
             defer gpa.free(full);
             break :blk mixer.load(full) catch |err| {
@@ -10476,6 +10478,7 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
     };
     const io = defaultIo();
     for (passes) |pass| {
+        if (!bundleNameOk(pass.shader_stem)) continue;
         const bin_path = std.fmt.allocPrint(gpa, "{s}/shaders/{s}.{s}.bin", .{ bundle_path, pass.shader_stem, tag }) catch continue;
         defer gpa.free(bin_path);
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, bin_path, gpa, .limited(256 * 1024)) catch |err| {
@@ -10924,6 +10927,7 @@ fn createLutLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []co
     const luts = try lens.lutPassNodes(gpa, &session.lens_graph);
     defer gpa.free(luts);
     for (luts) |lut| {
+        if (!bundleNameOk(lut.lut_stem)) continue;
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, lut.lut_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ImageLoader.start(gpa, path) catch continue;
@@ -10969,6 +10973,7 @@ fn createBlendLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     const blends = try lens.blendPassNodes(gpa, &session.lens_graph);
     defer gpa.free(blends);
     for (blends) |blend| {
+        if (!bundleNameOk(blend.background_stem)) continue;
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, blend.background_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ImageLoader.start(gpa, path) catch continue;
@@ -11013,6 +11018,7 @@ fn createEnvLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []co
     defer gpa.free(envs);
     for (envs) |ev| {
         const stem = ev.image_stem orelse continue;
+        if (!bundleNameOk(stem)) continue;
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ImageLoader.start(gpa, path) catch continue;
@@ -11368,6 +11374,7 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             session.sprite_masks.put(gpa, sprite.graph_index, .{ .channel = channel, .over = sprite.mask_over, .strength = sprite.mask_strength }) catch {};
             if (sprite.mask_strength_param.len > 0) session.sprite_mask_strength_params.put(gpa, sprite.graph_index, sprite.mask_strength_param) catch {};
         }
+        if (!bundleNameOk(sprite.image_stem)) continue;
         // An animated GIF upgrades the node to a video texture; a node with no
         // GIF falls through to the still or image-sequence PNG path.
         if (tryStartGifSprite(session, gpa, bundle_path, sprite)) continue;
@@ -11397,6 +11404,7 @@ fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     defer gpa.free(videos);
     for (videos) |v| {
         session.sprite_rects.put(gpa, v.graph_index, .{ v.rect[0], v.rect[1], v.rect[2], v.rect[3], v.opacity }) catch {};
+        if (!bundleNameOk(v.source)) continue;
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.mp4", .{ bundle_path, v.source }) catch continue;
         defer gpa.free(path);
         var decoder = video.Decoder.open(path) orelse {
@@ -11663,6 +11671,7 @@ fn createMeshFaceLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path:
     const meshes = try lens.meshFaceNodes(gpa, &session.lens_graph);
     defer gpa.free(meshes);
     for (meshes) |mesh| {
+        if (!bundleNameOk(mesh.texture_stem)) continue;
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, mesh.texture_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ImageLoader.start(gpa, path) catch continue;
@@ -11704,6 +11713,7 @@ fn createPaintFaceLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
     const paints = try lens.paintFaceNodes(gpa, &session.lens_graph);
     defer gpa.free(paints);
     for (paints) |paint| {
+        if (!bundleNameOk(paint.texture_stem)) continue;
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, paint.texture_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ImageLoader.start(gpa, path) catch continue;
@@ -11757,6 +11767,7 @@ fn createFaceSwapLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path:
     const swaps = try lens.faceSwapNodes(gpa, &session.lens_graph);
     defer gpa.free(swaps);
     for (swaps) |swap| {
+        if (!bundleNameOk(swap.donor_stem)) continue;
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, swap.donor_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ImageLoader.start(gpa, path) catch continue;
@@ -11858,6 +11869,7 @@ fn particlePattern(name: []const u8) particles.Pattern {
 /// default when the sprite is missing or unreadable.
 fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, graph_index: graph.NodeIndex, stem: []const u8) void {
     if (comptime !has_file_io) return;
+    if (!bundleNameOk(stem)) return;
     const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch return;
     defer gpa.free(path);
     const bytes = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(4 * 1024 * 1024)) catch return;
@@ -12001,28 +12013,46 @@ fn createMlLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
             std.log.info("gosslens: ml.infer node over the {d}-worker budget left inert", .{session.ml_worker_budget});
             continue;
         }
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, ml.model }) catch continue;
-        defer gpa.free(path);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        const bytes = readBundleAsset(gpa, bundle_path, ml.model, 32 * 1024 * 1024) orelse continue;
         defer gpa.free(bytes);
+        if (!modelAllowed(session, bytes)) {
+            std.log.info("gosslens: ml.infer model {s} not on the digest allowlist, node inert", .{ml.model});
+            continue;
+        }
         // A two-input model reads a second plane. A temporal model takes the
         // previous frame; a reference model conditions on a bundled image,
         // decoded here and sampled by the worker into input 1 (create copies
         // it, so the decode is freed on this return).
         const worker = blk: {
             if (ml.temporal) {
-                break :blk ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, true) catch continue;
+                break :blk ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, true) catch |err| {
+                    std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
+                    continue;
+                };
             }
             if (ml.aux_reference.len > 0) {
+                if (!bundleNameOk(ml.aux_reference)) continue;
                 const ref_path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, ml.aux_reference }) catch continue;
                 defer gpa.free(ref_path);
-                const ref_bytes = std.Io.Dir.cwd().readFileAlloc(io, ref_path, gpa, .limited(4 * 1024 * 1024)) catch continue;
+                const ref_bytes = std.Io.Dir.cwd().readFileAlloc(io, ref_path, gpa, .limited(4 * 1024 * 1024)) catch |err| {
+                    std.log.info("gosslens: ml.infer reference {s} unreadable ({t})", .{ ml.aux_reference, err });
+                    continue;
+                };
                 defer gpa.free(ref_bytes);
-                const dec = image.decode(gpa, ref_bytes) catch continue;
+                const dec = image.decode(gpa, ref_bytes) catch |err| {
+                    std.log.info("gosslens: ml.infer reference {s} did not decode ({t})", .{ ml.aux_reference, err });
+                    continue;
+                };
                 defer gpa.free(dec.rgba);
-                break :blk ml_infer.create(gpa, bytes, .{}, 2, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch continue;
+                break :blk ml_infer.create(gpa, bytes, .{}, 2, dec.rgba, @intCast(dec.width), @intCast(dec.height), false) catch |err| {
+                    std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
+                    continue;
+                };
             }
-            break :blk ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch continue;
+            break :blk ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch |err| {
+                std.log.info("gosslens: ml.infer model {s} left inert ({t})", .{ ml.model, err });
+                continue;
+            };
         };
 
         // A mask binding needs the bound tensor to be a square single-channel
@@ -12399,11 +12429,16 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             std.log.info("gosslens: audio.infer node over the {d}-worker budget left inert", .{session.ml_worker_budget});
             continue;
         }
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, audio.model }) catch continue;
-        defer gpa.free(path);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        const bytes = readBundleAsset(gpa, bundle_path, audio.model, 32 * 1024 * 1024) orelse continue;
         defer gpa.free(bytes);
-        const worker = ml_infer.audioCreate(gpa, bytes, .{}, 2) catch continue;
+        if (!modelAllowed(session, bytes)) {
+            std.log.info("gosslens: audio.infer model {s} not on the digest allowlist, node inert", .{audio.model});
+            continue;
+        }
+        const worker = ml_infer.audioCreate(gpa, bytes, .{}, 2) catch |err| {
+            std.log.info("gosslens: audio.infer model {s} left inert ({t})", .{ audio.model, err });
+            continue;
+        };
         const node_id = gpa.dupe(u8, node.id) catch {
             ml_infer.audioDestroy(worker);
             continue;
@@ -12458,9 +12493,16 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         var t_bos: u32 = 0;
         var t_eos: u32 = 1;
         if (audio.translate) |tr| tr_blk: {
-            const dec_bytes = readBundleAsset(gpa, bundle_path, tr.decoder) orelse break :tr_blk;
+            const dec_bytes = readBundleAsset(gpa, bundle_path, tr.decoder, 32 * 1024 * 1024) orelse break :tr_blk;
             defer gpa.free(dec_bytes);
-            const dec = ml_infer.genericCreate(gpa, dec_bytes, .{}, 2) catch break :tr_blk;
+            if (!modelAllowed(session, dec_bytes)) {
+                std.log.info("gosslens: translate decoder {s} not on the digest allowlist, binding inert", .{tr.decoder});
+                break :tr_blk;
+            }
+            const dec = ml_infer.genericCreate(gpa, dec_bytes, .{}, 2) catch |err| {
+                std.log.info("gosslens: translate decoder {s} left inert ({t})", .{ tr.decoder, err });
+                break :tr_blk;
+            };
             const toks = loadCaptionLabels(gpa, io, bundle_path, tr.tokens) orelse {
                 ml_infer.genericDestroy(dec);
                 break :tr_blk;
@@ -12485,9 +12527,16 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         var dub_rate: u32 = 22050;
         var dub_chars: []f32 = &.{};
         if (audio.dub) |db| dub_blk: {
-            const tts_bytes = readBundleAsset(gpa, bundle_path, db.model) orelse break :dub_blk;
+            const tts_bytes = readBundleAsset(gpa, bundle_path, db.model, 32 * 1024 * 1024) orelse break :dub_blk;
             defer gpa.free(tts_bytes);
-            const model = ml_infer.genericCreate(gpa, tts_bytes, .{}, 2) catch break :dub_blk;
+            if (!modelAllowed(session, tts_bytes)) {
+                std.log.info("gosslens: dub model {s} not on the digest allowlist, binding inert", .{db.model});
+                break :dub_blk;
+            }
+            const model = ml_infer.genericCreate(gpa, tts_bytes, .{}, 2) catch |err| {
+                std.log.info("gosslens: dub model {s} left inert ({t})", .{ db.model, err });
+                break :dub_blk;
+            };
             const in_len = ml_infer.genericInputLen(model, 0);
             if (in_len == 0 or in_len > caption_max) {
                 ml_infer.genericDestroy(model);
@@ -12552,9 +12601,13 @@ fn createAudioLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
 /// Loads a caption node's vocab: assets/<stem>.txt, one label per line, the CTC
 /// blank first. Returns owned lines, or null when the file is missing or empty.
 fn loadCaptionLabels(gpa: std.mem.Allocator, io: std.Io, bundle_path: []const u8, stem: []const u8) ?[][]u8 {
+    if (!bundleNameOk(stem)) return null;
     const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.txt", .{ bundle_path, stem }) catch return null;
     defer gpa.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024)) catch return null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024)) catch |err| {
+        std.log.info("gosslens: label file {s} unreadable ({t})", .{ stem, err });
+        return null;
+    };
     defer gpa.free(bytes);
     var lines: std.ArrayListUnmanaged([]u8) = .empty;
     var it = std.mem.splitScalar(u8, bytes, '\n');
@@ -13042,18 +13095,22 @@ const TemporalWorker = struct {
 /// frame count, leaves that node inert.
 fn createTemporalLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
     const lens = if (session.active_lens) |*l| l else return;
-    const io = defaultIo();
     for (lens.manifest.nodes) |node| {
         const tf = node.temporal orelse continue;
         if (session.ml_workers_loaded >= session.ml_worker_budget) {
             std.log.info("gosslens: temporal.fuse node over the {d}-worker budget left inert", .{session.ml_worker_budget});
             continue;
         }
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, tf.model }) catch continue;
-        defer gpa.free(path);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(32 * 1024 * 1024)) catch continue;
+        const bytes = readBundleAsset(gpa, bundle_path, tf.model, 32 * 1024 * 1024) orelse continue;
         defer gpa.free(bytes);
-        const worker = ml_infer.temporalCreate(gpa, bytes, .{}, 2, tf.frames) catch continue;
+        if (!modelAllowed(session, bytes)) {
+            std.log.info("gosslens: temporal.fuse model {s} not on the digest allowlist, node inert", .{tf.model});
+            continue;
+        }
+        const worker = ml_infer.temporalCreate(gpa, bytes, .{}, 2, tf.frames) catch |err| {
+            std.log.info("gosslens: temporal.fuse model {s} left inert ({t})", .{ tf.model, err });
+            continue;
+        };
         ml_infer.temporalSetPhase(worker, tf.phase);
         const target = generativeTargetNodeIndex(lens, gpa, &session.lens_graph, tf.sprite) orelse {
             ml_infer.temporalDestroy(worker);
@@ -13203,9 +13260,16 @@ fn createSplatLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
             std.log.info("gosslens: splat.cloud node over the {d}-worker budget left inert", .{session.ml_worker_budget});
             continue;
         }
-        const bytes = readBundleAsset(gpa, bundle_path, node.model) orelse continue;
+        const bytes = readBundleAsset(gpa, bundle_path, node.model, 32 * 1024 * 1024) orelse continue;
         defer gpa.free(bytes);
-        const worker = ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch continue;
+        if (!modelAllowed(session, bytes)) {
+            std.log.info("gosslens: splat.cloud model {s} not on the digest allowlist, node inert", .{node.model});
+            continue;
+        }
+        const worker = ml_infer.create(gpa, bytes, .{}, 2, null, 0, 0, false) catch |err| {
+            std.log.info("gosslens: splat.cloud model {s} left inert ({t})", .{ node.model, err });
+            continue;
+        };
         const len = ml_infer.outputLen(worker, 0);
         // A gaussian cloud's model emits xyz, scale, quaternion, opacity, and rgb
         // per splat (stride fourteen); a colored point cloud emits xyz then rgb
@@ -13477,12 +13541,42 @@ const DiffusionWorker = struct {
     tex: render.TextureHandle,
 };
 
-/// Reads a bundle asset by name, or null if it is missing or oversized. The
-/// caller frees the returned bytes.
-fn readBundleAsset(gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8) ?[]u8 {
+/// Whether a manifest-supplied asset name stays inside its lens bundle: a
+/// plain relative path with no empty, "." or ".." component, no leading
+/// separator, and no backslash, colon, or NUL anywhere. A manifest is
+/// untrusted content, so every loader path is built from a name this admits.
+fn bundleRelative(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (name[0] == '/') return false;
+    var parts = std.mem.splitScalar(u8, name, '/');
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        if (std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+        for (part) |ch| {
+            if (ch == '\\' or ch == ':' or ch == 0) return false;
+        }
+    }
+    return true;
+}
+
+/// bundleRelative with the refusal logged, for a loader skipping the node.
+fn bundleNameOk(name: []const u8) bool {
+    if (bundleRelative(name)) return true;
+    std.log.info("gosslens: asset name {s} escapes the bundle, refused", .{name});
+    return false;
+}
+
+/// Reads a bundle asset by name up to `limit` bytes, or null if the name would
+/// escape the bundle or the file is missing or oversized, each refusal logged.
+/// The caller frees the returned bytes.
+fn readBundleAsset(gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8, limit: usize) ?[]u8 {
+    if (!bundleNameOk(name)) return null;
     const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch return null;
     defer gpa.free(path);
-    return std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(64 * 1024 * 1024)) catch null;
+    return std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(limit)) catch |err| {
+        std.log.info("gosslens: bundle asset {s} unreadable ({t})", .{ name, err });
+        return null;
+    };
 }
 
 /// Builds a diffusion restyle worker for every diffusion node from its three
@@ -13498,18 +13592,29 @@ fn createDiffusionLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
         }
         // The encoder is optional: without one the loop starts from seeded noise
         // (text to image) rather than the camera frame (img2img).
-        const enc: []u8 = if (df.encoder.len > 0) (readBundleAsset(gpa, bundle_path, df.encoder) orelse continue) else &.{};
+        const enc: []u8 = if (df.encoder.len > 0) (readBundleAsset(gpa, bundle_path, df.encoder, 64 * 1024 * 1024) orelse continue) else &.{};
         defer if (enc.len > 0) gpa.free(enc);
-        const unet = readBundleAsset(gpa, bundle_path, df.unet) orelse continue;
+        const unet = readBundleAsset(gpa, bundle_path, df.unet, 64 * 1024 * 1024) orelse continue;
         defer gpa.free(unet);
-        const dec = readBundleAsset(gpa, bundle_path, df.decoder) orelse continue;
+        const dec = readBundleAsset(gpa, bundle_path, df.decoder, 64 * 1024 * 1024) orelse continue;
         defer gpa.free(dec);
-        const emb: []u8 = if (df.text_embedding.len > 0) (readBundleAsset(gpa, bundle_path, df.text_embedding) orelse &.{}) else &.{};
+        const emb: []u8 = if (df.text_embedding.len > 0) (readBundleAsset(gpa, bundle_path, df.text_embedding, 64 * 1024 * 1024) orelse &.{}) else &.{};
         defer if (emb.len > 0) gpa.free(emb);
+        // Each of the three model files passes the allowlist; the embedding is
+        // plain tensor data, not a model, so it rides outside the gate.
+        const models_allowed = (enc.len == 0 or modelAllowed(session, enc)) and
+            modelAllowed(session, unet) and modelAllowed(session, dec);
+        if (!models_allowed) {
+            std.log.info("gosslens: diffusion node {s} has a model off the digest allowlist, node inert", .{node.id});
+            continue;
+        }
 
         const target = generativeTargetNodeIndex(lens, gpa, &session.lens_graph, df.sprite) orelse continue;
 
-        const worker = diffusion.create(gpa, .{ .encoder = enc, .unet = unet, .decoder = dec, .text_embedding = emb }, .{}, .{ .steps = df.steps, .strength = df.strength, .seed = df.seed, .coherence = df.coherence }, 2) catch continue;
+        const worker = diffusion.create(gpa, .{ .encoder = enc, .unet = unet, .decoder = dec, .text_embedding = emb }, .{}, .{ .steps = df.steps, .strength = df.strength, .seed = df.seed, .coherence = df.coherence }, 2) catch |err| {
+            std.log.info("gosslens: diffusion node {s} left inert ({t})", .{ node.id, err });
+            continue;
+        };
         const side = diffusion.outputSide(worker);
         const len = diffusion.outputLen(worker);
         const rgb = gpa.alloc(f32, len) catch {
@@ -13852,6 +13957,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 }
             }
         }
+        if (!bundleNameOk(model.model_stem)) continue;
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.glb", .{ bundle_path, model.model_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ModelLoader.start(gpa, path) catch continue;
@@ -16531,6 +16637,88 @@ test "activating a lens with a blend.pass node loads its background image for re
 
     goss_session_deactivate_lens(session);
     try t.expectEqual(@as(usize, 0), session.blend_loaders.count());
+}
+
+test "bundleRelative admits plain relative names and rejects every escape shape" {
+    try t.expect(bundleRelative("model.onnx"));
+    try t.expect(bundleRelative("sounds/beep.wav"));
+    try t.expect(bundleRelative("a/b/c.png"));
+    try t.expect(!bundleRelative(""));
+    try t.expect(!bundleRelative("/etc/passwd"));
+    try t.expect(!bundleRelative("../x.png"));
+    try t.expect(!bundleRelative("assets/../../x"));
+    try t.expect(!bundleRelative("a/./b"));
+    try t.expect(!bundleRelative("a//b"));
+    try t.expect(!bundleRelative("a/"));
+    try t.expect(!bundleRelative("..\\x"));
+    try t.expect(!bundleRelative("c:/x"));
+    try t.expect(!bundleRelative("a\x00b"));
+}
+
+const escape_bundle_manifest =
+    \\{"glf":"1.0","id":"com.example.escape","version":"1.0.0","display_name":"Escape",
+    \\ "engine_compat":">=0.5","capabilities":[],"parameters":[],
+    \\ "nodes":[{"id":"../escape","type":"lut.pass","inputs":{"frame":"camera"},"params":{}}],
+    \\ "triggers":[{"when":"event('go')","action":{"kind":"play_sound","target":"../escape.wav"}}]}
+;
+
+test "a bundle asset name cannot leave its bundle" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    // The bundle names ../escape for its LUT, and a real, loadable PNG sits
+    // exactly where that name resolves - one level above assets/. The guard,
+    // not a missing file, is what must keep it out.
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = escape_bundle_manifest });
+    try tmp.dir.createDirPath(t.io, "assets");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "escape.png", .data = &lut_checker_png });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    try t.expectEqual(Status.ok, goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(@as(usize, 0), session.lut_loaders.count());
+    try t.expectEqual(@as(usize, 0), session.sound_ids.count());
+    goss_session_deactivate_lens(session);
+}
+
+const ml_bundle_manifest =
+    \\{"glf":"1.0","id":"com.example.byoml","version":"1.0.0","display_name":"ML",
+    \\ "engine_compat":">=0.5","capabilities":[],"parameters":[
+    \\   {"name":"p","type":"float","default":0.0,"min":0.0,"max":1.0}],
+    \\ "nodes":[{"id":"net","type":"ml.infer","params":{},
+    \\   "ml":{"model":"net.onnx","outputs":[{"tensor":0,"index":0,"param":"p"}]}}],
+    \\ "triggers":[]}
+;
+
+test "a lens-bundled model off the digest allowlist leaves its node inert with no leak" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    // Pin the allowlist to a digest the bundled bytes cannot match, so the
+    // loader's rejection path - read, refuse, free - is the one exercised.
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("the one trusted model", &digest, .{});
+    try t.expectEqual(Status.ok, goss_session_allow_model_digest(session, &digest));
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = ml_bundle_manifest });
+    try tmp.dir.createDirPath(t.io, "assets");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "assets/net.onnx", .data = "not the trusted model" });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    try t.expectEqual(Status.ok, goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(@as(usize, 0), session.ml_workers.items.len);
+    goss_session_deactivate_lens(session);
 }
 
 test "the ar brush projects a world stroke to screen and drops points behind the camera" {
