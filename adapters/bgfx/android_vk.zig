@@ -54,6 +54,10 @@ fn check(result: c.VkResult) Error!void {
 /// still sample it.
 pub const ring_depth = 4;
 
+/// Camera HALs cycle at most a handful of buffers; eight entries covers
+/// every observed HAL depth with room for a graphics/preview split.
+const import_cache_len = 8;
+
 const device_extensions = [_][*:0]const u8{
     "VK_KHR_swapchain",
     "VK_ANDROID_external_memory_android_hardware_buffer",
@@ -182,6 +186,17 @@ const AhbImport = struct {
         if (import.memory != null) c.vkFreeMemory(device, import.memory, null);
         import.* = .{};
     }
+};
+
+/// One import-cache slot: the camera HAL recycles a small fixed set of
+/// AHardwareBuffers, so imports are keyed by buffer pointer and reused
+/// instead of re-created every frame.
+const CachedImport = struct {
+    buffer: ?*c.AHardwareBuffer = null,
+    width: u32 = 0,
+    height: u32 = 0,
+    import: AhbImport = .{},
+    tick: u64 = 0,
 };
 
 /// A plain RGBA AHardwareBuffer imported as a sampled Vulkan image - the
@@ -361,7 +376,7 @@ pub const Converter = struct {
     command_pool: c.VkCommandPool,
     commands: [ring_depth]c.VkCommandBuffer,
     fences: [ring_depth]c.VkFence,
-    imports: [ring_depth]AhbImport,
+    import_cache: [import_cache_len]CachedImport,
     targets: [ring_depth]Target,
     width: u32 = 0,
     height: u32 = 0,
@@ -523,7 +538,7 @@ pub const Converter = struct {
             .command_pool = command_pool,
             .commands = commands,
             .fences = fences,
-            .imports = @splat(.{}),
+            .import_cache = @splat(.{}),
             .targets = @splat(.{}),
         };
     }
@@ -531,7 +546,7 @@ pub const Converter = struct {
     pub fn deinit(converter: *Converter) void {
         const device = converter.ctx.device;
         _ = c.vkDeviceWaitIdle(device);
-        for (&converter.imports) |*import| import.deinit(device);
+        for (&converter.import_cache) |*entry| entry.import.deinit(device);
         for (&converter.targets) |*target| target.deinit(device);
         for (converter.fences) |fence| c.vkDestroyFence(device, fence, null);
         c.vkDestroyCommandPool(device, converter.command_pool, null);
@@ -568,14 +583,18 @@ pub const Converter = struct {
         converter.slot = (slot + 1) % ring_depth;
 
         try check(c.vkWaitForFences(device, 1, &converter.fences[slot], c.VK_TRUE, std.math.maxInt(u64)));
-        converter.imports[slot].deinit(device);
 
         if (width != converter.width or height != converter.height) {
             try converter.recreateTargets(width, height);
+            // The stale imports pin their buffers' memory via the Vulkan
+            // reference; a camera restart flushes them all at once.
+            for (&converter.import_cache) |*entry| {
+                entry.import.deinit(device);
+                entry.* = .{};
+            }
         }
 
-        const import = try converter.importBuffer(hardware_buffer, width, height);
-        converter.imports[slot] = import;
+        const import = try converter.cachedImport(hardware_buffer, width, height);
         converter.updateSet(slot, import);
         try converter.record(slot, import, width, height);
 
@@ -634,6 +653,29 @@ pub const Converter = struct {
         }
         converter.width = width;
         converter.height = height;
+    }
+
+    /// The imported image for one camera buffer, from the cache when the
+    /// HAL hands the same buffer back. Eviction is safe because convert()
+    /// waits its submit to completion, so nothing cached is in flight.
+    fn cachedImport(converter: *Converter, hardware_buffer: *c.AHardwareBuffer, width: u32, height: u32) Error!AhbImport {
+        var evict = &converter.import_cache[0];
+        for (&converter.import_cache) |*entry| {
+            if (entry.buffer == hardware_buffer and entry.width == width and entry.height == height) {
+                entry.tick = converter.converted_frames;
+                return entry.import;
+            }
+            if (entry.buffer == null and evict.buffer != null) {
+                evict = entry;
+            } else if (evict.buffer != null and entry.tick < evict.tick) {
+                evict = entry;
+            }
+        }
+        evict.import.deinit(converter.ctx.device);
+        evict.* = .{};
+        const imported = try converter.importBuffer(hardware_buffer, width, height);
+        evict.* = .{ .buffer = hardware_buffer, .width = width, .height = height, .import = imported, .tick = converter.converted_frames };
+        return imported;
     }
 
     fn importBuffer(converter: *Converter, hardware_buffer: *c.AHardwareBuffer, width: u32, height: u32) Error!AhbImport {

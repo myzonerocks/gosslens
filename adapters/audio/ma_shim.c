@@ -78,6 +78,7 @@ typedef struct GossMixer {
 
 GossMixer *goss_mixer_create(int sample_rate, int channels);
 void goss_mixer_destroy(GossMixer *m);
+void goss_mixer_unload(GossMixer *m, int sound_id);
 int goss_mixer_load(GossMixer *m, const char *path, size_t path_len);
 int goss_mixer_load_memory(GossMixer *m, const void *data, size_t size);
 void goss_mixer_play(GossMixer *m, int sound_id, int loop, float gain);
@@ -116,7 +117,9 @@ GossMixer *goss_mixer_create(int sample_rate, int channels) {
 
 void goss_mixer_destroy(GossMixer *m) {
     if (!m) return;
-    for (int i = 0; i < m->sound_count; i++) goss_ma_free(m->sounds[i].pcm, NULL);
+    for (int i = 0; i < m->sound_count; i++) {
+        if (m->sounds[i].pcm) goss_ma_free(m->sounds[i].pcm, NULL);
+    }
     free(m);
 }
 
@@ -145,6 +148,21 @@ int goss_mixer_load_memory(GossMixer *m, const void *data, size_t size) {
     return goss_mixer_take(m, &dec);
 }
 
+// Releases one cached sound: every voice playing it stops, its PCM frees,
+// and the slot empties (ids stay stable; play refuses an emptied slot). This
+// is what lets a per-utterance loader (the dub voice) replace its previous
+// sound instead of exhausting the table.
+void goss_mixer_unload(GossMixer *m, int sound_id) {
+    if (!m || sound_id < 0 || sound_id >= m->sound_count) return;
+    if (!m->sounds[sound_id].pcm) return;
+    for (int i = 0; i < GOSS_MAX_VOICES; i++) {
+        if (m->voices[i].active && m->voices[i].sound == sound_id) m->voices[i].active = 0;
+    }
+    goss_ma_free(m->sounds[sound_id].pcm, NULL);
+    m->sounds[sound_id].pcm = NULL;
+    m->sounds[sound_id].frames = 0;
+}
+
 // Clamps a scaled float sample into the s16 range as a long, rejecting NaN
 // by construction so the float-to-integer cast can never be undefined.
 static long clamp_sample(float f) {
@@ -155,6 +173,7 @@ static long clamp_sample(float f) {
 
 void goss_mixer_play_pan(GossMixer *m, int sound_id, int loop, float gain, ma_uint64 fade_in, ma_uint64 fade_out, float pan) {
     if (!m || sound_id < 0 || sound_id >= m->sound_count) return;
+    if (!m->sounds[sound_id].pcm) return;
     // A non-finite gain would make the per-sample cast undefined; a silent
     // voice is the safe reading of a broken value.
     if (!isfinite(gain)) gain = 0.0f;

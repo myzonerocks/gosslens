@@ -168,6 +168,7 @@ pub const Primitive = struct {
         for (out[0..count], 0..) |*joint, i| {
             var tmp: [4]c.cgltf_uint = undefined;
             if (c.cgltf_accessor_read_uint(accessor, i, &tmp, 4) == 0) return error.MalformedAsset;
+            for (tmp) |v| if (v > std.math.maxInt(u16)) return error.MalformedAsset;
             joint.* = .{ @intCast(tmp[0]), @intCast(tmp[1]), @intCast(tmp[2]), @intCast(tmp[3]) };
         }
         return count;
@@ -659,6 +660,7 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
     if (target_node) |tn| {
         for (0..asset.animationCount()) |ai| {
             const clip = try decodeAnimation(gpa, asset.animation(ai), tn);
+            errdefer freeAnimation(gpa, &clip);
             // An animation that never touches this node decodes to no
             // channels; drop it so the mixer only holds clips that move it.
             if (clip.channels.len == 0) {
@@ -692,10 +694,11 @@ pub fn decodeModel(gpa: std.mem.Allocator, bytes: []const u8) Error!DecodedModel
         const deltas = try gpa.alloc([3]f32, vertex_count);
         errdefer gpa.free(deltas);
         if (try prim.readMorphTargetPositions(mi, deltas) != vertex_count) return error.MalformedAsset;
-        try morph_targets.append(gpa, deltas);
         const name = if (the_mesh.morphTargetName(mi)) |src| try gpa.dupe(u8, src) else try gpa.dupe(u8, "");
         errdefer gpa.free(name);
-        try morph_names.append(gpa, name);
+        try morph_names.ensureUnusedCapacity(gpa, 1);
+        try morph_targets.append(gpa, deltas);
+        morph_names.appendAssumeCapacity(name);
     }
 
     const owned_animations = try animations.toOwnedSlice(gpa);
