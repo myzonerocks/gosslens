@@ -366,7 +366,11 @@ fn emitStatement(graph: Graph, types: []const ValueType, index: u32, writer: *st
         .cos => try writer.print("cos(n{d})", .{in[0]}),
         .sqrt => try writer.print("sqrt(n{d})", .{in[0]}),
         .clamp => try writer.print("clamp(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
-        .split => try writer.print("n{d}.{c}", .{ in[0], "xyzw"[@min(3, @as(usize, @intFromFloat(node.params[0])))] }),
+        .split => {
+            const raw = node.params[0];
+            const lane: usize = if (raw >= 0 and raw <= 3) @intFromFloat(raw) else 0;
+            try writer.print("n{d}.{c}", .{ in[0], "xyzw"[lane] });
+        },
         .combine3 => try writer.print("vec3(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),
         .combine4 => try writer.print("vec4(n{d}, n{d}, n{d}, n{d})", .{ in[0], in[1], in[2], in[3] }),
         .mix => try writer.print("mix(n{d}, n{d}, n{d})", .{ in[0], in[1], in[2] }),

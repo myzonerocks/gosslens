@@ -22,6 +22,11 @@ public final class GossSession: @unchecked Sendable {
     private let engine: GossEngine
     private var destroyed = false
 
+    // Grow-only scratch for the per-frame multi-face and multi-body
+    // submits, so the hot path copies without allocating.
+    var faceSubmitScratch: [goss_face_result] = []
+    var bodySubmitScratch: [goss_pose_result] = []
+
     public static func create(engine: GossEngine, config: GossSessionConfig = GossSessionConfig()) throws -> GossSession {
         var raw = goss_session_config(frame_budget_us: config.frameBudgetUs, reserved: 0)
         var handle: OpaquePointer?
@@ -55,8 +60,10 @@ public final class GossSession: @unchecked Sendable {
     /// platform object must outlive the next rendered frame.
     public func submitFrame(desc: GossFrameDesc, planes: [UInt64]) throws {
         var raw = desc.raw
-        let padded = planes + Array(repeating: UInt64(0), count: max(0, 3 - planes.count))
-        var framePlanes = goss_frame_planes(plane_count: UInt32(planes.count), reserved: 0, planes: (padded[0], padded[1], padded[2]))
+        let p0 = planes.count > 0 ? planes[0] : 0
+        let p1 = planes.count > 1 ? planes[1] : 0
+        let p2 = planes.count > 2 ? planes[2] : 0
+        var framePlanes = goss_frame_planes(plane_count: UInt32(planes.count), reserved: 0, planes: (p0, p1, p2))
         try checked(goss_session_submit_frame(handle, &raw, &framePlanes))
     }
 

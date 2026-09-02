@@ -205,9 +205,9 @@ extension GossSession {
 
     /// Uploads one RGBA/BGRA frame into a named source (pixelFormat 3 BGRA, 4 RGBA).
     public func submitSourceFrame(_ name: String, rgba: [UInt8], width: UInt32, height: UInt32, stride: UInt32, pixelFormat: UInt32 = 4) throws {
-        var nameBytes = Array(name.utf8)
+        var mutableName = name
         var desc = goss_frame_desc(width: width, height: height, pixel_format: pixelFormat, color_standard: 0, color_range: 1, flags: 0, timestamp_us: 0)
-        try nameBytes.withUnsafeMutableBufferPointer { nb in
+        try mutableName.withUTF8 { nb in
             try rgba.withUnsafeBufferPointer { rb in
                 try checked(goss_session_submit_source_frame_rgba_copy(handle, nb.baseAddress, nb.count, &desc, rb.baseAddress, stride))
             }

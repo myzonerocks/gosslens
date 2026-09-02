@@ -3,6 +3,7 @@ package com.gosslens
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.os.Build
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -12,23 +13,49 @@ import java.nio.ByteOrder
  * thread drains into a streaming [AudioTrack]; underrun plays silence.
  */
 class GossAudioOutput(private val session: GossSession) {
-    private val ring = ShortArray(RING_FRAMES)
-    private var readIndex = 0
-    private var writeIndex = 0
-    private val lock = Object()
+    /** The state the writer thread and the drop safety net share. It holds
+     * no reference to the wrapper: a running thread is a GC root, so a
+     * thread capturing the wrapper would pin it (and its session) forever
+     * and the platform track could never be reclaimed. */
+    private class Playback {
+        val ring = ShortArray(RING_FRAMES)
+        var readIndex = 0
+        var writeIndex = 0
+        val lock = Object()
+        val chunk = ShortArray(CHUNK_FRAMES)
+        var track: AudioTrack? = null
+        var writer: Thread? = null
+        @Volatile var running = false
+
+        fun stop() {
+            running = false
+            writer?.join(500)
+            writer = null
+            track?.stop()
+            track?.release()
+            track = null
+        }
+    }
+
+    private val playback = Playback()
     private val pullBuffer: ByteBuffer =
         ByteBuffer.allocateDirect(PULL_FRAMES * 2).order(ByteOrder.nativeOrder())
     // One view over the pull buffer, created once so pump() allocates
     // nothing per frame.
     private val pullShorts = pullBuffer.asShortBuffer()
-    private val chunk = ShortArray(CHUNK_FRAMES)
-    private var track: AudioTrack? = null
-    private var writer: Thread? = null
-    @Volatile private var running = false
+
+    /** Releases the track and thread if the wrapper is dropped without
+     * stop(); the action holds only the playback state, never the wrapper. */
+    private val cleanable: Any? =
+        if (Build.VERSION.SDK_INT >= 33) NativeCleaner.register(this, PlaybackStopper(playback)) else null
+
+    private class PlaybackStopper(private val playback: Playback) : Runnable {
+        override fun run() = playback.stop()
+    }
 
     /** Starts the platform track and its writer thread. */
     fun start() {
-        if (track != null) return
+        if (playback.track != null) return
         val minBytes = AudioTrack.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
         )
@@ -50,23 +77,24 @@ class GossAudioOutput(private val session: GossSession) {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         t.play()
-        track = t
-        running = true
-        writer = Thread {
-            while (running) {
+        val p = playback
+        p.track = t
+        p.running = true
+        p.writer = Thread {
+            while (p.running) {
                 var filled = 0
-                synchronized(lock) {
-                    while (filled < chunk.size && readIndex != writeIndex) {
-                        chunk[filled] = ring[readIndex]
-                        readIndex = (readIndex + 1) % RING_FRAMES
+                synchronized(p.lock) {
+                    while (filled < p.chunk.size && p.readIndex != p.writeIndex) {
+                        p.chunk[filled] = p.ring[p.readIndex]
+                        p.readIndex = (p.readIndex + 1) % RING_FRAMES
                         filled += 1
                     }
                 }
-                while (filled < chunk.size) {
-                    chunk[filled] = 0
+                while (filled < p.chunk.size) {
+                    p.chunk[filled] = 0
                     filled += 1
                 }
-                t.write(chunk, 0, chunk.size)
+                t.write(p.chunk, 0, p.chunk.size)
             }
         }.also { it.name = "goss-audio-out"; it.start() }
     }
@@ -79,25 +107,20 @@ class GossAudioOutput(private val session: GossSession) {
         val count = minOf(frames, PULL_FRAMES)
         pullBuffer.clear()
         if (!session.pullAudio(pullBuffer, count)) return
-        synchronized(lock) {
+        val p = playback
+        synchronized(p.lock) {
             for (i in 0 until count) {
-                val next = (writeIndex + 1) % RING_FRAMES
-                if (next == readIndex) break
-                ring[writeIndex] = pullShorts.get(i)
-                writeIndex = next
+                val next = (p.writeIndex + 1) % RING_FRAMES
+                if (next == p.readIndex) break
+                p.ring[p.writeIndex] = pullShorts.get(i)
+                p.writeIndex = next
             }
         }
     }
 
-    /** Stops the writer thread and releases the platform track. */
-    fun stop() {
-        running = false
-        writer?.join(500)
-        writer = null
-        track?.stop()
-        track?.release()
-        track = null
-    }
+    /** Stops the writer thread and releases the platform track. Safe to
+     * call more than once; the drop safety net runs the same stop. */
+    fun stop() = playback.stop()
 
     companion object {
         /** The lens mixer's fixed output format. */

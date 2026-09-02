@@ -721,12 +721,29 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         if (width <= 0 || height <= 0) return null
         val pixels = width.toLong() * height
         val capacity = if (format == 0) pixels + pixels / 2 else pixels * 4
+        if (capacity > Int.MAX_VALUE) return null
         val data = liveStage(capacity.toInt())
         if (Gosslens.nativeCaptureLiveFrame(handle, session?.handle ?: 0L, format, data, capacity, liveInfo) != 0) return null
         val frame = ByteArray(capacity.toInt())
         data.rewind()
         data.get(frame)
         return frame
+    }
+
+    /** Reads the composited frame into [into] without allocating - the
+     * reuse sibling of captureLiveFrame for a per-frame broadcast loop.
+     * Returns the byte count, or -1 when the renderer is away or [into]
+     * is too short for the format at this size. */
+    fun captureLiveFrame(session: GossSession?, width: Int, height: Int, into: ByteArray, format: Int = 3): Int {
+        if (width <= 0 || height <= 0) return -1
+        val pixels = width.toLong() * height
+        val capacity = if (format == 0) pixels + pixels / 2 else pixels * 4
+        if (capacity > Int.MAX_VALUE || into.size < capacity.toInt()) return -1
+        val data = liveStage(capacity.toInt())
+        if (Gosslens.nativeCaptureLiveFrame(handle, session?.handle ?: 0L, format, data, capacity, liveInfo) != 0) return -1
+        data.rewind()
+        data.get(into, 0, capacity.toInt())
+        return capacity.toInt()
     }
 
     /** A high-resolution still: the composited frame at its own or a
@@ -963,9 +980,15 @@ class GossSession private constructor(
     /** Frees the native session if the wrapper is dropped without close();
      * only registered on API 33+, where Cleaner exists. */
     private val cleanable: Any? =
-        if (Build.VERSION.SDK_INT >= 33) NativeCleaner.register(this, SessionDisposer(handle)) else null
+        if (Build.VERSION.SDK_INT >= 33) NativeCleaner.register(this, SessionDisposer(engine, handle)) else null
 
-    private class SessionDisposer(private val handle: Long) : Runnable {
+    /** Holds the engine wrapper: a pending cleaner action is a strong ref,
+     * so the engine cannot be cleaned before this session's native side is
+     * gone, ordering the GC path session-first like the explicit one. */
+    private class SessionDisposer(
+        @Suppress("unused") private val engine: GossEngine,
+        private val handle: Long,
+    ) : Runnable {
         override fun run() = Gosslens.nativeSessionDestroy(handle)
     }
 
@@ -1213,8 +1236,7 @@ class GossSession private constructor(
      * sample; an empty array clears it. The producer path for an app that runs
      * its own segmentation instead of the in-engine worker. */
     fun setSegmentationMask(mask: FloatArray): Boolean {
-        if (mask.isEmpty()) return Gosslens.nativeSetSegmentationMask(handle, ByteBuffer.allocateDirect(0), 0) == 0
-        val buf = ByteBuffer.allocateDirect(mask.size * 4).order(java.nio.ByteOrder.nativeOrder())
+        val buf = stage(mask.size * 4)
         buf.asFloatBuffer().put(mask)
         return Gosslens.nativeSetSegmentationMask(handle, buf, mask.size) == 0
     }
@@ -1228,8 +1250,7 @@ class GossSession private constructor(
      * that channel's passes sample; channel 0 (person) rides setSegmentationMask,
      * so upload the classes after it. An empty array clears one channel. */
     fun setSegmentationClassMask(channel: Int, mask: FloatArray): Boolean {
-        if (mask.isEmpty()) return Gosslens.nativeSetSegmentationClassMask(handle, channel, ByteBuffer.allocateDirect(0), 0) == 0
-        val buf = ByteBuffer.allocateDirect(mask.size * 4).order(java.nio.ByteOrder.nativeOrder())
+        val buf = stage(mask.size * 4)
         buf.asFloatBuffer().put(mask)
         return Gosslens.nativeSetSegmentationClassMask(handle, channel, buf, mask.size) == 0
     }
@@ -1808,10 +1829,15 @@ class GossSession private constructor(
         return Gosslens.nativeFireEvent(handle, buf, bytes.size) == 0
     }
 
-    private fun nameBuf(name: String): Pair<ByteBuffer, Int> {
-        val b = name.toByteArray(Charsets.UTF_8)
-        return ByteBuffer.allocateDirect(b.size).apply { put(b); rewind() } to b.size
-    }
+    /** Direct buffers for source names, cached per name so the per-frame
+     * submit paths reuse them instead of allocating one every call. */
+    private val nameBufs = HashMap<String, Pair<ByteBuffer, Int>>()
+
+    private fun nameBuf(name: String): Pair<ByteBuffer, Int> =
+        nameBufs.getOrPut(name) {
+            val b = name.toByteArray(Charsets.UTF_8)
+            ByteBuffer.allocateDirect(b.size).apply { put(b); rewind() } to b.size
+        }
 
     /** Registers a named RGBA source for multi-source composition. */
     fun defineSource(name: String): Boolean {
@@ -1822,7 +1848,9 @@ class GossSession private constructor(
     /** Removes a named source. */
     fun removeSource(name: String): Boolean {
         val (buf, n) = nameBuf(name)
-        return Gosslens.nativeRemoveSource(handle, buf, n) == 0
+        val ok = Gosslens.nativeRemoveSource(handle, buf, n) == 0
+        if (ok) nameBufs.remove(name)
+        return ok
     }
 
     /** Uploads one RGBA/BGRA frame into a named source ([pixelFormat] 3 BGRA, 4 RGBA). */

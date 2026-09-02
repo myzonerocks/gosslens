@@ -46,7 +46,8 @@ const Reader = struct {
 
     fn readTag(r: *Reader) Error!Tag {
         const raw = try r.readVarint();
-        return .{ .field = @intCast(raw >> 3), .wire = @enumFromInt(@as(u3, @truncate(raw))) };
+        const field = std.math.cast(u32, raw >> 3) orelse return error.ModelRejected;
+        return .{ .field = field, .wire = @enumFromInt(@as(u3, @truncate(raw))) };
     }
 
     fn readLen(r: *Reader) Error![]const u8 {
@@ -197,10 +198,17 @@ pub const Engine = struct {
             }
             if (is_init) continue;
             var count: usize = 1;
-            for (info.dims) |d| count *= @intCast(@max(d, 1));
+            const dims_norm = arena.alloc(i64, info.dims.len) catch return error.OutOfMemory;
+            for (dims_norm, info.dims) |*dst, d| {
+                const dim = @max(d, 1);
+                if (dim > max_tensor_elems) return error.ModelRejected;
+                dst.* = dim;
+                count = std.math.mul(usize, count, @intCast(dim)) catch return error.ModelRejected;
+                if (count > max_tensor_elems) return error.ModelRejected;
+            }
             const data = arena.alloc(f32, count) catch return error.OutOfMemory;
             @memset(data, 0);
-            slots.append(arena, .{ .name = info.name, .dims = info.dims, .data = data }) catch return error.OutOfMemory;
+            slots.append(arena, .{ .name = info.name, .dims = dims_norm, .data = data }) catch return error.OutOfMemory;
         }
         if (slots.items.len == 0) return error.ModelRejected;
         if (parsed.output_names.len == 0) return error.ModelRejected;
@@ -244,6 +252,7 @@ pub const Engine = struct {
     }
 
     pub fn invoke(engine: *Engine) Error!void {
+        engine.result_table = .empty;
         _ = engine.run_arena.reset(.retain_capacity);
         const ra = engine.run_arena.allocator();
 
@@ -455,7 +464,8 @@ fn parseInitializerTensor(arena: std.mem.Allocator, bytes: []const u8) Error!Ten
                 dims.append(arena, @bitCast(try r.readVarint())) catch return error.OutOfMemory;
             } else try r.skip(tag.wire),
             2 => if (tag.wire == .varint) {
-                dtype = @enumFromInt(@as(i32, @intCast(try r.readVarint())));
+                const raw_dtype = std.math.cast(i32, try r.readVarint()) orelse return error.ModelRejected;
+                dtype = @enumFromInt(raw_dtype);
             } else try r.skip(tag.wire),
             4 => if (tag.wire == .len) {
                 float_data = try r.readLen();
@@ -477,7 +487,11 @@ fn parseInitializerTensor(arena: std.mem.Allocator, bytes: []const u8) Error!Ten
 
     const shape = dims.toOwnedSlice(arena) catch return error.OutOfMemory;
     var count: usize = 1;
-    for (shape) |d| count *= @intCast(@max(d, 0));
+    for (shape) |d| {
+        if (d < 0 or d > max_tensor_elems) return error.ModelRejected;
+        count = std.math.mul(usize, count, @intCast(d)) catch return error.ModelRejected;
+        if (count > max_tensor_elems) return error.ModelRejected;
+    }
     if (shape.len == 0) count = 1;
 
     const data = arena.alloc(f32, count) catch return error.OutOfMemory;
@@ -603,7 +617,7 @@ const max_tensor_elems: usize = 64 * 1024 * 1024 / @sizeOf(f32);
 fn newTensor(ra: std.mem.Allocator, dims: []const i64) Error!Tensor {
     var count: usize = 1;
     for (dims) |d| {
-        if (d < 0) return error.TensorShapeMismatch;
+        if (d < 0 or d > max_tensor_elems) return error.TensorShapeMismatch;
         count = std.math.mul(usize, count, @intCast(d)) catch return error.ModelRejected;
         if (count > max_tensor_elems) return error.ModelRejected;
     }
@@ -611,6 +625,19 @@ fn newTensor(ra: std.mem.Allocator, dims: []const i64) Error!Tensor {
     const data = ra.alloc(f32, count) catch return error.OutOfMemory;
     const owned_dims = ra.dupe(i64, dims) catch return error.OutOfMemory;
     return .{ .dims = owned_dims, .data = data };
+}
+
+/// A model-supplied stride, dilation, group, or kernel extent: strictly
+/// positive and small enough that output index math cannot overflow.
+fn posAttr(v: i64) Error!usize {
+    if (v < 1 or v > max_tensor_elems) return error.TensorShapeMismatch;
+    return @intCast(v);
+}
+
+/// A model-supplied pad: non-negative and bounded the same way.
+fn padAttr(v: i64) Error!i64 {
+    if (v < 0 or v > max_tensor_elems) return error.TensorShapeMismatch;
+    return v;
 }
 
 fn runNode(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnmanaged(Tensor)) Error!void {
@@ -902,26 +929,30 @@ fn conv(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnman
     const kh: usize = @intCast(w.dims[2]);
     const kw: usize = @intCast(w.dims[3]);
 
-    const group: usize = @intCast(node.attrInt("group", 1));
-    if (group == 0 or c % group != 0 or m % group != 0 or cpg != c / group) return error.TensorShapeMismatch;
+    const group = try posAttr(node.attrInt("group", 1));
+    if (c % group != 0 or m % group != 0 or cpg != c / group) return error.TensorShapeMismatch;
 
     const strides = node.attrInts("strides");
-    const sh: usize = if (strides.len >= 2) @intCast(strides[0]) else 1;
-    const sw: usize = if (strides.len >= 2) @intCast(strides[1]) else 1;
+    const sh: usize = if (strides.len >= 2) try posAttr(strides[0]) else 1;
+    const sw: usize = if (strides.len >= 2) try posAttr(strides[1]) else 1;
     const dil = node.attrInts("dilations");
-    const dh: usize = if (dil.len >= 2) @intCast(dil[0]) else 1;
-    const dw: usize = if (dil.len >= 2) @intCast(dil[1]) else 1;
+    const dh: usize = if (dil.len >= 2) try posAttr(dil[0]) else 1;
+    const dw: usize = if (dil.len >= 2) try posAttr(dil[1]) else 1;
     const pads = node.attrInts("pads");
-    const pt: i64 = if (pads.len >= 4) pads[0] else 0;
-    const pl: i64 = if (pads.len >= 4) pads[1] else 0;
-    const pb: i64 = if (pads.len >= 4) pads[2] else 0;
-    const pr: i64 = if (pads.len >= 4) pads[3] else 0;
+    const pt: i64 = if (pads.len >= 4) try padAttr(pads[0]) else 0;
+    const pl: i64 = if (pads.len >= 4) try padAttr(pads[1]) else 0;
+    const pb: i64 = if (pads.len >= 4) try padAttr(pads[2]) else 0;
+    const pr: i64 = if (pads.len >= 4) try padAttr(pads[3]) else 0;
 
-    const oh: usize = @intCast(@divFloor(@as(i64, @intCast(h)) + pt + pb - (@as(i64, @intCast(dh)) * (@as(i64, @intCast(kh)) - 1) + 1), @as(i64, @intCast(sh))) + 1);
-    const ow: usize = @intCast(@divFloor(@as(i64, @intCast(wd)) + pl + pr - (@as(i64, @intCast(dw)) * (@as(i64, @intCast(kw)) - 1) + 1), @as(i64, @intCast(sw))) + 1);
+    const oh_i = @divFloor(@as(i64, @intCast(h)) + pt + pb - (@as(i64, @intCast(dh)) * (@as(i64, @intCast(kh)) - 1) + 1), @as(i64, @intCast(sh))) + 1;
+    const ow_i = @divFloor(@as(i64, @intCast(wd)) + pl + pr - (@as(i64, @intCast(dw)) * (@as(i64, @intCast(kw)) - 1) + 1), @as(i64, @intCast(sw))) + 1;
+    if (oh_i < 0 or ow_i < 0) return error.TensorShapeMismatch;
+    const oh: usize = @intCast(oh_i);
+    const ow: usize = @intCast(ow_i);
 
     var bias: ?Tensor = null;
     if (node.inputs.len > 2 and node.inputs[2].len != 0) bias = try get(table, node.inputs[2]);
+    if (bias) |bt| if (bt.data.len < m) return error.TensorShapeMismatch;
 
     const out = try newTensor(ra, &.{ @intCast(n), @intCast(m), @intCast(oh), @intCast(ow) });
     const mpg = m / group; // output channels per group
@@ -971,19 +1002,22 @@ fn pool(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnman
 
     const ks = node.attrInts("kernel_shape");
     if (ks.len < 2) return error.TensorShapeMismatch;
-    const kh: usize = @intCast(ks[0]);
-    const kw: usize = @intCast(ks[1]);
+    const kh = try posAttr(ks[0]);
+    const kw = try posAttr(ks[1]);
     const strides = node.attrInts("strides");
-    const sh: usize = if (strides.len >= 2) @intCast(strides[0]) else 1;
-    const sw: usize = if (strides.len >= 2) @intCast(strides[1]) else 1;
+    const sh: usize = if (strides.len >= 2) try posAttr(strides[0]) else 1;
+    const sw: usize = if (strides.len >= 2) try posAttr(strides[1]) else 1;
     const pads = node.attrInts("pads");
-    const pt: i64 = if (pads.len >= 4) pads[0] else 0;
-    const pl: i64 = if (pads.len >= 4) pads[1] else 0;
-    const pb: i64 = if (pads.len >= 4) pads[2] else 0;
-    const prr: i64 = if (pads.len >= 4) pads[3] else 0;
+    const pt: i64 = if (pads.len >= 4) try padAttr(pads[0]) else 0;
+    const pl: i64 = if (pads.len >= 4) try padAttr(pads[1]) else 0;
+    const pb: i64 = if (pads.len >= 4) try padAttr(pads[2]) else 0;
+    const prr: i64 = if (pads.len >= 4) try padAttr(pads[3]) else 0;
 
-    const oh: usize = @intCast(@divFloor(@as(i64, @intCast(h)) + pt + pb - @as(i64, @intCast(kh)), @as(i64, @intCast(sh))) + 1);
-    const ow: usize = @intCast(@divFloor(@as(i64, @intCast(wd)) + pl + prr - @as(i64, @intCast(kw)), @as(i64, @intCast(sw))) + 1);
+    const oh_i = @divFloor(@as(i64, @intCast(h)) + pt + pb - @as(i64, @intCast(kh)), @as(i64, @intCast(sh))) + 1;
+    const ow_i = @divFloor(@as(i64, @intCast(wd)) + pl + prr - @as(i64, @intCast(kw)), @as(i64, @intCast(sw))) + 1;
+    if (oh_i < 0 or ow_i < 0) return error.TensorShapeMismatch;
+    const oh: usize = @intCast(oh_i);
+    const ow: usize = @intCast(ow_i);
 
     const out = try newTensor(ra, &.{ @intCast(n), @intCast(c), @intCast(oh), @intCast(ow) });
     for (0..n) |ni| {
@@ -1106,20 +1140,27 @@ fn reshape(ra: std.mem.Allocator, x: Tensor, shape_t: Tensor) Error!Tensor {
     var minus_one: ?usize = null;
     var known: usize = 1;
     for (shape_t.data, 0..) |v, i| {
-        if (!(v >= -9.0e15 and v <= 9.0e15)) return error.TensorShapeMismatch;
+        if (!(v >= -1.0 and v <= 9.0e15)) return error.TensorShapeMismatch;
         const d: i64 = @intFromFloat(v);
         if (d == -1) {
+            if (minus_one != null) return error.TensorShapeMismatch;
             minus_one = i;
             dims[i] = 1;
         } else if (d == 0) {
+            if (i >= x.dims.len) return error.TensorShapeMismatch;
             dims[i] = x.dims[i];
-            known *= @intCast(@max(dims[i], 1));
+            known = std.math.mul(usize, known, @intCast(@max(dims[i], 0))) catch return error.TensorShapeMismatch;
         } else {
             dims[i] = d;
-            known *= @intCast(@max(d, 1));
+            known = std.math.mul(usize, known, @intCast(d)) catch return error.TensorShapeMismatch;
         }
     }
-    if (minus_one) |i| dims[i] = @intCast(total / @max(known, 1));
+    // The declared shape must account for exactly the elements x holds;
+    // a mismatch would mint dims that disagree with the data length.
+    if (minus_one) |i| {
+        if (known == 0 or total % known != 0) return error.TensorShapeMismatch;
+        dims[i] = @intCast(total / known);
+    } else if (known != total) return error.TensorShapeMismatch;
     const out: Tensor = .{ .dims = dims, .data = ra.alloc(f32, total) catch return error.OutOfMemory };
     @memcpy(out.data, x.data);
     return out;
@@ -1128,11 +1169,12 @@ fn reshape(ra: std.mem.Allocator, x: Tensor, shape_t: Tensor) Error!Tensor {
 fn flatten(ra: std.mem.Allocator, x: Tensor, axis_in: i64) Error!Tensor {
     var axis = axis_in;
     if (axis < 0) axis += @intCast(x.dims.len);
+    if (axis < 0 or axis > @as(i64, @intCast(x.dims.len))) return error.TensorShapeMismatch;
     const ax: usize = @intCast(axis);
     var rows: usize = 1;
-    for (0..ax) |d| rows *= @intCast(@max(x.dims[d], 1));
+    for (0..ax) |d| rows = std.math.mul(usize, rows, @intCast(@max(x.dims[d], 1))) catch return error.TensorShapeMismatch;
     var cols: usize = 1;
-    for (ax..x.dims.len) |d| cols *= @intCast(@max(x.dims[d], 1));
+    for (ax..x.dims.len) |d| cols = std.math.mul(usize, cols, @intCast(@max(x.dims[d], 1))) catch return error.TensorShapeMismatch;
     const out: Tensor = .{ .dims = ra.dupe(i64, &.{ @intCast(rows), @intCast(cols) }) catch return error.OutOfMemory, .data = ra.alloc(f32, x.data.len) catch return error.OutOfMemory };
     @memcpy(out.data, x.data);
     return out;

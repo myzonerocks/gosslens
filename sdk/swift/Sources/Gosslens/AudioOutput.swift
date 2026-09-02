@@ -47,7 +47,12 @@ public final class GossAudioOutput {
         }
         engine.attach(node)
         engine.connect(node, to: engine.mainMixerNode, format: format)
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            engine.detach(node)
+            throw error
+        }
         source = node
     }
 

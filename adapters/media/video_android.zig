@@ -41,16 +41,18 @@ pub const Decoder = struct {
         fd: c_int,
     };
 
-    pub fn open(path: []const u8) ?Decoder {
+    // A ?Decoder body cannot arm errdefers, so the fallible build lives
+    // here and open() wraps it; every acquired handle has live cover.
+    fn openInner(path: []const u8) error{OpenFailed}!Decoder {
         var path_buf: [1024]u8 = undefined;
-        if (path.len >= path_buf.len) return null;
+        if (path.len >= path_buf.len) return error.OpenFailed;
         @memcpy(path_buf[0..path.len], path);
         path_buf[path.len] = 0;
         const path_z: [*:0]const u8 = path_buf[0..path.len :0];
         const fd_rc = std.os.linux.open(path_z, .{ .ACCMODE = .RDONLY }, 0);
-        if (fd_rc > std.math.maxInt(i32)) return null;
+        if (fd_rc > std.math.maxInt(i32)) return error.OpenFailed;
         const fd: c_int = @intCast(fd_rc);
-        if (fd < 0) return null;
+        if (fd < 0) return error.OpenFailed;
         errdefer _ = std.os.linux.close(fd);
 
         const size = blk: {
@@ -58,9 +60,9 @@ pub const Decoder = struct {
             _ = std.os.linux.lseek(fd, 0, std.os.linux.SEEK.SET);
             break :blk end;
         };
-        const ex = c.AMediaExtractor_new() orelse return null;
+        const ex = c.AMediaExtractor_new() orelse return error.OpenFailed;
         errdefer _ = c.AMediaExtractor_delete(ex);
-        if (c.AMediaExtractor_setDataSourceFd(ex, fd, 0, @intCast(size)) != c.AMEDIA_OK) return null;
+        if (c.AMediaExtractor_setDataSourceFd(ex, fd, 0, @intCast(size)) != c.AMEDIA_OK) return error.OpenFailed;
 
         const tracks = c.AMediaExtractor_getTrackCount(ex);
         var track: usize = 0;
@@ -78,7 +80,7 @@ pub const Decoder = struct {
                 var h: i32 = 0;
                 _ = c.AMediaFormat_getInt32(fmt, c.AMEDIAFORMAT_KEY_WIDTH, &w);
                 _ = c.AMediaFormat_getInt32(fmt, c.AMEDIAFORMAT_KEY_HEIGHT, &h);
-                if (w <= 0 or h <= 0) return null;
+                if (w <= 0 or h <= 0) return error.OpenFailed;
                 width = @intCast(w);
                 height = @intCast(h);
                 mime_z = mime;
@@ -86,21 +88,21 @@ pub const Decoder = struct {
                 break;
             }
         }
-        if (!found) return null;
-        if (c.AMediaExtractor_selectTrack(ex, track) != c.AMEDIA_OK) return null;
+        if (!found) return error.OpenFailed;
+        if (c.AMediaExtractor_selectTrack(ex, track) != c.AMEDIA_OK) return error.OpenFailed;
 
-        const codec = c.AMediaCodec_createDecoderByType(mime_z) orelse return null;
+        const codec = c.AMediaCodec_createDecoderByType(mime_z) orelse return error.OpenFailed;
         errdefer _ = c.AMediaCodec_delete(codec);
-        const cfg = c.AMediaExtractor_getTrackFormat(ex, track) orelse return null;
+        const cfg = c.AMediaExtractor_getTrackFormat(ex, track) orelse return error.OpenFailed;
         defer _ = c.AMediaFormat_delete(cfg);
         // Ask for a flexible YUV420 so the output is one of the layouts the
         // image adapter converts; null surface keeps frames on the CPU.
         c.AMediaFormat_setInt32(cfg, c.AMEDIAFORMAT_KEY_COLOR_FORMAT, color_yuv420_flexible);
-        if (c.AMediaCodec_configure(codec, cfg, null, null, 0) != c.AMEDIA_OK) return null;
-        if (c.AMediaCodec_start(codec) != c.AMEDIA_OK) return null;
+        if (c.AMediaCodec_configure(codec, cfg, null, null, 0) != c.AMEDIA_OK) return error.OpenFailed;
+        if (c.AMediaCodec_start(codec) != c.AMEDIA_OK) return error.OpenFailed;
 
         const gpa = std.heap.c_allocator;
-        const state = gpa.create(State) catch return null;
+        const state = gpa.create(State) catch return error.OpenFailed;
         state.* = .{
             .extractor = ex,
             .codec = codec,
@@ -113,6 +115,10 @@ pub const Decoder = struct {
             .fd = fd,
         };
         return .{ .handle = state, .width = width, .height = height };
+    }
+
+    pub fn open(path: []const u8) ?Decoder {
+        return openInner(path) catch null;
     }
 
     /// Feeds encoded samples and drains one decoded frame into out_bgra

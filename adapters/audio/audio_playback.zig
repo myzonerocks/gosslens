@@ -9,6 +9,7 @@ extern fn goss_mixer_create(sample_rate: c_int, channels: c_int) ?*Handle;
 extern fn goss_mixer_destroy(m: ?*Handle) void;
 extern fn goss_mixer_load(m: ?*Handle, path: [*]const u8, path_len: usize) c_int;
 extern fn goss_mixer_load_memory(m: ?*Handle, data: [*]const u8, size: usize) c_int;
+extern fn goss_mixer_unload(m: ?*Handle, sound_id: c_int) void;
 extern fn goss_mixer_play(m: ?*Handle, sound_id: c_int, loop: c_int, gain: f32) void;
 extern fn goss_mixer_play_fade(m: ?*Handle, sound_id: c_int, loop: c_int, gain: f32, fade_in: u64, fade_out: u64) void;
 extern fn goss_mixer_play_pan(m: ?*Handle, sound_id: c_int, loop: c_int, gain: f32, fade_in: u64, fade_out: u64, pan: f32) void;
@@ -42,6 +43,12 @@ pub const Mixer = struct {
         const id = goss_mixer_load_memory(self.handle, data.ptr, data.len);
         if (id < 0) return error.SoundLoadFailed;
         return @intCast(id);
+    }
+
+    /// Releases one cached sound: voices playing it stop and its PCM frees;
+    /// the id's slot empties and a later play of it is a no-op.
+    pub fn unload(self: *Mixer, sound_id: u32) void {
+        goss_mixer_unload(self.handle, @intCast(sound_id));
     }
 
     pub fn play(self: *Mixer, sound_id: u32, loop: bool, gain: f32) void {

@@ -166,7 +166,9 @@ pub fn synth(gpa: std.mem.Allocator, params: Params, sample_rate: u32) ![]u8 {
     const beats_per_bar: u32 = 4;
     const beat_s = 60.0 / @max(params.tempo_bpm, 1.0);
     const beat_len: usize = @intFromFloat(beat_s * sr);
-    const total: usize = beat_len * beats_per_bar * bars;
+    const per_bar = std.math.mul(usize, beat_len, beats_per_bar) catch return error.OutOfMemory;
+    const total = std.math.mul(usize, per_bar, bars) catch return error.OutOfMemory;
+    if (total > (1 << 29)) return error.OutOfMemory;
     const mix = try gpa.alloc(f32, @max(total, 1));
     defer gpa.free(mix);
     @memset(mix, 0);

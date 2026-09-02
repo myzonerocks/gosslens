@@ -64,6 +64,7 @@ or the [C SDK](sdk/c/README.md) for any other language with a C FFI.
 - **Beauty and makeup** - smooth, whiten, reshape, lipstick, and blush, each a live 0-to-1 control.
 - **Tracking** - multi-face, hands with gestures, and full-body pose, plus selfie segmentation for virtual backgrounds.
 - **Lenses** - the `.glens` format: scripted triggers, shader passes, glTF models, and physics, authored once and run on every platform.
+- **Your own models** - a lens bundles a TFLite or ONNX net and binds its outputs to parameters, masks, depth, or a drawn image; the host stages models in memory and reads tensors back.
 - **World and AR** - anchor content in space from ARKit, ARCore, or WebXR frames, and raycast a tap onto a scanned world mesh.
 - **Capture** - photos, video, and multi-source compositing through each platform's native media APIs.
 

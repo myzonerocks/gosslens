@@ -59,10 +59,12 @@ public final class GossLiveOutput {
         // The MTLTexture stays alive through this synchronous render, and the
         // pixel buffer keeps the IOSurface after cvTexture releases.
         let handle = Unmanaged.passUnretained(texture).toOpaque()
+        // The engine registers its wrap for the handle even on a warm-up
+        // miss, so track it before asking for the render.
+        published.insert(UInt(bitPattern: handle))
         guard engine.renderToLiveTexture(session: session, texture: handle, width: UInt32(width), height: UInt32(height)) else {
             return nil
         }
-        published.insert(UInt(bitPattern: handle))
         return pixelBuffer
     }
 

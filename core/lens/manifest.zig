@@ -3294,7 +3294,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                             if (try expectString(diags, path, v)) |s| it.carousel_param = try arena.dupe(u8, s);
                         }
                         if (getField(iv.object, "carousel_count")) |v| {
-                            if (v == .integer and v.integer >= 1) it.carousel_count = @intCast(v.integer);
+                            if (v == .integer and v.integer >= 1 and v.integer <= 1024) it.carousel_count = @intCast(v.integer);
                         }
                         field.interaction = it;
                     } else try diags.add(path.slice(), "sprite interaction must be an object", .{});
@@ -3790,10 +3790,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             if (!face_anchor) {
                 try diags.add(path.slice(), "face_index needs a face anchor", .{});
             } else if (numberOf(fiv)) |n| {
-                const idx = @as(i32, @intFromFloat(@round(n)));
-                if (idx < 0 or idx >= max_faces_bound) {
+                if (!(n >= 0 and n < max_faces_bound)) {
                     try diags.add(path.slice(), "face_index must be 0..{d}", .{max_faces_bound - 1});
-                } else face_index = idx;
+                } else face_index = @intFromFloat(@round(n));
             } else try diags.add(path.slice(), "face_index must be a number", .{});
         }
         var retarget = false;
@@ -4236,10 +4235,10 @@ fn parseMlOutputs(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocato
                 if (param.len == 0) continue;
                 var out: MlOutput = .{ .param = try arena.dupe(u8, param) };
                 if (getField(o, "tensor")) |v| {
-                    if (v == .integer and v.integer >= 0) out.tensor = @intCast(v.integer);
+                    if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) out.tensor = @intCast(v.integer);
                 }
                 if (getField(o, "index")) |v| {
-                    if (v == .integer and v.integer >= 0) out.index = @intCast(v.integer);
+                    if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) out.index = @intCast(v.integer);
                 }
                 if (getField(o, "reduce")) |v| {
                     if (try expectString(diags, path, v)) |name| {
@@ -4276,7 +4275,7 @@ fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
             } else {
                 var field: CaptionField = .{ .labels = try arena.dupe(u8, labels) };
                 if (getField(cv.object, "tensor")) |v| {
-                    if (v == .integer and v.integer >= 0) field.tensor = @intCast(v.integer);
+                    if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) field.tensor = @intCast(v.integer);
                 }
                 caption = field;
             }
@@ -4295,10 +4294,10 @@ fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
             } else {
                 var field: DiarizeField = .{ .param = try arena.dupe(u8, param) };
                 if (getField(dv.object, "embed_tensor")) |v| {
-                    if (v == .integer and v.integer >= 0) field.embed_tensor = @intCast(v.integer);
+                    if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) field.embed_tensor = @intCast(v.integer);
                 }
                 if (getField(dv.object, "max_speakers")) |v| {
-                    if (v == .integer and v.integer > 0) field.max_speakers = @intCast(v.integer);
+                    if (v == .integer and v.integer > 0 and v.integer <= 64) field.max_speakers = @intCast(v.integer);
                 }
                 if (getField(dv.object, "threshold")) |v| {
                     field.threshold = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.threshold)), 0, 1);
@@ -4321,16 +4320,16 @@ fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
             } else {
                 var field: TranslateField = .{ .decoder = try arena.dupe(u8, decoder), .tokens = try arena.dupe(u8, tokens) };
                 if (getField(tv.object, "memory_tensor")) |v| {
-                    if (v == .integer and v.integer >= 0) field.memory_tensor = @intCast(v.integer);
+                    if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) field.memory_tensor = @intCast(v.integer);
                 }
                 if (getField(tv.object, "max_tokens")) |v| {
                     if (v == .integer and v.integer > 0) field.max_tokens = @intCast(v.integer);
                 }
                 if (getField(tv.object, "bos")) |v| {
-                    if (v == .integer and v.integer >= 0) field.bos = @intCast(v.integer);
+                    if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) field.bos = @intCast(v.integer);
                 }
                 if (getField(tv.object, "eos")) |v| {
-                    if (v == .integer and v.integer >= 0) field.eos = @intCast(v.integer);
+                    if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) field.eos = @intCast(v.integer);
                 }
                 translate = field;
             }
@@ -4349,7 +4348,7 @@ fn parseAudioField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocat
             } else {
                 var field: DubField = .{ .model = try arena.dupe(u8, dub_model) };
                 if (getField(dv.object, "rate")) |v| {
-                    if (v == .integer and v.integer > 0) field.rate = @intCast(v.integer);
+                    if (v == .integer and v.integer >= 8000 and v.integer <= 48000) field.rate = @intCast(v.integer);
                 }
                 dub = field;
             }
@@ -4402,10 +4401,10 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
     var input_width: u32 = 0;
     var input_height: u32 = 0;
     if (getField(object, "input_width")) |v| {
-        if (v == .integer and v.integer >= 0) input_width = @intCast(v.integer);
+        if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) input_width = @intCast(v.integer);
     }
     if (getField(object, "input_height")) |v| {
-        if (v == .integer and v.integer >= 0) input_height = @intCast(v.integer);
+        if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) input_height = @intCast(v.integer);
     }
     const outputs_slice = try parseMlOutputs(diags, path, arena, object);
     var mask: ?MlMask = null;
@@ -4416,7 +4415,7 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         } else {
             var m: MlMask = .{};
             if (getField(mv.object, "tensor")) |v| {
-                if (v == .integer and v.integer >= 0) m.tensor = @intCast(v.integer);
+                if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) m.tensor = @intCast(v.integer);
             }
             const channel_name = if (getField(mv.object, "channel")) |v| (try expectString(diags, path, v) orelse "") else "";
             if (maskChannelIndex(channel_name)) |channel| {
@@ -4440,7 +4439,7 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
             } else {
                 var st: MlStyle = .{ .sprite = try arena.dupe(u8, sprite_id) };
                 if (getField(sv.object, "tensor")) |v| {
-                    if (v == .integer and v.integer >= 0) st.tensor = @intCast(v.integer);
+                    if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) st.tensor = @intCast(v.integer);
                 }
                 style = st;
             }
@@ -4455,7 +4454,7 @@ fn parseMlField(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator,
         } else {
             var dd: MlDepth = .{};
             if (getField(dv.object, "tensor")) |v| {
-                if (v == .integer and v.integer >= 0) dd.tensor = @intCast(v.integer);
+                if (v == .integer and v.integer >= 0 and v.integer <= std.math.maxInt(u32)) dd.tensor = @intCast(v.integer);
             }
             if (getField(dv.object, "invert")) |v| {
                 dd.invert = v == .bool and v.bool;

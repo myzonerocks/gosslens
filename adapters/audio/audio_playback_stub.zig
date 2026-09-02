@@ -23,6 +23,11 @@ pub const Mixer = struct {
         return error.MixerUnsupported;
     }
 
+    pub fn unload(self: *Mixer, sound_id: u32) void {
+        _ = self;
+        _ = sound_id;
+    }
+
     pub fn loadMemory(self: *Mixer, data: []const u8) !u32 {
         _ = self;
         _ = data;

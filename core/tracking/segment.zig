@@ -19,6 +19,7 @@ pub const Params = struct {
 };
 
 fn samePaddingTotal(filter: i32, in_size: i32, stride: i32) i32 {
+    if (stride <= 0) return 0;
     return @max(0, filter - @mod(in_size - 1, stride) - 1);
 }
 
