@@ -247,8 +247,14 @@ extension GossSession {
             try checked(goss_session_submit_faces(handle, nil, 0))
             return
         }
-        var raws = faces.map { $0.raw }
-        try checked(goss_session_submit_faces(handle, &raws, UInt32(raws.count)))
+        if faceSubmitScratch.count < faces.count {
+            faceSubmitScratch = Array(repeating: goss_face_result(), count: faces.count)
+        }
+        for i in 0..<faces.count { faceSubmitScratch[i] = faces[i].raw }
+        let count = UInt32(faces.count)
+        try faceSubmitScratch.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_submit_faces(handle, buffer.baseAddress, count))
+        }
     }
 
     /// The number of faces the last submitFaces kept, zero to GOSS_FACE_MAX.
@@ -274,8 +280,14 @@ extension GossSession {
             try checked(goss_session_submit_bodies(handle, nil, 0))
             return
         }
-        var raws = bodies.map { $0.raw }
-        try checked(goss_session_submit_bodies(handle, &raws, UInt32(raws.count)))
+        if bodySubmitScratch.count < bodies.count {
+            bodySubmitScratch = Array(repeating: goss_pose_result(), count: bodies.count)
+        }
+        for i in 0..<bodies.count { bodySubmitScratch[i] = bodies[i].raw }
+        let count = UInt32(bodies.count)
+        try bodySubmitScratch.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_submit_bodies(handle, buffer.baseAddress, count))
+        }
     }
 
     /// Submits the hands tracked this frame from the app's own tracker, so
