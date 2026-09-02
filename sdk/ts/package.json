@@ -1,6 +1,6 @@
 {
   "name": "@myzonerocks/gosslens",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "description": "Web SDK for the gosslens camera and AR engine, over the wasm core.",
   "license": "Apache-2.0",
   "repository": {
