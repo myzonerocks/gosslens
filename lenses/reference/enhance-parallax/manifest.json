@@ -1,0 +1,25 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.enhance-parallax",
+  "version": "1.0.0",
+  "display_name": "Parallax 3D Photo",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {
+      "id": "parallax",
+      "type": "parallax.pass",
+      "inputs": {
+        "frame": "camera"
+      },
+      "params": {},
+      "parallax": {
+        "amount": 0.08,
+        "focus": 0.45,
+        "fill": 1
+      }
+    }
+  ],
+  "triggers": []
+}

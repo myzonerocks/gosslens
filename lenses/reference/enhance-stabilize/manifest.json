@@ -1,0 +1,23 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.enhance-stabilize",
+  "version": "1.0.0",
+  "display_name": "Stabilize",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {
+      "id": "stabilize",
+      "type": "stabilize.pass",
+      "inputs": {
+        "frame": "camera"
+      },
+      "params": {},
+      "stabilize": {
+        "strength": 0.8
+      }
+    }
+  ],
+  "triggers": []
+}

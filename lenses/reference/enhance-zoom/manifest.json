@@ -1,0 +1,25 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.enhance-zoom",
+  "version": "1.0.0",
+  "display_name": "Zoom Crop",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {
+      "id": "zoom",
+      "type": "zoom.pass",
+      "inputs": {
+        "frame": "camera"
+      },
+      "params": {},
+      "zoom": {
+        "factor": 1.6,
+        "cx": 0.4,
+        "cy": 0.45
+      }
+    }
+  ],
+  "triggers": []
+}

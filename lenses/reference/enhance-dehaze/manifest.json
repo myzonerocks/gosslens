@@ -1,0 +1,23 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.enhance-dehaze",
+  "version": "1.0.0",
+  "display_name": "Dehaze",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {
+      "id": "dehaze",
+      "type": "dehaze.pass",
+      "inputs": {
+        "frame": "camera"
+      },
+      "params": {},
+      "dehaze": {
+        "strength": 0.85
+      }
+    }
+  ],
+  "triggers": []
+}
