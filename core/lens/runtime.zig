@@ -415,6 +415,10 @@ pub const SpriteNode = struct {
     play: manifest.SpritePlay,
     /// The direct-manipulation gestures this sprite responds to.
     interaction: manifest.Interaction,
+    /// Clockwise turn in degrees about the quad's centre, and the parameter name
+    /// that replaces it live.
+    rotation: f32,
+    rotation_param: []const u8,
     /// A segmentation channel that keys the sprite full-frame; null draws the
     /// sprite over the frame at its rect. mask_over selects the composite:
     /// false fills behind the region (greenscreen), true fills over it (restyle).
@@ -480,6 +484,10 @@ pub const TextNode = struct {
     /// A parameter name whose live value overrides opacity each frame, or
     /// empty for the static opacity.
     opacity_param: []const u8,
+    /// Clockwise turn in degrees about the text's centre, and the parameter name
+    /// that replaces it live.
+    rotation: f32 = 0,
+    rotation_param: []const u8 = "",
     /// Rich-text styling: a vertical gradient base color, a drop shadow, and a
     /// stroke outline (each null/false is off).
     gradient: ?[3]u8,
@@ -1629,7 +1637,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .sprite_2d) continue;
             const sp = node.sprite orelse manifest.SpriteField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .play = sp.play, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over, .mask_strength = sp.mask_strength, .mask_strength_param = sp.mask_strength_param, .anchor_face = sp.anchor_face, .cutout_channel = sp.cutout_channel, .cutout_softness = sp.cutout_softness, .cutout_whole = sp.cutout_whole });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .image_stem = node.asset_stem.?, .rect = .{ sp.x, sp.y, sp.w, sp.h }, .opacity = sp.opacity, .opacity_param = sp.opacity_param, .x_param = sp.x_param, .y_param = sp.y_param, .w_param = sp.w_param, .h_param = sp.h_param, .frames = sp.frames, .fps = sp.fps, .play = sp.play, .interaction = sp.interaction, .mask_channel = sp.mask_channel, .mask_over = sp.mask_mode == .over, .mask_strength = sp.mask_strength, .mask_strength_param = sp.mask_strength_param, .rotation = sp.rotation, .rotation_param = sp.rotation_param, .anchor_face = sp.anchor_face, .cutout_channel = sp.cutout_channel, .cutout_softness = sp.cutout_softness, .cutout_whole = sp.cutout_whole });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1661,7 +1669,7 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .text_2d) continue;
             const tf = node.text orelse manifest.TextField{};
-            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth, .wrap = tf.wrap, .bend = tf.bend, .anchor_face = tf.anchor_face, .content_source = tf.content_source, .countdown_seconds = tf.countdown_seconds });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .content = tf.content, .rect = .{ tf.x, tf.y, tf.w, tf.h }, .opacity = tf.opacity, .color = .{ tf.r, tf.g, tf.b }, .opacity_param = tf.opacity_param, .rotation = tf.rotation, .rotation_param = tf.rotation_param, .gradient = tf.gradient, .shadow = tf.shadow, .stroke = tf.stroke, .depth = tf.depth, .wrap = tf.wrap, .bend = tf.bend, .anchor_face = tf.anchor_face, .content_source = tf.content_source, .countdown_seconds = tf.countdown_seconds });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -1926,7 +1934,7 @@ pub const Lens = struct {
         }
     }
 
-    fn nodeIndexByName(self: *const Lens, name: []const u8) ?graph.NodeIndex {
+    pub fn nodeIndexByName(self: *const Lens, name: []const u8) ?graph.NodeIndex {
         for (self.nodes) |node| {
             if (std.mem.eql(u8, node.node_id, name)) return node.graph_index;
         }

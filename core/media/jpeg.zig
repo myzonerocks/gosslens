@@ -260,6 +260,237 @@ fn clampSample(pixels: []const u8, width: u32, height: u32, sx: i64, sy: i64) [3
     return .{ pixels[i], pixels[i + 1], pixels[i + 2] };
 }
 
+
+/// The rows an MCU row can see. The whole-image encoder hands it every row; the streaming one
+/// hands it the band in hand and the row the band starts at. Sampling clamps to the picture, so an
+/// MCU hanging off the right or bottom edge repeats the edge exactly as it always has.
+const Rows = struct {
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+    /// The image row `pixels` begins at.
+    top: u32,
+    /// How many rows `pixels` holds.
+    rows: u32,
+
+    fn sample(v: Rows, sx: i64, sy: i64) [3]u8 {
+        const cx: u32 = @intCast(std.math.clamp(sx, 0, @as(i64, v.width) - 1));
+        const cy: u32 = @intCast(std.math.clamp(sy, 0, @as(i64, v.height) - 1));
+        const local = std.math.clamp(@as(i64, cy) - @as(i64, v.top), 0, @as(i64, v.rows) - 1);
+        const i = (@as(usize, @intCast(local)) * v.width + cx) * 4;
+        return .{ v.pixels[i], v.pixels[i + 1], v.pixels[i + 2] };
+    }
+};
+
+/// The predictors and tables an MCU row needs, carried between rows and, when streaming, between
+/// bands: a JPEG's DC values are differences from the previous block, so losing them at a band
+/// edge would shift every colour after it.
+const Mcu = struct {
+    luma_q: [64]u16,
+    chroma_q: [64]u16,
+    dc_luma: [256]Code,
+    ac_luma: [256]Code,
+    dc_chroma: [256]Code,
+    ac_chroma: [256]Code,
+    dc_y: i32 = 0,
+    dc_cb: i32 = 0,
+    dc_cr: i32 = 0,
+
+    fn row(m: *Mcu, w: *Writer, v: Rows, my: u32, mcus_x: u32) !void {
+        var mx: u32 = 0;
+        while (mx < mcus_x) : (mx += 1) {
+            const base_x: i64 = @as(i64, mx) * 16;
+            const base_y: i64 = @as(i64, my) * 16;
+            var cb_block: [64]f32 = undefined;
+            var cr_block: [64]f32 = undefined;
+
+            var by: u32 = 0;
+            while (by < 2) : (by += 1) {
+                var bx: u32 = 0;
+                while (bx < 2) : (bx += 1) {
+                    var y_block: [64]f32 = undefined;
+                    var r: u32 = 0;
+                    while (r < 8) : (r += 1) {
+                        var col: u32 = 0;
+                        while (col < 8) : (col += 1) {
+                            const rgb = v.sample(base_x + @as(i64, bx) * 8 + col, base_y + @as(i64, by) * 8 + r);
+                            const yy = 0.299 * f(rgb[0]) + 0.587 * f(rgb[1]) + 0.114 * f(rgb[2]);
+                            y_block[r * 8 + col] = yy - 128.0;
+                        }
+                    }
+                    m.dc_y = try encodeBlock(w, &y_block, m.luma_q, m.dc_luma, m.ac_luma, m.dc_y);
+                }
+            }
+
+            var r: u32 = 0;
+            while (r < 8) : (r += 1) {
+                var col: u32 = 0;
+                while (col < 8) : (col += 1) {
+                    const sx = base_x + @as(i64, col) * 2;
+                    const sy = base_y + @as(i64, r) * 2;
+                    var cb_sum: f32 = 0;
+                    var cr_sum: f32 = 0;
+                    var dy: i64 = 0;
+                    while (dy < 2) : (dy += 1) {
+                        var dx: i64 = 0;
+                        while (dx < 2) : (dx += 1) {
+                            const rgb = v.sample(sx + dx, sy + dy);
+                            cb_sum += -0.168736 * f(rgb[0]) - 0.331264 * f(rgb[1]) + 0.5 * f(rgb[2]);
+                            cr_sum += 0.5 * f(rgb[0]) - 0.418688 * f(rgb[1]) - 0.081312 * f(rgb[2]);
+                        }
+                    }
+                    cb_block[r * 8 + col] = cb_sum / 4.0;
+                    cr_block[r * 8 + col] = cr_sum / 4.0;
+                }
+            }
+            m.dc_cb = try encodeBlock(w, &cb_block, m.chroma_q, m.dc_chroma, m.ac_chroma, m.dc_cb);
+            m.dc_cr = try encodeBlock(w, &cr_block, m.chroma_q, m.dc_chroma, m.ac_chroma, m.dc_cr);
+        }
+    }
+};
+
+
+/// The markers before the scan: identity, quantisation, frame shape, and the Huffman tables.
+/// Shared, so the whole-image and streaming encoders can never write different headers.
+fn writeHeader(w: *Writer, gpa: std.mem.Allocator, width: u32, height: u32, luma_q: [64]u16, chroma_q: [64]u16, opts: Options) Error!void {
+    try w.marker(0xD8); // SOI
+
+    // APP0 JFIF.
+    try w.marker(0xE0);
+    try w.u16be(16);
+    try w.out.appendSlice(gpa, "JFIF\x00");
+    try w.out.appendSlice(gpa, &.{ 1, 1, 0 }); // version 1.1, no density units
+    try w.out.appendSlice(gpa, &.{ 0, 1, 0, 1 }); // 1x1 density
+    try w.out.appendSlice(gpa, &.{ 0, 0 }); // no thumbnail
+
+    // APP1 EXIF carrying orientation and the software tag, so viewers
+    // rotate correctly and the encoder is identifiable.
+    try writeExif(w, gpa, opts.orientation);
+
+    // APP2 ICC profile for wide-gamut output, chunked at 65533 bytes.
+    if (opts.icc_profile) |icc| try writeIccProfile(w, gpa, icc);
+
+    // DQT: luma then chroma, 8-bit precision, in zigzag order.
+    try writeQuantTable(w, gpa, 0, luma_q);
+    try writeQuantTable(w, gpa, 1, chroma_q);
+
+    // SOF0: baseline, 3 components, Y at 2x2 sampling (4:2:0).
+    try w.marker(0xC0);
+    try w.u16be(17);
+    try w.out.append(gpa, 8); // 8-bit samples
+    try w.u16be(@intCast(height));
+    try w.u16be(@intCast(width));
+    try w.out.append(gpa, 3);
+    try w.out.appendSlice(gpa, &.{ 1, 0x22, 0 }); // Y: 2x2, quant 0
+    try w.out.appendSlice(gpa, &.{ 2, 0x11, 1 }); // Cb: 1x1, quant 1
+    try w.out.appendSlice(gpa, &.{ 3, 0x11, 1 }); // Cr: 1x1, quant 1
+
+    try writeHuffTable(w, gpa, 0x00, dc_luma_bits, &dc_luma_vals);
+    try writeHuffTable(w, gpa, 0x10, ac_luma_bits, &ac_luma_vals);
+    try writeHuffTable(w, gpa, 0x01, dc_chroma_bits, &dc_chroma_vals);
+    try writeHuffTable(w, gpa, 0x11, ac_chroma_bits, &ac_chroma_vals);
+
+    // SOS.
+    try w.marker(0xDA);
+    try w.u16be(12);
+    try w.out.append(gpa, 3);
+    try w.out.appendSlice(gpa, &.{ 1, 0x00 }); // Y uses DC/AC table 0
+    try w.out.appendSlice(gpa, &.{ 2, 0x11 }); // Cb uses table 1
+    try w.out.appendSlice(gpa, &.{ 3, 0x11 }); // Cr uses table 1
+    try w.out.appendSlice(gpa, &.{ 0, 63, 0 }); // full spectral selection
+
+}
+
+/// A JPEG written band by band, so a capture larger than memory never exists whole. Rows arrive
+/// in any grouping; whatever does not complete a 16-row MCU row is held back. The DC predictors
+/// and bit accumulator carry across bands - a DC value is a difference from the previous block,
+/// so dropping it at a seam would shift every colour after it.
+pub const StreamEncoder = struct {
+    gpa: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    w: Writer,
+    mcu: Mcu,
+    width: u32,
+    height: u32,
+    /// Rows held back because they do not complete an MCU row yet.
+    held: []u8,
+    held_rows: u32 = 0,
+    /// The image row the held rows begin at.
+    held_top: u32 = 0,
+    /// MCU rows already written.
+    done_rows: u32 = 0,
+
+    pub fn begin(e: *StreamEncoder, gpa: std.mem.Allocator, out: *std.ArrayList(u8), width: u32, height: u32, opts: Options) Error!void {
+        if (width == 0 or height == 0) return error.EmptyImage;
+        const luma_q = scaleQuant(luma_base, opts.quality);
+        const chroma_q = scaleQuant(chroma_base, opts.quality);
+        e.* = .{
+            .gpa = gpa,
+            .out = out,
+            .w = .{ .out = out, .gpa = gpa },
+            .mcu = .{
+                .luma_q = luma_q,
+                .chroma_q = chroma_q,
+                .dc_luma = buildTable(dc_luma_bits, &dc_luma_vals),
+                .ac_luma = buildTable(ac_luma_bits, &ac_luma_vals),
+                .dc_chroma = buildTable(dc_chroma_bits, &dc_chroma_vals),
+                .ac_chroma = buildTable(ac_chroma_bits, &ac_chroma_vals),
+            },
+            .width = width,
+            .height = height,
+            .held = try gpa.alloc(u8, @as(usize, width) * 16 * 4),
+        };
+        try writeHeader(&e.w, gpa, width, height, luma_q, chroma_q, opts);
+    }
+
+    pub fn deinit(e: *StreamEncoder) void {
+        e.gpa.free(e.held);
+        e.held = &.{};
+    }
+
+    /// Takes the next rows of the picture, top to bottom.
+    pub fn writeBand(e: *StreamEncoder, pixels: []const u8, rows: u32) Error!void {
+        if (rows == 0) return;
+        if (pixels.len != @as(usize, e.width) * rows * 4) return error.SizeMismatch;
+        var taken: u32 = 0;
+        while (taken < rows) {
+            const room = 16 - e.held_rows;
+            const take = @min(room, rows - taken);
+            const dst = @as(usize, e.held_rows) * e.width * 4;
+            const src = @as(usize, taken) * e.width * 4;
+            @memcpy(e.held[dst..][0 .. @as(usize, take) * e.width * 4], pixels[src..][0 .. @as(usize, take) * e.width * 4]);
+            e.held_rows += take;
+            taken += take;
+            if (e.held_rows == 16) try e.flushRow();
+        }
+    }
+
+    /// Encodes the held MCU row. The view is told which image row it starts at, so an MCU reading
+    /// past the band's bottom clamps to the picture exactly as the whole-image encoder does.
+    fn flushRow(e: *StreamEncoder) Error!void {
+        const view: Rows = .{
+            .pixels = e.held[0 .. @as(usize, e.width) * e.held_rows * 4],
+            .width = e.width,
+            .height = e.height,
+            .top = e.held_top,
+            .rows = e.held_rows,
+        };
+        const mcus_x = (e.width + 15) / 16;
+        try e.mcu.row(&e.w, view, e.done_rows, mcus_x);
+        e.done_rows += 1;
+        e.held_top += e.held_rows;
+        e.held_rows = 0;
+    }
+
+    /// Closes the picture: the last short band is encoded, the bits are flushed, and the end
+    /// marker written.
+    pub fn finish(e: *StreamEncoder) Error!void {
+        if (e.held_rows > 0) try e.flushRow();
+        try e.w.flushBits();
+        try e.w.marker(0xD9);
+    }
+};
+
 /// Encodes tightly packed RGBA8 as a baseline JPEG (4:2:0), appending to
 /// `out`. Chroma is subsampled 2x2 over 16x16 MCUs; edge samples clamp.
 pub fn encode(gpa: std.mem.Allocator, out: *std.ArrayList(u8), pixels: []const u8, width: u32, height: u32, opts: Options) Error!void {
@@ -276,114 +507,21 @@ pub fn encode(gpa: std.mem.Allocator, out: *std.ArrayList(u8), pixels: []const u
     var w = Writer{ .out = out, .gpa = gpa };
     errdefer out.clearRetainingCapacity();
 
-    try w.marker(0xD8); // SOI
+    try writeHeader(&w, gpa, width, height, luma_q, chroma_q, opts);
 
-    // APP0 JFIF.
-    try w.marker(0xE0);
-    try w.u16be(16);
-    try out.appendSlice(gpa, "JFIF\x00");
-    try out.appendSlice(gpa, &.{ 1, 1, 0 }); // version 1.1, no density units
-    try out.appendSlice(gpa, &.{ 0, 1, 0, 1 }); // 1x1 density
-    try out.appendSlice(gpa, &.{ 0, 0 }); // no thumbnail
-
-    // APP1 EXIF carrying orientation and the software tag, so viewers
-    // rotate correctly and the encoder is identifiable.
-    try writeExif(&w, gpa, opts.orientation);
-
-    // APP2 ICC profile for wide-gamut output, chunked at 65533 bytes.
-    if (opts.icc_profile) |icc| try writeIccProfile(&w, gpa, icc);
-
-    // DQT: luma then chroma, 8-bit precision, in zigzag order.
-    try writeQuantTable(&w, gpa, 0, luma_q);
-    try writeQuantTable(&w, gpa, 1, chroma_q);
-
-    // SOF0: baseline, 3 components, Y at 2x2 sampling (4:2:0).
-    try w.marker(0xC0);
-    try w.u16be(17);
-    try out.append(gpa, 8); // 8-bit samples
-    try w.u16be(@intCast(height));
-    try w.u16be(@intCast(width));
-    try out.append(gpa, 3);
-    try out.appendSlice(gpa, &.{ 1, 0x22, 0 }); // Y: 2x2, quant 0
-    try out.appendSlice(gpa, &.{ 2, 0x11, 1 }); // Cb: 1x1, quant 1
-    try out.appendSlice(gpa, &.{ 3, 0x11, 1 }); // Cr: 1x1, quant 1
-
-    try writeHuffTable(&w, gpa, 0x00, dc_luma_bits, &dc_luma_vals);
-    try writeHuffTable(&w, gpa, 0x10, ac_luma_bits, &ac_luma_vals);
-    try writeHuffTable(&w, gpa, 0x01, dc_chroma_bits, &dc_chroma_vals);
-    try writeHuffTable(&w, gpa, 0x11, ac_chroma_bits, &ac_chroma_vals);
-
-    // SOS.
-    try w.marker(0xDA);
-    try w.u16be(12);
-    try out.append(gpa, 3);
-    try out.appendSlice(gpa, &.{ 1, 0x00 }); // Y uses DC/AC table 0
-    try out.appendSlice(gpa, &.{ 2, 0x11 }); // Cb uses table 1
-    try out.appendSlice(gpa, &.{ 3, 0x11 }); // Cr uses table 1
-    try out.appendSlice(gpa, &.{ 0, 63, 0 }); // full spectral selection
-
-    var dc_y: i32 = 0;
-    var dc_cb: i32 = 0;
-    var dc_cr: i32 = 0;
+    var mcu: Mcu = .{
+        .luma_q = luma_q,
+        .chroma_q = chroma_q,
+        .dc_luma = dc_luma,
+        .ac_luma = ac_luma,
+        .dc_chroma = dc_chroma,
+        .ac_chroma = ac_chroma,
+    };
+    const view: Rows = .{ .pixels = pixels, .width = width, .height = height, .top = 0, .rows = height };
     const mcus_x = (width + 15) / 16;
     const mcus_y = (height + 15) / 16;
-
     var my: u32 = 0;
-    while (my < mcus_y) : (my += 1) {
-        var mx: u32 = 0;
-        while (mx < mcus_x) : (mx += 1) {
-            const base_x: i64 = @as(i64, mx) * 16;
-            const base_y: i64 = @as(i64, my) * 16;
-            var cb_block: [64]f32 = undefined;
-            var cr_block: [64]f32 = undefined;
-
-            // Four luma blocks in raster order within the MCU, chroma
-            // averaged over each 2x2 luma quad as we go.
-            var by: u32 = 0;
-            while (by < 2) : (by += 1) {
-                var bx: u32 = 0;
-                while (bx < 2) : (bx += 1) {
-                    var y_block: [64]f32 = undefined;
-                    var row: u32 = 0;
-                    while (row < 8) : (row += 1) {
-                        var col: u32 = 0;
-                        while (col < 8) : (col += 1) {
-                            const sx = base_x + @as(i64, bx) * 8 + col;
-                            const sy = base_y + @as(i64, by) * 8 + row;
-                            const rgb = clampSample(pixels, width, height, sx, sy);
-                            const yy = 0.299 * f(rgb[0]) + 0.587 * f(rgb[1]) + 0.114 * f(rgb[2]);
-                            y_block[row * 8 + col] = yy - 128.0;
-                        }
-                    }
-                    dc_y = try encodeBlock(&w, &y_block, luma_q, dc_luma, ac_luma, dc_y);
-                }
-            }
-
-            var row: u32 = 0;
-            while (row < 8) : (row += 1) {
-                var col: u32 = 0;
-                while (col < 8) : (col += 1) {
-                    const sx = base_x + @as(i64, col) * 2;
-                    const sy = base_y + @as(i64, row) * 2;
-                    var cb_sum: f32 = 0;
-                    var cr_sum: f32 = 0;
-                    var dy: i64 = 0;
-                    while (dy < 2) : (dy += 1) {
-                        var dx: i64 = 0;
-                        while (dx < 2) : (dx += 1) {
-                            const rgb = clampSample(pixels, width, height, sx + dx, sy + dy);
-                            cb_sum += -0.168736 * f(rgb[0]) - 0.331264 * f(rgb[1]) + 0.5 * f(rgb[2]);
-                            cr_sum += 0.5 * f(rgb[0]) - 0.418688 * f(rgb[1]) - 0.081312 * f(rgb[2]);
-                        }
-                    }
-                    cb_block[row * 8 + col] = cb_sum / 4.0;
-                    cr_block[row * 8 + col] = cr_sum / 4.0;
-                }
-            }
-            dc_cb = try encodeBlock(&w, &cb_block, chroma_q, dc_chroma, ac_chroma, dc_cb);
-            dc_cr = try encodeBlock(&w, &cr_block, chroma_q, dc_chroma, ac_chroma, dc_cr);
-        }
-    }
+    while (my < mcus_y) : (my += 1) try mcu.row(&w, view, my, mcus_x);
 
     try w.flushBits();
     try w.marker(0xD9); // EOI

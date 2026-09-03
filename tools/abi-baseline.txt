@@ -1,4 +1,4 @@
-abi 0.100
+abi 0.102
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -178,6 +178,7 @@ fn goss_status goss_session_ar_brush_begin(goss_session *session)
 fn goss_status goss_session_ar_brush_point(goss_session *session, float x, float y, float z)
 fn goss_status goss_session_ar_brush_end(goss_session *session)
 fn goss_status goss_session_ar_brush_undo(goss_session *session)
+fn goss_status goss_session_ar_brush_redo(goss_session *session)
 fn goss_status goss_session_ar_brush_clear(goss_session *session)
 fn goss_status goss_session_grab(goss_session *session, float x, float y, float z)
 fn goss_status goss_session_release(goss_session *session)
@@ -207,6 +208,7 @@ fn goss_status goss_session_enable_segmentation(goss_session *session, const uin
 fn goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest)
 fn goss_status goss_session_clear_model_allowlist(goss_session *session)
 fn goss_status goss_session_provide_lens_asset(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *bytes, size_t len)
+fn goss_status goss_session_sprite_transform(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out_x, float *out_y, float *out_w, float *out_h, float *out_rotation)
 fn goss_status goss_session_ml_output(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint32_t tensor, float *out, size_t capacity, size_t *out_len)
 fn goss_status goss_session_ml_mask(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out, size_t capacity, size_t *out_len)
 fn void goss_session_disable_segmentation(goss_session *session)

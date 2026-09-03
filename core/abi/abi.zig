@@ -209,6 +209,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_ar_brush_point(goss_session *session, float x, float y, float z)",
     "goss_status goss_session_ar_brush_end(goss_session *session)",
     "goss_status goss_session_ar_brush_undo(goss_session *session)",
+    "goss_status goss_session_ar_brush_redo(goss_session *session)",
     "goss_status goss_session_ar_brush_clear(goss_session *session)",
     "goss_status goss_session_grab(goss_session *session, float x, float y, float z)",
     "goss_status goss_session_release(goss_session *session)",
@@ -238,6 +239,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest)",
     "goss_status goss_session_clear_model_allowlist(goss_session *session)",
     "goss_status goss_session_provide_lens_asset(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *bytes, size_t len)",
+    "goss_status goss_session_sprite_transform(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out_x, float *out_y, float *out_w, float *out_h, float *out_rotation)",
     "goss_status goss_session_ml_output(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint32_t tensor, float *out, size_t capacity, size_t *out_len)",
     "goss_status goss_session_ml_mask(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out, size_t capacity, size_t *out_len)",
     "void goss_session_disable_segmentation(goss_session *session)",
@@ -762,6 +764,10 @@ pub const Session = struct {
     audio_ring: [audio_ring_len]f32 = @splat(0),
     audio_ring_pos: usize = 0,
     audio_ring_filled: bool = false,
+    /// Brings the device's own microphone rate to the ring's fixed one, carrying its phase across
+    /// buffers. Without it the ring held whatever rate the handset used and every audio model read
+    /// a rate-shifted window - the same speech answered differently per device.
+    audio_resampler: audio_analysis.MicResampler = .{},
     /// Scratch the tick copies a worker's window into, in chronological order,
     /// before handing it to the inference core. Allocated when the first audio
     /// worker loads, sized to the ring.
@@ -1440,6 +1446,12 @@ pub const Session = struct {
     sprite_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     sprite_rects: std.AutoHashMapUnmanaged(graph.NodeIndex, [5]f32) = .empty,
+    /// A sprite.2d or text.2d node's authored turn in degrees, and the parameter
+    /// name that replaces it live. A gesture's turn adds to this, so an authored
+    /// angle is where the sticker starts rather than something the first drag
+    /// discards. Read back through goss_session_sprite_transform.
+    sprite_rotations: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    sprite_rotation_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
     /// Extruded 3D text nodes: the glyph block mesh and its color, drawn via
     /// the model path, by graph index.
     text3d_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { mesh: render.Renderer.ModelMesh, color: [4]f32 }) = .empty,
@@ -3870,6 +3882,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.tile = if (is_final) s.capture_tile else null;
                 // The frame passes through whole; the mesh then draws
                 // only its own triangles over it. No tracked face means
                 // no draw, the capability's defined degradation.
@@ -4003,6 +4016,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.tile = if (is_final) s.capture_tile else null;
                 // The frame passes through whole; the lash strip then rises off
                 // each tracked upper lid over it. No tracked face means no draw,
                 // the capability's defined degradation.
@@ -4108,7 +4122,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     const sc = @max(rect[2], 0.1) * 0.7;
                     // Place the text at its rect centre and rotate it so the
                     // extruded sides show rather than reading as a flat label.
-                    const model = math.Mat4.translation(.{ cx * 0.7, cy * 0.7, 0 }).mul(math.Mat4.rotationY(0.6)).mul(math.Mat4.rotationX(0.25)).mul(math.Mat4.scaling(.{ sc, sc, sc }));
+                    // The Y/X tilt shows the extruded sides; the authored turn rides on top of it
+                    // about the screen normal, so a 3D banner tilts like a flat one.
+                    const turn: f32 = spriteTurn(s, entry.graph_index);
+                    const model = math.Mat4.translation(.{ cx * 0.7, cy * 0.7, 0 }).mul(math.Mat4.rotationZ(std.math.degreesToRadians(turn))).mul(math.Mat4.rotationY(0.6)).mul(math.Mat4.rotationX(0.25)).mul(math.Mat4.scaling(.{ sc, sc, sc }));
                     r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
                     r.drawModelMesh(mesh_view, text3d.mesh, model, text3d.color, aspect);
                     if (output) |target| {
@@ -4208,14 +4225,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
                 // An interactive sprite draws at its dragged and scaled rect,
                 // keeping its own opacity, and turned by any live rotation.
-                var sprite_rotation: f32 = 0;
+                var sprite_rotation: f32 = std.math.degreesToRadians(spriteTurn(s, entry.graph_index));
                 if (s.sprite_interactions.get(entry.graph_index)) |si| {
                     const tr = si.rect();
                     rect[0] = tr[0];
                     rect[1] = tr[1];
                     rect[2] = tr[2];
                     rect[3] = tr[3];
-                    sprite_rotation = si.rot;
+                    sprite_rotation += si.rot;
                 }
                 drawn += 1;
                 const blit_view = next_view_id;
@@ -5009,6 +5026,8 @@ pub fn destroySession(session: *Session) void {
     session.text3d_meshes.deinit(session.engine.gpa);
     session.video_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
+    session.sprite_rotations.deinit(session.engine.gpa);
+    session.sprite_rotation_params.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
@@ -5852,6 +5871,31 @@ pub const photo_supported = photo.supported;
 /// out_len so a too-small buffer can be retried. JPEG is the engine's
 /// own encoder - on every target, never gated on a platform backend;
 /// HEIC routes to the platform. color_space picks the JPEG ICC profile.
+/// A capture written band by band, in whichever format was asked for. Both encoders hold their
+/// own state across bands, so the tiling loop hands rows to one of these and never branches.
+const BandSink = union(enum) {
+    png: png.StreamEncoder,
+    jpeg: jpeg.StreamEncoder,
+
+    fn writeBand(self: *BandSink, rows: []const u8, count: u32) !void {
+        switch (self.*) {
+            inline else => |*enc| try enc.writeBand(rows, count),
+        }
+    }
+
+    fn finish(self: *BandSink) !void {
+        switch (self.*) {
+            inline else => |*enc| try enc.finish(),
+        }
+    }
+
+    fn deinit(self: *BandSink) void {
+        switch (self.*) {
+            inline else => |*enc| enc.deinit(),
+        }
+    }
+};
+
 fn encodeLossyPhoto(gpa: std.mem.Allocator, pixels: []const u8, width: u32, height: u32, format: u32, quality: u32, color_space: u32, orientation: u8, data: []u8, out_len: *usize) Status {
     if (format == 1) {
         var encoded: std.ArrayList(u8) = .empty;
@@ -6077,6 +6121,22 @@ pub export fn goss_engine_recording_stop(engine: ?*Engine) Status {
 /// and beat analysis always consumes it (driving audio.level and
 /// audio.beat triggers), and an active recording of this session muxes
 /// it as the audio track where the backend supports audio.
+/// Writes resampled microphone samples straight into the session's ring, so the resampler needs
+/// no buffer of its own between it and the ring.
+const RingSink = struct {
+    session: *Session,
+
+    pub fn put(self: *RingSink, v: f32) void {
+        const s = self.session;
+        s.audio_ring[s.audio_ring_pos] = v;
+        s.audio_ring_pos += 1;
+        if (s.audio_ring_pos >= audio_ring_len) {
+            s.audio_ring_pos = 0;
+            s.audio_ring_filled = true;
+        }
+    }
+};
+
 pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, timestamp_us: i64) Status {
     const s = session orelse return .invalid_argument;
     const data = samples orelse return .invalid_argument;
@@ -6086,19 +6146,21 @@ pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f
     s.audio_engine_fed = true;
     s.audio_timestamp_us = timestamp_us;
 
-    // Downmix each frame to mono and write it into the microphone ring, so an
-    // audio.infer worker reads a window of the latest samples off the frame path.
+    // Downmix each frame to mono, resample to the ring's fixed rate, and write it in, so an
+    // audio.infer worker reads a window of the latest samples at one rate on every device.
+    // The mono pass runs in chunks so a long buffer needs no allocation.
     var fi: usize = 0;
-    while (fi < frame_count) : (fi += 1) {
-        var mono: f32 = 0;
-        for (0..channels) |ch| mono += slice[fi * channels + ch];
-        mono /= @floatFromInt(channels);
-        s.audio_ring[s.audio_ring_pos] = mono;
-        s.audio_ring_pos += 1;
-        if (s.audio_ring_pos >= audio_ring_len) {
-            s.audio_ring_pos = 0;
-            s.audio_ring_filled = true;
+    var mono: [512]f32 = undefined;
+    var sink: RingSink = .{ .session = s };
+    while (fi < frame_count) {
+        const take = @min(mono.len, frame_count - fi);
+        for (0..take) |k| {
+            var sum: f32 = 0;
+            for (0..channels) |ch| sum += slice[(fi + k) * channels + ch];
+            mono[k] = sum / @as(f32, @floatFromInt(channels));
         }
+        s.audio_resampler.feed(mono[0..take], sample_rate, &sink);
+        fi += take;
     }
 
     const e = s.engine;
@@ -6169,17 +6231,11 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     };
     const render_w: u32 = @as(u32, still_w) * supersample;
     const render_h: u32 = @as(u32, still_h) * supersample;
-    // Above the max texture size a single target is impossible, so the
-    // output composites in tiles and stitches. The perspective 3D content
-    // (model, cloth, hair, particles) tiles through the per-tile
-    // sub-frustum crop; the screen-space face-mesh overlay and rotated or
-    // mirrored plain frames stay single-target under the cap.
+    // Above the max texture size a single target is impossible, so the output composites in tiles
+    // and stitches. The perspective 3D content tiles through the per-tile sub-frustum crop, and a
+    // turned or mirrored frame tiles because the turn rides the sampling rather than a transform
+    // on the quad. The screen-space face-mesh overlay is still single-target under the cap.
     const tile_cap: u32 = if (s.capture_tile_cap != 0) s.capture_tile_cap else 16384;
-    const has_screenspace_mesh = s.mesh_face_textures.count() > 0 or s.paint_face_textures.count() > 0 or s.face_swap_textures.count() > 0 or s.lash_params.count() > 0;
-    const rot = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
-    const upright = rot == 0 and (current.desc.flags & frame_flag_mirror) == 0;
-    const tileable = !has_screenspace_mesh and upright;
-    if ((render_w > tile_cap or render_h > tile_cap) and !tileable) return .invalid_argument;
 
     const gpa = e.gpa;
     const render_size = @as(usize, render_w) * @as(usize, render_h) * 4;
@@ -6200,11 +6256,11 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
         s.capture_aspect = 0;
     }
 
-    // Streaming tiled PNG: encode each tile-row band as it finishes and
-    // free it, so peak memory is one band plus the compressed output, not
-    // the whole render buffer - what lets a large capture fit in a phone's
-    // RAM. Supersample and the lossy formats keep the full-buffer path.
-    if ((cols > 1 or rows > 1) and cfg.format == 0 and supersample == 1 and !s.capture_no_stream) {
+    // Encode each band as it finishes and free it, so peak memory is one band plus the output
+    // rather than the whole render buffer - what lets a large capture fit in a phone's RAM.
+    // A supersampled capture streams too: the band walks the output, so each renders its own
+    // taller slice and downsamples before encoding, instead of holding the enlarged buffer.
+    if ((cols > 1 or rows > 1) and (cfg.format == 0 or cfg.format == 1) and !s.capture_no_stream) {
         const space = color.Space.fromInt(cfg.color_space);
         var tags: png.ColorTags = .{};
         if (space != .srgb) {
@@ -6213,18 +6269,36 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
         }
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(gpa);
-        var enc: png.StreamEncoder = undefined;
-        enc.begin(gpa, &encoded, render_w, render_h, .{
-            .bit_depth = if (cfg.bit_depth == 16) 16 else 8,
-            .color = tags,
-        }) catch return .out_of_memory;
+        var enc: BandSink = if (cfg.format == 1) .{ .jpeg = undefined } else .{ .png = undefined };
+        switch (enc) {
+            .png => |*p_| p_.begin(gpa, &encoded, still_w, still_h, .{
+                .bit_depth = if (cfg.bit_depth == 16) 16 else 8,
+                .color = tags,
+            }) catch return .out_of_memory,
+            .jpeg => |*j_| j_.begin(gpa, &encoded, still_w, still_h, .{
+                .quality = if (cfg.quality == 0) 90 else @intCast(cfg.quality),
+                .orientation = 1,
+                .icc_profile = color.iccProfile(cfg.color_space),
+            }) catch return .out_of_memory,
+        }
         defer enc.deinit();
-        const band = gpa.alloc(u8, @as(usize, render_w) * @min(tile_cap, render_h) * 4) catch return .out_of_memory;
+        // The band is a whole number of output rows, so the box filter always sees complete
+        // source blocks: a band split mid-block would average across a seam.
+        const ss: u32 = supersample;
+        const out_band: u32 = @max(1, tile_cap / ss);
+        const band_rows: u32 = out_band * ss;
+        const band = gpa.alloc(u8, @as(usize, render_w) * @min(band_rows, render_h) * 4) catch return .out_of_memory;
         defer gpa.free(band);
+        var shrunk: []u8 = &.{};
+        defer if (shrunk.len > 0) gpa.free(shrunk);
+        if (ss > 1) {
+            shrunk = gpa.alloc(u8, @as(usize, still_w) * out_band * 4) catch return .out_of_memory;
+        }
+        const band_count: u32 = (render_h + band_rows - 1) / band_rows;
         var ty: u32 = 0;
-        while (ty < rows) : (ty += 1) {
-            const tile_y = ty * tile_cap;
-            const th: u32 = @min(tile_cap, render_h - tile_y);
+        while (ty < band_count) : (ty += 1) {
+            const tile_y = ty * band_rows;
+            const th: u32 = @min(band_rows, render_h - tile_y);
             var tx: u32 = 0;
             while (tx < cols) : (tx += 1) {
                 const tile_x = tx * tile_cap;
@@ -6256,11 +6330,19 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
                     @memcpy(band[dst..][0 .. @as(usize, tw) * 4], tile_buf[src..][0 .. @as(usize, tw) * 4]);
                 }
             }
-            enc.writeBand(band[0 .. @as(usize, render_w) * th * 4], th) catch return .out_of_memory;
+            if (ss > 1) {
+                const out_rows: u32 = th / ss;
+                if (out_rows > 0) {
+                    image.downsampleBox(band[0 .. @as(usize, render_w) * th * 4], render_w, th, shrunk[0 .. @as(usize, still_w) * out_rows * 4], still_w, out_rows) catch return .unsupported;
+                    enc.writeBand(shrunk[0 .. @as(usize, still_w) * out_rows * 4], out_rows) catch return .out_of_memory;
+                }
+            } else {
+                enc.writeBand(band[0 .. @as(usize, render_w) * th * 4], th) catch return .out_of_memory;
+            }
         }
         enc.finish() catch return .out_of_memory;
-        w.* = render_w;
-        h.* = render_h;
+        w.* = still_w;
+        h.* = still_h;
         len_out.* = encoded.items.len;
         if (out_capacity < encoded.items.len) return .invalid_argument;
         @memcpy(data[0..encoded.items.len], encoded.items);
@@ -7150,6 +7232,14 @@ pub export fn goss_session_ar_brush_end(session: ?*Session) Status {
 pub export fn goss_session_ar_brush_undo(session: ?*Session) Status {
     const s = session orelse return .invalid_argument;
     s.ar_board.undo();
+    return .ok;
+}
+
+/// Puts back the last world stroke undo took off, so the AR rail offers the same
+/// undo/redo pair the screen brush already does. A fresh stroke drops the redo stack.
+pub export fn goss_session_ar_brush_redo(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.ar_board.redoLast();
     return .ok;
 }
 
@@ -9682,6 +9772,8 @@ fn destroySpriteState(session: *Session) void {
     session.text3d_meshes.clearRetainingCapacity();
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
+    session.sprite_rotations.clearRetainingCapacity();
+    session.sprite_rotation_params.clearRetainingCapacity();
     session.sprite_opacity_params.clearRetainingCapacity();
     session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
@@ -9913,10 +10005,7 @@ fn loadScriptFile(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) 
     if (s.script_engine != null) return;
     const lens = if (s.active_lens) |*l| l else return;
     const file = lens.scriptFile() orelse return;
-    if (!bundleNameOk(file)) return;
-    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, file }) catch return;
-    defer gpa.free(path);
-    const src = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(256 * 1024)) catch return;
+    const src = readBundleAsset(s, gpa, bundle_path, file, 256 * 1024) orelse return;
     defer gpa.free(src);
     setupScriptFromSource(s, src);
 }
@@ -10556,65 +10645,10 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
         error.OutOfMemory => .out_of_memory,
         else => .invalid_argument,
     };
-    // The asset-free composite nodes (blur.pass, grade.pass, bloom.pass) need
-    // no bundle, so build the chain and their params here too - a lens
-    // activated from raw json, as on the web, gets its post-effects. Nodes
-    // that need packaged assets stay not-ready until a directory load.
-    createGradeParams(s, gpa) catch {};
-    createDehazeParams(s, gpa) catch {};
-    createRelightParams(s, gpa) catch {};
-    createGlareParams(s, gpa) catch {};
-    createVignetteParams(s, gpa) catch {};
-    createLowLightParams(s, gpa) catch {};
-    createUndistortParams(s, gpa) catch {};
-    createAwbParams(s, gpa) catch {};
-    createStabilizeParams(s, gpa) catch {};
-    createZoomParams(s, gpa) catch {};
-    createDereflectParams(s, gpa) catch {};
-    createHarmonizeParams(s, gpa) catch {};
-    createInpaintParams(s, gpa) catch {};
-    createRollingParams(s, gpa) catch {};
-    createParallaxParams(s, gpa) catch {};
-    createLashParams(s, gpa) catch {};
-    createBloomParams(s, gpa) catch {};
-    createDofParams(s, gpa) catch {};
-    createFogParams(s, gpa) catch {};
-    createOutlineParams(s, gpa) catch {};
-    createOccluderParams(s, gpa) catch {};
-    createCutoutParams(s, gpa) catch {};
-    createTintParams(s, gpa) catch {};
-    createSmoothParams(s, gpa) catch {};
-    createRetouchParams(s, gpa) catch {};
-    createMatteParams(s, gpa) catch {};
-    createHairMatteParams(s, gpa) catch {};
-    createStylizeParams(s, gpa) catch {};
-    createEdgeParams(s, gpa) catch {};
-    createWarpParams(s, gpa) catch {};
-    createReshapeParams(s, gpa) catch {};
-    createBodyReshapeParams(s, gpa) catch {};
-    createTrailParams(s, gpa) catch {};
-    createSsrParams(s, gpa) catch {};
-    createEnvParams(s, gpa) catch {};
-    // A particle fountain also needs no bundle (the CPU sim and its mesh are
-    // built from the field alone), so create it here too; the empty bundle
-    // path just means a glTF model's own asset never loads, degrading it,
-    // while the fountain runs. A sprite image would need a directory.
-    createModelLoaders(s, gpa, "") catch {};
-    // Text rasterizes from the built-in font and touches no file, and the
-    // audio-enhance state must reset here or a previous lens's echo and pitch
-    // settings would survive into this activation.
-    createTextTextures(s, gpa) catch {};
-    // The heavy inference loaders read through the staged-asset store first,
-    // so a JSON-activated lens (the web path) runs its models with no
-    // filesystem; an unstaged model just leaves that node inert.
-    s.ml_workers_loaded = 0;
-    createMlLoaders(s, gpa, "");
-    createTemporalLoaders(s, gpa, "");
-    createAudioLoaders(s, gpa, "");
-    resolveAudioEnhance(s);
-    createDiffusionLoaders(s, gpa, "");
-    createSplatLoaders(s, gpa, "");
-    buildChainOrder(s, gpa) catch {};
+    // No bundle directory: the same resource pass the directory path runs, with an empty
+    // bundle so every reader falls to the host-staged copies. A node whose asset was never
+    // staged stays inert, which is the capability degrade, not a failed activation.
+    createLensResources(s, gpa, "") catch {};
     return .ok;
 }
 
@@ -10635,13 +10669,11 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         std.log.info("gosslens: every shader.pass left inert - no shader profile for this backend ({t})", .{err});
         return;
     };
-    const io = defaultIo();
     for (passes) |pass| {
-        if (!bundleNameOk(pass.shader_stem)) continue;
-        const bin_path = std.fmt.allocPrint(gpa, "{s}/shaders/{s}.{s}.bin", .{ bundle_path, pass.shader_stem, tag }) catch continue;
-        defer gpa.free(bin_path);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, bin_path, gpa, .limited(256 * 1024)) catch |err| {
-            std.log.info("gosslens: shader.pass {s} left inert - {s} unreadable ({t})", .{ pass.shader_stem, bin_path, err });
+        var bin_buf: [512]u8 = undefined;
+        const bin_name = std.fmt.bufPrint(&bin_buf, "{s}.{s}.bin", .{ pass.shader_stem, tag }) catch continue;
+        const bytes = readBundleFile(session, gpa, bundle_path, "shaders", bin_name, 256 * 1024) orelse {
+            std.log.info("gosslens: shader.pass {s} left inert - shaders/{s} unreadable", .{ pass.shader_stem, bin_name });
             continue;
         };
         defer gpa.free(bytes);
@@ -11086,10 +11118,7 @@ fn createLutLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []co
     const luts = try lens.lutPassNodes(gpa, &session.lens_graph);
     defer gpa.free(luts);
     for (luts) |lut| {
-        if (!bundleNameOk(lut.lut_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, lut.lut_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{lut.lut_stem}) orelse continue;
         session.lut_loaders.put(gpa, lut.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11132,10 +11161,7 @@ fn createBlendLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     const blends = try lens.blendPassNodes(gpa, &session.lens_graph);
     defer gpa.free(blends);
     for (blends) |blend| {
-        if (!bundleNameOk(blend.background_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, blend.background_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{blend.background_stem}) orelse continue;
         session.blend_loaders.put(gpa, blend.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11177,10 +11203,7 @@ fn createEnvLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []co
     defer gpa.free(envs);
     for (envs) |ev| {
         const stem = ev.image_stem orelse continue;
-        if (!bundleNameOk(stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{stem}) orelse continue;
         session.env_loaders.put(gpa, ev.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11288,9 +11311,9 @@ const DynamicText = struct {
 /// when the node ships no GIF, so the caller falls back to a PNG.
 fn tryStartGifSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, sprite: runtime.SpriteNode) bool {
     if (session.engine.renderer == null) return false;
-    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.gif", .{ bundle_path, sprite.image_stem }) catch return false;
-    defer gpa.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(32 << 20)) catch return false;
+    var name_buf: [512]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}.gif", .{sprite.image_stem}) catch return false;
+    const bytes = readBundleAsset(session, gpa, bundle_path, name, 32 << 20) orelse return false;
     defer gpa.free(bytes);
     const decoded = gif.decode(gpa, bytes) catch return false;
     defer decoded.deinit(gpa);
@@ -11516,6 +11539,8 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
     defer gpa.free(sprites);
     for (sprites) |sprite| {
         session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
+        if (sprite.rotation != 0) session.sprite_rotations.put(gpa, sprite.graph_index, sprite.rotation) catch {};
+        if (sprite.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, sprite.graph_index, sprite.rotation_param) catch {};
         if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
         if (sprite.x_param.len > 0 or sprite.y_param.len > 0 or sprite.w_param.len > 0 or sprite.h_param.len > 0) {
             session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
@@ -11541,9 +11566,7 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             startSpriteAnim(session, gpa, bundle_path, sprite);
             continue;
         }
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, sprite.image_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{sprite.image_stem}) orelse continue;
         session.sprite_loaders.put(gpa, sprite.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11650,9 +11673,7 @@ fn startSpriteAnim(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
     @memset(loaders, null);
     @memset(textures, .{ .idx = render.invalid_handle });
     for (0..n) |i| {
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}_{d}.png", .{ bundle_path, sprite.image_stem, i }) catch continue;
-        defer gpa.free(path);
-        loaders[i] = asset.ImageLoader.start(gpa, path) catch null;
+        loaders[i] = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}_{d}.png", .{ sprite.image_stem, i });
     }
     session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = sprite.fps, .loaders = loaders, .textures = textures, .play = sprite.play }) catch {
         for (loaders) |maybe| if (maybe) |l| l.deinit();
@@ -11795,6 +11816,8 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
                     continue;
                 };
                 session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
+                if (txt.rotation != 0) session.sprite_rotations.put(gpa, txt.graph_index, txt.rotation) catch {};
+                if (txt.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, txt.graph_index, txt.rotation_param) catch {};
             } else |_| {}
             continue;
         }
@@ -11815,6 +11838,8 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
         };
         session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
         if (txt.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, txt.graph_index, txt.opacity_param) catch {};
+        if (txt.rotation != 0) session.sprite_rotations.put(gpa, txt.graph_index, txt.rotation) catch {};
+        if (txt.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, txt.graph_index, txt.rotation_param) catch {};
         if (txt.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, txt.graph_index, @intCast(txt.anchor_face)) catch {};
         // A live content source registers the node for per-frame refresh; the
         // static raster above stands in until the first frame resolves it.
@@ -11838,10 +11863,7 @@ fn createMeshFaceLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path:
     const meshes = try lens.meshFaceNodes(gpa, &session.lens_graph);
     defer gpa.free(meshes);
     for (meshes) |mesh| {
-        if (!bundleNameOk(mesh.texture_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, mesh.texture_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{mesh.texture_stem}) orelse continue;
         session.mesh_face_loaders.put(gpa, mesh.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11880,10 +11902,7 @@ fn createPaintFaceLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
     const paints = try lens.paintFaceNodes(gpa, &session.lens_graph);
     defer gpa.free(paints);
     for (paints) |paint| {
-        if (!bundleNameOk(paint.texture_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, paint.texture_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{paint.texture_stem}) orelse continue;
         session.paint_face_loaders.put(gpa, paint.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11934,10 +11953,7 @@ fn createFaceSwapLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path:
     const swaps = try lens.faceSwapNodes(gpa, &session.lens_graph);
     defer gpa.free(swaps);
     for (swaps) |swap| {
-        if (!bundleNameOk(swap.donor_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, swap.donor_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{swap.donor_stem}) orelse continue;
         session.face_swap_loaders.put(gpa, swap.graph_index, loader) catch {
             loader.deinit();
         };
@@ -12035,11 +12051,9 @@ fn particlePattern(name: []const u8) particles.Pattern {
 /// static texture, best-effort, leaving the node on the built-in soft round
 /// default when the sprite is missing or unreadable.
 fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, graph_index: graph.NodeIndex, stem: []const u8) void {
-    if (comptime !has_file_io) return;
-    if (!bundleNameOk(stem)) return;
-    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch return;
-    defer gpa.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(4 * 1024 * 1024)) catch return;
+    var name_buf: [512]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}.png", .{stem}) catch return;
+    const bytes = readBundleAsset(session, gpa, bundle_path, name, 4 * 1024 * 1024) orelse return;
     defer gpa.free(bytes);
     const decoded = image.decode(gpa, bytes) catch return;
     defer gpa.free(decoded.rgba);
@@ -12051,7 +12065,9 @@ fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []
 
 /// One second of mono audio at 48 kHz, the largest window an audio.infer model
 /// may read from the ring.
-const audio_ring_len: usize = 48000;
+/// One second of microphone at the ring's fixed rate. The rate is the resampler's, not the
+/// device's, so this length is a duration rather than a sample count that varies per handset.
+const audio_ring_len: usize = audio_analysis.mic_rate;
 
 /// The most bytes a decoded caption holds.
 const caption_max: usize = 512;
@@ -13007,6 +13023,16 @@ fn readAudioWindow(session: *const Session, out: []f32) void {
     }
 }
 
+/// The rate the microphone ring holds, for a harness that has to describe a sound in seconds.
+pub fn micRate() u32 {
+    return audio_analysis.mic_rate;
+}
+
+/// Reads the ring the way an audio model does, for the conformance harness.
+pub fn readAudioWindowForTest(session: *const Session, out: []f32) void {
+    readAudioWindow(session, out);
+}
+
 /// Runs each audio.infer worker over the latest microphone window and reads its
 /// outputs into the parameters it binds, so the model drives the lens from the
 /// mic the way pollMlOutputs drives it from the camera.
@@ -13720,6 +13746,24 @@ const DiffusionWorker = struct {
 /// plain relative path with no empty, "." or ".." component, no leading
 /// separator, and no backslash, colon, or NUL anywhere. A manifest is
 /// untrusted content, so every loader path is built from a name this admits.
+/// Starts an off-thread load for one bundle asset, from a host-staged copy when the host provided
+/// one and from the bundle's assets/ directory otherwise. Both sources decode on the loader's own
+/// thread, so a filesystem-less host runs the same lenses as a directory install rather than
+/// silently losing every image, sprite and model.
+fn startBundleAsset(comptime L: type, s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, comptime fmt: []const u8, args: anytype) ?*L {
+    var name_buf: [512]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, fmt, args) catch {
+        std.log.info("gosslens: asset name over {d} bytes, refused", .{name_buf.len});
+        return null;
+    };
+    if (!bundleNameOk(name)) return null;
+    if (s.staged_assets.get(name)) |staged| return L.startBytes(gpa, staged) catch null;
+    if (comptime !has_file_io) return null;
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch return null;
+    defer gpa.free(path);
+    return L.start(gpa, path) catch null;
+}
+
 fn bundleRelative(name: []const u8) bool {
     if (name.len == 0) return false;
     if (name[0] == '/') return false;
@@ -13746,16 +13790,27 @@ fn bundleNameOk(name: []const u8) bool {
 /// A host-staged copy wins over the bundle directory, so a filesystem-less
 /// build reads the same names from memory. The caller frees the returned bytes.
 fn readBundleAsset(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8, limit: usize) ?[]u8 {
+    return readBundleFile(s, gpa, bundle_path, "assets", name, limit);
+}
+
+/// The same read for a bundle subdirectory other than assets/. The staged key is the whole
+/// bundle-relative path, which is what a host that never unpacked a directory would name it.
+fn readBundleFile(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, subdir: []const u8, name: []const u8, limit: usize) ?[]u8 {
     if (!bundleNameOk(name)) return null;
-    if (s.staged_assets.get(name)) |staged| {
+    var key_buf: [640]u8 = undefined;
+    const key = if (std.mem.eql(u8, subdir, "assets"))
+        name
+    else
+        std.fmt.bufPrint(&key_buf, "{s}/{s}", .{ subdir, name }) catch return null;
+    if (s.staged_assets.get(key)) |staged| {
         if (staged.len > limit) {
-            std.log.info("gosslens: staged asset {s} over the {d}-byte bound, refused", .{ name, limit });
+            std.log.info("gosslens: staged asset {s} over the {d}-byte bound, refused", .{ key, limit });
             return null;
         }
         return gpa.dupe(u8, staged) catch null;
     }
     if (comptime !has_file_io) return null;
-    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch return null;
+    const path = std.fmt.allocPrint(gpa, "{s}/{s}/{s}", .{ bundle_path, subdir, name }) catch return null;
     defer gpa.free(path);
     return std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(limit)) catch |err| {
         std.log.info("gosslens: bundle asset {s} unreadable ({t})", .{ name, err });
@@ -13780,9 +13835,53 @@ fn stageAsset(s: *Session, name: []const u8, bytes: []const u8) error{OutOfMemor
     try s.staged_assets.put(gpa, owned_name, owned_bytes);
 }
 
-/// Hands the engine one bundle asset's bytes under its manifest name ahead
-/// of a JSON lens activation, so a filesystem-less host (the web) runs the
-/// heavy inference nodes from memory. The name must stay bundle-relative;
+/// A placed node's turn in degrees before any gesture: the authored angle plus what a bound
+/// parameter reads. Additive, unlike the rect parameters, because an angle has a composable zero -
+/// an override would snap an authored 30-degree sticker flat the moment a lens bound a parameter
+/// it had not yet driven.
+fn spriteTurn(s: *Session, index: graph.NodeIndex) f32 {
+    var turn: f32 = s.sprite_rotations.get(index) orelse 0;
+    if (s.sprite_rotation_params.get(index)) |pname| {
+        if (s.active_lens) |*lens| {
+            if (lens.paramValue(pname)) |v| turn += v;
+        }
+    }
+    return turn;
+}
+
+/// Where a placed node currently draws: its rect after any drag and pinch, and its turn after the
+/// authored angle, a bound parameter, and any gesture. The draw reads these same values.
+fn spriteTransform(s: *Session, index: graph.NodeIndex) ?[5]f32 {
+    const stored = s.sprite_rects.get(index) orelse return null;
+    var rect: [4]f32 = .{ stored[0], stored[1], stored[2], stored[3] };
+    var turn: f32 = spriteTurn(s, index);
+    if (s.sprite_interactions.get(index)) |si| {
+        rect = si.rect();
+        turn += std.math.radiansToDegrees(si.rot);
+    }
+    return .{ rect[0], rect[1], rect[2], rect[3], turn };
+}
+
+/// Reads one placed node's live rect and turn, so a host can show a sticker's handles or persist
+/// where the wearer left it. Any of the out pointers may be null.
+pub export fn goss_session_sprite_transform(session: ?*Session, node_id: ?[*]const u8, node_id_len: usize, out_x: ?*f32, out_y: ?*f32, out_w: ?*f32, out_h: ?*f32, out_rotation: ?*f32) Status {
+    const s = session orelse return .invalid_argument;
+    const n = node_id orelse return .invalid_argument;
+    if (node_id_len == 0) return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .invalid_argument;
+    const id = n[0..node_id_len];
+    const index = lens.nodeIndexByName(id) orelse return .invalid_argument;
+    const placed = spriteTransform(s, index) orelse return .invalid_argument;
+    if (out_x) |o| o.* = placed[0];
+    if (out_y) |o| o.* = placed[1];
+    if (out_w) |o| o.* = placed[2];
+    if (out_h) |o| o.* = placed[3];
+    if (out_rotation) |o| o.* = placed[4];
+    return .ok;
+}
+
+/// Hands the engine one bundle asset's bytes under its manifest name ahead of a JSON activation,
+/// so a filesystem-less host runs the whole lens from memory. The name must stay bundle-relative;
 /// zero-length bytes remove a previously staged name.
 pub export fn goss_session_provide_lens_asset(session: ?*Session, name: ?[*]const u8, name_len: usize, bytes: ?[*]const u8, len: usize) Status {
     const s = session orelse return .invalid_argument;
@@ -14224,10 +14323,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 }
             }
         }
-        if (!bundleNameOk(model.model_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.glb", .{ bundle_path, model.model_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ModelLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ModelLoader, session, gpa, bundle_path, "{s}.glb", .{model.model_stem}) orelse continue;
         session.model_loaders.put(gpa, model.graph_index, loader) catch {
             loader.deinit();
         };
@@ -14482,13 +14578,11 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
 // error set to just Unsupported there and break the OutOfMemory arm
 // goss_session_activate_lens_from_directory's catch already handles for
 // every other target.
-fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) anyerror!void {
-    if (comptime !has_file_io) return error.Unsupported;
-    const manifest_path = try std.fmt.allocPrint(gpa, "{s}/manifest.json", .{bundle_path});
-    defer gpa.free(manifest_path);
-    const manifest_json = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), manifest_path, gpa, .limited(manifest.max_manifest_bytes + 1));
-    defer gpa.free(manifest_json);
-    try activateLens(session, gpa, manifest_json);
+/// Every node type's resources, for both activation paths. An empty bundle_path is the
+/// filesystem-less host: each reader prefers a host-staged copy, so a JSON activation with
+/// its assets staged gets the same nodes a directory install does, and an unstaged asset
+/// leaves that one node inert. One list, so a new node type cannot reach only one path.
+fn createLensResources(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) anyerror!void {
     loadScriptFile(session, gpa, bundle_path);
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
@@ -14550,6 +14644,16 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createEnvParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
+}
+
+fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) anyerror!void {
+    if (comptime !has_file_io) return error.Unsupported;
+    const manifest_path = try std.fmt.allocPrint(gpa, "{s}/manifest.json", .{bundle_path});
+    defer gpa.free(manifest_path);
+    const manifest_json = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), manifest_path, gpa, .limited(manifest.max_manifest_bytes + 1));
+    defer gpa.free(manifest_json);
+    try activateLens(session, gpa, manifest_json);
+    try createLensResources(session, gpa, bundle_path);
 }
 
 pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bundle_path: ?[*]const u8, bundle_path_len: usize) Status {
