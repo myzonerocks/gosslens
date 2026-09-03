@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 100u
+#define GOSS_ABI_MINOR 102u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -575,8 +575,17 @@ goss_status goss_session_clear_model_allowlist(goss_session *session);
 /* Graph thread. Hands the engine one bundle asset's bytes under its
  * manifest name ahead of a JSON lens activation, so a filesystem-less host
  * (the web) runs the heavy inference nodes from memory. The name must stay
- * bundle-relative; zero-length bytes remove a previously staged name. */
+ * bundle-relative; zero-length bytes remove a previously staged name. Names
+ * every node type reads through, images included, so a host that fetches a
+ * lens over the network runs the same lens a directory install runs. */
 goss_status goss_session_provide_lens_asset(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *bytes, size_t len);
+
+/* Graph thread. Reads one placed node's live rect (normalized, origin
+ * top-left) and its turn in degrees clockwise: the authored angle, replaced
+ * by any bound parameter, plus any gesture the wearer applied. For a host
+ * drawing selection handles or persisting where a sticker was left. Any out
+ * pointer may be NULL. */
+goss_status goss_session_sprite_transform(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out_x, float *out_y, float *out_w, float *out_h, float *out_rotation);
 
 /* Graph thread. Copies one ml.infer node's whole published output tensor
  * into caller memory, the element count written to out_len. capacity is in
@@ -956,6 +965,7 @@ goss_status goss_session_ar_brush_begin(goss_session *session);
 goss_status goss_session_ar_brush_point(goss_session *session, float x, float y, float z);
 goss_status goss_session_ar_brush_end(goss_session *session);
 goss_status goss_session_ar_brush_undo(goss_session *session);
+goss_status goss_session_ar_brush_redo(goss_session *session);
 goss_status goss_session_ar_brush_clear(goss_session *session);
 
 /* Screen touch. Feed one event per finger so the engine recognizes the screen

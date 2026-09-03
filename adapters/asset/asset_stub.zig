@@ -20,6 +20,12 @@ fn StubLoader(comptime Result: type) type {
             return error.Unsupported;
         }
 
+        pub fn startBytes(gpa: std.mem.Allocator, bytes: []const u8) CreateError!*Self {
+            _ = gpa;
+            _ = bytes;
+            return error.Unsupported;
+        }
+
         pub fn take(loader: *Self) ?Result {
             _ = loader;
             return null;

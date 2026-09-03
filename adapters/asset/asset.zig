@@ -25,9 +25,13 @@ pub fn Loader(comptime Result: type, comptime decodeFn: fn (std.mem.Allocator, [
     return struct {
         const Self = @This();
 
+        /// Where the bytes come from: a bundle file, or a copy the host staged in memory. Both
+        /// decode on the same background thread, so a filesystem-less host is not a second path.
+        pub const Source = union(enum) { path: []u8, bytes: []u8 };
+
         gpa: std.mem.Allocator,
         io_state: std.Io.Threaded,
-        path: []u8,
+        source: Source,
         thread: ?std.Thread = null,
         result: std.atomic.Value(?*Result) = .init(null),
         failed: std.atomic.Value(bool) = .init(false),
@@ -36,10 +40,23 @@ pub fn Loader(comptime Result: type, comptime decodeFn: fn (std.mem.Allocator, [
         /// the caller's own buffer is free to go away as soon as this
         /// returns.
         pub fn start(gpa: std.mem.Allocator, path: []const u8) CreateError!*Self {
-            const loader = try gpa.create(Self);
+            return spawn(gpa, .{ .path = try gpa.dupe(u8, path) });
+        }
+
+        /// Decodes bytes the host already handed over, off-thread like a file. The bytes are
+        /// copied, so the caller's staged copy is free to be replaced immediately.
+        pub fn startBytes(gpa: std.mem.Allocator, bytes: []const u8) CreateError!*Self {
+            return spawn(gpa, .{ .bytes = try gpa.dupe(u8, bytes) });
+        }
+
+        fn spawn(gpa: std.mem.Allocator, source: Source) CreateError!*Self {
+            const loader = gpa.create(Self) catch |err| {
+                switch (source) {
+                    inline else => |owned| gpa.free(owned),
+                }
+                return err;
+            };
             errdefer gpa.destroy(loader);
-            const owned_path = try gpa.dupe(u8, path);
-            errdefer gpa.free(owned_path);
             loader.* = .{
                 .gpa = gpa,
                 // The single-threaded form, not the pooled one
@@ -50,7 +67,7 @@ pub fn Loader(comptime Result: type, comptime decodeFn: fn (std.mem.Allocator, [
                 // coordinate - the same reasoning core/abi's own
                 // defaultIo() already applies.
                 .io_state = std.Io.Threaded.init_single_threaded,
-                .path = owned_path,
+                .source = source,
             };
             errdefer loader.io_state.deinit();
             loader.thread = std.Thread.spawn(.{}, run, .{loader}) catch return error.OutOfMemory;
@@ -62,11 +79,14 @@ pub fn Loader(comptime Result: type, comptime decodeFn: fn (std.mem.Allocator, [
             // The format's own per-asset limit (SPEC 1.1): a loader
             // never reads past what a validated bundle could ever have
             // shipped.
-            const bytes = std.Io.Dir.cwd().readFileAlloc(io, loader.path, loader.gpa, .limited(32 * 1024 * 1024)) catch {
-                loader.failed.store(true, .release);
-                return;
+            const bytes = switch (loader.source) {
+                .bytes => |staged| staged,
+                .path => |path| std.Io.Dir.cwd().readFileAlloc(io, path, loader.gpa, .limited(32 * 1024 * 1024)) catch {
+                    loader.failed.store(true, .release);
+                    return;
+                },
             };
-            defer loader.gpa.free(bytes);
+            defer if (loader.source == .path) loader.gpa.free(bytes);
             const decoded = decodeFn(loader.gpa, bytes) catch {
                 loader.failed.store(true, .release);
                 return;
@@ -105,7 +125,9 @@ pub fn Loader(comptime Result: type, comptime decodeFn: fn (std.mem.Allocator, [
                 loader.gpa.destroy(ptr);
             }
             loader.io_state.deinit();
-            loader.gpa.free(loader.path);
+            switch (loader.source) {
+                inline else => |owned| loader.gpa.free(owned),
+            }
             loader.gpa.destroy(loader);
         }
     };

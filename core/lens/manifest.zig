@@ -853,6 +853,14 @@ pub const SpriteField = struct {
     /// `reverse` cycles backward, and `boomerang` ping-pongs forward then back -
     /// the slow-mo/reverse/boomerang edit; `fps` sets the speed.
     play: SpritePlay = .loop,
+    /// Turn the drawn quad clockwise by this many degrees about its own centre.
+    /// A live gesture's turn adds to this, so an authored angle is where the
+    /// sticker starts rather than a value the first drag throws away.
+    rotation: f32 = 0,
+    /// A parameter name whose live value is added to `rotation` each frame, so a
+    /// ramp spins a sticker from its authored rest angle. Additive rather than an
+    /// override: an undriven parameter would otherwise snap an authored turn flat.
+    rotation_param: []const u8 = "",
     /// A segmentation channel that keys the sprite full-frame against the region
     /// it names. Null draws the sprite over the frame at its rect as usual.
     mask_channel: ?u8 = null,
@@ -909,6 +917,14 @@ pub const TextField = struct {
     /// Like SpriteField.opacity_param: a parameter name whose live value
     /// overrides the text's opacity each frame. Empty keeps the static one.
     opacity_param: []const u8 = "",
+    /// Turn the drawn quad clockwise by this many degrees about its own centre.
+    /// A live gesture's turn adds to this, so an authored angle is where the
+    /// sticker starts rather than a value the first drag throws away.
+    rotation: f32 = 0,
+    /// A parameter name whose live value is added to `rotation` each frame, so a
+    /// ramp spins a sticker from its authored rest angle. Additive rather than an
+    /// override: an undriven parameter would otherwise snap an authored turn flat.
+    rotation_param: []const u8 = "",
     /// The rgb the glyphs fade toward at their base for a vertical gradient
     /// (top is the main color); null draws a flat fill.
     gradient: ?[3]u8 = null,
@@ -1700,6 +1716,29 @@ fn readVec6(value: std.json.Value, out: *[6]f32) bool {
     if (value != .array or value.array.items.len != 6) return false;
     for (value.array.items, 0..) |item, i| out[i] = @floatCast(numberOf(item) orelse return false);
     return true;
+}
+
+/// Diagnoses every key an object carries that this parser does not read. A manifest that names a
+/// gesture the parser has no field for used to validate clean and then simply never fire — the
+/// object-move reference asked for "scale" and silently could not resize for exactly that reason.
+fn rejectUnknownKeys(diags: *Diagnostics, path: *PathStack, what: []const u8, object: std.json.ObjectMap, comptime known: []const []const u8) error{OutOfMemory}!void {
+    var it = object.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        var found = false;
+        inline for (known) |k| {
+            if (std.mem.eql(u8, key, k)) found = true;
+        }
+        if (!found) try diags.add(path.slice(), "{s} has no '{s}' field", .{ what, key });
+    }
+}
+
+/// Reads a boolean, diagnosing anything else rather than leaving the field at its default — a
+/// gesture written as a string is an authoring mistake, not an off switch.
+fn expectBool(diags: *Diagnostics, path: *PathStack, what: []const u8, key: []const u8, value: std.json.Value) error{OutOfMemory}!?bool {
+    if (value == .bool) return value.bool;
+    try diags.add(path.slice(), "{s} {s} must be true or false", .{ what, key });
+    return null;
 }
 
 fn getField(object: std.json.ObjectMap, name: []const u8) ?std.json.Value {
@@ -3227,6 +3266,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(sv.object, "h_param")) |v| {
                     if (try expectString(diags, path, v)) |s| field.h_param = try arena.dupe(u8, s);
                 }
+                if (getField(sv.object, "rotation")) |v| field.rotation = @floatCast(std.math.clamp(numberOf(v) orelse field.rotation, -360.0, 360.0));
+                if (getField(sv.object, "rotation_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.rotation_param = try arena.dupe(u8, s);
+                }
                 if (getField(sv.object, "anchor_face")) |v| {
                     if (v == .integer and v.integer >= 0 and v.integer < face_landmark_count) {
                         field.anchor_face = @intCast(v.integer);
@@ -3234,6 +3277,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(sv.object, "cutout")) |cv| {
                     if (cv == .object) {
+                        try rejectUnknownKeys(diags, path, "sprite cutout", cv.object, &.{ "mask", "softness" });
                         if (getField(cv.object, "mask")) |mv| {
                             if (try expectString(diags, path, mv)) |name| {
                                 if (maskChannelIndex(name)) |channel| field.cutout_channel = channel else try diags.add(path.slice(), "sprite cutout mask names an unknown channel '{s}'", .{name});
@@ -3270,14 +3314,18 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(sv.object, "interaction")) |iv| {
                     if (iv == .object) {
                         var it: Interaction = .{};
+                        try rejectUnknownKeys(diags, path, "sprite interaction", iv.object, &.{
+                            "drag", "pinch",          "rotate",          "tap_event",       "slider_param",
+                            "slider_vertical", "slider_min", "slider_max", "carousel_param", "carousel_count",
+                        });
                         if (getField(iv.object, "drag")) |b| {
-                            if (b == .bool) it.drag = b.bool;
+                            if (try expectBool(diags, path, "sprite interaction", "drag", b)) |v| it.drag = v;
                         }
                         if (getField(iv.object, "pinch")) |b| {
-                            if (b == .bool) it.pinch = b.bool;
+                            if (try expectBool(diags, path, "sprite interaction", "pinch", b)) |v| it.pinch = v;
                         }
                         if (getField(iv.object, "rotate")) |b| {
-                            if (b == .bool) it.rotate = b.bool;
+                            if (try expectBool(diags, path, "sprite interaction", "rotate", b)) |v| it.rotate = v;
                         }
                         if (getField(iv.object, "tap_event")) |v| {
                             if (try expectString(diags, path, v)) |s| it.tap_event = try arena.dupe(u8, s);
@@ -3286,7 +3334,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                             if (try expectString(diags, path, v)) |s| it.slider_param = try arena.dupe(u8, s);
                         }
                         if (getField(iv.object, "slider_vertical")) |b| {
-                            if (b == .bool) it.slider_vertical = b.bool;
+                            if (try expectBool(diags, path, "sprite interaction", "slider_vertical", b)) |v| it.slider_vertical = v;
                         }
                         if (getField(iv.object, "slider_min")) |v| it.slider_min = @floatCast(numberOf(v) orelse it.slider_min);
                         if (getField(iv.object, "slider_max")) |v| it.slider_max = @floatCast(numberOf(v) orelse it.slider_max);
@@ -3333,6 +3381,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(tv.object, "opacity_param")) |v| {
                     if (try expectString(diags, path, v)) |s| field.opacity_param = try arena.dupe(u8, s);
+                }
+                if (getField(tv.object, "rotation")) |v| field.rotation = @floatCast(std.math.clamp(numberOf(v) orelse field.rotation, -360.0, 360.0));
+                if (getField(tv.object, "rotation_param")) |v| {
+                    if (try expectString(diags, path, v)) |s| field.rotation_param = try arena.dupe(u8, s);
                 }
                 if (getField(tv.object, "gradient")) |v| {
                     var rgb: [3]f32 = undefined;
@@ -5424,6 +5476,23 @@ test "a sprite.2d node parses its rect and opacity" {
     try t.expectApproxEqAbs(@as(f32, 0.25), sp.x, 0.001);
     try t.expectApproxEqAbs(@as(f32, 0.5), sp.w, 0.001);
     try t.expectApproxEqAbs(@as(f32, 0.8), sp.opacity, 0.001);
+}
+
+test "a sprite.2d and a text.2d node parse an authored rotation" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "badge", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"rotation": 30.0, "rotation_param": "spin"}},
+        \\   {"id": "label", "type": "text.2d", "inputs": {"frame": "camera"}, "params": {}, "text": {"content": "GO", "rotation": -18.5}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const sp = manifest.nodes[0].sprite orelse return error.TestUnexpectedResult;
+    try t.expectApproxEqAbs(@as(f32, 30.0), sp.rotation, 0.001);
+    try t.expectEqualStrings("spin", sp.rotation_param);
+    const tf = manifest.nodes[1].text orelse return error.TestUnexpectedResult;
+    try t.expectApproxEqAbs(@as(f32, -18.5), tf.rotation, 0.001);
 }
 
 test "a sprite.2d node parses its placement parameters" {
