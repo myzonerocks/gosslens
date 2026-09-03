@@ -416,6 +416,28 @@ extension GossSession {
     public func addARStrokePoint(x: Float, y: Float, z: Float) throws { try checked(goss_session_ar_brush_point(handle, x, y, z)) }
     public func endARStroke() throws { try checked(goss_session_ar_brush_end(handle)) }
     public func undoARStroke() throws { try checked(goss_session_ar_brush_undo(handle)) }
+    public func redoARStroke() throws { try checked(goss_session_ar_brush_redo(handle)) }
+
+    /// Where a placed sprite.2d, text.2d or video.texture node currently draws: its rect in
+    /// normalized coordinates and its turn in degrees clockwise - the authored angle, plus any
+    /// bound parameter, plus any gesture the wearer applied. Nil for an unknown node.
+    public struct SpriteTransform: Equatable {
+        public let x: Float
+        public let y: Float
+        public let width: Float
+        public let height: Float
+        public let rotation: Float
+    }
+
+    public func spriteTransform(nodeId: String) -> SpriteTransform? {
+        var x: Float = 0, y: Float = 0, w: Float = 0, h: Float = 0, r: Float = 0
+        let bytes = Array(nodeId.utf8)
+        let ok = bytes.withUnsafeBufferPointer { buffer in
+            goss_session_sprite_transform(handle, buffer.baseAddress, buffer.count, &x, &y, &w, &h, &r) == GOSS_OK
+        }
+        guard ok else { return nil }
+        return SpriteTransform(x: x, y: y, width: w, height: h, rotation: r)
+    }
     public func clearARStrokes() throws { try checked(goss_session_ar_brush_clear(handle)) }
     /// Feeds one screen touch event so the engine recognizes the gestures a
     /// lens reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled;

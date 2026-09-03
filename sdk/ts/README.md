@@ -154,8 +154,14 @@ script node last wrote.
 
 A lens's `ml.infer`, `audio.infer`, `temporal.fuse`, `splat.cloud`, and
 `diffusion` nodes run real inference in the page through the engine's
-synchronous web rail. Stage each model file under the name the manifest uses
-before activating, then feed frames with `trackFrame` and read results back:
+synchronous web rail. Stage each file under the name the manifest uses
+before activating - `provideLensAsset` covers every bundle asset, not just the
+nets: images, LUTs, sprites, face textures, glTF models and shader binaries (as
+`shaders/<stem>.<profile>.bin`), so a lens fetched over the network runs exactly
+as an unpacked directory does. Then feed frames with `trackFrame` and read
+results back (`spriteTransform(nodeId)` reads where a placed sprite, label or
+video node currently draws - its rect and its turn in degrees, after the authored
+angle, any bound parameter and any gesture):
 
 ```typescript
 session.provideLensAsset("net.onnx", modelBytes);
@@ -384,7 +390,9 @@ const ribbon = session.brushVertices();
 
 `setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x, y, z)`/`endARStroke` are the
 world-anchored twin: points are pushed in the world frame world tracking reports,
-so a stroke stays fixed in the scene.
+so a stroke stays fixed in the scene. `undoARStroke`/`redoARStroke`/`clearARStrokes`
+are its stacks - the same undo/redo pair the screen brush has, so one brush rail
+drives both; a fresh stroke drops the redo future, as in any editor.
 
 ## Capture and recording
 
@@ -456,7 +464,9 @@ for the mic to send the lens sound over silence). `pullAudio` still pulls the le
 sound alone for local WebAudio playback with no call in progress; `GossAudioOutput`
 wraps that playback (an `AudioWorklet` it owns, `start()` from a gesture, `pump()`
 each frame beside `tickLens`). `GossMicInput` captures the microphone into
-`submitAudio` so level and beat triggers fire in the browser, and
+`submitAudio` so level and beat triggers fire in the browser at whatever rate
+the browser chose - the engine resamples to its own fixed ring rate, so an
+`audio.infer` model reads the same window here as on a phone - and
 `GossVideoTexture` plays an MP4 through the browser's decoder into a named
 source a lens composites.
 

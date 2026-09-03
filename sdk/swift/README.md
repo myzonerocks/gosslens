@@ -157,9 +157,15 @@ in [the lens spec](../../lenses/SPEC.md).
 
 ### Bring-your-own models
 
-A lens's `ml.infer` and companion nodes load their model files from the bundle
-directory, or from memory: `provideLensAsset(name:bytes:)` stages a model under
-the name the manifest uses ahead of a JSON activation, `mlOutput(_:tensor:)`
+A lens loads its files from the bundle directory, or from memory:
+`provideLensAsset(name:bytes:)` stages any bundle asset under the name the
+manifest uses ahead of a JSON activation - images, LUTs, sprites, face textures,
+glTF models and shader binaries (as `shaders/<stem>.<profile>.bin`) as well as
+the inference nets, so a lens fetched over the network runs exactly as an
+unpacked directory does. `spriteTransform(nodeId:)` reads where a placed
+sprite, label or video node currently draws: its rect and its turn in degrees,
+after the authored angle, any bound parameter and any gesture - for drawing
+selection handles or persisting where a sticker was left. `mlOutput(_:tensor:)`
 reads a node's whole published output tensor back, and `mlMask(_:)` reads a
 mask binding resampled to the segmentation plane. `Gosslens.capabilities()`
 reports which rails this build compiled real. `submitHands(_:)` feeds hands
@@ -378,7 +384,9 @@ let ribbon = try session.brushVertices()
 
 `setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x:y:z:)`/`endARStroke` are the
 world-anchored twin: points are pushed in the world frame world tracking reports,
-so a stroke stays fixed in the scene.
+so a stroke stays fixed in the scene. `undoARStroke`/`redoARStroke`/`clearARStrokes`
+are its stacks - the same undo/redo pair the screen brush has, so one brush rail
+drives both; a fresh stroke drops the redo future, as in any editor.
 
 ## Capture and recording
 
@@ -484,7 +492,12 @@ audioTrack.send(mixed)   // publish; pass mic: nil for lens sound over silence
 call in progress; in a call, `mixOutputAudio` replaces it. `GossAudioOutput`
 routes that local playback to the speaker for you: `start()` it once after the
 session exists and call `pump()` each frame beside `tickLens`, and lens sounds
-play through an `AVAudioEngine` source it owns.
+play through an `AVAudioEngine` source it owns. `GossMicInput` is the other
+direction: `start()` taps the device microphone and submits every buffer, so
+level, beat and `audio.infer` all run without you writing the interleave. It
+does not request permission or configure `AVAudioSession` - the app owns that,
+and a call may already hold the microphone. The engine resamples whatever rate
+the hardware granted, so pass it through rather than converting first.
 
 When the lens carries an `audio.infer` node with a caption binding, the engine
 runs on-device ASR over the mic and `captionText` reads the decoded text by the
