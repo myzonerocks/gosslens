@@ -1135,6 +1135,9 @@ pub const Session = struct {
     /// filesystem-less host (the web) feeds model, reference, and label bytes
     /// through; keys and values are session-owned copies.
     staged_assets: std.StringHashMapUnmanaged([]u8) = .{},
+    /// Temp files a staged clip was spilled to, because the platform decoder opens by path and
+    /// cannot be handed bytes. Deleted when the lens goes, so a session leaves nothing behind.
+    spilled_assets: std.ArrayList([]u8) = .empty,
     /// The newest host-submitted hands, preferred over the built-in worker so
     /// a platform's own tracker drives the same hand signals and joints.
     submitted_hands: hand.Result = std.mem.zeroes(hand.Result),
@@ -5183,6 +5186,8 @@ pub fn destroySession(session: *Session) void {
         session.engine.gpa.free(entry.key_ptr.*);
         session.engine.gpa.free(entry.value_ptr.*);
     }
+    clearSpilledAssets(session);
+    session.spilled_assets.deinit(session.engine.gpa);
     session.staged_assets.deinit(session.engine.gpa);
     session.capture_poses.deinit(session.engine.gpa);
     session.recon_gaussians.deinit(session.engine.gpa);
@@ -9769,6 +9774,7 @@ fn destroySpriteState(session: *Session) void {
         session.engine.gpa.free(vid.rgba);
     }
     session.video_textures.clearRetainingCapacity();
+    clearSpilledAssets(session);
     session.text3d_meshes.clearRetainingCapacity();
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
@@ -11587,7 +11593,7 @@ fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     for (videos) |v| {
         session.sprite_rects.put(gpa, v.graph_index, .{ v.rect[0], v.rect[1], v.rect[2], v.rect[3], v.opacity }) catch {};
         if (!bundleNameOk(v.source)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.mp4", .{ bundle_path, v.source }) catch continue;
+        const path = videoPathFor(session, gpa, bundle_path, v.source) orelse continue;
         defer gpa.free(path);
         var decoder = video.Decoder.open(path) orelse {
             std.log.info("gosslens: video.texture {s} left blank - {s} did not open on this decoder", .{ v.source, path });
@@ -13789,6 +13795,48 @@ fn bundleNameOk(name: []const u8) bool {
 /// escape the bundle or the asset is missing or oversized, each refusal logged.
 /// A host-staged copy wins over the bundle directory, so a filesystem-less
 /// build reads the same names from memory. The caller frees the returned bytes.
+/// A path the platform video decoder can open for an asset, spilling a host-staged clip to a temp
+/// file first because the decoder takes a path and not bytes. The caller frees the returned path;
+/// the file itself is the session's until the lens is torn down.
+fn videoPathFor(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, source: []const u8) ?[]u8 {
+    var name_buf: [512]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}.mp4", .{source}) catch return null;
+    if (comptime !has_file_io) return null;
+    if (s.staged_assets.get(name)) |staged| {
+        const dir = tempDirPath();
+        const sep: []const u8 = if (dir.len > 0 and dir[dir.len - 1] == '/') "" else "/";
+        const spill = std.fmt.allocPrint(gpa, "{s}{s}goss-{x}-{s}", .{ dir, sep, @intFromPtr(s), name }) catch return null;
+        std.Io.Dir.cwd().writeFile(defaultIo(), .{ .sub_path = spill, .data = staged }) catch {
+            gpa.free(spill);
+            return null;
+        };
+        const owned = gpa.dupe(u8, spill) catch {
+            gpa.free(spill);
+            return null;
+        };
+        s.spilled_assets.append(gpa, owned) catch gpa.free(owned);
+        return spill;
+    }
+    return std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch null;
+}
+
+/// The platform temp directory, with its trailing separator. iOS hands every process its own
+/// sandboxed TMPDIR; the fallback is only for hosts that set none.
+fn tempDirPath() []const u8 {
+    const set = std.c.getenv("TMPDIR") orelse return "/tmp/";
+    return std.mem.span(set);
+}
+
+/// Removes every temp file a staged clip was spilled to.
+fn clearSpilledAssets(s: *Session) void {
+    const gpa = s.engine.gpa;
+    for (s.spilled_assets.items) |path| {
+        if (comptime has_file_io) std.Io.Dir.cwd().deleteFile(defaultIo(), path) catch {};
+        gpa.free(path);
+    }
+    s.spilled_assets.clearRetainingCapacity();
+}
+
 fn readBundleAsset(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8, limit: usize) ?[]u8 {
     return readBundleFile(s, gpa, bundle_path, "assets", name, limit);
 }

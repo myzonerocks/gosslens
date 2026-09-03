@@ -3153,6 +3153,9 @@ fn proveStagedImageAssets(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const cases = [_]struct { dir: []const u8, asset: []const u8 }{
         .{ .dir = ".lens-packages/face-paint", .asset = "face_paint.png" },
         .{ .dir = ".lens-packages/war-paint", .asset = "war_paint.png" },
+        // A clip too: the platform decoder opens by path, so a staged clip spills to a temp file
+        // rather than being declared impossible.
+        .{ .dir = ".lens-packages/video-texture", .asset = "clip.mp4" },
     };
     const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
     defer gpa.free(face_bytes);
