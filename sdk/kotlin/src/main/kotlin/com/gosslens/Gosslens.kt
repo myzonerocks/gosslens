@@ -191,6 +191,8 @@ object Gosslens {
     internal external fun nativeArBrushPoint(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeArBrushEnd(session: Long): Int
     internal external fun nativeArBrushUndo(session: Long): Int
+    internal external fun nativeArBrushRedo(session: Long): Int
+    internal external fun nativeSpriteTransform(session: Long, nodeId: ByteBuffer, nodeIdLen: Int, out: ByteBuffer): Int
     internal external fun nativeArBrushClear(session: Long): Int
     internal external fun nativeGrab(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeTouch(session: Long, phase: Int, pointerId: Int, x: Float, y: Float): Int
@@ -1983,7 +1985,23 @@ class GossSession private constructor(
     fun addARStrokePoint(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeArBrushPoint(handle, x, y, z) == 0
     fun endARStroke(): Boolean = Gosslens.nativeArBrushEnd(handle) == 0
     fun undoARStroke(): Boolean = Gosslens.nativeArBrushUndo(handle) == 0
+    fun redoARStroke(): Boolean = Gosslens.nativeArBrushRedo(handle) == 0
     fun clearARStrokes(): Boolean = Gosslens.nativeArBrushClear(handle) == 0
+    /// Where a placed sprite.2d, text.2d or video.texture node currently draws: its rect in
+    /// normalized coordinates and its turn in degrees clockwise - the authored angle, plus any
+    /// bound parameter, plus any gesture. Null for an unknown node.
+    data class SpriteTransform(val x: Float, val y: Float, val w: Float, val h: Float, val rotation: Float)
+
+    fun spriteTransform(nodeId: String): SpriteTransform? {
+        val idBytes = nodeId.toByteArray(Charsets.UTF_8)
+        val idBuf = ByteBuffer.allocateDirect(maxOf(idBytes.size, 1))
+        idBuf.put(idBytes)
+        idBuf.rewind()
+        val out = ByteBuffer.allocateDirect(5 * 4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeSpriteTransform(handle, idBuf, idBytes.size, out) != 0) return null
+        return SpriteTransform(out.getFloat(0), out.getFloat(4), out.getFloat(8), out.getFloat(12), out.getFloat(16))
+    }
+
     /// Feeds one screen touch event so the engine recognizes the gestures a
     /// lens reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled;
     /// pointerId names the finger; x and y are normalized 0..1 over the frame.
