@@ -3934,6 +3934,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             var field: AudioEnhanceField = .{};
             if (getField(object, "enhance")) |ev| {
                 if (ev == .object) {
+                    try rejectUnknownKeys(diags, path, "enhance", ev.object, &.{ "dereverb", "dereverb_ms", "echo", "echo_ms", "strength" });
                     if (getField(ev.object, "strength")) |v| field.strength = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.strength)), 0, 1);
                     if (getField(ev.object, "echo")) |v| field.echo = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.echo)), 0, 1);
                     if (getField(ev.object, "echo_ms")) |v| field.echo_ms = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.echo_ms)), 5, 60);
@@ -3948,6 +3949,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             var field: VoiceTransformField = .{};
             if (getField(object, "voice")) |vv| {
                 if (vv == .object) {
+                    try rejectUnknownKeys(diags, path, "voice", vv.object, &.{ "formant", "pitch", "robot" });
                     if (getField(vv.object, "pitch")) |v| field.pitch = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.pitch)), 0.5, 2);
                     if (getField(vv.object, "formant")) |v| field.formant = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.formant)), 0.5, 2);
                     if (getField(vv.object, "robot")) |v| field.robot = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse field.robot)), 0, 2000);
