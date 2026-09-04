@@ -1559,6 +1559,16 @@ pub fn build(b: *std.Build) void {
         run_conformance.step.dependOn(lens_package_reference_step);
         addUserArgs(b, run_conformance);
         conformance_step.dependOn(&run_conformance.step);
+
+        // bgfx is one per process, so bringing renderers up and down cannot be
+        // proven inside a run that already holds one. Its own run, on the same
+        // step, so the merge bar covers it: nothing held this until a phone died
+        // on the fifteenth engine of a test suite.
+        const run_lifecycle = b.addRunArtifact(conformance_exe);
+        run_lifecycle.setCwd(b.path("."));
+        run_lifecycle.addArg("--lifecycle");
+        conformance_step.dependOn(&run_lifecycle.step);
+
         // The leak gates ride the merge bar where the render stack exists:
         // on macOS `zig build ci` runs the full conformance, submit and
         // render and capture and record and loaders included. Non-GPU
@@ -3732,8 +3742,8 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
             module.addCSourceFile(.{
                 .file = b.path(b.fmt(".vendor/litert/tflite/{s}", .{file})),
                 .flags = &.{
-                    "-std=c++20",     "-fno-exceptions", "-fno-sanitize=undefined",
-                    "-w",             "-fno-objc-arc",   "-fno-objc-exceptions",
+                    "-std=c++20", "-fno-exceptions", "-fno-sanitize=undefined",
+                    "-w",         "-fno-objc-arc",   "-fno-objc-exceptions",
                 },
             });
         }
@@ -3836,9 +3846,9 @@ fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
 // compiler half is host-only and exists to run protoc during the build.
 fn protobufSources(b: *std.Build, out: *std.ArrayList([]const u8), with_compiler: bool) void {
     const excludes = [_][]const u8{
-        "_test.cc",   "test_util",  "unittest",     "_benchmark", "mock_",
-        "_mock.cc",   "/testing/",  "fake_plugin",  "tester.cc",  "main.cc",
-        "/kotlin/",   "test_plugin", "/cpp/tools/", "no_generators",
+        "_test.cc", "test_util",   "unittest",    "_benchmark",    "mock_",
+        "_mock.cc", "/testing/",   "fake_plugin", "tester.cc",     "main.cc",
+        "/kotlin/", "test_plugin", "/cpp/tools/", "no_generators",
     };
     listFilesRecursive(b, ".vendor/protobuf/src/google/protobuf", ".cc", &excludes, out);
     var kept: std.ArrayList([]const u8) = .empty;

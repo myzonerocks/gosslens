@@ -213,7 +213,12 @@ pub fn encodeRgbaOpts(gpa: std.mem.Allocator, out: *std.ArrayList(u8), pixels: [
     defer compressed.deinit();
     const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
     defer gpa.free(window);
-    var compress = try std.compress.flate.Compress.init(&compressed.writer, window, .zlib, .level_6);
+    // On the heap, never the stack: the deflate state is a quarter of a megabyte,
+    // and a stack frame that size overflows any thread but the main one - which is
+    // exactly how a capture from a worker thread took the process down.
+    const compress = try gpa.create(std.compress.flate.Compress);
+    defer gpa.destroy(compress);
+    compress.* = try std.compress.flate.Compress.init(&compressed.writer, window, .zlib, .level_6);
     try compress.writer.writeAll(filtered);
     try compress.finish();
 
@@ -229,7 +234,9 @@ pub const StreamEncoder = struct {
     gpa: std.mem.Allocator,
     out: *std.ArrayList(u8),
     compressed: std.Io.Writer.Allocating,
-    compress: std.compress.flate.Compress,
+    /// By pointer, not by value: the deflate state is a quarter of a megabyte, and
+    /// this struct is declared on a caller's stack.
+    compress: *std.compress.flate.Compress,
     window: []u8,
     filt: []u8,
     prev: []u8,
@@ -279,7 +286,9 @@ pub const StreamEncoder = struct {
         errdefer gpa.free(self.prev);
         self.wide = if (opts.bit_depth == 16) try gpa.alloc(u8, row_bytes) else &.{};
         errdefer if (self.wide.len > 0) gpa.free(self.wide);
-        self.compress = try std.compress.flate.Compress.init(&self.compressed.writer, self.window, .zlib, .level_6);
+        self.compress = try gpa.create(std.compress.flate.Compress);
+        errdefer gpa.destroy(self.compress);
+        self.compress.* = try std.compress.flate.Compress.init(&self.compressed.writer, self.window, .zlib, .level_6);
     }
 
     /// Filters and compresses `band_height` rows of tightly packed RGBA8.
@@ -316,6 +325,7 @@ pub const StreamEncoder = struct {
     }
 
     pub fn deinit(self: *StreamEncoder) void {
+        self.gpa.destroy(self.compress);
         self.compressed.deinit();
         self.gpa.free(self.window);
         self.gpa.free(self.filt);
