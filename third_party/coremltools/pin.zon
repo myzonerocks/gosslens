@@ -1,0 +1,16 @@
+.{
+    .name = "coremltools",
+    .repo = "https://github.com/apple/coremltools",
+    .version = "9.0",
+    .commit = "428d4b2658dfc44194f27f4f36870751be402ff7",
+    .archive_sha256 = "575888d3f2de2ff4da73b6e229f28b943642503f973888362e5d59870983e5d2",
+    .license = "BSD-3-Clause",
+    .license_file = "LICENSE.txt",
+    .license_sha256 = "d467a35319f25bd5310100d06ac8be62f880d1cb425181f1ec2b8333a1000afa",
+    .exclude = .{
+        "*/coremlpython/*",     "*/coremltools/*", "*/deps/*",       "*/docker/*",
+        "*/docs/*",             "*/docs-guides/*", "*/examples/*",   "*/mlmodel/build/*",
+        "*/milstoragepython/*", "*/mlmodel/src/*", "*/mlmodel/tests/*", "*/modelpackage/*",
+        "*/reqs/*",             "*/scripts/*",
+    },
+}
