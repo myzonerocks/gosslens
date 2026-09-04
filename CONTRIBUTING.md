@@ -75,6 +75,7 @@ toolchain decisions are logged in [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md).
 zig build harness              # run a lens through the real graph, drawn on screen
 zig build conformance          # run a reference lens through the ABI twice, proving bit-stable output
 zig build conformance -- --watch  # the same run, holding and labelling each proof's render on screen
+zig build conformance -- --golden # print the cross-target golden signature for lenses/cross-target-golden.txt
 ```
 
 The harness runs a lens through the real graph and draws it on screen, the same
@@ -85,6 +86,16 @@ ABI adds a proof here, and the run prints one PROOF line per capability it
 clears. Add `--watch` to hold each proof's final frame on screen with its name
 in the title bar, so the run reads as a live sequence instead of one frozen
 frame; it is display only and leaves the pinned output unchanged.
+
+`--golden` answers a different question: not whether this backend is stable
+against itself, but whether another one draws the same colour. It renders one
+fixed synthetic frame through one fixed grade and prints an 8x8 grid of RGB
+block means, pinned at `lenses/cross-target-golden.txt`. A client builds the
+same frame from the same integer arithmetic - no fixture ships - and holds
+itself to that file within 8/255. Block means rather than pixels, because a
+per-pixel compare across two backends measures rasterisation and the question
+here is colour. Regenerate the file only for an intended change to the grade
+math, and say so in review.
 
 ## Shaders and lenses
 

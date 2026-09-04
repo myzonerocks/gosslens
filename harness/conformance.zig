@@ -6,8 +6,9 @@
 //! twice produces byte-identical output. Each lens's hash also checks
 //! against lenses/conformance-baseline.txt (--print regenerates it), so
 //! a change that shifts a lens's real output shows up as a tracked diff
-//! in review, not just same-run determinism. This is still one platform
-//! (host/macOS); cross-platform value-stability is real remaining work.
+//! in review, not just same-run determinism. The suite itself is one
+//! platform (host/macOS); --golden is the cross-target half, printing a
+//! block-mean signature another backend holds itself to within 8/255.
 
 const std = @import("std");
 const abi = @import("abi");
@@ -2752,7 +2753,6 @@ fn proveStreamedSupersample(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-
 /// Proves the microphone ring is rate-independent. It used to hold whatever rate the device
 /// submitted, so the same speech produced a different window on a 44.1 kHz handset than on a
 /// 48 kHz one and every audio.infer model answered differently per device. The ring now holds one
@@ -2844,8 +2844,8 @@ fn writeOneNodeLens(gpa: std.mem.Allocator, dir: []const u8, node_type: []const 
 fn proveEnhanceReferences(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // Works off the frame alone: each must change it, and no two may be the same lens.
     const acts = [_][]const u8{
-        "enhance-dehaze",  "enhance-relight",   "enhance-glare",     "enhance-vignette",
-        "enhance-lowlight", "enhance-awb",      "enhance-zoom",      "enhance-dereflect",
+        "enhance-dehaze",    "enhance-relight", "enhance-glare", "enhance-vignette",
+        "enhance-lowlight",  "enhance-awb",     "enhance-zoom",  "enhance-dereflect",
         "enhance-harmonize",
     };
     const plain = (try captureBareFrame(gpa, engine, 6)) orelse return false;
@@ -21281,6 +21281,111 @@ fn watchHold(name: [*:0]const u8) void {
     }
 }
 
+/// The fixed grade every target renders for the cross-target compare. Absolute
+/// fields, no bundle and no tracker, so the only thing under test is the
+/// renderer's own colour math on this backend.
+const golden_manifest =
+    \\{
+    \\  "glf": "1.0",
+    \\  "id": "goss.look.golden",
+    \\  "version": "1.0.0",
+    \\  "display_name": "Golden",
+    \\  "engine_compat": ">=0.5",
+    \\  "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "grade", "type": "grade.pass", "inputs": {"frame": "camera"}, "params": {}, "grade": {"exposure": 0.25, "contrast": 1.15, "saturation": 0.8, "temperature": 0.05, "tint": -0.02, "brightness": 0.03, "hue": 0.1}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+const golden_side: u32 = 128;
+const golden_blocks: usize = 8;
+
+/// The source frame, from integer arithmetic alone so every target builds the
+/// same bytes without shipping a file.
+fn goldenFrame(gpa: std.mem.Allocator) ![]u8 {
+    const rgba = try gpa.alloc(u8, golden_side * golden_side * 4);
+    for (0..golden_side) |y| {
+        for (0..golden_side) |x| {
+            const i = (y * golden_side + x) * 4;
+            rgba[i + 0] = @intCast((x * 2) & 0xFF);
+            rgba[i + 1] = @intCast((y * 2) & 0xFF);
+            rgba[i + 2] = @intCast((x + y) & 0xFF);
+            rgba[i + 3] = 255;
+        }
+    }
+    return rgba;
+}
+
+/// Block means over the composite rather than its pixels: a per-pixel compare
+/// across two backends measures rasterisation, and this measures colour.
+fn goldenSignature(gpa: std.mem.Allocator, engine: *abi.Engine, out: *[golden_blocks * golden_blocks * 3]u8) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens(session, golden_manifest.ptr, golden_manifest.len) != .ok) {
+        std.debug.print("conformance: FAIL golden lens activation\n", .{});
+        return false;
+    }
+    const rgba = try goldenFrame(gpa);
+    defer gpa.free(rgba);
+    const desc: abi.FrameDesc = .{
+        .width = golden_side,
+        .height = golden_side,
+        // 4 is rgba8: the copy submit takes only the two packed formats.
+        .pixel_format = 4,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    if (abi.goss_session_submit_frame_rgba_copy(session, &desc, rgba.ptr, golden_side * 4) != .ok) {
+        std.debug.print("conformance: FAIL golden submit\n", .{});
+        return false;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const pixels = try gpa.alloc(u8, @as(usize, width) * @as(usize, height) * 4);
+    defer gpa.free(pixels);
+    var out_w: u32 = 0;
+    var out_h: u32 = 0;
+    if (abi.goss_engine_capture_frame(engine, session, pixels.ptr, pixels.len, &out_w, &out_h) != .ok) {
+        std.debug.print("conformance: FAIL golden capture\n", .{});
+        return false;
+    }
+    goldenBlocks(pixels, out_w, out_h, out);
+    return true;
+}
+
+/// Averages the readback into an 8x8 grid of RGB means. Every pixel is visited
+/// once, so this is linear in the frame and needs no scratch beyond the grid.
+fn goldenBlocks(pixels: []const u8, w: u32, h: u32, out: *[golden_blocks * golden_blocks * 3]u8) void {
+    var sums = [_]u64{0} ** (golden_blocks * golden_blocks * 3);
+    var counts = [_]u64{0} ** (golden_blocks * golden_blocks);
+    for (0..h) |y| {
+        const by = @min(y * golden_blocks / h, golden_blocks - 1);
+        for (0..w) |x| {
+            const bx = @min(x * golden_blocks / w, golden_blocks - 1);
+            const cell = by * golden_blocks + bx;
+            const i = (y * w + x) * 4;
+            sums[cell * 3 + 0] += pixels[i + 0];
+            sums[cell * 3 + 1] += pixels[i + 1];
+            sums[cell * 3 + 2] += pixels[i + 2];
+            counts[cell] += 1;
+        }
+    }
+    for (0..golden_blocks * golden_blocks) |cell| {
+        const n = @max(counts[cell], 1);
+        for (0..3) |ch| out[cell * 3 + ch] = @intCast(sums[cell * 3 + ch] / n);
+    }
+}
+
 pub fn main(init_args: std.process.Init) !u8 {
     const gpa = init_args.gpa;
     harness_io = init_args.io;
@@ -21293,6 +21398,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     _ = arg_it.next();
     const first_arg = arg_it.next();
     const print_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--print") else false;
+    const golden_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--golden") else false;
     g_watch = if (first_arg) |arg| std.mem.eql(u8, arg, "--watch") else false;
 
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
@@ -21314,6 +21420,16 @@ pub fn main(init_args: std.process.Init) !u8 {
         .height = height,
     };
     if (abi.goss_engine_init_renderer(engine, &renderer_desc) != .ok) return error.RendererInit;
+
+    if (golden_mode) {
+        var signature: [golden_blocks * golden_blocks * 3]u8 = undefined;
+        if (!try goldenSignature(gpa, engine, &signature)) return 1;
+        var out_buf: [1024]u8 = undefined;
+        var stdout = std.Io.File.stdout().writer(init_args.io, &out_buf);
+        try stdout.interface.print("{x}\n", .{&signature});
+        try stdout.interface.flush();
+        return 0;
+    }
 
     var current: std.Io.Writer.Allocating = .init(gpa);
     defer current.deinit();
