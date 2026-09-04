@@ -37,12 +37,8 @@ let engineLinkerSettings: [LinkerSetting] = [
     .linkedLibrary("xnnpack-neonfp16arith_aarch64", .when(platforms: [.iOS])),
     .linkedLibrary("xnnpack-neoni8mm", .when(platforms: [.iOS])),
     .linkedLibrary("yuv", .when(platforms: [.iOS])),
-    // The system libraries the archives above were compiled against: angle's zlib calls and
-    // every C++ vendor's runtime. Named here because a static archive carries neither.
     .linkedLibrary("z", .when(platforms: [.iOS])),
     .linkedLibrary("c++", .when(platforms: [.iOS])),
-    // The Neural Engine path: tflite's CoreML delegate is compiled into libtflite.a, so a
-    // consumer of these archives links CoreML the same way it links Metal.
     .linkedFramework("CoreML", .when(platforms: [.iOS])),
     .linkedFramework("Metal", .when(platforms: [.iOS])),
     .linkedFramework("QuartzCore", .when(platforms: [.iOS])),
