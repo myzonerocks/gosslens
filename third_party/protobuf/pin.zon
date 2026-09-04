@@ -1,0 +1,16 @@
+.{
+    .name = "protobuf",
+    .repo = "https://github.com/protocolbuffers/protobuf",
+    .version = "v36.1",
+    .commit = "343dce906a7fe34f93b8ea4fe956e4474e9ec52b",
+    .archive_sha256 = "4703e9a2269bb0aab5ee306ed7446caa2db339867c8beeca0b000490719bedfa",
+    .license = "BSD-3-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d",
+    .exclude = .{
+        "*/benchmarks/*", "*/conformance/*", "*/csharp/*", "*/docs/*",  "*/editors/*",
+        "*/examples/*",   "*/go/*",          "*/hpb/*",    "*/java/*",  "*/lua/*",
+        "*/objectivec/*", "*/php/*",         "*/pkg/*",    "*/python/*","*/ruby/*",
+        "*/rust/*",
+    },
+}
