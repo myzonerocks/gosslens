@@ -34,7 +34,10 @@ void main()
 	rgb = (rgb - 0.5) * contrast + 0.5;
 	rgb += vec3(temperature, 0.0, -temperature);
 	rgb += vec3(tint, -tint, tint);
-	float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
+	// Rec.709 luma, the same weights the grayscale term below uses and the same
+	// ones CSS saturate/grayscale and Core Image's colorControls use, so a look
+	// desaturates identically in the engine and on every client that also draws it.
+	float luma = dot(rgb, vec3(0.2125, 0.7154, 0.0721));
 	rgb = mix(vec3_splat(luma), rgb, saturation);
 
 	// Hue rotates the IQ chroma plane by hueRad, guarded so the default
