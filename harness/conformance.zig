@@ -3440,7 +3440,39 @@ fn proveStreamedJpeg(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         }
     }
 
+    // The size-probe convention every SDK uses: capacity zero first, then a buffer of the size
+    // that came back. Only the whole-buffer form above was covered, so a lossy still had never
+    // been asked its size before being asked for its bytes.
+    for ([_]u32{ 1, 2 }) |fmt| {
+        // HEIC needs the platform photo backend; where there is none the call says so and the
+        // probe has nothing to prove.
+        var probe_cfg = cfg;
+        probe_cfg.format = fmt;
+        var needed: usize = 0;
+        var pw: u32 = 0;
+        var ph: u32 = 0;
+        var probe_byte: [1]u8 = undefined;
+        const probe = abi.goss_engine_capture_still(engine, session, &probe_cfg, &probe_byte, 0, &needed, &pw, &ph);
+        if (probe == .unsupported) continue;
+        if (probe != .invalid_argument or needed == 0) {
+            std.debug.print("conformance: FAIL format {d} probe answered {any} with {d} needed\n", .{ fmt, probe, needed });
+            return false;
+        }
+        const sized = try gpa.alloc(u8, needed);
+        defer gpa.free(sized);
+        var sized_len: usize = 0;
+        if (abi.goss_engine_capture_still(engine, session, &probe_cfg, sized.ptr, sized.len, &sized_len, &pw, &ph) != .ok) {
+            std.debug.print("conformance: FAIL format {d} capture into the probed size\n", .{fmt});
+            return false;
+        }
+        if (sized_len == 0 or sized_len > needed) {
+            std.debug.print("conformance: FAIL format {d} wrote {d} into a probed {d}\n", .{ fmt, sized_len, needed });
+            return false;
+        }
+    }
+
     std.debug.print("conformance: PROOF a JPEG capture streams band by band, byte-identical to the whole-buffer encode\n", .{});
+    std.debug.print("conformance: PROOF a lossy still answers its own size probe and fills the buffer that probe asked for\n", .{});
     return true;
 }
 
