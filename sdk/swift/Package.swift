@@ -37,6 +37,9 @@ let engineLinkerSettings: [LinkerSetting] = [
     .linkedLibrary("xnnpack-neonfp16arith_aarch64", .when(platforms: [.iOS])),
     .linkedLibrary("xnnpack-neoni8mm", .when(platforms: [.iOS])),
     .linkedLibrary("yuv", .when(platforms: [.iOS])),
+    // The Neural Engine path: tflite's CoreML delegate is compiled into libtflite.a, so a
+    // consumer of these archives links CoreML the same way it links Metal.
+    .linkedFramework("CoreML", .when(platforms: [.iOS])),
     .linkedFramework("Metal", .when(platforms: [.iOS])),
     .linkedFramework("QuartzCore", .when(platforms: [.iOS])),
     .linkedFramework("CoreMedia", .when(platforms: [.iOS])),
