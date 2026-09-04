@@ -5647,6 +5647,14 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     return e.capture_target;
 }
 
+/// The capture target's real size is the only size readTexture writes, so a
+/// readback into a buffer sized from the size that was *asked for* overruns the
+/// heap whenever the two differ - a composite that fell back leaves the previous
+/// capture's target in place, and that is enough. Checked at every readback.
+fn captureTargetMatches(e: *const Engine, width: u32, height: u32) bool {
+    return e.capture_width == width and e.capture_height == height;
+}
+
 pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
@@ -5665,6 +5673,8 @@ pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, ou
     const staging = e.capture_staging orelse return .renderer_unavailable;
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, data);
+    // bgfx writes the copy at ready_frame, so this waits rather than
+    // giving up: abandoning it frees a buffer the GPU still writes into.
     while (r.frame() < ready_frame) {}
     return .ok;
 }
@@ -5705,6 +5715,8 @@ pub export fn goss_engine_capture_live_frame(engine: ?*Engine, session: ?*Sessio
         }
         render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
         const ready_frame = render.Renderer.readTexture(staging, e.capture_convert.ptr);
+        // bgfx writes the copy at ready_frame, so this waits rather than
+        // giving up: abandoning it frees a buffer the GPU still writes into.
         while (r.frame() < ready_frame) {}
         // The readback is packed RGBA and argbToNv12 reads R,G,B in that
         // order, so no swizzle first. BT.709 video range broadcast default.
@@ -5714,6 +5726,8 @@ pub export fn goss_engine_capture_live_frame(engine: ?*Engine, session: ?*Sessio
 
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, data);
+    // bgfx writes the copy at ready_frame, so this waits rather than
+    // giving up: abandoning it frees a buffer the GPU still writes into.
     while (r.frame() < ready_frame) {}
     if (format == pixel_format_bgra8) image.swapRedBlue(data[0..rgba_size]) catch return .unsupported;
     return .ok;
@@ -5848,6 +5862,8 @@ pub export fn goss_engine_capture_photo(engine: ?*Engine, session: ?*Session, ou
     const staging = e.capture_staging orelse return .renderer_unavailable;
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
+    // bgfx writes the copy at ready_frame, so this waits rather than
+    // giving up: abandoning it frees a buffer the GPU still writes into.
     while (r.frame() < ready_frame) {}
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -5947,6 +5963,8 @@ pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session,
     const staging = e.capture_staging orelse return .renderer_unavailable;
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
+    // bgfx writes the copy at ready_frame, so this waits rather than
+    // giving up: abandoning it frees a buffer the GPU still writes into.
     while (r.frame() < ready_frame) {}
 
     return encodeLossyPhoto(gpa, pixels, e.capture_width, e.capture_height, format, quality, 0, 1, data[0..out_capacity], len_out);
@@ -6322,11 +6340,14 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
                     h.* = 0;
                     return .ok;
                 }
+                if (!captureTargetMatches(e, tw, th)) return .again;
                 const staging = e.capture_staging orelse return .renderer_unavailable;
                 const tile_buf = gpa.alloc(u8, @as(usize, tw) * @as(usize, th) * 4) catch return .out_of_memory;
                 defer gpa.free(tile_buf);
                 render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
                 const ready_frame = render.Renderer.readTexture(staging, tile_buf.ptr);
+                // bgfx writes the copy at ready_frame, so this waits rather than
+                // giving up: abandoning it frees a buffer the GPU still writes into.
                 while (r.frame() < ready_frame) {}
                 var row: u32 = 0;
                 while (row < th) : (row += 1) {
@@ -6369,9 +6390,12 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
             h.* = 0;
             return .ok;
         }
+        if (!captureTargetMatches(e, render_w, render_h)) return .again;
         const staging = e.capture_staging orelse return .renderer_unavailable;
         render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
         const ready_frame = render.Renderer.readTexture(staging, rendered.ptr);
+        // bgfx writes the copy at ready_frame, so this waits rather than
+        // giving up: abandoning it frees a buffer the GPU still writes into.
         while (r.frame() < ready_frame) {}
     } else {
         // Composite each tile into its own small target and stitch the
@@ -6398,12 +6422,15 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
                     h.* = 0;
                     return .ok;
                 }
+                if (!captureTargetMatches(e, tw, th)) return .again;
                 const staging = e.capture_staging orelse return .renderer_unavailable;
                 const tile_size = @as(usize, tw) * @as(usize, th) * 4;
                 const tile_buf = gpa.alloc(u8, tile_size) catch return .out_of_memory;
                 defer gpa.free(tile_buf);
                 render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
                 const ready_frame = render.Renderer.readTexture(staging, tile_buf.ptr);
+                // bgfx writes the copy at ready_frame, so this waits rather than
+                // giving up: abandoning it frees a buffer the GPU still writes into.
                 while (r.frame() < ready_frame) {}
                 var row: u32 = 0;
                 while (row < th) : (row += 1) {
@@ -7923,7 +7950,6 @@ pub export fn goss_session_submit_avatar_source_rgba(session: ?*Session, rgba: ?
     }
     return .ok;
 }
-
 
 /// The session's reusable NV12 conversion planes, sized for width x height;
 /// grown when a larger frame arrives, never shrunk, freed at destroy.

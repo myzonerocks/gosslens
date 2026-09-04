@@ -21281,6 +21281,79 @@ fn watchHold(name: [*:0]const u8) void {
     }
 }
 
+/// How many engine-and-renderer cycles one process must survive. A client that
+/// exports clips makes one engine per export, so this is a session's worth of
+/// work, not a stress number.
+const renderer_cycles: usize = 64;
+
+/// Create engine, bring up a renderer, draw, destroy - over and over in one
+/// process, each cycle through a counting allocator whose live bytes must come
+/// back to where they started. The headless proof cycles sessions over one
+/// engine and never makes a renderer, so nothing held this.
+fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool {
+    var settled: usize = 0;
+    var first_live: usize = 0;
+    var cycle: usize = 0;
+    while (cycle < renderer_cycles) : (cycle += 1) {
+        var counter = CountingAllocator{ .backing = gpa };
+        const engine = abi.createEngine(counter.allocator(), .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 }) catch {
+            std.debug.print("conformance: FAIL renderer lifecycle - engine {d} would not create\n", .{cycle});
+            return false;
+        };
+        const desc: abi.RendererDesc = .{
+            .native_window_handle = glfwGetCocoaWindow(window),
+            .width = width,
+            .height = height,
+        };
+        if (abi.goss_engine_init_renderer(engine, &desc) != .ok) {
+            std.debug.print("conformance: FAIL renderer lifecycle - renderer {d} would not come up\n", .{cycle});
+            abi.destroyEngine(engine);
+            return false;
+        }
+        const session = abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 }) catch {
+            std.debug.print("conformance: FAIL renderer lifecycle - session {d}\n", .{cycle});
+            abi.destroyEngine(engine);
+            return false;
+        };
+        const rgba = try goldenFrame(gpa);
+        defer gpa.free(rgba);
+        const frame: abi.FrameDesc = .{
+            .width = golden_side,
+            .height = golden_side,
+            .pixel_format = 4,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = 1000,
+        };
+        _ = abi.goss_session_submit_frame_rgba_copy(session, &frame, rgba.ptr, golden_side * 4);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        abi.destroySession(session);
+        abi.destroyEngine(engine);
+
+        // The allocator outlives the engine it fed, so anything the cycle kept
+        // is still counted here. The first cycle warms one-time state; from the
+        // second on, live bytes must not climb.
+        const live = counter.inUse();
+        if (cycle == 1) {
+            first_live = live;
+            settled = live;
+        } else if (cycle > 1) {
+            if (live > settled) settled = live;
+            if (live > first_live) {
+                std.debug.print(
+                    "conformance: FAIL renderer lifecycle - cycle {d} left {d} bytes against cycle 1's {d}\n",
+                    .{ cycle, live, first_live },
+                );
+                return false;
+            }
+        }
+    }
+    std.debug.print("conformance: PROOF {d} engine-and-renderer cycles in one process, nothing kept\n", .{renderer_cycles});
+    return true;
+}
+
 /// The fixed grade every target renders for the cross-target compare. Absolute
 /// fields, no bundle and no tracker, so the only thing under test is the
 /// renderer's own colour math on this backend.
@@ -21399,6 +21472,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     const first_arg = arg_it.next();
     const print_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--print") else false;
     const golden_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--golden") else false;
+    const lifecycle_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--lifecycle") else false;
     g_watch = if (first_arg) |arg| std.mem.eql(u8, arg, "--watch") else false;
 
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
@@ -21407,6 +21481,12 @@ pub fn main(init_args: std.process.Init) !u8 {
     const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "conformance", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
     g_watch_window = window;
+
+    // Before the suite's own engine: bgfx is one per process, so a proof about
+    // bringing renderers up and down has to own the process to say anything.
+    if (lifecycle_mode) {
+        return if (try proveRendererLifecycle(gpa, window)) 0 else 1;
+    }
 
     // The engine runs under a counting allocator so the per-frame budget
     // gate can watch its heap footprint settle across a render loop.
