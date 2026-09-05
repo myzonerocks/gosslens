@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 102u
+#define GOSS_ABI_MINOR 103u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -342,6 +342,11 @@ goss_status goss_engine_recording_start(goss_engine *engine, goss_session *sessi
 /* Stops the engine's recording, flushing frames still in flight and
  * finalizing the container. */
 goss_status goss_engine_recording_stop(goss_engine *engine);
+
+/* Tells the next recording whether frames arrive in real time. True is the live camera and
+ * the default; an offline lane rendering a clip faster than real time passes false, so the
+ * writer stamps the frames' own timestamps instead of pacing them to the clock. */
+goss_status goss_engine_recording_set_realtime(goss_engine *engine, bool realtime);
 
 /* Feeds interleaved f32 PCM into the session: the engine's own level
  * and beat analysis always consumes it (driving the audio.level and
