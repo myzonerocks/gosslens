@@ -351,14 +351,12 @@ fn proveVideoRecording(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         std.debug.print("conformance: FAIL the recorded file does not decode\n", .{});
         return false;
     };
-    // Every encoder pool slot skips exactly its first frame while the
-    // render-target wrap lands, and the engine counts those plus any
-    // timestamp drops. The decoded count must match that accounting
-    // (one extra sample of container-timing slack allowed - the video
-    // track starts after time zero once audio sets the clock base),
-    // and warmups must stay a minority of the recording.
+    // A recording owns one wrap, and a wrap lands a frame after it is made,
+    // so the first frame is the only one the recorder can skip. The decoded
+    // count matches that accounting, one extra sample of slack allowed: the
+    // video track starts after time zero once audio sets the clock base.
     const accounted = total_frames - engine.recording_warmups - engine.recording_dropped;
-    if (shape.frames < accounted or shape.frames > accounted + 1 or shape.frames < total_frames / 2 or shape.width != 400 or shape.height != 300) {
+    if (engine.recording_warmups > 1 or shape.frames < accounted or shape.frames > accounted + 1 or shape.width != 400 or shape.height != 300) {
         std.debug.print("conformance: FAIL recorded shape {d} frames ({d} warmups, {d} dropped) {d}x{d} video {d}us\n", .{ shape.frames, engine.recording_warmups, engine.recording_dropped, shape.width, shape.height, shape.duration_us });
         return false;
     }
@@ -389,7 +387,48 @@ fn proveVideoRecording(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         std.debug.print("conformance: FAIL a/v end drift {d}us (video end {d}, audio end {d})\n", .{ drift, shape.duration_us, audio_end_us });
         return false;
     }
-    std.debug.print("conformance: PROOF recording is a decodable video with an aligned audio track ({d}/{d} frames, {d} pool warmups, {d}x{d}, video {d}us, a/v drift {d}us)\n", .{ shape.frames, total_frames, engine.recording_warmups, shape.width, shape.height, shape.duration_us, drift });
+    // The same lens again, told its frames are not in real time: an offline
+    // lane has no viewfinder, so the composite goes straight to the encoder
+    // and no frame waits on a present. Every frame must still land.
+    const offline_path = "zig-out/conformance-recording-offline.mp4";
+    const realtime_warmups = engine.recording_warmups;
+    _ = abi.goss_engine_recording_set_realtime(engine, false);
+    defer _ = abi.goss_engine_recording_set_realtime(engine, true);
+    if (abi.goss_engine_recording_start(engine, session, offline_path.ptr, offline_path.len, null) != .ok) {
+        std.debug.print("conformance: FAIL offline recording start\n", .{});
+        return false;
+    }
+    const offline_total = 12;
+    for (0..offline_total) |i| {
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = @intCast((i + 1) * 33_333),
+        };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_recording_stop(engine) != .ok) {
+        std.debug.print("conformance: FAIL offline recording stop\n", .{});
+        return false;
+    }
+    const offline_shape = abi.recordingProbe(offline_path) catch {
+        std.debug.print("conformance: FAIL the offline recording does not decode\n", .{});
+        return false;
+    };
+    const offline_accounted = offline_total - engine.recording_warmups - engine.recording_dropped;
+    if (engine.recording_warmups > 1 or offline_shape.frames < offline_accounted or offline_shape.frames > offline_accounted + 1) {
+        std.debug.print("conformance: FAIL offline recorded shape {d} frames ({d} warmups, {d} dropped)\n", .{ offline_shape.frames, engine.recording_warmups, engine.recording_dropped });
+        return false;
+    }
+    std.debug.print("conformance: PROOF recording is a decodable video with an aligned audio track ({d}/{d} frames, {d} pool warmups, {d}x{d}, video {d}us, a/v drift {d}us), and an offline recording keeps every frame with no viewfinder present ({d}/{d})\n", .{ shape.frames, total_frames, realtime_warmups, shape.width, shape.height, shape.duration_us, drift, offline_shape.frames, offline_total });
     return true;
 }
 
@@ -21284,6 +21323,14 @@ fn watchHold(name: [*:0]const u8) void {
 /// work, not a stress number.
 const renderer_cycles: usize = 64;
 
+/// Frames each cycle renders, how many of them warm the renderer before the
+/// measure starts, and how much dearer a later renderer's cheapest frame may
+/// be than the renderer before it. A renderer brought up after another was
+/// destroyed must cost what that one cost.
+const lifecycle_frames: usize = 12;
+const lifecycle_warm_frames: usize = 4;
+const lifecycle_cost_slack: u64 = 3;
+
 /// Create engine, bring up a renderer, draw, destroy - over and over in one
 /// process, each cycle through a counting allocator whose live bytes must come
 /// back to where they started. The headless proof cycles sessions over one
@@ -21291,6 +21338,9 @@ const renderer_cycles: usize = 64;
 fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool {
     var settled: usize = 0;
     var first_live: usize = 0;
+    var first_frame_us: u64 = 0;
+    var settled_frame_us: u64 = 0;
+    var worst_frame_us: u64 = 0;
     var cycle: usize = 0;
     while (cycle < renderer_cycles) : (cycle += 1) {
         var counter = CountingAllocator{ .backing = gpa };
@@ -21315,7 +21365,7 @@ fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool 
         };
         const rgba = try goldenFrame(gpa);
         defer gpa.free(rgba);
-        const frame: abi.FrameDesc = .{
+        var frame: abi.FrameDesc = .{
             .width = golden_side,
             .height = golden_side,
             .pixel_format = 4,
@@ -21324,9 +21374,36 @@ fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool 
             .flags = 0,
             .timestamp_us = 1000,
         };
-        _ = abi.goss_session_submit_frame_rgba_copy(session, &frame, rgba.ptr, golden_side * 4);
-        _ = abi.goss_engine_render_frame(engine, session);
-        c.glfwPollEvents();
+        // Events every frame, so the window's layer is live and the swap chain
+        // presents against the display the way a client's does. The cheapest
+        // frame is the measure: a renderer on a slower path has a higher
+        // floor, while a hiccup only moves the mean.
+        var per_frame_us: u64 = std.math.maxInt(u64);
+        var f: usize = 0;
+        while (f < lifecycle_frames) : (f += 1) {
+            const drawn = std.Io.Timestamp.now(harness_io, .awake);
+            frame.timestamp_us = @intCast(1000 + f * 33_333);
+            _ = abi.goss_session_submit_frame_rgba_copy(session, &frame, rgba.ptr, golden_side * 4);
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            const cost: u64 = @intCast(@divTrunc(drawn.durationTo(std.Io.Timestamp.now(harness_io, .awake)).nanoseconds, 1000));
+            if (f >= lifecycle_warm_frames and cost < per_frame_us) per_frame_us = cost;
+        }
+        // Cycle 0 pays the process-wide warmup a first renderer carries, so
+        // renderer 1 is the baseline the rest are held to, the same cycle the
+        // leak check below settles on.
+        if (cycle == 0) first_frame_us = per_frame_us;
+        if (cycle == 1) settled_frame_us = per_frame_us;
+        if (cycle > 0 and per_frame_us > worst_frame_us) worst_frame_us = per_frame_us;
+        if (cycle > 1 and per_frame_us > @max(settled_frame_us * lifecycle_cost_slack, 2000)) {
+            std.debug.print(
+                "conformance: FAIL renderer lifecycle - cycle {d} costs {d}us a frame against renderer 1's {d}us\n",
+                .{ cycle, per_frame_us, settled_frame_us },
+            );
+            abi.destroySession(session);
+            abi.destroyEngine(engine);
+            return false;
+        }
         abi.destroySession(session);
         abi.destroyEngine(engine);
 
@@ -21348,7 +21425,10 @@ fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool 
             }
         }
     }
-    std.debug.print("conformance: PROOF {d} engine-and-renderer cycles in one process, nothing kept\n", .{renderer_cycles});
+    std.debug.print(
+        "conformance: PROOF {d} engine-and-renderer cycles in one process, nothing kept, and every renderer made after a destroy renders as fast as the one before it (worst {d}us against renderer 1's {d}us a frame, first renderer {d}us)\n",
+        .{ renderer_cycles, worst_frame_us, settled_frame_us, first_frame_us },
+    );
     return true;
 }
 

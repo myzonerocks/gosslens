@@ -473,10 +473,10 @@ pub const Engine = struct {
     /// writer never paces frames that carry their own clock.
     recording_realtime: bool = true,
     recording_session: ?*Session = null,
-    /// External render targets per encoder pool buffer, keyed by the
-    /// native texture pointer - the pool cycles a few buffers, each
-    /// needing its own persistent wrap.
-    recording_slots: std.AutoHashMapUnmanaged(usize, RecordingSlot) = .empty,
+    /// The one external wrap a recording composites into. A framebuffer
+    /// resolves its attachment's native pointer per frame, so one texture
+    /// and one target serve every buffer the encoder pool vends.
+    recording_wrap: RecordingSlot = .{},
     recording_pending: [2]?PendingRecordingFrame = .{ null, null },
     recording_pending_at: u8 = 0,
     /// The slot the current frame's composite renders into, when this
@@ -4974,11 +4974,15 @@ fn blitCaptureToSwapChain(e: *Engine, r: *render.Renderer, view_id: u8) void {
 
 /// The recording sibling of blitCaptureToSwapChain: a recorded frame's
 /// composite lands in the encoder's own surface, so the swap chain
-/// still needs a passthrough of it to display normally.
+/// still needs a passthrough of it to display normally. An offline
+/// recording has no viewfinder and the present costs a display
+/// refresh, so it draws the encoder pass alone.
 fn blitRecordingToSwapChain(e: *Engine, r: *render.Renderer, view_id: u8) void {
     const target = e.recording_frame_target orelse return;
-    render.Renderer.setViewTarget(view_id, null, @intCast(r.width), @intCast(r.height));
-    r.submitShaderPass(view_id, r.passthroughProgram(), target.texture, r.default_mask_texture);
+    if (e.recording_realtime) {
+        render.Renderer.setViewTarget(view_id, null, @intCast(r.width), @intCast(r.height));
+        r.submitShaderPass(view_id, r.passthroughProgram(), target.texture, r.default_mask_texture);
+    }
     if (recording_binds_window) {
         if (e.recording_window_target) |window| {
             const rec = &(e.recording.?);
@@ -5414,17 +5418,13 @@ fn prepareRecordingFrame(e: *Engine, r: *render.Renderer) ?media_recording.Frame
     const width: u16 = @intCast(rec.config.width);
     const height: u16 = @intCast(rec.config.height);
     const key = @intFromPtr(frame.native_texture);
+    const wrap = &e.recording_wrap;
     if (recording_binds_window) {
         // The window is not sampleable, so the composite lands in the
         // capture target (sampleable) and re-presents into both the
         // swap chain and the encoder window each frame.
-        const slot = e.recording_slots.getOrPut(e.gpa, key) catch {
-            rec.abortFrame(frame);
-            return null;
-        };
-        if (!slot.found_existing) slot.value_ptr.* = .{};
-        if (slot.value_ptr.target == null) {
-            slot.value_ptr.target = render.Renderer.createWindowTarget(frame.native_texture, width, height) catch {
+        if (wrap.target == null) {
+            wrap.target = render.Renderer.createWindowTarget(frame.native_texture, width, height) catch {
                 e.recording_warmups += 1;
                 rec.abortFrame(frame);
                 return null;
@@ -5435,28 +5435,23 @@ fn prepareRecordingFrame(e: *Engine, r: *render.Renderer) ?media_recording.Frame
             rec.abortFrame(frame);
             return null;
         };
-        e.recording_window_target = slot.value_ptr.target;
+        e.recording_window_target = wrap.target;
         e.recording_frame_target = e.capture_target;
         return frame;
     }
-    const slot = e.recording_slots.getOrPut(e.gpa, key) catch {
-        rec.abortFrame(frame);
-        return null;
-    };
-    if (!slot.found_existing) slot.value_ptr.* = .{};
-    const wrapped = r.wrapExternalRenderTarget(&slot.value_ptr.persistent, width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, key) orelse {
+    const wrapped = r.wrapExternalRenderTarget(&wrap.persistent, width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, key) orelse {
         e.recording_warmups += 1;
         rec.abortFrame(frame);
         return null;
     };
-    if (slot.value_ptr.target == null) {
-        slot.value_ptr.target = render.Renderer.createExternalTarget(wrapped) catch {
+    if (wrap.target == null) {
+        wrap.target = render.Renderer.createExternalTarget(wrapped) catch {
             e.recording_warmups += 1;
             rec.abortFrame(frame);
             return null;
         };
     }
-    e.recording_frame_target = slot.value_ptr.target;
+    e.recording_frame_target = wrap.target;
     return frame;
 }
 
@@ -5500,13 +5495,9 @@ fn finishRecording(e: *Engine) bool {
     } else {
         ok = false;
     }
-    var it = e.recording_slots.valueIterator();
-    while (it.next()) |slot| {
-        if (slot.target) |target| render.Renderer.destroyOffscreenTarget(target);
-        slot.persistent.deinit();
-    }
-    e.recording_slots.deinit(e.gpa);
-    e.recording_slots = .empty;
+    if (e.recording_wrap.target) |target| render.Renderer.destroyOffscreenTarget(target);
+    e.recording_wrap.persistent.deinit();
+    e.recording_wrap = .{};
     e.recording = null;
     e.recording_session = null;
     e.recording_frame_target = null;
@@ -6118,7 +6109,8 @@ pub const RecordingConfig = extern struct {
 /// the frame's own timestamp until goss_engine_recording_stop.
 /// Tells the next recording whether frames arrive in real time. True is the live camera and
 /// the default; an offline lane rendering a clip faster than real time passes false, so the
-/// writer stamps the frames' own timestamps instead of pacing them to the clock.
+/// writer stamps the frames' own timestamps instead of pacing them to the clock and the
+/// composite goes straight to the encoder with no viewfinder present to wait on.
 pub export fn goss_engine_recording_set_realtime(engine: ?*Engine, realtime: bool) Status {
     const e = engine orelse return .invalid_argument;
     e.recording_realtime = realtime;
