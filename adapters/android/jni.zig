@@ -985,7 +985,7 @@ export fn Java_com_gosslens_Gosslens_nativeCaptureLiveFrame(env: *JniEnv, cls: j
     return @intFromEnum(status);
 }
 
-export fn Java_com_gosslens_Gosslens_nativeRecordingStart(env: *JniEnv, cls: jobject, engine: i64, session: i64, path_buffer: jobject, path_len: i32, width: i32, height: i32, bitrate: i32, codec: i32) i32 {
+export fn Java_com_gosslens_Gosslens_nativeRecordingStart(env: *JniEnv, cls: jobject, engine: i64, session: i64, path_buffer: jobject, path_len: i32, width: i32, height: i32, bitrate: i32, codec: i32, realtime: i32) i32 {
     _ = cls;
     const path = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const config: abi.RecordingConfig = .{
@@ -994,6 +994,8 @@ export fn Java_com_gosslens_Gosslens_nativeRecordingStart(env: *JniEnv, cls: job
         .bitrate_bps = @intCast(@max(bitrate, 0)),
         .codec = @intCast(@max(codec, 0)),
     };
+    const set = abi.goss_engine_recording_set_realtime(engineFromHandle(engine), realtime != 0);
+    if (set != .ok) return @intFromEnum(set);
     return @intFromEnum(abi.goss_engine_recording_start(engineFromHandle(engine), sessionFromHandle(session), @ptrCast(path), @intCast(@max(path_len, 0)), &config));
 }
 

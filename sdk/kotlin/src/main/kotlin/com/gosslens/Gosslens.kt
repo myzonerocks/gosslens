@@ -24,7 +24,7 @@ object Gosslens {
     internal external fun nativeCapturePhoto(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeCaptureLiveFrame(engine: Long, session: Long, format: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeCaptureStill(engine: Long, session: Long, width: Int, height: Int, supersample: Int, format: Int, quality: Int, colorSpace: Int, bitDepth: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
-    internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int): Int
+    internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int, realtime: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
     internal external fun nativeSubmitWorld(session: Long, stateBuffer: ByteBuffer, planesBuffer: ByteBuffer, planeCount: Int, anchorsBuffer: ByteBuffer, anchorCount: Int, lightBuffer: ByteBuffer): Int
     internal external fun nativeCaptureView(session: Long, guidanceBuffer: ByteBuffer): Int
@@ -677,13 +677,15 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
 
     /** Starts recording the session's rendered frames, effects baked
      * in, into an MP4 at [path]. One recording per engine; every
-     * rendered frame appends until [stopRecording]. */
-    fun startRecording(session: GossSession, path: String, width: Int = 0, height: Int = 0, bitrate: Int = 0, hevc: Boolean = false): Boolean {
+     * rendered frame appends until [stopRecording].
+     * [realtime] false is for an offline lane with no viewfinder: the composite goes straight
+     * to the encoder rather than waiting on a display refresh nobody is watching. */
+    fun startRecording(session: GossSession, path: String, width: Int = 0, height: Int = 0, bitrate: Int = 0, hevc: Boolean = false, realtime: Boolean = true): Boolean {
         val bytes = path.toByteArray(Charsets.UTF_8)
         val buffer = ByteBuffer.allocateDirect(bytes.size)
         buffer.put(bytes)
         buffer.rewind()
-        return Gosslens.nativeRecordingStart(handle, session.handle, buffer, bytes.size, width, height, bitrate, if (hevc) 1 else 0) == 0
+        return Gosslens.nativeRecordingStart(handle, session.handle, buffer, bytes.size, width, height, bitrate, if (hevc) 1 else 0, if (realtime) 1 else 0) == 0
     }
 
     /** Stops the recording, flushing in-flight frames and finalizing
@@ -1861,7 +1863,8 @@ class GossSession private constructor(
         return Gosslens.nativeSubmitSourceFrameRgba(handle, buf, n, rgba, width, height, stride, pixelFormat) == 0
     }
 
-    /** Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid. */
+    /** Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip,
+     * 4 grid, 5 overlay, where every source covers the whole frame and stacks by opacity. */
     fun setLayout(arrangement: Int): Boolean = Gosslens.nativeSetLayout(handle, arrangement) == 0
 
     fun clearLayout(): Boolean = Gosslens.nativeClearLayout(handle) == 0

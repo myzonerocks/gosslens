@@ -469,8 +469,8 @@ pub const Engine = struct {
     /// frame of recording_session; frames commit two engine frames
     /// after they render so the GPU has finished writing them.
     recording: ?media_recording.Recording = null,
-    /// Whether the next recording expects frames in real time. An offline lane clears it so the
-    /// writer never paces frames that carry their own clock.
+    /// Whether a viewfinder is watching the recording. An offline lane clears it and the
+    /// composite goes straight to the encoder, skipping a present nobody sees.
     recording_realtime: bool = true,
     recording_session: ?*Session = null,
     /// The one external wrap a recording composites into. A framebuffer
@@ -6107,10 +6107,10 @@ pub const RecordingConfig = extern struct {
 /// the file at path. One recording per engine; every subsequent
 /// goss_engine_render_frame of this session appends one video frame at
 /// the frame's own timestamp until goss_engine_recording_stop.
-/// Tells the next recording whether frames arrive in real time. True is the live camera and
-/// the default; an offline lane rendering a clip faster than real time passes false, so the
-/// writer stamps the frames' own timestamps instead of pacing them to the clock and the
-/// composite goes straight to the encoder with no viewfinder present to wait on.
+/// Tells the next recording whether a viewfinder is watching it. True is the live camera and
+/// the default; an offline lane rendering a clip faster than real time passes false, and the
+/// composite then goes straight to the encoder rather than waiting on a display refresh to
+/// present a frame nobody sees. Frames carry their own timestamps either way.
 pub export fn goss_engine_recording_set_realtime(engine: ?*Engine, realtime: bool) Status {
     const e = engine orelse return .invalid_argument;
     e.recording_realtime = realtime;
@@ -6136,7 +6136,6 @@ pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, 
         .height = height,
         .bitrate_bps = cfg.bitrate_bps,
         .codec = @enumFromInt(cfg.codec),
-        .realtime = e.recording_realtime,
     }) catch return .invalid_argument;
     e.recording_session = s;
     e.recording_warmups = 0;
@@ -6899,8 +6898,9 @@ fn feedSourceSegmenter(s: *Session, seg: *segmentation.Segmentation, d: *const F
 }
 
 /// Sets the composite arrangement over the camera plus the named sources
-/// (0 custom, 1 side-by-side, 2 top-bottom, 3 picture-in-picture, 4 grid). The
-/// composite runs at the head of the render chain; the rest is unchanged.
+/// (0 custom, 1 side-by-side, 2 top-bottom, 3 picture-in-picture, 4 grid,
+/// 5 overlay, where every source covers the whole frame and stacks by opacity).
+/// The composite runs at the head of the render chain; the rest is unchanged.
 pub export fn goss_session_set_layout(session: ?*Session, arrangement: u32) Status {
     const s = session orelse return .invalid_argument;
     const total: u8 = s.source_count + 1; // camera is source 0

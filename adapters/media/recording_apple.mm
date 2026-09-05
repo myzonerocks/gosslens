@@ -77,7 +77,7 @@ void recycleFrame(Recording* r, RecordingFrame* frame) {
 
 void* recording_open_impl(const uint8_t* path, size_t path_len,
                           uint32_t width, uint32_t height,
-                          uint32_t bitrate_bps, uint32_t codec, uint32_t realtime) {
+                          uint32_t bitrate_bps, uint32_t codec) {
   if (path == nullptr || path_len == 0 || width == 0 || height == 0) return nullptr;
   @autoreleasepool {
     NSString* ns_path = [[NSString alloc] initWithBytes:path
@@ -104,7 +104,10 @@ void* recording_open_impl(const uint8_t* path, size_t path_len,
     AVAssetWriterInput* input =
         [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo
                                        outputSettings:settings];
-    input.expectsMediaDataInRealTime = realtime != 0;
+    // The writer always takes real-time input. Told otherwise it applies full backpressure and
+    // the readiness spin below gives up on a slower host, so whether a viewfinder is presented
+    // is the engine's business and never the writer's.
+    input.expectsMediaDataInRealTime = YES;
     if (![writer canAddInput:input]) return nullptr;
     [writer addInput:input];
 
@@ -135,7 +138,7 @@ void* recording_open_impl(const uint8_t* path, size_t path_len,
       };
       audio_input = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeAudio
                                                    outputSettings:audio_settings];
-      audio_input.expectsMediaDataInRealTime = realtime != 0;
+      audio_input.expectsMediaDataInRealTime = YES;
       if ([writer canAddInput:audio_input]) {
         [writer addInput:audio_input];
       } else {
@@ -469,8 +472,8 @@ int32_t recording_probe_audio_impl(const uint8_t* path, size_t path_len,
 
 extern "C" void* goss_recording_open(const uint8_t* path, size_t path_len,
                                      uint32_t width, uint32_t height,
-                                     uint32_t bitrate_bps, uint32_t codec, uint32_t realtime) {
-  GOSS_SHIM_GUARD(void*, nullptr, recording_open_impl(path, path_len, width, height, bitrate_bps, codec, realtime))
+                                     uint32_t bitrate_bps, uint32_t codec) {
+  GOSS_SHIM_GUARD(void*, nullptr, recording_open_impl(path, path_len, width, height, bitrate_bps, codec))
 }
 
 // Vends the next pool buffer as an opaque frame token plus the Metal

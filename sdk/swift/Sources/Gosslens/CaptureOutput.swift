@@ -130,8 +130,8 @@ extension GossEngine {
     /// Starts recording the session's rendered frames, effects baked
     /// in, into an MP4 at path. One recording per engine; every
     /// rendered frame appends until stopRecording.
-    /// `realtime` false is for an offline lane that hands the recorder frames faster than real
-    /// time with their own timestamps; the writer then stamps them rather than pacing them.
+    /// `realtime` false is for an offline lane with no viewfinder: the composite goes straight
+    /// to the encoder rather than waiting on a display refresh nobody is watching.
     public func startRecording(session: GossSession, path: String, width: UInt32 = 0, height: UInt32 = 0, bitrate: UInt32 = 0, hevc: Bool = false, realtime: Bool = true) throws {
         try checked(goss_engine_recording_set_realtime(handle, realtime))
         var config = goss_recording_config(width: width, height: height, bitrate_bps: bitrate, codec: hevc ? 1 : 0)

@@ -205,16 +205,28 @@ extension GossSession {
 
     /// Uploads one RGBA/BGRA frame into a named source (pixelFormat 3 BGRA, 4 RGBA).
     public func submitSourceFrame(_ name: String, rgba: [UInt8], width: UInt32, height: UInt32, stride: UInt32, pixelFormat: UInt32 = 4) throws {
-        var mutableName = name
-        var desc = goss_frame_desc(width: width, height: height, pixel_format: pixelFormat, color_standard: 0, color_range: 1, flags: 0, timestamp_us: 0)
-        try mutableName.withUTF8 { nb in
-            try rgba.withUnsafeBufferPointer { rb in
-                try checked(goss_session_submit_source_frame_rgba_copy(handle, nb.baseAddress, nb.count, &desc, rb.baseAddress, stride))
-            }
+        try rgba.withUnsafeBufferPointer { rb in
+            guard let base = rb.baseAddress else { return }
+            try submitSourceFrame(
+                name, rgba: base, width: width, height: height, stride: stride,
+                pixelFormat: GossPixelFormat(rawValue: pixelFormat) ?? .rgba8,
+            )
         }
     }
 
-    /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid.
+    /// The same upload from a pointer, the sibling of `submitFrameRgbaCopy`: a lane feeding a
+    /// source every frame hands the decoder's own buffer over rather than copying it into an
+    /// array first, and a clip that was filmed sideways says so here as a camera frame does.
+    public func submitSourceFrame(_ name: String, rgba: UnsafePointer<UInt8>, width: UInt32, height: UInt32, stride: UInt32, pixelFormat: GossPixelFormat = .rgba8, rotationDegrees: UInt32 = 0, mirrored: Bool = false, timestampUs: Int64 = 0) throws {
+        var mutableName = name
+        var raw = GossFrameDesc(width: width, height: height, pixelFormat: pixelFormat, rotationDegrees: rotationDegrees, mirrored: mirrored, timestampUs: timestampUs).raw
+        try mutableName.withUTF8 { nb in
+            try checked(goss_session_submit_source_frame_rgba_copy(handle, nb.baseAddress, nb.count, &raw, rgba, stride))
+        }
+    }
+
+    /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip,
+    /// 4 grid, 5 overlay, where every source covers the whole frame and stacks by opacity.
     public func setLayout(_ arrangement: UInt32) throws {
         try checked(goss_session_set_layout(handle, arrangement))
     }
@@ -224,8 +236,9 @@ extension GossSession {
     }
 
     /// Sets a source's composite blend: opacity, key mode (0 none, 1 matte from
-    /// the source alpha, 2 chroma-key), the chroma color, and a match
-    /// similarity. The name "camera" addresses the live camera base.
+    /// the source alpha, 2 chroma-key, 3 a supplied per-source mask), the chroma
+    /// color, and a match similarity. The name "camera" addresses the live camera
+    /// base, which has no source mask.
     public func setSourceComposite(_ name: String, opacity: Float = 1, key: UInt32 = 0, chroma: (r: Float, g: Float, b: Float) = (0, 0, 0), similarity: Float = 0) throws {
         var b = Array(name.utf8)
         try b.withUnsafeMutableBufferPointer { buf in

@@ -343,9 +343,10 @@ goss_status goss_engine_recording_start(goss_engine *engine, goss_session *sessi
  * finalizing the container. */
 goss_status goss_engine_recording_stop(goss_engine *engine);
 
-/* Tells the next recording whether frames arrive in real time. True is the live camera and
- * the default; an offline lane rendering a clip faster than real time passes false, so the
- * writer stamps the frames' own timestamps instead of pacing them to the clock. */
+/* Tells the next recording whether a viewfinder is watching it. True is the live camera and
+ * the default; an offline lane rendering a clip faster than real time passes false, and the
+ * composite then goes straight to the encoder rather than waiting on a display refresh.
+ * Frames carry their own timestamps either way. */
 goss_status goss_engine_recording_set_realtime(goss_engine *engine, bool realtime);
 
 /* Feeds interleaved f32 PCM into the session: the engine's own level
@@ -886,7 +887,8 @@ goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const gos
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,
  * then set_layout to composite the camera (source 0) and the named sources
- * (arrangement: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid). */
+ * (arrangement: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid, 5 overlay,
+ * where every source covers the whole frame and stacks by opacity). */
 goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len);
 goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len);
 goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
