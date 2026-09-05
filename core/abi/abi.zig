@@ -638,6 +638,12 @@ const PendingGlbCollider = struct {
 const SpriteMask = struct { channel: u8, over: bool, strength: f32 = 1 };
 
 pub const Session = struct {
+    /// Mask scratch for the per-frame matte and segmentation polls. On the session, which lives
+    /// on the heap, rather than a local in each poll: a 256x256 float mask is a quarter of a
+    /// megabyte, and eleven of them as locals on the render path overflowed any thread but the
+    /// main one. Two slots, because the sclera matte holds a mask and an iris at once.
+    mask_scratch: [2][segmentation.mask_len]f32 = undefined,
+
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
     /// once fed, its level and beat outrank the host's tick value.
     audio: audio_analysis.Analysis = .{},
@@ -9323,27 +9329,27 @@ fn fuseDepthIntoMask(session: *Session, mask: *[segmentation.mask_len]f32) void 
 /// mode-3 matte texture, so the composite keys the guest by the engine's own
 /// segmentation of its frame. No mask yet leaves the source showing whole.
 fn pollSourceSegmentation(session: *Session) void {
-    var mask: [segmentation.mask_len]f32 = undefined;
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
     for (0..session.source_count) |i| {
         const seg = session.source_segmenter[i] orelse continue;
-        if (!segmentation.readMask(seg, &mask)) continue;
-        _ = uploadMaskFromF32(&session.source_seg_mask[i], &mask);
+        if (!segmentation.readMask(seg, mask)) continue;
+        _ = uploadMaskFromF32(&session.source_seg_mask[i], mask);
     }
 }
 
 fn pollSegmentationMask(session: *Session) void {
     const worker = session.segmentation_worker orelse return;
-    var mask: [segmentation.mask_len]f32 = undefined;
-    if (!segmentation.readMask(worker, &mask)) return;
-    fuseDepthIntoMask(session, &mask);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    if (!segmentation.readMask(worker, mask)) return;
+    fuseDepthIntoMask(session, mask);
 
     clearSegmentationTextures(session);
-    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, &mask);
+    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
 
     // A harmonize.pass measures its region statistics from the CPU mask, so keep
     // a copy when one is active.
     if (session.wants_person_mask and session.person_mask.len == mask.len) {
-        @memcpy(session.person_mask, &mask);
+        @memcpy(session.person_mask, mask);
         session.person_mask_valid = true;
     }
 
@@ -9355,8 +9361,8 @@ fn pollSegmentationMask(session: *Session) void {
     for (1..manifest.mask_channels.len) |channel| {
         if (!maskChannelNeeded(session, @intCast(channel))) continue;
         const source = classChannelSource(class_count, channel) orelse continue;
-        if (!segmentation.readClassMask(worker, source, &mask)) continue;
-        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+        if (!segmentation.readClassMask(worker, source, mask)) continue;
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
     }
 }
 
@@ -9365,12 +9371,12 @@ fn pollSegmentationMask(session: *Session) void {
 /// so a scene-keyed pass draws nothing at no per-frame cost.
 fn pollSceneSegmentation(session: *Session) void {
     const worker = session.scene_worker orelse return;
-    var mask: [segmentation.mask_len]f32 = undefined;
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
     for (scene_class_order) |channel| {
         if (!maskChannelNeeded(session, channel)) continue;
         const source = sceneChannelSource(channel) orelse continue;
-        if (!segmentation.readClassMask(worker, source, &mask)) continue;
-        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+        if (!segmentation.readClassMask(worker, source, mask)) continue;
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
     }
 }
 
@@ -9540,24 +9546,24 @@ fn pollScleraMatte(session: *Session, channel: u8) void {
     if (!maskChannelNeeded(session, channel)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
-    var iris: [segmentation.mask_len]f32 = undefined;
-    @memset(&iris, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
+    const iris: *[segmentation.mask_len]f32 = &session.mask_scratch[1];
+    @memset(iris, 0);
     var ring: [face.landmark_count][2]f32 = undefined;
     const eyes = [_][]const u16{ &face.left_eye_loop, &face.right_eye_loop };
     for (eyes) |loop| {
         for (loop, 0..) |idx, i| ring[i] = points[idx];
-        fillPolygon(ring[0..loop.len], &mask);
+        fillPolygon(ring[0..loop.len], mask);
     }
     const irises = [_][]const u16{ &face.left_iris_loop, &face.right_iris_loop };
     for (irises) |loop| {
         for (loop, 0..) |idx, i| ring[i] = points[idx];
-        fillPolygon(ring[0..loop.len], &iris);
+        fillPolygon(ring[0..loop.len], iris);
     }
-    for (&mask, iris) |*m, i| m.* *= (1.0 - i);
+    for (mask, iris) |*m, i| m.* *= (1.0 - i);
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
 }
 
 /// Builds the upper lash-line band matte from both eyes' upper lid arcs: each
@@ -9568,13 +9574,13 @@ fn pollLashLineMatte(session: *Session, channel: u8) void {
     if (!maskChannelNeeded(session, channel)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
     var band: [18][2]f32 = undefined;
-    fillPolygon(face.lashLineBand(&points, &face.left_eye_loop, &band), &mask);
-    fillPolygon(face.lashLineBand(&points, &face.right_eye_loop, &band), &mask);
+    fillPolygon(face.lashLineBand(&points, &face.left_eye_loop, &band), mask);
+    fillPolygon(face.lashLineBand(&points, &face.right_eye_loop, &band), mask);
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
 }
 
 /// Builds a contour or highlight matte from clustered face landmarks: each
@@ -9585,15 +9591,15 @@ fn pollFaceHullMatte(session: *Session, channel: u8, regions: []const []const u1
     if (!maskChannelNeeded(session, channel)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
     var cluster: [face.landmark_count][2]f32 = undefined;
     for (regions) |region| {
         for (region, 0..) |idx, i| cluster[i] = points[idx];
-        fillLandmarkHull(cluster[0..region.len], &mask);
+        fillLandmarkHull(cluster[0..region.len], mask);
     }
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
 }
 
 /// Builds a face-part matte channel from one or more landmark loops, unioned,
@@ -9604,15 +9610,15 @@ fn pollFacePartMatte(session: *Session, channel: u8, loops: []const []const u16)
     if (!maskChannelNeeded(session, channel)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
     var ring: [face.landmark_count][2]f32 = undefined;
     for (loops) |loop| {
         for (loop, 0..) |idx, i| ring[i] = points[idx];
-        fillPolygon(ring[0..loop.len], &mask);
+        fillPolygon(ring[0..loop.len], mask);
     }
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
 }
 
 fn pollHeadMatte(session: *Session) void {
@@ -9620,11 +9626,11 @@ fn pollHeadMatte(session: *Session) void {
     if (!maskChannelNeeded(session, head)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, head);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
-    fillLandmarkHull(points[0..], &mask);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
+    fillLandmarkHull(points[0..], mask);
     clearClassTexture(session, head);
-    session.segmentation_class_textures[head] = uploadMaskFromF32(&session.class_tex[head], &mask);
+    session.segmentation_class_textures[head] = uploadMaskFromF32(&session.class_tex[head], mask);
 }
 
 fn pollHandMatte(session: *Session) void {
@@ -9638,18 +9644,18 @@ fn pollHandMatte(session: *Session) void {
     if (w <= 0 or h <= 0 or !tracking.hand_worker.readResult(worker, &result) or result.hand_count == 0) {
         return clearClassTexture(session, chan);
     }
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
     var any = false;
     for (result.hands[0..result.hand_count]) |tracked| {
         if (tracked.presence < 0.5) continue;
         var pts: [hand.landmark_count][2]f32 = undefined;
         for (0..hand.landmark_count) |i| pts[i] = .{ tracked.landmarks[i * 3] / w, tracked.landmarks[i * 3 + 1] / h };
-        fillLandmarkHull(pts[0..], &mask);
+        fillLandmarkHull(pts[0..], mask);
         any = true;
     }
     clearClassTexture(session, chan);
-    if (any) session.segmentation_class_textures[chan] = uploadMaskFromF32(&session.class_tex[chan], &mask);
+    if (any) session.segmentation_class_textures[chan] = uploadMaskFromF32(&session.class_tex[chan], mask);
 }
 
 /// When the host submits depth and no in-engine segmenter runs, the depth
@@ -9662,7 +9668,7 @@ fn pollDepthOcclusion(session: *Session) void {
     const plane = (session.depth_near + session.depth_far) * 0.5;
     const bias: f32 = 0.02;
     const side = segmentation.mask_side;
-    var mask: [segmentation.mask_len]f32 = undefined;
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
     for (0..side) |y| {
         for (0..side) |x| {
             const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(side));
@@ -9672,7 +9678,7 @@ fn pollDepthOcclusion(session: *Session) void {
         }
     }
     clearSegmentationTextures(session);
-    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, &mask);
+    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
 }
 
 fn destroyLutState(session: *Session) void {
