@@ -2,7 +2,7 @@ import CGosslens
 
 /// Pixel layout of a camera frame as delivered by the platform.
 /// Raw values mirror the frozen C enum.
-public enum GossPixelFormat: UInt32 {
+public enum GossPixelFormat: UInt32, Sendable {
     case nv12 = 0
     case nv21 = 1
     case i420 = 2
@@ -10,19 +10,19 @@ public enum GossPixelFormat: UInt32 {
     case rgba8 = 4
 }
 
-public enum GossColorStandard: UInt32 {
+public enum GossColorStandard: UInt32, Sendable {
     case bt601 = 0
     case bt709 = 1
     case bt2020 = 2
 }
 
-public enum GossColorRange: UInt32 {
+public enum GossColorRange: UInt32, Sendable {
     case video = 0
     case full = 1
 }
 
 /// Platform thermal pressure, fed by the SDK from the OS thermal API.
-public enum GossThermal: UInt32 {
+public enum GossThermal: UInt32, Sendable {
     case nominal = 0
     case fair = 1
     case serious = 2
@@ -31,7 +31,7 @@ public enum GossThermal: UInt32 {
 
 /// How the pipeline is currently degraded. Levels only trade effect
 /// quality; capture and preview never stop.
-public enum GossDegradeLevel: UInt32 {
+public enum GossDegradeLevel: UInt32, Sendable {
     case full = 0
     case reducedMlCadence = 1
     case segmentationOff = 2

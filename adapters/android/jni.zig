@@ -1413,10 +1413,24 @@ export fn Java_com_gosslens_Gosslens_nativeArBrushEnd(env: *JniEnv, cls: jobject
     return @intFromEnum(abi.goss_session_ar_brush_end(sessionFromHandle(session)));
 }
 
+/// out_buffer takes five floats: x, y, w, h, then the turn in degrees.
+export fn Java_com_gosslens_Gosslens_nativeSpriteTransform(env: *JniEnv, cls: jobject, session: i64, node_id_buffer: jobject, node_id_len: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const node_id = getDirectBufferAddress(env, node_id_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: [*]f32 = @ptrCast(@alignCast(getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument)));
+    return @intFromEnum(abi.goss_session_sprite_transform(sessionFromHandle(session), @ptrCast(node_id), @intCast(@max(node_id_len, 0)), &out[0], &out[1], &out[2], &out[3], &out[4]));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeArBrushUndo(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;
     return @intFromEnum(abi.goss_session_ar_brush_undo(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeArBrushRedo(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_ar_brush_redo(sessionFromHandle(session)));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeArBrushClear(env: *JniEnv, cls: jobject, session: i64) i32 {

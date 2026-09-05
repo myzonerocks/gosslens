@@ -25,6 +25,10 @@ pub const WorldStroke = struct {
 pub const WorldBoard = struct {
     strokes: [max_strokes]WorldStroke = undefined,
     count: u16 = 0,
+    /// Strokes taken off the board by undo, newest last, so redo can put them
+    /// back. A fresh stroke drops them, the same rule the screen board follows.
+    redo: [max_strokes]WorldStroke = undefined,
+    redo_count: u16 = 0,
     drawing: bool = false,
     style_color: [4]f32 = .{ 1, 1, 1, 1 },
     style_width: f32 = 0.01,
@@ -41,6 +45,7 @@ pub const WorldBoard = struct {
 
     pub fn begin(self: *WorldBoard) void {
         if (self.count >= max_strokes) return;
+        self.redo_count = 0;
         self.strokes[self.count] = .{ .color = self.style_color, .width = self.style_width, .mode = self.style_mode };
         self.drawing = true;
     }
@@ -60,11 +65,22 @@ pub const WorldBoard = struct {
     }
 
     pub fn undo(self: *WorldBoard) void {
-        if (self.count > 0) self.count -= 1;
+        if (self.count == 0) return;
+        self.count -= 1;
+        self.redo[self.redo_count] = self.strokes[self.count];
+        self.redo_count += 1;
+    }
+
+    pub fn redoLast(self: *WorldBoard) void {
+        if (self.redo_count == 0 or self.count >= max_strokes) return;
+        self.redo_count -= 1;
+        self.strokes[self.count] = self.redo[self.redo_count];
+        self.count += 1;
     }
 
     pub fn clear(self: *WorldBoard) void {
         self.count = 0;
+        self.redo_count = 0;
         self.drawing = false;
     }
 
@@ -125,4 +141,33 @@ test "undo drops the last stroke and clear empties the board" {
     b.clear();
     try t.expectEqual(@as(u16, 0), b.strokeCount());
     try t.expectEqual(@as(?*const WorldStroke, null), b.get(0));
+}
+
+test "redo puts back what undo took, and a fresh stroke drops the redo future" {
+    var b = WorldBoard{};
+    b.setStyle(.{ 1, 0, 0, 1 }, 0.02);
+    b.begin();
+    b.point(0, 0, -1);
+    b.point(1, 1, -1);
+    b.end();
+    b.undo();
+    try t.expectEqual(@as(u16, 0), b.strokeCount());
+    b.redoLast();
+    try t.expectEqual(@as(u16, 1), b.strokeCount());
+    const back = b.get(0) orelse return error.TestUnexpectedResult;
+    try t.expectApproxEqAbs(@as(f32, 0.02), back.width, 1e-6);
+    try t.expectEqual(@as(u16, 2), back.count);
+
+    // Redo with nothing undone is a no-op rather than a duplicate.
+    b.redoLast();
+    try t.expectEqual(@as(u16, 1), b.strokeCount());
+
+    // Drawing after an undo leaves the undone stroke unreachable, as in any editor.
+    b.undo();
+    b.begin();
+    b.point(0, 1, -1);
+    b.point(1, 0, -1);
+    b.end();
+    b.redoLast();
+    try t.expectEqual(@as(u16, 1), b.strokeCount());
 }

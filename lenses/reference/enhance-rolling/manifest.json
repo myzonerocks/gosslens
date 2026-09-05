@@ -1,0 +1,24 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.enhance-rolling",
+  "version": "1.0.0",
+  "display_name": "Rolling Shutter Fix",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {
+      "id": "rolling",
+      "type": "rolling.pass",
+      "inputs": {
+        "frame": "camera"
+      },
+      "params": {},
+      "rolling": {
+        "strength": 0.9,
+        "readout": 0.03
+      }
+    }
+  ],
+  "triggers": []
+}

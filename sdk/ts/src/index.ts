@@ -1704,6 +1704,32 @@ export class GossSession {
     this.mod.ccall("goss_session_ar_brush_undo", "number", ["number"], [this.handle]);
   }
 
+  redoARStroke(): void {
+    this.mod.ccall("goss_session_ar_brush_redo", "number", ["number"], [this.handle]);
+  }
+
+  /// Where a placed sprite.2d, text.2d or video.texture node currently draws: its rect in
+  /// normalized coordinates and its turn in degrees clockwise - the authored angle, plus any
+  /// bound parameter, plus any gesture. Null for an unknown node.
+  spriteTransform(nodeId: string): { x: number; y: number; w: number; h: number; rotation: number } | null {
+    const id = new TextEncoder().encode(nodeId);
+    // One scratch block holds the name then the five floats, aligned, so this needs no second
+    // allocation and no second buffer to keep in step with it.
+    const floatsAt = (id.length + 3) & ~3;
+    const base = this.scratch(floatsAt + 5 * 4);
+    this.mod.HEAPU8.set(id, base);
+    const out = base + floatsAt;
+    const status = this.mod.ccall(
+      "goss_session_sprite_transform",
+      "number",
+      ["number", "number", "number", "number", "number", "number", "number", "number"],
+      [this.handle, base, id.length, out, out + 4, out + 8, out + 12, out + 16],
+    );
+    if (status !== 0) return null;
+    const f = this.mod.HEAPF32;
+    return { x: f[out >> 2], y: f[(out + 4) >> 2], w: f[(out + 8) >> 2], h: f[(out + 12) >> 2], rotation: f[(out + 16) >> 2] };
+  }
+
   clearARStrokes(): void {
     this.mod.ccall("goss_session_ar_brush_clear", "number", ["number"], [this.handle]);
   }

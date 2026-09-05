@@ -320,6 +320,8 @@ pub const Renderer = struct {
     beauty_params_uniform: c.bgfx_uniform_handle_t,
     reshape_params_uniform: c.bgfx_uniform_handle_t,
     makeup_params_uniform: c.bgfx_uniform_handle_t,
+    /// The sub-rect a tiled capture is drawing, for the screen-space meshes.
+    mesh_tile_uniform: c.bgfx_uniform_handle_t,
     /// paint.face's opacity and blend mode, one vec4 (x opacity, y mode).
     paint_params_uniform: c.bgfx_uniform_handle_t,
     /// face.swap's opacity and seam feather width, one vec4 (x opacity, y width).
@@ -766,6 +768,7 @@ pub const Renderer = struct {
             .body_points_uniform = c.bgfx_create_uniform("u_bodyPoints", c.BGFX_UNIFORM_TYPE_VEC4, body_reshape_points_vec4_count),
             .body_bank_uniform = c.bgfx_create_uniform("u_bodyBank", c.BGFX_UNIFORM_TYPE_VEC4, body_reshape_bank_vec4_count),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .mesh_tile_uniform = c.bgfx_create_uniform("u_meshTile", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .paint_params_uniform = c.bgfx_create_uniform("u_paintParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .swap_params_uniform = c.bgfx_create_uniform("u_swapParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .lash_color_uniform = c.bgfx_create_uniform("u_lashColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -1580,6 +1583,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.reshape_bank_uniform);
         c.bgfx_destroy_uniform(r.reshape_hubs_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
+        c.bgfx_destroy_uniform(r.mesh_tile_uniform);
         c.bgfx_destroy_uniform(r.paint_params_uniform);
         c.bgfx_destroy_uniform(r.swap_params_uniform);
         c.bgfx_destroy_uniform(r.lash_color_uniform);
@@ -1911,28 +1915,27 @@ pub const Renderer = struct {
         c.bgfx_alloc_transient_vertex_buffer(&tvb, 4, &r.layout);
         c.bgfx_alloc_transient_index_buffer(&tib, 6, false);
 
-        // A tile restricts the sampled UV to its region of the virtual
-        // output; the quad still fills the tile target. Each output pixel
-        // samples the identical UV whether tiled or whole. v0 is the top
-        // edge, v1 the bottom, matching the layout below.
+        // A tile restricts the sampled region to its part of the virtual output; the quad still
+        // fills the tile's target. Turning and mirroring ride the sampling rather than a transform
+        // on the quad, which is what lets them tile: a rotated quad spins within its own target,
+        // so every tile would turn about its own centre instead of the picture turning once.
         const uv_l: f32 = if (r.tile) |tl| tl.u0 else 0.0;
         const uv_r: f32 = if (r.tile) |tl| tl.u1 else 1.0;
         const uv_top: f32 = if (r.tile) |tl| tl.v0 else 0.0;
         const uv_bot: f32 = if (r.tile) |tl| tl.v1 else 1.0;
+        const bl = sampleAt(uv_l, uv_bot, rotation_degrees, mirror);
+        const br = sampleAt(uv_r, uv_bot, rotation_degrees, mirror);
+        const tr = sampleAt(uv_r, uv_top, rotation_degrees, mirror);
+        const tl_uv = sampleAt(uv_l, uv_top, rotation_degrees, mirror);
         const verts: [*][5]f32 = @ptrCast(@alignCast(tvb.data));
-        verts[0] = .{ -1.0, -1.0, 0.0, uv_l, uv_bot };
-        verts[1] = .{ 1.0, -1.0, 0.0, uv_r, uv_bot };
-        verts[2] = .{ 1.0, 1.0, 0.0, uv_r, uv_top };
-        verts[3] = .{ -1.0, 1.0, 0.0, uv_l, uv_top };
+        verts[0] = .{ -1.0, -1.0, 0.0, bl[0], bl[1] };
+        verts[1] = .{ 1.0, -1.0, 0.0, br[0], br[1] };
+        verts[2] = .{ 1.0, 1.0, 0.0, tr[0], tr[1] };
+        verts[3] = .{ -1.0, 1.0, 0.0, tl_uv[0], tl_uv[1] };
         const idx: [*]u16 = @ptrCast(@alignCast(tib.data));
         for ([6]u16{ 0, 1, 2, 0, 2, 3 }, 0..) |v, i| idx[i] = v;
 
-        const angle = math.scalar.radians(@floatFromInt(rotation_degrees));
-        var mvp = math.Mat4.rotationZ(angle);
-        if (mirror) {
-            mvp = math.Mat4.mul(mvp, math.Mat4.scaling(.{ -1.0, 1.0, 1.0 }));
-        }
-        _ = c.bgfx_set_transform(&mvp.cols, 1);
+        _ = c.bgfx_set_transform(&math.Mat4.identity.cols, 1);
 
         const view = math.Mat4.identity;
         const proj = math.Mat4.ortho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, .zero_to_one);
@@ -2076,6 +2079,7 @@ pub const Renderer = struct {
             blendFunc(src_alpha, c.BGFX_STATE_BLEND_INV_SRC_ALPHA);
         const state: u64 = @as(u64, c.BGFX_STATE_WRITE_RGB) | @as(u64, c.BGFX_STATE_WRITE_A) | blend;
         c.bgfx_set_state(state, 0);
+        r.setMeshTile();
         c.bgfx_submit(view_id, r.brush_program, 0, c.BGFX_DISCARD_ALL);
     }
 
@@ -2845,6 +2849,7 @@ pub const Renderer = struct {
         const params = [4]f32{ intensity, 0.0, 0.0, 0.0 };
         c.bgfx_set_uniform(r.makeup_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        r.setMeshTile();
         c.bgfx_submit(view_id, r.makeup_program, 0, c.BGFX_DISCARD_ALL);
     }
 
@@ -2852,6 +2857,16 @@ pub const Renderer = struct {
     /// its tracked landmark (frame pixels in, zero-to-one frame UV out),
     /// canonical texture coordinates, the same program and blend the
     /// makeup mesh uses.
+    /// Tells a screen-space mesh which slice of the picture it is drawing into. Whole-frame draws
+    /// send the identity rect, so the shader's arithmetic is unchanged when nothing is tiled.
+    fn setMeshTile(r: *const Renderer) void {
+        const rect: [4]f32 = if (r.tile) |tl|
+            .{ tl.u0, tl.v0, @max(tl.u1 - tl.u0, 1e-6), @max(tl.v1 - tl.v0, 1e-6) }
+        else
+            .{ 0.0, 0.0, 1.0, 1.0 };
+        c.bgfx_set_uniform(r.mesh_tile_uniform, &rect, 1);
+    }
+
     pub fn submitFaceMesh(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, mesh_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, intensity: f32) void {
         std.debug.assert(landmarks.len >= 468 * 3);
         var positions: [face_mesh_topology.vertex_count * 2]f32 = undefined;
@@ -2868,6 +2883,7 @@ pub const Renderer = struct {
         const params = [4]f32{ intensity, 0.0, 0.0, 0.0 };
         c.bgfx_set_uniform(r.makeup_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        r.setMeshTile();
         c.bgfx_submit(view_id, r.makeup_program, 0, c.BGFX_DISCARD_ALL);
     }
 
@@ -2891,6 +2907,7 @@ pub const Renderer = struct {
         const params = [4]f32{ opacity, blend, 0.0, 0.0 };
         c.bgfx_set_uniform(r.paint_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        r.setMeshTile();
         c.bgfx_submit(view_id, r.paint_face_program, 0, c.BGFX_DISCARD_ALL);
     }
 
@@ -2913,6 +2930,7 @@ pub const Renderer = struct {
         const params = [4]f32{ opacity, feather, 0.0, 0.0 };
         c.bgfx_set_uniform(r.swap_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        r.setMeshTile();
         c.bgfx_submit(view_id, r.face_swap_program, 0, c.BGFX_DISCARD_ALL);
     }
 
@@ -3804,4 +3822,43 @@ test "every backend has all three shaders embedded" {
     try t.expect(blobs.fs_preview_rgba_essl.len > 0);
     try t.expect(blobs.fs_preview_rgba_spirv.len > 0);
     try t.expect(blobs.vs_preview_essl.len > 0);
+}
+
+/// Where an output point reads from in the source, under a quarter turn and an optional mirror.
+/// The inverse of the turn: the pixel being written asks which source pixel lands on it.
+fn sampleAt(u: f32, v: f32, rotation_degrees: u32, mirror: bool) [2]f32 {
+    const turned: [2]f32 = switch (rotation_degrees % 360) {
+        90 => .{ 1.0 - v, u },
+        180 => .{ 1.0 - u, 1.0 - v },
+        270 => .{ v, 1.0 - u },
+        else => .{ u, v },
+    };
+    return .{ if (mirror) 1.0 - turned[0] else turned[0], turned[1] };
+}
+
+test "an upright frame samples itself" {
+    try std.testing.expectEqual([2]f32{ 0.25, 0.75 }, sampleAt(0.25, 0.75, 0, false));
+}
+
+test "a quarter turn reads across" {
+    try std.testing.expectEqual([2]f32{ 0.25, 0.25 }, sampleAt(0.25, 0.75, 90, false));
+    try std.testing.expectEqual([2]f32{ 0.75, 0.25 }, sampleAt(0.25, 0.75, 180, false));
+    try std.testing.expectEqual([2]f32{ 0.75, 0.75 }, sampleAt(0.25, 0.75, 270, false));
+}
+
+test "a mirror flips across the source, after the turn" {
+    try std.testing.expectEqual([2]f32{ 0.75, 0.75 }, sampleAt(0.25, 0.75, 0, true));
+    try std.testing.expectEqual([2]f32{ 0.75, 0.25 }, sampleAt(0.25, 0.75, 90, true));
+}
+
+test "the corners of a tile stay inside the source" {
+    for ([_]u32{ 0, 90, 180, 270 }) |rot| {
+        for ([_]bool{ false, true }) |mir| {
+            for ([_][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 }, .{ 1, 1 }, .{ 0.5, 0.5 } }) |p| {
+                const at = sampleAt(p[0], p[1], rot, mir);
+                try std.testing.expect(at[0] >= 0.0 and at[0] <= 1.0);
+                try std.testing.expect(at[1] >= 0.0 and at[1] <= 1.0);
+            }
+        }
+    }
 }

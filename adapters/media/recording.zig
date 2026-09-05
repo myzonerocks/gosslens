@@ -21,6 +21,10 @@ pub const Codec = enum(u32) {
 };
 
 pub const Config = struct {
+    /// Whether frames arrive as they are captured. An offline lane hands the recorder frames
+    /// faster than real time with their own timestamps, and a writer told to expect real time
+    /// would pace them to the clock.
+    realtime: bool = true,
     width: u32,
     height: u32,
     /// Zero lets the backend pick a rate fitting the dimensions.
@@ -34,7 +38,7 @@ pub const Error = error{
     FinishFailed,
 };
 
-extern fn goss_recording_open(path: [*]const u8, path_len: usize, width: u32, height: u32, bitrate_bps: u32, codec: u32) ?*anyopaque;
+extern fn goss_recording_open(path: [*]const u8, path_len: usize, width: u32, height: u32, bitrate_bps: u32, codec: u32, realtime: u32) ?*anyopaque;
 extern fn goss_recording_begin_frame(handle: *anyopaque, out_frame: *?*anyopaque, out_metal_texture: *?*anyopaque) i32;
 extern fn goss_recording_commit_frame(handle: *anyopaque, frame_token: *anyopaque, timestamp_us: i64) i32;
 extern fn goss_recording_abort_frame(handle: *anyopaque, frame_token: *anyopaque) void;
@@ -58,7 +62,7 @@ pub const Recording = struct {
     committed: u32 = 0,
 
     pub fn start(path: []const u8, config: Config) Error!Recording {
-        const handle = goss_recording_open(path.ptr, path.len, config.width, config.height, config.bitrate_bps, @intFromEnum(config.codec)) orelse return error.OpenFailed;
+        const handle = goss_recording_open(path.ptr, path.len, config.width, config.height, config.bitrate_bps, @intFromEnum(config.codec), @intFromBool(config.realtime)) orelse return error.OpenFailed;
         return .{ .handle = handle, .config = config };
     }
 

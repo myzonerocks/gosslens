@@ -7,7 +7,7 @@
   "capabilities": ["segmentation"],
   "parameters": [],
   "nodes": [
-    {"id": "cut", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.55, "y": 0.3, "w": 0.4, "h": 0.5, "opacity": 1.0, "cutout": {"mask": "person", "softness": 0.03}, "interaction": {"drag": true, "scale": true}}}
+    {"id": "cut", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.55, "y": 0.3, "w": 0.4, "h": 0.5, "opacity": 1.0, "cutout": {"mask": "person", "softness": 0.03}, "interaction": {"drag": true, "pinch": true, "rotate": true}}}
   ],
   "triggers": []
 }

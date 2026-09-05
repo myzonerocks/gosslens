@@ -20,6 +20,115 @@ fn writeChunk(out: *std.ArrayList(u8), gpa: std.mem.Allocator, kind: *const [4]u
     try out.appendSlice(gpa, &crc_bytes);
 }
 
+/// A decoded 8-bit RGBA picture. `pixels` is owned by the caller.
+pub const Image = struct {
+    width: u32,
+    height: u32,
+    pixels: []u8,
+
+    pub fn deinit(self: Image, gpa: std.mem.Allocator) void {
+        gpa.free(self.pixels);
+    }
+};
+
+/// Reads an 8-bit RGB or RGBA PNG back to tightly packed RGBA8. Enough to check what this module
+/// wrote, which is what conformance needs when a comparison has to be per pixel rather than per
+/// byte. Interlaced, paletted and 16-bit files are refused rather than half-read.
+pub fn decodeRgba(gpa: std.mem.Allocator, bytes: []const u8) !Image {
+    if (bytes.len < png_signature.len or !std.mem.eql(u8, bytes[0..png_signature.len], &png_signature)) return error.NotPng;
+    var width: u32 = 0;
+    var height: u32 = 0;
+    var channels: usize = 0;
+    var idat: std.ArrayList(u8) = .empty;
+    defer idat.deinit(gpa);
+    var at: usize = png_signature.len;
+    while (at + 8 <= bytes.len) {
+        const len = std.mem.readInt(u32, bytes[at..][0..4], .big);
+        const kind = bytes[at + 4 ..][0..4];
+        const body_at = at + 8;
+        if (body_at + len + 4 > bytes.len) return error.Truncated;
+        const body = bytes[body_at..][0..len];
+        if (std.mem.eql(u8, kind, "IHDR")) {
+            if (len < 13) return error.Truncated;
+            width = std.mem.readInt(u32, body[0..4], .big);
+            height = std.mem.readInt(u32, body[4..8], .big);
+            if (body[8] != 8) return error.Unsupported;
+            channels = switch (body[9]) {
+                2 => 3,
+                6 => 4,
+                else => return error.Unsupported,
+            };
+            if (body[12] != 0) return error.Unsupported;
+        } else if (std.mem.eql(u8, kind, "IDAT")) {
+            try idat.appendSlice(gpa, body);
+        } else if (std.mem.eql(u8, kind, "IEND")) break;
+        at = body_at + len + 4;
+    }
+    if (width == 0 or height == 0 or channels == 0) return error.EmptyImage;
+
+    var reader: std.Io.Reader = .fixed(idat.items);
+    const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
+    defer gpa.free(window);
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(gpa);
+    var writer: std.Io.Writer.Allocating = .fromArrayList(gpa, &raw);
+    defer raw = writer.toArrayList();
+    var decompress: std.compress.flate.Decompress = .init(&reader, .zlib, window);
+    _ = try decompress.reader.streamRemaining(&writer.writer);
+    const inflated = writer.written();
+
+    const stride = @as(usize, width) * channels;
+    if (inflated.len < (stride + 1) * height) return error.Truncated;
+    const out = try gpa.alloc(u8, @as(usize, width) * height * 4);
+    errdefer gpa.free(out);
+    const line = try gpa.alloc(u8, stride);
+    defer gpa.free(line);
+    const prev = try gpa.alloc(u8, stride);
+    defer gpa.free(prev);
+    @memset(prev, 0);
+    var y: u32 = 0;
+    while (y < height) : (y += 1) {
+        const row_at = @as(usize, y) * (stride + 1);
+        const filter = inflated[row_at];
+        @memcpy(line, inflated[row_at + 1 ..][0..stride]);
+        var i: usize = 0;
+        while (i < stride) : (i += 1) {
+            const a: u32 = if (i >= channels) line[i - channels] else 0;
+            const b: u32 = prev[i];
+            const c: u32 = if (i >= channels) prev[i - channels] else 0;
+            line[i] = switch (filter) {
+                0 => line[i],
+                1 => line[i] +% @as(u8, @intCast(a)),
+                2 => line[i] +% @as(u8, @intCast(b)),
+                3 => line[i] +% @as(u8, @intCast((a + b) / 2)),
+                4 => line[i] +% @as(u8, @intCast(paeth(a, b, c))),
+                else => return error.Unsupported,
+            };
+        }
+        var x: u32 = 0;
+        while (x < width) : (x += 1) {
+            const src = @as(usize, x) * channels;
+            const dst = (@as(usize, y) * width + x) * 4;
+            out[dst] = line[src];
+            out[dst + 1] = line[src + 1];
+            out[dst + 2] = line[src + 2];
+            out[dst + 3] = if (channels == 4) line[src + 3] else 255;
+        }
+        @memcpy(prev, line);
+    }
+    return .{ .width = width, .height = height, .pixels = out };
+}
+
+fn paeth(a: u32, b: u32, c: u32) u32 {
+    const p = @as(i32, @intCast(a)) + @as(i32, @intCast(b)) - @as(i32, @intCast(c));
+    const pa = @abs(p - @as(i32, @intCast(a)));
+    const pb = @abs(p - @as(i32, @intCast(b)));
+    const pc = @abs(p - @as(i32, @intCast(c)));
+    if (pa <= pb and pa <= pc) return a;
+    if (pb <= pc) return b;
+    return c;
+}
+
 /// Color tagging the PNG carries: the sRGB marker, or explicit cHRM
 /// primaries plus gAMA for wide-gamut output. All optional; none is the
 /// untagged default.
@@ -104,7 +213,12 @@ pub fn encodeRgbaOpts(gpa: std.mem.Allocator, out: *std.ArrayList(u8), pixels: [
     defer compressed.deinit();
     const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
     defer gpa.free(window);
-    var compress = try std.compress.flate.Compress.init(&compressed.writer, window, .zlib, .level_6);
+    // On the heap, never the stack: the deflate state is a quarter of a megabyte,
+    // and a stack frame that size overflows any thread but the main one - which is
+    // exactly how a capture from a worker thread took the process down.
+    const compress = try gpa.create(std.compress.flate.Compress);
+    defer gpa.destroy(compress);
+    compress.* = try std.compress.flate.Compress.init(&compressed.writer, window, .zlib, .level_6);
     try compress.writer.writeAll(filtered);
     try compress.finish();
 
@@ -120,7 +234,9 @@ pub const StreamEncoder = struct {
     gpa: std.mem.Allocator,
     out: *std.ArrayList(u8),
     compressed: std.Io.Writer.Allocating,
-    compress: std.compress.flate.Compress,
+    /// By pointer, not by value: the deflate state is a quarter of a megabyte, and
+    /// this struct is declared on a caller's stack.
+    compress: *std.compress.flate.Compress,
     window: []u8,
     filt: []u8,
     prev: []u8,
@@ -170,7 +286,9 @@ pub const StreamEncoder = struct {
         errdefer gpa.free(self.prev);
         self.wide = if (opts.bit_depth == 16) try gpa.alloc(u8, row_bytes) else &.{};
         errdefer if (self.wide.len > 0) gpa.free(self.wide);
-        self.compress = try std.compress.flate.Compress.init(&self.compressed.writer, self.window, .zlib, .level_6);
+        self.compress = try gpa.create(std.compress.flate.Compress);
+        errdefer gpa.destroy(self.compress);
+        self.compress.* = try std.compress.flate.Compress.init(&self.compressed.writer, self.window, .zlib, .level_6);
     }
 
     /// Filters and compresses `band_height` rows of tightly packed RGBA8.
@@ -207,6 +325,7 @@ pub const StreamEncoder = struct {
     }
 
     pub fn deinit(self: *StreamEncoder) void {
+        self.gpa.destroy(self.compress);
         self.compressed.deinit();
         self.gpa.free(self.window);
         self.gpa.free(self.filt);
@@ -266,4 +385,18 @@ test "size mismatch and empty refuse" {
     const px = [4]u8{ 1, 2, 3, 4 };
     try t.expectError(error.SizeMismatch, encodeRgba(t.allocator, &out, &px, 2, 2));
     try t.expectError(error.EmptyImage, encodeRgba(t.allocator, &out, &px, 0, 1));
+}
+
+test "a decoded PNG is the pixels that were encoded" {
+    const gpa = std.testing.allocator;
+    var pixels: [4 * 3 * 4]u8 = undefined;
+    for (&pixels, 0..) |*b, i| b.* = @intCast((i * 37) % 251);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try encodeRgba(gpa, &out, &pixels, 4, 3);
+    const back = try decodeRgba(gpa, out.items);
+    defer back.deinit(gpa);
+    try std.testing.expectEqual(@as(u32, 4), back.width);
+    try std.testing.expectEqual(@as(u32, 3), back.height);
+    try std.testing.expectEqualSlices(u8, &pixels, back.pixels);
 }

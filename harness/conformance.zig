@@ -6,8 +6,9 @@
 //! twice produces byte-identical output. Each lens's hash also checks
 //! against lenses/conformance-baseline.txt (--print regenerates it), so
 //! a change that shifts a lens's real output shows up as a tracked diff
-//! in review, not just same-run determinism. This is still one platform
-//! (host/macOS); cross-platform value-stability is real remaining work.
+//! in review, not just same-run determinism. The suite itself is one
+//! platform (host/macOS); --golden is the cross-target half, printing a
+//! block-mean signature another backend holds itself to within 8/255.
 
 const std = @import("std");
 const abi = @import("abi");
@@ -48,6 +49,7 @@ const height: u32 = 300;
 /// channels (hair) the channel lenses need.
 const reference_lenses = [_]struct { name: []const u8, segmentation_model: []const u8 }{
     .{ .name = "shader-tint", .segmentation_model = single_class_model_path },
+    .{ .name = "warm-lut", .segmentation_model = single_class_model_path },
     .{ .name = "beauty-baseline", .segmentation_model = single_class_model_path },
     .{ .name = "background-swap", .segmentation_model = single_class_model_path },
     .{ .name = "trigger-anim", .segmentation_model = single_class_model_path },
@@ -2604,6 +2606,874 @@ fn proveTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
 
     std.debug.print("conformance: PROOF tiled composition stitches byte-identical to a single-target render (2x2 and 3x2 grids)\n", .{});
+    return true;
+}
+
+/// Proves a turned or mirrored capture tiles: the same frame submitted upright, quarter-turned,
+/// and mirrored composites byte-identically whether it is rendered as one target or stitched from
+/// tiles. Turning used to bar the tiled path outright, because the turn rode a transform on the
+/// quad and every tile would have spun about its own centre.
+fn proveTurnedTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const cfg = abi.CaptureConfig{ .width = 400, .height = 300, .supersample = 0, .format = 0, .quality = 0 };
+    const buf_cap = 400 * 300 * 4 + 4096;
+
+    // Upright, a quarter turn, a half turn, and a mirrored quarter turn.
+    const turns = [_]struct { rot: u32, mirror: bool }{
+        .{ .rot = 0, .mirror = false },
+        .{ .rot = 1, .mirror = false },
+        .{ .rot = 2, .mirror = false },
+        .{ .rot = 1, .mirror = true },
+    };
+    for (turns) |turn| {
+        var flags: u32 = turn.rot << abi.frame_rotation_shift;
+        if (turn.mirror) flags |= abi.frame_flag_mirror;
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = flags,
+            .timestamp_us = 2000,
+        };
+        const half_w = (planes.width + 1) / 2;
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        for (0..3) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+
+        const whole = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(whole);
+        var whole_len: usize = 0;
+        var ow: u32 = 0;
+        var oh: u32 = 0;
+        session.capture_tile_cap = 0;
+        if (abi.goss_engine_capture_still(engine, session, &cfg, whole.ptr, whole.len, &whole_len, &ow, &oh) != .ok) {
+            std.debug.print("conformance: FAIL single-target capture at turn {d} mirror {}\n", .{ turn.rot, turn.mirror });
+            return false;
+        }
+
+        const tiled = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(tiled);
+        var tiled_len: usize = 0;
+        session.capture_tile_cap = 150;
+        const status = abi.goss_engine_capture_still(engine, session, &cfg, tiled.ptr, tiled.len, &tiled_len, &ow, &oh);
+        session.capture_tile_cap = 0;
+        if (status != .ok) {
+            std.debug.print("conformance: FAIL tiled capture at turn {d} mirror {}\n", .{ turn.rot, turn.mirror });
+            return false;
+        }
+        if (!std.mem.eql(u8, whole[0..whole_len], tiled[0..tiled_len])) {
+            std.debug.print("conformance: FAIL turn {d} mirror {} tiles differently from one target\n", .{ turn.rot, turn.mirror });
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF a turned or mirrored capture stitches byte-identical to a single target (upright, quarter, half, and mirrored quarter)\n", .{});
+    return true;
+}
+
+/// Proves a supersampled capture streams: the same still at 2x, tiled and streamed band by band,
+/// matches the whole-buffer render byte for byte. Streaming used to demand supersample 1, so a
+/// supersampled still held the entire enlarged render in memory — the very buffer tiling exists
+/// to avoid, and at full-sensor sizes the reason it could not be taken at all.
+fn proveStreamedSupersample(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 3000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..3) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const cfg = abi.CaptureConfig{ .width = 200, .height = 150, .supersample = 2, .format = 0, .quality = 0 };
+    const buf_cap = 200 * 150 * 4 + 8192;
+
+    // The reference: the whole enlarged render held in one buffer and downsampled at the end.
+    const whole = try gpa.alloc(u8, buf_cap);
+    defer gpa.free(whole);
+    var whole_len: usize = 0;
+    var ow: u32 = 0;
+    var oh: u32 = 0;
+    session.capture_tile_cap = 0;
+    session.capture_no_stream = true;
+    const whole_status = abi.goss_engine_capture_still(engine, session, &cfg, whole.ptr, whole.len, &whole_len, &ow, &oh);
+    session.capture_no_stream = false;
+    if (whole_status != .ok or ow != 200 or oh != 150) {
+        std.debug.print("conformance: FAIL whole-buffer supersampled capture\n", .{});
+        return false;
+    }
+
+    // Streamed: a lowered cap forces bands, and each band is downsampled before it is encoded.
+    const streamed = try gpa.alloc(u8, buf_cap);
+    defer gpa.free(streamed);
+    var streamed_len: usize = 0;
+    session.capture_tile_cap = 120;
+    const status = abi.goss_engine_capture_still(engine, session, &cfg, streamed.ptr, streamed.len, &streamed_len, &ow, &oh);
+    session.capture_tile_cap = 0;
+    if (status != .ok or ow != 200 or oh != 150) {
+        std.debug.print("conformance: FAIL streamed supersampled capture ({any}, {d}x{d})\n", .{ status, ow, oh });
+        return false;
+    }
+    if (!std.mem.eql(u8, whole[0..whole_len], streamed[0..streamed_len])) {
+        std.debug.print("conformance: FAIL a streamed supersampled capture differs from the whole-buffer render\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a supersampled capture streams band by band, byte-identical to the whole-buffer render\n", .{});
+    return true;
+}
+
+/// Proves the microphone ring is rate-independent. It used to hold whatever rate the device
+/// submitted, so the same speech produced a different window on a 44.1 kHz handset than on a
+/// 48 kHz one and every audio.infer model answered differently per device. The ring now holds one
+/// fixed rate: the same tone submitted at four device rates must land as the same ring content.
+fn proveMicResampler(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const rates = [_]u32{ 48000, 44100, 32000, 16000 };
+    const seconds = 0.25;
+    var windows: [rates.len][]f32 = undefined;
+    var made: usize = 0;
+    defer for (windows[0..made]) |w| gpa.free(w);
+
+    for (rates, 0..) |rate, i| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        // A 440 Hz tone, described in seconds so every rate carries the same sound.
+        const frames: usize = @intFromFloat(@as(f64, @floatFromInt(rate)) * seconds);
+        const pcm = try gpa.alloc(f32, frames);
+        defer gpa.free(pcm);
+        for (pcm, 0..) |*v, k| {
+            const at = @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(rate));
+            v.* = @floatCast(@sin(at * 440.0 * 2.0 * std.math.pi));
+        }
+        // Several buffers, so a resampler that restarted its phase each call would show a seam.
+        const chunk: usize = 1024;
+        var at: usize = 0;
+        while (at < frames) {
+            const take = @min(chunk, frames - at);
+            if (abi.goss_session_submit_audio(session, pcm[at..].ptr, @intCast(take), rate, 1, 0) != .ok) {
+                std.debug.print("conformance: FAIL submitting audio at {d} Hz\n", .{rate});
+                return false;
+            }
+            at += take;
+        }
+        const want: usize = @intFromFloat(@as(f64, @floatFromInt(abi.micRate())) * seconds * 0.9);
+        const window = try gpa.alloc(f32, want);
+        errdefer gpa.free(window);
+        abi.readAudioWindowForTest(session, window);
+        windows[i] = window;
+        made += 1;
+    }
+
+    // Every rate must land as the same sound. Compared as a mean absolute difference, because a
+    // resample is an approximation: byte-identity would be a claim linear interpolation cannot make.
+    for (1..made) |i| {
+        var sum: f64 = 0;
+        for (windows[0], windows[i]) |a, b| sum += @abs(a - b);
+        const mean = sum / @as(f64, @floatFromInt(windows[0].len));
+        if (mean > 0.06) {
+            std.debug.print("conformance: FAIL {d} Hz landed in the ring differently from 48 kHz (mean {d:.4})\n", .{ rates[i], mean });
+            return false;
+        }
+    }
+    // And the window must actually hold the tone, not silence that would trivially match.
+    var peak: f32 = 0;
+    for (windows[0]) |v| peak = @max(peak, @abs(v));
+    if (peak < 0.5) {
+        std.debug.print("conformance: FAIL the ring holds no signal (peak {d:.3})\n", .{peak});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the microphone ring holds one fixed rate: the same tone at 48, 44.1, 32 and 16 kHz lands as the same window, joined across buffers\n", .{});
+    return true;
+}
+
+/// Writes a one-node lens into zig-out and returns its directory, for a control that has to run
+/// the identical pipeline as the lens under test and differ only in what the manifest asked for.
+fn writeOneNodeLens(gpa: std.mem.Allocator, dir: []const u8, node_type: []const u8, block: []const u8, params: []const u8) ![]const u8 {
+    const path = try std.fmt.allocPrint(gpa, "zig-out/{s}", .{dir});
+    errdefer gpa.free(path);
+    try std.Io.Dir.cwd().createDirPath(harness_io, path);
+    const json = try std.fmt.allocPrint(gpa,
+        \\{{"glf":"1.0","id":"goss.control.{s}","version":"1.0.0","display_name":"Control","engine_compat":">=0.5",
+        \\ "capabilities":[],"parameters":[],
+        \\ "nodes":[{{"id":"n","type":"{s}","inputs":{{"frame":"camera"}},"params":{{}},"{s}":{s}}}],
+        \\ "triggers":[]}}
+    , .{ dir, node_type, block, params });
+    defer gpa.free(json);
+    const manifest_path = try std.fmt.allocPrint(gpa, "{s}/manifest.json", .{path});
+    defer gpa.free(manifest_path);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = manifest_path, .data = json });
+    return path;
+}
+
+/// Proves every enhance pass ships a reference bundle; thirteen had none, only inline manifests
+/// written at test time, while PARITY claimed otherwise. Two groups because the contracts differ:
+/// a pass working off the frame alone must visibly change it, while one needing submitted input
+/// (intrinsics, motion, orientation, depth) must hold the frame through without it.
+fn proveEnhanceReferences(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    // Works off the frame alone: each must change it, and no two may be the same lens.
+    const acts = [_][]const u8{
+        "enhance-dehaze",    "enhance-relight", "enhance-glare", "enhance-vignette",
+        "enhance-lowlight",  "enhance-awb",     "enhance-zoom",  "enhance-dereflect",
+        "enhance-harmonize",
+    };
+    const plain = (try captureBareFrame(gpa, engine, 6)) orelse return false;
+    defer gpa.free(plain);
+
+    var shots: [acts.len][]u8 = undefined;
+    var made: usize = 0;
+    defer for (shots[0..made]) |shot| gpa.free(shot);
+    for (acts, 0..) |name, i| {
+        var path_buf: [96]u8 = undefined;
+        const pkg = std.fmt.bufPrint(&path_buf, ".lens-packages/{s}", .{name}) catch return error.NameTooLong;
+        const shot = (try captureFountainAtFrame(gpa, engine, pkg, 6)) orelse {
+            std.debug.print("conformance: FAIL {s} did not activate\n", .{name});
+            return false;
+        };
+        shots[i] = shot;
+        made += 1;
+        const again = (try captureFountainAtFrame(gpa, engine, pkg, 6)) orelse return false;
+        defer gpa.free(again);
+        if (!std.mem.eql(u8, shot, again)) {
+            std.debug.print("conformance: FAIL {s} is not bit-stable across runs\n", .{name});
+            return false;
+        }
+        if (std.mem.eql(u8, shot, plain)) {
+            std.debug.print("conformance: FAIL {s} renders the frame unchanged - the reference proves nothing\n", .{name});
+            return false;
+        }
+    }
+    for (0..made) |i| {
+        for (i + 1..made) |j| {
+            if (std.mem.eql(u8, shots[i], shots[j])) {
+                std.debug.print("conformance: FAIL {s} and {s} render identically\n", .{ acts[i], acts[j] });
+                return false;
+            }
+        }
+    }
+    // A starved pass is compared against the same pass turned off, not against a bare camera:
+    // running any lens at all resamples through an offscreen target, so a no-lens render is a
+    // different pipeline and would make an inert pass look like it had done something.
+    const off_controls = [_]struct { name: []const u8, node: []const u8, block: []const u8, off: []const u8 }{
+        .{ .name = "enhance-undistort", .node = "undistort.pass", .block = "undistort", .off = "{\"strength\":0.0}" },
+        .{ .name = "enhance-stabilize", .node = "stabilize.pass", .block = "stabilize", .off = "{\"strength\":0.0}" },
+        .{ .name = "enhance-rolling", .node = "rolling.pass", .block = "rolling", .off = "{\"strength\":0.0}" },
+        .{ .name = "enhance-parallax", .node = "parallax.pass", .block = "parallax", .off = "{\"amount\":0.0}" },
+    };
+    for (off_controls) |ctl| {
+        var path_buf: [96]u8 = undefined;
+        const pkg = std.fmt.bufPrint(&path_buf, ".lens-packages/{s}", .{ctl.name}) catch return error.NameTooLong;
+        const shot = (try captureFountainAtFrame(gpa, engine, pkg, 6)) orelse {
+            std.debug.print("conformance: FAIL {s} did not activate\n", .{ctl.name});
+            return false;
+        };
+        defer gpa.free(shot);
+        var dir_buf: [64]u8 = undefined;
+        const dir = std.fmt.bufPrint(&dir_buf, "control-{s}", .{ctl.name}) catch return error.NameTooLong;
+        const control_path = try writeOneNodeLens(gpa, dir, ctl.node, ctl.block, ctl.off);
+        defer gpa.free(control_path);
+        const control = (try captureFountainAtFrame(gpa, engine, control_path, 6)) orelse {
+            std.debug.print("conformance: FAIL the off control for {s} did not activate\n", .{ctl.name});
+            return false;
+        };
+        defer gpa.free(control);
+        if (!std.mem.eql(u8, shot, control)) {
+            std.debug.print("conformance: FAIL {s} altered the frame with none of its input submitted\n", .{ctl.name});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF all {d} enhance passes ship a reference bundle: {d} change the frame and each differs from its siblings, {d} hold it through untouched without their submitted input\n", .{ acts.len + off_controls.len, made, off_controls.len });
+    return true;
+}
+
+/// Proves the AR rail's undo/redo pair. The world board had undo and clear but no redo, so a
+/// brush rail offering one button on the screen brush and not the other in AR could not be the
+/// same rail. Driven entirely through the public surface, including the editor rule that drawing
+/// after an undo leaves the undone stroke unreachable.
+fn proveArBrushRedo(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const stroke = struct {
+        fn draw(sess: *abi.Session, x: f32) void {
+            _ = abi.goss_session_ar_brush_begin(sess);
+            _ = abi.goss_session_ar_brush_point(sess, x, 0.0, -1.0);
+            _ = abi.goss_session_ar_brush_point(sess, x, 0.5, -1.0);
+            _ = abi.goss_session_ar_brush_end(sess);
+        }
+    };
+
+    stroke.draw(session, -0.2);
+    stroke.draw(session, 0.2);
+    if (session.ar_board.strokeCount() != 2) {
+        std.debug.print("conformance: FAIL two AR strokes did not land\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_ar_brush_undo(session);
+    _ = abi.goss_session_ar_brush_undo(session);
+    if (session.ar_board.strokeCount() != 0) {
+        std.debug.print("conformance: FAIL undo did not empty the AR board\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_ar_brush_redo(session);
+    _ = abi.goss_session_ar_brush_redo(session);
+    if (session.ar_board.strokeCount() != 2) {
+        std.debug.print("conformance: FAIL redo did not put both AR strokes back\n", .{});
+        return false;
+    }
+    // The restored stroke is the one that was taken, not a blank of the right shape.
+    const back = session.ar_board.get(1) orelse return error.MissingStroke;
+    if (back.count != 2 or @abs(back.points[0].x - 0.2) > 1e-6) {
+        std.debug.print("conformance: FAIL the redone AR stroke is not the stroke undo took\n", .{});
+        return false;
+    }
+    // Redo past the end adds nothing.
+    _ = abi.goss_session_ar_brush_redo(session);
+    if (session.ar_board.strokeCount() != 2) {
+        std.debug.print("conformance: FAIL redo past the end duplicated a stroke\n", .{});
+        return false;
+    }
+    // Drawing after an undo drops the redo future.
+    _ = abi.goss_session_ar_brush_undo(session);
+    stroke.draw(session, 0.6);
+    _ = abi.goss_session_ar_brush_redo(session);
+    if (session.ar_board.strokeCount() != 2) {
+        std.debug.print("conformance: FAIL a redo after a fresh AR stroke resurrected a left branch\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_ar_brush_clear(session);
+    _ = abi.goss_session_ar_brush_redo(session);
+    if (session.ar_board.strokeCount() != 0) {
+        std.debug.print("conformance: FAIL a redo after clear put a stroke back\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the AR brush undoes and redoes like the screen brush: the stroke comes back whole, a fresh stroke drops the redo future, and clear ends it\n", .{});
+    return true;
+}
+
+/// Proves a cutout sticker is manipulable: a drag moves it, a pinch resizes it, a twist turns it,
+/// each read back through the transform the draw uses. Both cutout lenses used to ask for a
+/// gesture named "scale", which the parser has no field for, so they validated clean and could
+/// never resize; an unknown gesture key is now refused rather than ignored.
+fn proveStickerInteraction(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const dir = ".lens-packages/cutout-sticker";
+    if (abi.goss_session_activate_lens_from_directory(session, dir, dir.len) != .ok) {
+        std.debug.print("conformance: FAIL activating the cutout sticker\n", .{});
+        return false;
+    }
+    const signals = std.mem.zeroes(abi.LensSignals);
+    var x0: f32 = 0;
+    var y0: f32 = 0;
+    var w0: f32 = 0;
+    var h0: f32 = 0;
+    var r0: f32 = 0;
+    if (abi.goss_session_sprite_transform(session, "cut", "cut".len, &x0, &y0, &w0, &h0, &r0) != .ok) {
+        std.debug.print("conformance: FAIL reading the sticker's resting transform\n", .{});
+        return false;
+    }
+
+    // One finger, dragged right and down across the sticker.
+    _ = abi.goss_session_touch(session, 0, 1, 0.75, 0.55);
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    _ = abi.goss_session_touch(session, 1, 1, 0.85, 0.65);
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    _ = abi.goss_session_touch(session, 2, 1, 0.85, 0.65);
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    var x1: f32 = 0;
+    var y1: f32 = 0;
+    var w1: f32 = 0;
+    var h1: f32 = 0;
+    if (abi.goss_session_sprite_transform(session, "cut", "cut".len, &x1, &y1, &w1, &h1, null) != .ok) return error.TransformFailed;
+    if (!(x1 > x0 + 0.05 and y1 > y0 + 0.05)) {
+        std.debug.print("conformance: FAIL a drag did not move the sticker ({d},{d} -> {d},{d})\n", .{ x0, y0, x1, y1 });
+        return false;
+    }
+    if (@abs(w1 - w0) > 1e-4 or @abs(h1 - h0) > 1e-4) {
+        std.debug.print("conformance: FAIL a drag resized the sticker as well as moving it\n", .{});
+        return false;
+    }
+
+    // Two fingers, spread apart: the sticker grows and keeps its centre.
+    const cx0 = x1 + w1 * 0.5;
+    const cy0 = y1 + h1 * 0.5;
+    _ = abi.goss_session_touch(session, 0, 1, 0.40, 0.50);
+    _ = abi.goss_session_touch(session, 0, 2, 0.60, 0.50);
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    _ = abi.goss_session_touch(session, 1, 1, 0.25, 0.50);
+    _ = abi.goss_session_touch(session, 1, 2, 0.75, 0.50);
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    var x2: f32 = 0;
+    var y2: f32 = 0;
+    var w2: f32 = 0;
+    var h2: f32 = 0;
+    if (abi.goss_session_sprite_transform(session, "cut", "cut".len, &x2, &y2, &w2, &h2, null) != .ok) return error.TransformFailed;
+    if (!(w2 > w1 * 1.2 and h2 > h1 * 1.2)) {
+        std.debug.print("conformance: FAIL a pinch did not resize the sticker ({d}x{d} -> {d}x{d})\n", .{ w1, h1, w2, h2 });
+        return false;
+    }
+    if (@abs((x2 + w2 * 0.5) - cx0) > 1e-3 or @abs((y2 + h2 * 0.5) - cy0) > 1e-3) {
+        std.debug.print("conformance: FAIL a pinch moved the sticker's centre\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_touch(session, 2, 1, 0.25, 0.50);
+    _ = abi.goss_session_touch(session, 2, 2, 0.75, 0.50);
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+
+    // Two fingers twisted a quarter turn: the angle moves and the size does not.
+    var r2: f32 = 0;
+    if (abi.goss_session_sprite_transform(session, "cut", "cut".len, null, null, null, null, &r2) != .ok) return error.TransformFailed;
+    _ = abi.goss_session_touch(session, 0, 1, 0.40, 0.50);
+    _ = abi.goss_session_touch(session, 0, 2, 0.60, 0.50);
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    _ = abi.goss_session_touch(session, 1, 1, 0.50, 0.40);
+    _ = abi.goss_session_touch(session, 1, 2, 0.50, 0.60);
+    _ = abi.goss_session_tick_lens(session, 16000, &signals);
+    var r3: f32 = 0;
+    var w3: f32 = 0;
+    if (abi.goss_session_sprite_transform(session, "cut", "cut".len, null, null, &w3, null, &r3) != .ok) return error.TransformFailed;
+    if (@abs(r3 - r2) < 45.0) {
+        std.debug.print("conformance: FAIL a twist did not turn the sticker ({d} -> {d} degrees)\n", .{ r2, r3 });
+        return false;
+    }
+    if (@abs(w3 - w2) > w2 * 0.05) {
+        std.debug.print("conformance: FAIL a twist resized the sticker\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a cutout sticker drags, pinches and twists, each read back through the transform the draw uses\n", .{});
+    return true;
+}
+
+/// Proves an authored turn on a sticker and on a text label: the manifest's angle draws, a bound
+/// parameter turns it further, and the host reads back what is actually on screen. Rotation used
+/// to exist only as a live gesture — a lens could not ship a tilted sticker, and nothing could
+/// read where one had been left.
+fn proveAuthoredRotation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const straight = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-flat", 10)) orelse return false;
+    defer gpa.free(straight);
+    const turned = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-turned", 10)) orelse return false;
+    defer gpa.free(turned);
+    if (std.mem.eql(u8, straight, turned)) {
+        std.debug.print("conformance: FAIL an authored text rotation drew the same as the straight label\n", .{});
+        return false;
+    }
+    const turned_again = (try captureFountainAtFrame(gpa, engine, ".lens-packages/text-turned", 10)) orelse return false;
+    defer gpa.free(turned_again);
+    if (!std.mem.eql(u8, turned, turned_again)) {
+        std.debug.print("conformance: FAIL an authored text rotation is not bit-stable across runs\n", .{});
+        return false;
+    }
+
+    // The sticker: read the transform back, then drive the bound parameter and read it again.
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const dir = ".lens-packages/sticker-turned";
+    if (abi.goss_session_activate_lens_from_directory(session, dir, dir.len) != .ok) {
+        std.debug.print("conformance: FAIL activating the turned sticker\n", .{});
+        return false;
+    }
+    var x: f32 = 0;
+    var y: f32 = 0;
+    var w: f32 = 0;
+    var h: f32 = 0;
+    var turn: f32 = 0;
+    if (abi.goss_session_sprite_transform(session, "badge", "badge".len, &x, &y, &w, &h, &turn) != .ok) {
+        std.debug.print("conformance: FAIL reading the sticker transform\n", .{});
+        return false;
+    }
+    if (@abs(x - 0.3) > 1e-5 or @abs(w - 0.24) > 1e-5 or @abs(turn - 30.0) > 1e-4) {
+        std.debug.print("conformance: FAIL the sticker transform read back {d},{d} {d}x{d} at {d} degrees\n", .{ x, y, w, h, turn });
+        return false;
+    }
+    // A bound parameter adds to the authored angle, so an undriven one leaves the sticker as
+    // authored rather than snapping it flat.
+    if (session.active_lens) |*lens| lens.setParam("spin", -105.0) else return error.NoActiveLens;
+    if (abi.goss_session_sprite_transform(session, "badge", "badge".len, null, null, null, null, &turn) != .ok) {
+        std.debug.print("conformance: FAIL re-reading the sticker transform\n", .{});
+        return false;
+    }
+    if (@abs(turn + 75.0) > 1e-4) {
+        std.debug.print("conformance: FAIL a bound rotation parameter read back {d} degrees, wanted -75 (30 authored plus -105)\n", .{turn});
+        return false;
+    }
+    // An unknown node is refused rather than guessed at.
+    if (abi.goss_session_sprite_transform(session, "nope", "nope".len, &x, null, null, null, null) != .invalid_argument) {
+        std.debug.print("conformance: FAIL an unknown node id was not refused\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a lens authors a sticker's and a label's turn, a bound parameter turns it further, and the host reads back the angle actually drawn\n", .{});
+    return true;
+}
+
+/// Proves a filesystem-less host renders the same picture: one lens activated from its directory
+/// and from its manifest JSON with the image staged in memory must capture identically. The JSON
+/// path used to run only the asset-free nodes, so every sticker, LUT, face texture and model
+/// vanished on a host that never unpacked a directory - every phone fetching a lens over the wire.
+fn proveStagedImageAssets(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const cases = [_]struct { dir: []const u8, asset: []const u8 }{
+        .{ .dir = ".lens-packages/face-paint", .asset = "face_paint.png" },
+        .{ .dir = ".lens-packages/war-paint", .asset = "war_paint.png" },
+        // A clip too: the platform decoder opens by path, so a staged clip spills to a temp file
+        // rather than being declared impossible.
+        .{ .dir = ".lens-packages/video-texture", .asset = "clip.mp4" },
+    };
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 5000,
+    };
+    const cfg = abi.CaptureConfig{ .width = 320, .height = 240, .supersample = 0, .format = 0, .quality = 0 };
+    const buf_cap = 320 * 240 * 4 + 4096;
+
+    for (cases) |case| {
+        const manifest_path = try std.fmt.allocPrint(gpa, "{s}/manifest.json", .{case.dir});
+        defer gpa.free(manifest_path);
+        const manifest_json = try std.Io.Dir.cwd().readFileAlloc(harness_io, manifest_path, gpa, .limited(1 << 20));
+        defer gpa.free(manifest_json);
+        const asset_path = try std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ case.dir, case.asset });
+        defer gpa.free(asset_path);
+        const asset_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, asset_path, gpa, .limited(32 << 20));
+        defer gpa.free(asset_bytes);
+
+        var shots: [2][]u8 = .{ &.{}, &.{} };
+        defer for (shots) |shot| if (shot.len > 0) gpa.free(shot);
+        // Pass 0 activates from the directory; pass 1 stages the image and activates from JSON.
+        for (0..2) |pass| {
+            const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(engine);
+            if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+                std.debug.print("conformance: FAIL face tracking enable for {s}\n", .{case.dir});
+                return false;
+            }
+            if (pass == 0) {
+                if (abi.goss_session_activate_lens_from_directory(session, case.dir.ptr, case.dir.len) != .ok) {
+                    std.debug.print("conformance: FAIL directory activation of {s}\n", .{case.dir});
+                    return false;
+                }
+            } else {
+                if (abi.goss_session_provide_lens_asset(session, case.asset.ptr, case.asset.len, asset_bytes.ptr, asset_bytes.len) != .ok) {
+                    std.debug.print("conformance: FAIL staging {s}\n", .{case.asset});
+                    return false;
+                }
+                if (abi.goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len) != .ok) {
+                    std.debug.print("conformance: FAIL JSON activation of {s}\n", .{case.dir});
+                    return false;
+                }
+            }
+            if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.TrackFrameFailed;
+            }
+            var tracked: abi.FaceResult = undefined;
+            var polls: usize = 0;
+            while (abi.goss_session_face_result(session, &tracked) == .again) {
+                std.Thread.yield() catch {};
+                if (g_watch) c.glfwPollEvents();
+                polls += 1;
+                if (polls > 100_000_000) return error.FaceResultTimedOut;
+            }
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            // The texture loads off-thread; render until the node has it, as a real host does.
+            for (0..30) |_| {
+                _ = abi.goss_engine_render_frame(engine, session);
+                c.glfwPollEvents();
+            }
+            const shot = try gpa.alloc(u8, buf_cap);
+            errdefer gpa.free(shot);
+            var shot_len: usize = 0;
+            var ow: u32 = 0;
+            var oh: u32 = 0;
+            const status = abi.goss_engine_capture_still(engine, session, &cfg, shot.ptr, shot.len, &shot_len, &ow, &oh);
+            if (status != .ok) {
+                std.debug.print("conformance: FAIL capture for {s} pass {d} ({any})\n", .{ case.dir, pass, status });
+                gpa.free(shot);
+                return false;
+            }
+            shots[pass] = try gpa.realloc(shot, shot_len);
+        }
+        if (!std.mem.eql(u8, shots[0], shots[1])) {
+            std.debug.print("conformance: FAIL {s} staged in memory renders differently from the same bundle on disk\n", .{case.dir});
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF a lens activated from JSON with its images staged in memory renders exactly what the same bundle renders from disk\n", .{});
+    return true;
+}
+
+/// Proves the screen-space face effects tile. Their geometry is a flat mesh already in screen
+/// space, so a tile used to draw the whole face across its own small target instead of its slice
+/// of the picture — which is why a face lens could not be captured above the tile cap at all.
+/// Each lens is captured whole and tiled and the two must be the same file.
+fn proveTiledFaceMesh(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const lenses = [_][]const u8{
+        ".lens-packages/face-paint",
+        ".lens-packages/war-paint",
+        ".lens-packages/lashes-3d",
+        ".lens-packages/face-swap",
+    };
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const cfg = abi.CaptureConfig{ .width = 320, .height = 240, .supersample = 0, .format = 0, .quality = 0 };
+    const buf_cap = 320 * 240 * 4 + 4096;
+
+    for (lenses) |path| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+            std.debug.print("conformance: FAIL face tracking enable for {s}\n", .{path});
+            return false;
+        }
+        if (abi.goss_session_activate_lens_from_directory(session, path.ptr, path.len) != .ok) {
+            std.debug.print("conformance: FAIL lens activation for {s}\n", .{path});
+            return false;
+        }
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = 4000,
+        };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.TrackFrameFailed;
+        }
+        var tracked: abi.FaceResult = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_face_result(session, &tracked) == .again) {
+            std.Thread.yield() catch {};
+            if (g_watch) c.glfwPollEvents();
+            polls += 1;
+            if (polls > 100_000_000) return error.FaceResultTimedOut;
+        }
+        // A capture with no face tracked would prove nothing: both paths would be a bare frame.
+        if (tracked.landmarks.len < 3 or tracked.presence < 0.5) {
+            std.debug.print("conformance: FAIL no face tracked in the corpus for {s}\n", .{path});
+            return false;
+        }
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        for (0..3) |_| {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+
+        const whole = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(whole);
+        var whole_len: usize = 0;
+        var ow: u32 = 0;
+        var oh: u32 = 0;
+        session.capture_tile_cap = 0;
+        const whole_status = abi.goss_engine_capture_still(engine, session, &cfg, whole.ptr, whole.len, &whole_len, &ow, &oh);
+        if (whole_status != .ok or ow != 320 or oh != 240) {
+            std.debug.print("conformance: FAIL whole-buffer capture for {s} ({any})\n", .{ path, whole_status });
+            return false;
+        }
+
+        const tiled = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(tiled);
+        var tiled_len: usize = 0;
+        session.capture_tile_cap = 128;
+        session.capture_no_stream = true;
+        const status = abi.goss_engine_capture_still(engine, session, &cfg, tiled.ptr, tiled.len, &tiled_len, &ow, &oh);
+        session.capture_no_stream = false;
+        session.capture_tile_cap = 0;
+        if (status != .ok or ow != 320 or oh != 240) {
+            std.debug.print("conformance: FAIL tiled capture for {s} ({any})\n", .{ path, status });
+            return false;
+        }
+        // A tile rasterizes in its own smaller viewport, so an interpolated varying can land one
+        // least-significant bit off the whole-frame draw. Geometry error would show as whole
+        // pixels in the wrong place, which this bound rules out: nothing moves, nothing is missing.
+        const a = try png.decodeRgba(gpa, whole[0..whole_len]);
+        defer a.deinit(gpa);
+        const b = try png.decodeRgba(gpa, tiled[0..tiled_len]);
+        defer b.deinit(gpa);
+        var worst: u32 = 0;
+        var moved: usize = 0;
+        for (a.pixels, b.pixels) |pa, pb| {
+            const d = @abs(@as(i32, pa) - @as(i32, pb));
+            if (d > worst) worst = @intCast(d);
+            if (d > 1) moved += 1;
+        }
+        if (worst > 1 or moved > 0) {
+            std.debug.print("conformance: FAIL a tiled {s} capture moved pixels (worst {d}, {d} beyond one bit)\n", .{ path, worst, moved });
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF face mesh, face paint, lashes and face swap all tile, every pixel within one bit of a single-target render\n", .{});
+    return true;
+}
+
+/// Proves a JPEG capture streams: the encoder carries its DC predictors and bit accumulator
+/// across band edges, so a banded encode is the same file as a whole-buffer one. Without that
+/// carry every band would restart the DC difference and shift colour at the seam.
+fn proveStreamedJpeg(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 3200,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..3) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // A height that is not a multiple of 16 so the last band is a short MCU row.
+    const cfg = abi.CaptureConfig{ .width = 200, .height = 150, .supersample = 0, .format = 1, .quality = 88 };
+    const buf_cap = 200 * 150 * 4 + 8192;
+
+    const whole = try gpa.alloc(u8, buf_cap);
+    defer gpa.free(whole);
+    var whole_len: usize = 0;
+    var ow: u32 = 0;
+    var oh: u32 = 0;
+    session.capture_tile_cap = 0;
+    session.capture_no_stream = true;
+    const whole_status = abi.goss_engine_capture_still(engine, session, &cfg, whole.ptr, whole.len, &whole_len, &ow, &oh);
+    session.capture_no_stream = false;
+    if (whole_status != .ok or ow != 200 or oh != 150) {
+        std.debug.print("conformance: FAIL whole-buffer JPEG capture\n", .{});
+        return false;
+    }
+    if (whole_len < 2 or whole[0] != 0xFF or whole[1] != 0xD8) {
+        std.debug.print("conformance: FAIL the whole-buffer capture is not a JPEG\n", .{});
+        return false;
+    }
+
+    // Two band heights, one of them not a divisor of the picture, so a seam lands mid-MCU-row
+    // in the row supply and the encoder has to hold rows back.
+    for ([_]u16{ 120, 48 }) |cap| {
+        const streamed = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(streamed);
+        var streamed_len: usize = 0;
+        session.capture_tile_cap = cap;
+        const status = abi.goss_engine_capture_still(engine, session, &cfg, streamed.ptr, streamed.len, &streamed_len, &ow, &oh);
+        session.capture_tile_cap = 0;
+        if (status != .ok or ow != 200 or oh != 150) {
+            std.debug.print("conformance: FAIL streamed JPEG capture at cap {d} ({any})\n", .{ cap, status });
+            return false;
+        }
+        if (!std.mem.eql(u8, whole[0..whole_len], streamed[0..streamed_len])) {
+            std.debug.print("conformance: FAIL a streamed JPEG at cap {d} differs from the whole-buffer encode\n", .{cap});
+            return false;
+        }
+    }
+
+    // The size-probe convention every SDK uses: capacity zero first, then a buffer of the size
+    // that came back. Only the whole-buffer form above was covered, so a lossy still had never
+    // been asked its size before being asked for its bytes.
+    for ([_]u32{ 1, 2 }) |fmt| {
+        // HEIC needs the platform photo backend; where there is none the call says so and the
+        // probe has nothing to prove.
+        var probe_cfg = cfg;
+        probe_cfg.format = fmt;
+        var needed: usize = 0;
+        var pw: u32 = 0;
+        var ph: u32 = 0;
+        var probe_byte: [1]u8 = undefined;
+        const probe = abi.goss_engine_capture_still(engine, session, &probe_cfg, &probe_byte, 0, &needed, &pw, &ph);
+        if (probe == .unsupported) continue;
+        if (probe != .invalid_argument or needed == 0) {
+            std.debug.print("conformance: FAIL format {d} probe answered {any} with {d} needed\n", .{ fmt, probe, needed });
+            return false;
+        }
+        const sized = try gpa.alloc(u8, needed);
+        defer gpa.free(sized);
+        var sized_len: usize = 0;
+        if (abi.goss_engine_capture_still(engine, session, &probe_cfg, sized.ptr, sized.len, &sized_len, &pw, &ph) != .ok) {
+            std.debug.print("conformance: FAIL format {d} capture into the probed size\n", .{fmt});
+            return false;
+        }
+        if (sized_len == 0 or sized_len > needed) {
+            std.debug.print("conformance: FAIL format {d} wrote {d} into a probed {d}\n", .{ fmt, sized_len, needed });
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF a JPEG capture streams band by band, byte-identical to the whole-buffer encode\n", .{});
+    std.debug.print("conformance: PROOF a lossy still answers its own size probe and fills the buffer that probe asked for\n", .{});
     return true;
 }
 
@@ -12560,11 +13430,17 @@ fn captureFountain(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []const u8)
     return captureFountainAtFrame(gpa, engine, pkg, 85);
 }
 
+/// The camera through the compositor with no lens at all - the only honest baseline for asking
+/// whether a pass changed anything, since any reference lens runs a pass of its own.
+fn captureBareFrame(gpa: std.mem.Allocator, engine: *abi.Engine, capture_frame: usize) !?[]u8 {
+    return captureFountainAtFrame(gpa, engine, "", capture_frame);
+}
+
 fn captureFountainAtFrame(gpa: std.mem.Allocator, engine: *abi.Engine, pkg: []const u8, capture_frame: usize) !?[]u8 {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
-    if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) return null;
+    if (pkg.len > 0 and abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) return null;
     const corpus = try loadCorpusFrame(gpa, corpus_path);
     defer corpus.deinit();
     const planes = try rgbaToNv12(gpa, corpus.frame);
@@ -20406,6 +21282,184 @@ fn watchHold(name: [*:0]const u8) void {
     }
 }
 
+/// How many engine-and-renderer cycles one process must survive. A client that
+/// exports clips makes one engine per export, so this is a session's worth of
+/// work, not a stress number.
+const renderer_cycles: usize = 64;
+
+/// Create engine, bring up a renderer, draw, destroy - over and over in one
+/// process, each cycle through a counting allocator whose live bytes must come
+/// back to where they started. The headless proof cycles sessions over one
+/// engine and never makes a renderer, so nothing held this.
+fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool {
+    var settled: usize = 0;
+    var first_live: usize = 0;
+    var cycle: usize = 0;
+    while (cycle < renderer_cycles) : (cycle += 1) {
+        var counter = CountingAllocator{ .backing = gpa };
+        const engine = abi.createEngine(counter.allocator(), .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 }) catch {
+            std.debug.print("conformance: FAIL renderer lifecycle - engine {d} would not create\n", .{cycle});
+            return false;
+        };
+        const desc: abi.RendererDesc = .{
+            .native_window_handle = glfwGetCocoaWindow(window),
+            .width = width,
+            .height = height,
+        };
+        if (abi.goss_engine_init_renderer(engine, &desc) != .ok) {
+            std.debug.print("conformance: FAIL renderer lifecycle - renderer {d} would not come up\n", .{cycle});
+            abi.destroyEngine(engine);
+            return false;
+        }
+        const session = abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 }) catch {
+            std.debug.print("conformance: FAIL renderer lifecycle - session {d}\n", .{cycle});
+            abi.destroyEngine(engine);
+            return false;
+        };
+        const rgba = try goldenFrame(gpa);
+        defer gpa.free(rgba);
+        const frame: abi.FrameDesc = .{
+            .width = golden_side,
+            .height = golden_side,
+            .pixel_format = 4,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = 1000,
+        };
+        _ = abi.goss_session_submit_frame_rgba_copy(session, &frame, rgba.ptr, golden_side * 4);
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        abi.destroySession(session);
+        abi.destroyEngine(engine);
+
+        // The allocator outlives the engine it fed, so anything the cycle kept
+        // is still counted here. The first cycle warms one-time state; from the
+        // second on, live bytes must not climb.
+        const live = counter.inUse();
+        if (cycle == 1) {
+            first_live = live;
+            settled = live;
+        } else if (cycle > 1) {
+            if (live > settled) settled = live;
+            if (live > first_live) {
+                std.debug.print(
+                    "conformance: FAIL renderer lifecycle - cycle {d} left {d} bytes against cycle 1's {d}\n",
+                    .{ cycle, live, first_live },
+                );
+                return false;
+            }
+        }
+    }
+    std.debug.print("conformance: PROOF {d} engine-and-renderer cycles in one process, nothing kept\n", .{renderer_cycles});
+    return true;
+}
+
+/// The fixed grade every target renders for the cross-target compare. Absolute
+/// fields, no bundle and no tracker, so the only thing under test is the
+/// renderer's own colour math on this backend.
+const golden_manifest =
+    \\{
+    \\  "glf": "1.0",
+    \\  "id": "goss.look.golden",
+    \\  "version": "1.0.0",
+    \\  "display_name": "Golden",
+    \\  "engine_compat": ">=0.5",
+    \\  "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "grade", "type": "grade.pass", "inputs": {"frame": "camera"}, "params": {}, "grade": {"exposure": 0.25, "contrast": 1.15, "saturation": 0.8, "temperature": 0.05, "tint": -0.02, "brightness": 0.03, "hue": 0.1}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+const golden_side: u32 = 128;
+const golden_blocks: usize = 8;
+
+/// The source frame, from integer arithmetic alone so every target builds the
+/// same bytes without shipping a file.
+fn goldenFrame(gpa: std.mem.Allocator) ![]u8 {
+    const rgba = try gpa.alloc(u8, golden_side * golden_side * 4);
+    for (0..golden_side) |y| {
+        for (0..golden_side) |x| {
+            const i = (y * golden_side + x) * 4;
+            rgba[i + 0] = @intCast((x * 2) & 0xFF);
+            rgba[i + 1] = @intCast((y * 2) & 0xFF);
+            rgba[i + 2] = @intCast((x + y) & 0xFF);
+            rgba[i + 3] = 255;
+        }
+    }
+    return rgba;
+}
+
+/// Block means over the composite rather than its pixels: a per-pixel compare
+/// across two backends measures rasterisation, and this measures colour.
+fn goldenSignature(gpa: std.mem.Allocator, engine: *abi.Engine, out: *[golden_blocks * golden_blocks * 3]u8) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens(session, golden_manifest.ptr, golden_manifest.len) != .ok) {
+        std.debug.print("conformance: FAIL golden lens activation\n", .{});
+        return false;
+    }
+    const rgba = try goldenFrame(gpa);
+    defer gpa.free(rgba);
+    const desc: abi.FrameDesc = .{
+        .width = golden_side,
+        .height = golden_side,
+        // 4 is rgba8: the copy submit takes only the two packed formats.
+        .pixel_format = 4,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    if (abi.goss_session_submit_frame_rgba_copy(session, &desc, rgba.ptr, golden_side * 4) != .ok) {
+        std.debug.print("conformance: FAIL golden submit\n", .{});
+        return false;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const pixels = try gpa.alloc(u8, @as(usize, width) * @as(usize, height) * 4);
+    defer gpa.free(pixels);
+    var out_w: u32 = 0;
+    var out_h: u32 = 0;
+    if (abi.goss_engine_capture_frame(engine, session, pixels.ptr, pixels.len, &out_w, &out_h) != .ok) {
+        std.debug.print("conformance: FAIL golden capture\n", .{});
+        return false;
+    }
+    goldenBlocks(pixels, out_w, out_h, out);
+    return true;
+}
+
+/// Averages the readback into an 8x8 grid of RGB means. Every pixel is visited
+/// once, so this is linear in the frame and needs no scratch beyond the grid.
+fn goldenBlocks(pixels: []const u8, w: u32, h: u32, out: *[golden_blocks * golden_blocks * 3]u8) void {
+    var sums = [_]u64{0} ** (golden_blocks * golden_blocks * 3);
+    var counts = [_]u64{0} ** (golden_blocks * golden_blocks);
+    for (0..h) |y| {
+        const by = @min(y * golden_blocks / h, golden_blocks - 1);
+        for (0..w) |x| {
+            const bx = @min(x * golden_blocks / w, golden_blocks - 1);
+            const cell = by * golden_blocks + bx;
+            const i = (y * w + x) * 4;
+            sums[cell * 3 + 0] += pixels[i + 0];
+            sums[cell * 3 + 1] += pixels[i + 1];
+            sums[cell * 3 + 2] += pixels[i + 2];
+            counts[cell] += 1;
+        }
+    }
+    for (0..golden_blocks * golden_blocks) |cell| {
+        const n = @max(counts[cell], 1);
+        for (0..3) |ch| out[cell * 3 + ch] = @intCast(sums[cell * 3 + ch] / n);
+    }
+}
+
 pub fn main(init_args: std.process.Init) !u8 {
     const gpa = init_args.gpa;
     harness_io = init_args.io;
@@ -20418,6 +21472,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     _ = arg_it.next();
     const first_arg = arg_it.next();
     const print_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--print") else false;
+    const golden_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--golden") else false;
+    const lifecycle_mode = if (first_arg) |arg| std.mem.eql(u8, arg, "--lifecycle") else false;
     g_watch = if (first_arg) |arg| std.mem.eql(u8, arg, "--watch") else false;
 
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
@@ -20426,6 +21482,12 @@ pub fn main(init_args: std.process.Init) !u8 {
     const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "conformance", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
     g_watch_window = window;
+
+    // Before the suite's own engine: bgfx is one per process, so a proof about
+    // bringing renderers up and down has to own the process to say anything.
+    if (lifecycle_mode) {
+        return if (try proveRendererLifecycle(gpa, window)) 0 else 1;
+    }
 
     // The engine runs under a counting allocator so the per-frame budget
     // gate can watch its heap footprint settle across a render loop.
@@ -20439,6 +21501,16 @@ pub fn main(init_args: std.process.Init) !u8 {
         .height = height,
     };
     if (abi.goss_engine_init_renderer(engine, &renderer_desc) != .ok) return error.RendererInit;
+
+    if (golden_mode) {
+        var signature: [golden_blocks * golden_blocks * 3]u8 = undefined;
+        if (!try goldenSignature(gpa, engine, &signature)) return 1;
+        var out_buf: [1024]u8 = undefined;
+        var stdout = std.Io.File.stdout().writer(init_args.io, &out_buf);
+        try stdout.interface.print("{x}\n", .{&signature});
+        try stdout.interface.flush();
+        return 0;
+    }
 
     var current: std.Io.Writer.Allocating = .init(gpa);
     defer current.deinit();
@@ -20864,6 +21936,16 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveHighResCapture(gpa, engine)) return 1;
     watchHold("high res capture");
     if (!try proveTiledCapture(gpa, engine)) return 1;
+    if (!try proveTurnedTiledCapture(gpa, engine)) return 1;
+    if (!try proveStreamedSupersample(gpa, engine)) return 1;
+    if (!try proveStreamedJpeg(gpa, engine)) return 1;
+    if (!try proveTiledFaceMesh(gpa, engine)) return 1;
+    if (!try proveStagedImageAssets(gpa, engine)) return 1;
+    if (!try proveAuthoredRotation(gpa, engine)) return 1;
+    if (!try proveStickerInteraction(gpa, engine)) return 1;
+    if (!try proveArBrushRedo(gpa, engine)) return 1;
+    if (!try proveEnhanceReferences(gpa, engine)) return 1;
+    if (!try proveMicResampler(gpa, engine)) return 1;
     watchHold("tiled capture");
     if (!try proveLiveFrameEgress(gpa, engine)) return 1;
     watchHold("live frame egress");

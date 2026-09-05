@@ -51,7 +51,6 @@ pub fn build(b: *std.Build) void {
         ci_step.dependOn(&ci_diff.step);
     }
 
-
     const math_module = b.createModule(.{
         .root_source_file = b.path("core/math/math.zig"),
         .target = target,
@@ -694,14 +693,14 @@ pub fn build(b: *std.Build) void {
         if (have_inference_stack) {
             deps_step.dependOn(&b.addInstallArtifact(buildFft2dLib(b, target, optimize, null), .{}).step);
             if (flatc_exe) |flatc| {
-                deps_step.dependOn(&b.addInstallArtifact(buildTfliteLib(b, target, optimize, flatc, null), .{}).step);
+                deps_step.dependOn(&b.addInstallArtifact(buildTfliteLib(b, target, optimize, flatc, null, null), .{}).step);
             }
             deps_step.dependOn(&b.addInstallArtifact(buildAbseilLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildCpuinfoLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildRuyLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildFarmhashLib(b, target, optimize, null), .{}).step);
-        deps_step.dependOn(&b.addInstallArtifact(buildFlatbuffersLib(b, target, optimize, null), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildFlatbuffersLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildXnnpackLib(b, target, optimize, null, null), .{}).step);
         } else {
             deps_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
@@ -943,7 +942,7 @@ pub fn build(b: *std.Build) void {
                 .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
             });
         }
-        tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null));
+        tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null, null));
         tracking_module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
         tracking_module.linkLibrary(buildAbseilLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildRuyLib(b, target, optimize, null));
@@ -1034,7 +1033,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "segmentation_core", .module = segmentation_core_wasi },
             },
         });
-        exports_wasi.linkLibrary(buildTfliteLib(b, wasi_target, wasi_optimize, flatc_exe.?, null));
+        exports_wasi.linkLibrary(buildTfliteLib(b, wasi_target, wasi_optimize, flatc_exe.?, null, null));
         exports_wasi.linkLibrary(buildXnnpackLib(b, wasi_target, wasi_optimize, null, null));
         exports_wasi.linkLibrary(buildAbseilLib(b, wasi_target, wasi_optimize, null));
         exports_wasi.linkLibrary(buildRuyLib(b, wasi_target, wasi_optimize, null));
@@ -1099,39 +1098,39 @@ pub fn build(b: *std.Build) void {
         });
         const tracking_cores_wasm = trackingCoreModules(b, wasm_target, .ReleaseSmall, math_wasm);
         abi_wasm.addImport("face", tracking_cores_wasm.face);
-    abi_wasm.addImport("hand", tracking_cores_wasm.hand);
-    abi_wasm.addImport("pose", tracking_cores_wasm.pose);
-    abi_wasm.addImport("face_geometry", tracking_cores_wasm.face_geometry);
-    abi_wasm.addImport("png", pngModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("gif", gifModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("color", colorModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, .ReleaseSmall, null));
-    abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall, null));
-    abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("sfx", sfxModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("music", musicModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("barcode", barcodeModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("medialib", medialibModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("qr", qrModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("flash", flashModule(b, wasm_target, .ReleaseSmall));
-    const fft_abi_wasm = fftModule(b, wasm_target, .ReleaseSmall);
-    abi_wasm.addImport("formant", formantModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
-    abi_wasm.addImport("fingerprint", fingerprintModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
-    abi_wasm.addImport("layout", compositeLayoutModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("geo", geoModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("world_mesh", worldMeshModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("font", fontModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("stroke", strokeModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("world_board", worldBoardModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
-    abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
-    abi_wasm.addImport("gesture", gestureModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
-    abi_wasm.addImport("particles", particlesModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("sph", sphModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("hand", tracking_cores_wasm.hand);
+        abi_wasm.addImport("pose", tracking_cores_wasm.pose);
+        abi_wasm.addImport("face_geometry", tracking_cores_wasm.face_geometry);
+        abi_wasm.addImport("png", pngModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("gif", gifModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("color", colorModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, .ReleaseSmall, null));
+        abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall, null));
+        abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("sfx", sfxModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("music", musicModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("barcode", barcodeModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("medialib", medialibModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("qr", qrModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("flash", flashModule(b, wasm_target, .ReleaseSmall));
+        const fft_abi_wasm = fftModule(b, wasm_target, .ReleaseSmall);
+        abi_wasm.addImport("formant", formantModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
+        abi_wasm.addImport("fingerprint", fingerprintModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
+        abi_wasm.addImport("layout", compositeLayoutModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("geo", geoModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("world_mesh", worldMeshModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("font", fontModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("stroke", strokeModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("world_board", worldBoardModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
+        abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
+        abi_wasm.addImport("gesture", gestureModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
+        abi_wasm.addImport("particles", particlesModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("sph", sphModule(b, wasm_target, .ReleaseSmall));
         abi_wasm.addImport("face106", b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = wasm_target,
@@ -1398,8 +1397,8 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "sampler", .module = sampler_module },
                     .{ .name = "face", .module = face_module },
                     .{ .name = "hand", .module = hand_core_module },
-                .{ .name = "pose", .module = pose_core_module },
-                .{ .name = "face_geometry", .module = face_geometry_core_module },
+                    .{ .name = "pose", .module = pose_core_module },
+                    .{ .name = "face_geometry", .module = face_geometry_core_module },
                     .{ .name = "tracker", .module = tracker_module },
                     .{ .name = "graph", .module = graph_module },
                     .{ .name = "math", .module = math_module },
@@ -1524,7 +1523,7 @@ pub fn build(b: *std.Build) void {
         conformance_module.linkLibrary(glfw_lib);
         if (conformance_inference) {
             conformance_module.link_libcpp = true;
-            conformance_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null));
+            conformance_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null, null));
             conformance_module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
             conformance_module.linkLibrary(buildAbseilLib(b, target, optimize, null));
             conformance_module.linkLibrary(buildRuyLib(b, target, optimize, null));
@@ -1552,6 +1551,16 @@ pub fn build(b: *std.Build) void {
         run_conformance.step.dependOn(lens_package_reference_step);
         if (b.args) |args| run_conformance.addArgs(args);
         conformance_step.dependOn(&run_conformance.step);
+
+        // bgfx is one per process, so bringing renderers up and down cannot be
+        // proven inside a run that already holds one. Its own run, on the same
+        // step, so the merge bar covers it: nothing held this until a phone died
+        // on the fifteenth engine of a test suite.
+        const run_lifecycle = b.addRunArtifact(conformance_exe);
+        run_lifecycle.setCwd(b.path("."));
+        run_lifecycle.addArg("--lifecycle");
+        conformance_step.dependOn(&run_lifecycle.step);
+
         // The leak gates ride the merge bar where the render stack exists:
         // on macOS `zig build ci` runs the full conformance, submit and
         // render and capture and record and loaders included. Non-GPU
@@ -1927,7 +1936,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     addNdkPaths(b, jni_module, sysroot, abi_triple);
     if (inference_android) {
         jni_module.link_libcpp = true;
-        jni_module.linkLibrary(buildTfliteLib(b, android_target, optimize, flatc_android.?, libc_txt));
+        jni_module.linkLibrary(buildTfliteLib(b, android_target, optimize, flatc_android.?, libc_txt, null));
         jni_module.linkLibrary(buildXnnpackLib(b, android_target, optimize, libc_txt, null));
         jni_module.linkLibrary(buildAbseilLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildRuyLib(b, android_target, optimize, libc_txt));
@@ -2694,9 +2703,8 @@ fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     var sources: std.ArrayList([]const u8) = .empty;
     var absl_excludes: std.ArrayList([]const u8) = .empty;
     absl_excludes.appendSlice(b.allocator, &.{
-        "_test", "test_", "_benchmark", "benchmark", "_mock", "mock_", "matchers",
-        "test_util", "print_hash_of", "gaussian_distribution_gentables", "pool_urbg_gentables",
-        "_win.cc", "_emscripten.cc",
+        "_test",     "test_",         "_benchmark",                      "benchmark",           "_mock",   "mock_",          "matchers",
+        "test_util", "print_hash_of", "gaussian_distribution_gentables", "pool_urbg_gentables", "_win.cc", "_emscripten.cc",
     }) catch @panic("oom");
     // No signals to install a handler for on the web target.
     if (target.result.cpu.arch.isWasm()) {
@@ -2741,16 +2749,16 @@ fn buildCpuinfoLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     const arch = target.result.cpu.arch;
     if (arch == .x86_64) {
         for ([_][]const u8{
-            "x86/init.c",       "x86/info.c",              "x86/vendor.c",
-            "x86/uarch.c",      "x86/name.c",              "x86/topology.c",
-            "x86/isa.c",        "x86/cache/init.c",        "x86/cache/descriptor.c",
+            "x86/init.c",                "x86/info.c",       "x86/vendor.c",
+            "x86/uarch.c",               "x86/name.c",       "x86/topology.c",
+            "x86/isa.c",                 "x86/cache/init.c", "x86/cache/descriptor.c",
             "x86/cache/deterministic.c",
         }) |file| {
             files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
         }
         if (os == .linux) {
             for ([_][]const u8{
-                "linux/cpulist.c", "linux/multiline.c", "linux/processors.c", "linux/smallfile.c",
+                "linux/cpulist.c",  "linux/multiline.c",   "linux/processors.c", "linux/smallfile.c",
                 "x86/linux/init.c", "x86/linux/cpuinfo.c",
             }) |file| {
                 files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
@@ -2766,9 +2774,9 @@ fn buildCpuinfoLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         }
     } else if (os == .linux) {
         for ([_][]const u8{
-            "linux/cpulist.c",       "linux/multiline.c", "linux/processors.c", "linux/smallfile.c",
-            "arm/cache.c",           "arm/uarch.c",       "arm/linux/chipset.c", "arm/linux/clusters.c",
-            "arm/linux/cpuinfo.c",   "arm/linux/hwcap.c", "arm/linux/init.c",    "arm/linux/midr.c",
+            "linux/cpulist.c",         "linux/multiline.c", "linux/processors.c",  "linux/smallfile.c",
+            "arm/cache.c",             "arm/uarch.c",       "arm/linux/chipset.c", "arm/linux/clusters.c",
+            "arm/linux/cpuinfo.c",     "arm/linux/hwcap.c", "arm/linux/init.c",    "arm/linux/midr.c",
             "arm/linux/aarch64-isa.c",
         }) |file| {
             files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
@@ -2876,16 +2884,12 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     // common code they alone pull in), OpenCL, the experimental Rust
     // translator, frame capture, and code for platforms that aren't us.
     const angle_excludes = [_][]const u8{
-        "_unittest.cpp", "_test.cpp",    "_fuzzer.cpp",   "_unittest.mm", "_test.mm",
-        "/fuzz/",        "/tests/",
-        "/renderer/d3d/", "/renderer/vulkan/", "/renderer/wgpu/",
-        "/renderer/null/", "/renderer/gl/",    "/renderer/cl/",
-        "/dxgi_support_table", "/dxgi_format_map_autogen",
-        "/CL",           "/cl_",         "_cl_",         "validationCL", "PackedCLEnums",
-        "system_utils_linux", "system_utils_win",
-        "/common/gl/",   "/common/serializer/", "/common/vulkan/", "/common/spirv/",
-        "/compiler/translator/ir/", "/compiler/translator/hlsl/",
-        "/compiler/translator/spirv/", "/compiler/translator/wgsl/",
+        "_unittest.cpp",      "_test.cpp",                        "_fuzzer.cpp",                "_unittest.mm",                "_test.mm",
+        "/fuzz/",             "/tests/",                          "/renderer/d3d/",             "/renderer/vulkan/",           "/renderer/wgpu/",
+        "/renderer/null/",    "/renderer/gl/",                    "/renderer/cl/",              "/dxgi_support_table",         "/dxgi_format_map_autogen",
+        "/CL",                "/cl_",                             "_cl_",                       "validationCL",                "PackedCLEnums",
+        "system_utils_linux", "system_utils_win",                 "/common/gl/",                "/common/serializer/",         "/common/vulkan/",
+        "/common/spirv/",     "/compiler/translator/ir/",         "/compiler/translator/hlsl/", "/compiler/translator/spirv/", "/compiler/translator/wgsl/",
         "/libANGLE/capture/",
         // The real ASTC decoder needs an external codec this project
         // doesn't vendor; AstcDecompressorNoOp.cpp is ANGLE's own
@@ -2895,9 +2899,8 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         // for iOS is exactly SystemInfo.cpp + SystemInfo_apple.mm +
         // SystemInfo_ios.cpp - every other SystemInfo_*.{cpp,mm} here is
         // a different platform's file.
-        "SystemInfo_android", "SystemInfo_fuchsia", "SystemInfo_libpci",
-        "SystemInfo_linux",   "SystemInfo_macos",   "SystemInfo_vulkan",
-        "SystemInfo_win",     "SystemInfo_x11",
+        "SystemInfo_android",         "SystemInfo_fuchsia",          "SystemInfo_libpci",
+        "SystemInfo_linux",   "SystemInfo_macos",                 "SystemInfo_vulkan",          "SystemInfo_win",              "SystemInfo_x11",
     };
 
     var sources: std.ArrayList([]const u8) = .empty;
@@ -3174,7 +3177,7 @@ fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         }
     }.lessThan);
     const yuv_flags = [_][]const u8{
-        "-std=c++17",           "-fno-exceptions",         "-fno-sanitize=undefined", "-w",
+        "-std=c++17",           "-fno-exceptions",      "-fno-sanitize=undefined", "-w",
         "-DLIBYUV_DISABLE_SVE", "-DLIBYUV_DISABLE_SME",
     };
     for (yuv_sources.items) |file| {
@@ -3329,8 +3332,8 @@ fn xnnpackConfigureModule(b: *std.Build, module: *std.Build.Module, target: std.
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     for ([_][]const u8{
         ".vendor/xnnpack",             ".vendor/xnnpack/include", ".vendor/xnnpack/src",
-        ".vendor/pthreadpool/include",
-        ".vendor/fxdiv/include",       ".vendor/fp16/include", ".vendor/cpuinfo/include",
+        ".vendor/pthreadpool/include", ".vendor/fxdiv/include",   ".vendor/fp16/include",
+        ".vendor/cpuinfo/include",
     }) |dir| {
         module.addIncludePath(b.path(dir));
     }
@@ -3396,12 +3399,12 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         cmakeSourceList(b, ".vendor/xnnpack", ".vendor/xnnpack/CMakeLists.txt", group, &shared);
     }
     for ([_][]const u8{
-        "src/sanitizers.c",       "src/configs/hardware-config.c",     "src/xnnpack/init-once.c",
-        "src/indirection.c",      "src/microparams-init.c",            "src/normalization.c",
-        "src/pack-lh.cc",         "src/reference/packing.cc",          "src/allocator.c",
-        "src/cache.c",            "src/datatype.c",                    "src/operators/fingerprint_id.c",
+        "src/sanitizers.c",                  "src/configs/hardware-config.c",   "src/xnnpack/init-once.c",
+        "src/indirection.c",                 "src/microparams-init.c",          "src/normalization.c",
+        "src/pack-lh.cc",                    "src/reference/packing.cc",        "src/allocator.c",
+        "src/cache.c",                       "src/datatype.c",                  "src/operators/fingerprint_id.c",
         "src/operators/fingerprint_cache.c", "src/xnnpack/fingerprint_check.c", "src/memory.c",
-        "src/microkernel-utils.c", "src/mutex.c",                      "src/operator-run.c",
+        "src/microkernel-utils.c",           "src/mutex.c",                     "src/operator-run.c",
         "src/operator-utils.c",
     }) |file| {
         shared.append(b.allocator, b.fmt(".vendor/xnnpack/{s}", .{file})) catch @panic("oom");
@@ -3584,7 +3587,7 @@ fn tfliteGroupSources(b: *std.Build, group: TfliteGroup, out: *std.ArrayList([]c
         if (entry.kind != .file) continue;
         const name = entry.name;
         if (!std.mem.endsWith(u8, name, ".c") and !std.mem.endsWith(u8, name, ".cc")) continue;
-        const stem = name[0 .. std.mem.lastIndexOfScalar(u8, name, '.').?];
+        const stem = name[0..std.mem.lastIndexOfScalar(u8, name, '.').?];
         if (std.mem.endsWith(u8, stem, "_test") or std.mem.endsWith(u8, stem, "test_util")) continue;
         for (group.exclude_contains) |pattern| {
             if (std.mem.indexOf(u8, name, pattern) != null) continue :files;
@@ -3599,7 +3602,7 @@ fn tfliteGroupSources(b: *std.Build, group: TfliteGroup, out: *std.ArrayList([]c
 // The inference runtime itself: interpreter, builtin kernels, and the cpu
 // delegate, aggregated the same way the pinned build does. Graph rewriting
 // pieces the runtime still reaches for live in the sibling tensorflow pin.
-fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, flatc: *std.Build.Step.Compile, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
+fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, flatc: *std.Build.Step.Compile, libc: ?std.Build.LazyPath, protoc: ?*std.Build.Step.Compile) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libc = true;
     module.link_libcpp = true;
@@ -3615,13 +3618,12 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         wasm_compat_flags = &.{ "-include", b.pathFromRoot("adapters/tracking/wasi_std/wasi_compat.h") };
     }
     for ([_][]const u8{
-        ".vendor/litert",           ".vendor/tensorflow",          ".vendor/tensorflow/third_party/xla",
-        ".vendor/flatbuffers/include",
-        ".vendor/abseil",           ".vendor/eigen",               ".vendor/ruy",
-        ".vendor/gemmlowp",         ".vendor/ml-dtypes",           ".vendor/farmhash/src",
-        ".vendor/neon2sse",
-        ".vendor/cpuinfo/include",  ".vendor/pthreadpool/include", ".vendor/xnnpack",
-        ".vendor/xnnpack/include",  ".vendor/fp16/include",
+        ".vendor/litert",              ".vendor/tensorflow", ".vendor/tensorflow/third_party/xla",
+        ".vendor/flatbuffers/include", ".vendor/abseil",     ".vendor/eigen",
+        ".vendor/ruy",                 ".vendor/gemmlowp",   ".vendor/ml-dtypes",
+        ".vendor/farmhash/src",        ".vendor/neon2sse",   ".vendor/cpuinfo/include",
+        ".vendor/pthreadpool/include", ".vendor/xnnpack",    ".vendor/xnnpack/include",
+        ".vendor/fp16/include",
     }) |dir| {
         module.addIncludePath(b.path(dir));
     }
@@ -3672,6 +3674,47 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         sources.append(b.allocator, b.fmt(".vendor/litert/tflite/{s}", .{file})) catch @panic("oom");
     }
     sources.append(b.allocator, b.fmt(".vendor/litert/tflite/{s}", .{logging_source})) catch @panic("oom");
+    // Apple's Neural Engine, through tflite's own CoreML delegate. The runtime already asks for
+    // it by name on iOS, so leaving it out of the build left the call unresolvable: an unbuilt
+    // capability, not a limitation. Objective-C++ against the platform frameworks, so it joins
+    // only the Apple slices; every other target keeps the delegate-free tflite it had.
+    if (os == .ios) {
+        // Objective-C++, so no ARC (tflite manages its own retains) and no
+        // objc exceptions either: leaving those on defines __EXCEPTIONS, and
+        // eigen then compiles the try/throw path the rest of this archive is
+        // built without.
+        for ([_][]const u8{
+            "delegates/coreml/coreml_delegate.mm",
+            "delegates/coreml/coreml_delegate_kernel.mm",
+            "delegates/coreml/coreml_executor.mm",
+        }) |file| {
+            module.addCSourceFile(.{
+                .file = b.path(b.fmt(".vendor/litert/tflite/{s}", .{file})),
+                .flags = &.{
+                    "-std=c++20", "-fno-exceptions", "-fno-sanitize=undefined",
+                    "-w",         "-fno-objc-arc",   "-fno-objc-exceptions",
+                },
+            });
+        }
+        listFilesRecursive(b, ".vendor/litert/tflite/delegates/coreml/builders", ".cc", &.{"_test.cc"}, &sources);
+        // The delegate hands CoreML a serialized model spec, so coremltools'
+        // .proto files and the protobuf runtime they generate against are
+        // part of this archive. Both are lite-runtime, and nothing outside
+        // the delegate references them.
+        const spec_flags = [_][]const u8{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" };
+        var generated_sources: std.ArrayList([]const u8) = .empty;
+        const spec_dir = coremlSpecSources(b, protoc.?, &generated_sources);
+        module.addIncludePath(spec_dir);
+        module.addIncludePath(b.path(".vendor/protobuf/src"));
+        module.addIncludePath(b.path(".vendor/protobuf/third_party/utf8_range"));
+        module.addCSourceFiles(.{ .root = spec_dir, .files = generated_sources.items, .flags = &spec_flags });
+        var runtime_sources: std.ArrayList([]const u8) = .empty;
+        protobufSources(b, &runtime_sources, false);
+        addUtf8Range(b, module);
+        for (runtime_sources.items) |file| {
+            module.addCSourceFile(.{ .file = b.path(file), .flags = &spec_flags });
+        }
+    }
     if (target.result.abi.isAndroid()) {
         sources.append(b.allocator, ".vendor/litert/tflite/profiling/atrace_profiler.cc") catch @panic("oom");
     }
@@ -3724,20 +3767,19 @@ fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
     module.addIncludePath(b.path(".vendor/flatbuffers/grpc"));
     const flags = [_][]const u8{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" };
     const sources = [_][]const u8{
-        "src/idl_parser.cpp",          "src/idl_gen_text.cpp",     "src/reflection.cpp",
-        "src/util.cpp",                "src/idl_gen_binary.cpp",   "src/idl_gen_cpp.cpp",
-        "src/idl_gen_csharp.cpp",      "src/idl_gen_dart.cpp",     "src/idl_gen_kotlin.cpp",
-        "src/idl_gen_kotlin_kmp.cpp",  "src/idl_gen_go.cpp",       "src/idl_gen_java.cpp",
-        "src/idl_gen_ts.cpp",          "src/idl_gen_php.cpp",      "src/idl_gen_python.cpp",
-        "src/idl_gen_lobster.cpp",     "src/idl_gen_rust.cpp",     "src/idl_gen_fbs.cpp",
-        "src/idl_gen_grpc.cpp",        "src/idl_gen_json_schema.cpp", "src/idl_gen_swift.cpp",
-        "src/file_name_saving_file_manager.cpp", "src/file_binary_writer.cpp", "src/file_writer.cpp",
-        "src/flatc.cpp",               "src/flatc_main.cpp",       "src/binary_annotator.cpp",
-        "src/annotated_binary_text_gen.cpp", "src/bfbs_gen_lua.cpp", "src/bfbs_gen_nim.cpp",
-        "src/code_generators.cpp",     "include/codegen/python.cc",
-        "grpc/src/compiler/cpp_generator.cc", "grpc/src/compiler/go_generator.cc",
-        "grpc/src/compiler/java_generator.cc", "grpc/src/compiler/python_generator.cc",
-        "grpc/src/compiler/swift_generator.cc", "grpc/src/compiler/ts_generator.cc",
+        "src/idl_parser.cpp",                    "src/idl_gen_text.cpp",                "src/reflection.cpp",
+        "src/util.cpp",                          "src/idl_gen_binary.cpp",              "src/idl_gen_cpp.cpp",
+        "src/idl_gen_csharp.cpp",                "src/idl_gen_dart.cpp",                "src/idl_gen_kotlin.cpp",
+        "src/idl_gen_kotlin_kmp.cpp",            "src/idl_gen_go.cpp",                  "src/idl_gen_java.cpp",
+        "src/idl_gen_ts.cpp",                    "src/idl_gen_php.cpp",                 "src/idl_gen_python.cpp",
+        "src/idl_gen_lobster.cpp",               "src/idl_gen_rust.cpp",                "src/idl_gen_fbs.cpp",
+        "src/idl_gen_grpc.cpp",                  "src/idl_gen_json_schema.cpp",         "src/idl_gen_swift.cpp",
+        "src/file_name_saving_file_manager.cpp", "src/file_binary_writer.cpp",          "src/file_writer.cpp",
+        "src/flatc.cpp",                         "src/flatc_main.cpp",                  "src/binary_annotator.cpp",
+        "src/annotated_binary_text_gen.cpp",     "src/bfbs_gen_lua.cpp",                "src/bfbs_gen_nim.cpp",
+        "src/code_generators.cpp",               "include/codegen/python.cc",           "grpc/src/compiler/cpp_generator.cc",
+        "grpc/src/compiler/go_generator.cc",     "grpc/src/compiler/java_generator.cc", "grpc/src/compiler/python_generator.cc",
+        "grpc/src/compiler/swift_generator.cc",  "grpc/src/compiler/ts_generator.cc",
     };
     for (sources) |file| {
         module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/flatbuffers/{s}", .{file})), .flags = &flags });
@@ -3746,6 +3788,82 @@ fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
     const step = b.step("flatc", "Build the schema compiler from the pinned flatbuffers tree");
     step.dependOn(&b.addInstallArtifact(exe, .{}).step);
     return exe;
+}
+
+// Protobuf's own sources, minus its tests and its language backends' tests.
+// The runtime half links into whatever needs the generated spec; the
+// compiler half is host-only and exists to run protoc during the build.
+fn protobufSources(b: *std.Build, out: *std.ArrayList([]const u8), with_compiler: bool) void {
+    const excludes = [_][]const u8{
+        "_test.cc", "test_util",   "unittest",    "_benchmark",    "mock_",
+        "_mock.cc", "/testing/",   "fake_plugin", "tester.cc",     "main.cc",
+        "/kotlin/", "test_plugin", "/cpp/tools/", "no_generators",
+    };
+    listFilesRecursive(b, ".vendor/protobuf/src/google/protobuf", ".cc", &excludes, out);
+    var kept: std.ArrayList([]const u8) = .empty;
+    for (out.items) |file| {
+        const is_compiler = std.mem.indexOf(u8, file, "/compiler/") != null;
+        if (is_compiler and !with_compiler) continue;
+        kept.append(b.allocator, file) catch @panic("oom");
+    }
+    out.* = kept;
+}
+
+/// utf8_range is the one C file in the pin, so it carries its own flags
+/// rather than the C++ standard every other protobuf source is built with.
+fn addUtf8Range(b: *std.Build, module: *std.Build.Module) void {
+    module.addCSourceFile(.{
+        .file = b.path(".vendor/protobuf/third_party/utf8_range/utf8_range.c"),
+        .flags = &.{ "-std=c11", "-fno-sanitize=undefined", "-w" },
+    });
+}
+
+fn addProtocTool(b: *std.Build) ?*std.Build.Step.Compile {
+    b.build_root.handle.access(b.graph.io, ".vendor/protobuf/src/google/protobuf/message.cc", .{}) catch return null;
+    const module = b.createModule(.{ .target = b.graph.host, .optimize = .ReleaseFast });
+    module.link_libcpp = true;
+    module.addIncludePath(b.path(".vendor/protobuf/src"));
+    module.addIncludePath(b.path(".vendor/protobuf/third_party/utf8_range"));
+    module.addIncludePath(b.path(".vendor/abseil"));
+    module.linkLibrary(buildAbseilLib(b, b.graph.host, .ReleaseFast, null));
+    var sources: std.ArrayList([]const u8) = .empty;
+    protobufSources(b, &sources, true);
+    sources.append(b.allocator, "tools/protoc_cpp_main.cc") catch @panic("oom");
+    addUtf8Range(b, module);
+    const flags = [_][]const u8{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" };
+    for (sources.items) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+    }
+    return b.addExecutable(.{ .name = "protoc", .root_module = module });
+}
+
+// Runs protoc over coremltools' model spec. Returns the directory the
+// generated C++ landed in; the .pb.cc names mirror the .proto names, so the
+// caller derives its source list from the pinned tree it just compiled.
+fn coremlSpecSources(b: *std.Build, protoc: *std.Build.Step.Compile, out: *std.ArrayList([]const u8)) std.Build.LazyPath {
+    const dir = ".vendor/coremltools/mlmodel/format";
+    const run = b.addRunArtifact(protoc);
+    run.addPrefixedDirectoryArg("--proto_path=", b.path(dir));
+    const generated = run.addPrefixedOutputDirectoryArg("--cpp_out=", "coreml-spec");
+    var protos: std.ArrayList([]const u8) = .empty;
+    listFilesRecursive(b, dir, ".proto", &.{}, &protos);
+    std.mem.sort([]const u8, protos.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    // The specs import one another by bare name, so protoc has to run with
+    // the format directory itself as the root; the delegate includes them
+    // under mlmodel/format, so the output is staged back under that path.
+    for (protos.items) |path| {
+        const name = path[dir.len + 1 ..];
+        run.addArg(name);
+        const stem = name[0 .. name.len - ".proto".len];
+        out.append(b.allocator, b.fmt("mlmodel/format/{s}.pb.cc", .{stem})) catch @panic("oom");
+    }
+    const staged = b.addWriteFiles();
+    _ = staged.addCopyDirectory(generated, "mlmodel/format", .{});
+    return staged.getDirectory();
 }
 
 /// The active iOS SDK path (iPhoneOS for device, iPhoneSimulator for the
@@ -3818,10 +3936,10 @@ fn buildGlfwLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     glfw_module.addIncludePath(b.path(".vendor/glfw/src"));
     const glfw_flags = [_][]const u8{"-D_GLFW_COCOA"};
     for ([_][]const u8{
-        "context.c",      "egl_context.c",  "init.c",         "input.c",
-        "monitor.c",      "null_init.c",    "null_joystick.c", "null_monitor.c",
-        "null_window.c",  "osmesa_context.c", "platform.c",   "vulkan.c",
-        "window.c",       "macos_time.c",   "posix_module.c", "posix_thread.c",
+        "context.c",     "egl_context.c",    "init.c",          "input.c",
+        "monitor.c",     "null_init.c",      "null_joystick.c", "null_monitor.c",
+        "null_window.c", "osmesa_context.c", "platform.c",      "vulkan.c",
+        "window.c",      "macos_time.c",     "posix_module.c",  "posix_thread.c",
     }) |file| {
         glfw_module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/glfw/src/{s}", .{file})), .flags = &glfw_flags });
     }
@@ -4229,8 +4347,9 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             },
         });
         abi_ios.addImport("beauty", beauty_ios_module);
+        const protoc_exe = addProtocTool(b);
         for ([_]*std.Build.Step.Compile{
-            buildTfliteLib(b, ios_target, optimize, flatc_exe.?, null),
+            buildTfliteLib(b, ios_target, optimize, flatc_exe.?, null, protoc_exe),
             buildXnnpackLib(b, ios_target, optimize, null, &family_libs),
             buildAbseilLib(b, ios_target, optimize, null),
             buildRuyLib(b, ios_target, optimize, null),

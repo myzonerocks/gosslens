@@ -220,3 +220,99 @@ test "stereo averages to mono and determinism holds" {
     try t.expectEqual(first.beat, second.beat);
     try t.expect(first.level > 0);
 }
+
+/// The rate the microphone ring holds, whatever the device hands over. One second of ring.
+pub const mic_rate: u32 = 48000;
+
+/// Resamples the microphone to the ring's fixed rate, so a model reads the same window whatever
+/// rate the handset submits. Stateful across calls on purpose: the fractional position and the
+/// previous buffer's last sample carry, so consecutive buffers join without a click at the seam.
+/// `sink` is anything with a `put(f32)` method, so the ring writes in place.
+pub const MicResampler = struct {
+    /// Fractional position in the incoming stream, in source samples.
+    pos: f32 = 0,
+    /// The final sample of the previous buffer, so the first output can interpolate across.
+    tail: f32 = 0,
+    have_tail: bool = false,
+
+    /// A stream already at mic_rate passes through untouched — identical values, no filter.
+    pub fn feed(self: *MicResampler, in: []const f32, rate: u32, sink: anytype) void {
+        if (in.len == 0 or rate == 0) return;
+        if (rate == mic_rate) {
+            for (in) |v| sink.put(v);
+            self.tail = in[in.len - 1];
+            self.have_tail = true;
+            self.pos = 0;
+            return;
+        }
+        const step = @as(f32, @floatFromInt(rate)) / @as(f32, @floatFromInt(mic_rate));
+        var at = self.pos;
+        while (at < @as(f32, @floatFromInt(in.len))) : (at += step) {
+            const i = @floor(at);
+            const frac = at - i;
+            const idx: isize = @intFromFloat(i);
+            // Index -1 is the previous buffer's last sample, which is what makes the seam smooth.
+            const a: f32 = if (idx < 0) (if (self.have_tail) self.tail else in[0]) else in[@intCast(idx)];
+            const next: usize = @intCast(idx + 1);
+            const b: f32 = if (next < in.len) in[next] else a;
+            sink.put(a + (b - a) * frac);
+        }
+        // Carry the overshoot into the next buffer rather than restarting at zero.
+        self.pos = at - @as(f32, @floatFromInt(in.len));
+        self.tail = in[in.len - 1];
+        self.have_tail = true;
+    }
+};
+
+const CountingSink = struct {
+    out: []f32,
+    n: usize = 0,
+
+    fn put(self: *CountingSink, v: f32) void {
+        if (self.n < self.out.len) self.out[self.n] = v;
+        self.n += 1;
+    }
+};
+
+test "a stream already at the ring rate passes through untouched" {
+    var r = MicResampler{};
+    const in = [_]f32{ 0.1, -0.2, 0.3, -0.4 };
+    var buf: [8]f32 = undefined;
+    var sink = CountingSink{ .out = buf[0..] };
+    r.feed(&in, mic_rate, &sink);
+    try t.expectEqual(@as(usize, 4), sink.n);
+    try t.expectEqualSlices(f32, &in, buf[0..4]);
+}
+
+test "a lower rate stretches to the ring rate and joins across buffers" {
+    var r = MicResampler{};
+    var buf: [512]f32 = undefined;
+    var sink = CountingSink{ .out = buf[0..] };
+    // 24 kHz in: every source sample becomes two at 48 kHz.
+    const first = [_]f32{ 0.0, 1.0, 0.0, -1.0 };
+    r.feed(&first, 24000, &sink);
+    try t.expectEqual(@as(usize, 8), sink.n);
+    try t.expectApproxEqAbs(@as(f32, 0.0), buf[0], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.5), buf[1], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 1.0), buf[2], 1e-6);
+
+    // The second buffer continues the phase instead of restarting, so there is no click at the
+    // seam: the first output interpolates from the previous tail (-1) toward this buffer's 0.
+    const before = sink.n;
+    const second = [_]f32{ 0.0, 1.0, 0.0, -1.0 };
+    r.feed(&second, 24000, &sink);
+    try t.expect(sink.n > before);
+    try t.expect(buf[before] >= -1.0 and buf[before] <= 0.0);
+}
+
+test "a rate above the ring rate decimates" {
+    var r = MicResampler{};
+    var buf: [512]f32 = undefined;
+    var sink = CountingSink{ .out = buf[0..] };
+    var in: [96]f32 = undefined;
+    for (&in, 0..) |*v, i| v.* = @floatFromInt(i);
+    r.feed(&in, 96000, &sink);
+    try t.expectEqual(@as(usize, 48), sink.n);
+    try t.expectApproxEqAbs(@as(f32, 0.0), buf[0], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 2.0), buf[1], 1e-6);
+}

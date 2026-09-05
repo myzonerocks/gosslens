@@ -8,7 +8,7 @@
   "parameters": [],
   "nodes": [
     {"id": "erase", "type": "inpaint.pass", "inputs": {"frame": "camera"}, "params": {}, "inpaint": {"mask": "person", "radius": 0.12}},
-    {"id": "moved", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.55, "y": 0.28, "w": 0.42, "h": 0.55, "opacity": 1.0, "cutout": {"mask": "person", "softness": 0.03}, "interaction": {"drag": true, "scale": true}}}
+    {"id": "moved", "type": "sprite.2d", "inputs": {"frame": "camera"}, "params": {}, "sprite": {"x": 0.55, "y": 0.28, "w": 0.42, "h": 0.55, "opacity": 1.0, "cutout": {"mask": "person", "softness": 0.03}, "interaction": {"drag": true, "pinch": true, "rotate": true}}}
   ],
   "triggers": []
 }

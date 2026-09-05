@@ -77,7 +77,7 @@ void recycleFrame(Recording* r, RecordingFrame* frame) {
 
 void* recording_open_impl(const uint8_t* path, size_t path_len,
                           uint32_t width, uint32_t height,
-                          uint32_t bitrate_bps, uint32_t codec) {
+                          uint32_t bitrate_bps, uint32_t codec, uint32_t realtime) {
   if (path == nullptr || path_len == 0 || width == 0 || height == 0) return nullptr;
   @autoreleasepool {
     NSString* ns_path = [[NSString alloc] initWithBytes:path
@@ -104,7 +104,7 @@ void* recording_open_impl(const uint8_t* path, size_t path_len,
     AVAssetWriterInput* input =
         [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo
                                        outputSettings:settings];
-    input.expectsMediaDataInRealTime = YES;
+    input.expectsMediaDataInRealTime = realtime != 0;
     if (![writer canAddInput:input]) return nullptr;
     [writer addInput:input];
 
@@ -135,7 +135,7 @@ void* recording_open_impl(const uint8_t* path, size_t path_len,
       };
       audio_input = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeAudio
                                                    outputSettings:audio_settings];
-      audio_input.expectsMediaDataInRealTime = YES;
+      audio_input.expectsMediaDataInRealTime = realtime != 0;
       if ([writer canAddInput:audio_input]) {
         [writer addInput:audio_input];
       } else {
@@ -469,8 +469,8 @@ int32_t recording_probe_audio_impl(const uint8_t* path, size_t path_len,
 
 extern "C" void* goss_recording_open(const uint8_t* path, size_t path_len,
                                      uint32_t width, uint32_t height,
-                                     uint32_t bitrate_bps, uint32_t codec) {
-  GOSS_SHIM_GUARD(void*, nullptr, recording_open_impl(path, path_len, width, height, bitrate_bps, codec))
+                                     uint32_t bitrate_bps, uint32_t codec, uint32_t realtime) {
+  GOSS_SHIM_GUARD(void*, nullptr, recording_open_impl(path, path_len, width, height, bitrate_bps, codec, realtime))
 }
 
 // Vends the next pool buffer as an opaque frame token plus the Metal

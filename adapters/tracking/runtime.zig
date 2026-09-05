@@ -29,6 +29,15 @@ pub const Error = error{
 /// A model naming this many distinct custom ops has no real model on
 /// this project's roadmap to justify a dynamic list for - every known
 /// case (today, just Convolution2DTransposeBias) needs exactly one.
+/// Apple targets run Objective-C inside the delegate, so the invoke needs a pool.
+const is_apple = switch (builtin.target.os.tag) {
+    .ios, .tvos, .macos, .watchos => true,
+    else => false,
+};
+
+extern fn objc_autoreleasePoolPush() ?*anyopaque;
+extern fn objc_autoreleasePoolPop(pool: ?*anyopaque) void;
+
 const max_custom_ops = 4;
 
 /// The reporter callback type exactly as the C API declares it on this
@@ -195,6 +204,11 @@ pub const Engine = struct {
     }
 
     pub fn invoke(engine: *Engine) Error!void {
+        // Inside an autorelease pool on Apple targets. The workers are raw threads and the CoreML
+        // delegate is Objective-C: with no pool, every object it autoreleases has nowhere to land.
+        // That crashed a phone in objc_msgSend on the tracking thread, and it grows without bound.
+        const pool = if (comptime is_apple) objc_autoreleasePoolPush() else {};
+        defer if (comptime is_apple) objc_autoreleasePoolPop(pool);
         if (c.TfLiteInterpreterInvoke(engine.interpreter) != c.kTfLiteOk) {
             return error.InvokeFailed;
         }
@@ -216,7 +230,7 @@ pub const Engine = struct {
         if (c.TfLiteTensorType(tensor) != c.kTfLiteFloat32) return error.TensorShapeMismatch;
         const data = c.TfLiteTensorData(tensor) orelse return error.TensorMissing;
         const count = c.TfLiteTensorByteSize(tensor) / @sizeOf(f32);
-        return @as([*]const f32, @alignCast(@ptrCast(data)))[0..count];
+        return @as([*]const f32, @ptrCast(@alignCast(data)))[0..count];
     }
 
     pub fn outputDims(engine: *const Engine, index: usize, dims: []i32) Error![]i32 {
