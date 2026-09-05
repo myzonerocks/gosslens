@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.warm-lut",
+  "version": "1.0.0",
+  "display_name": "Warm",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "warm", "type": "lut.pass", "inputs": {"frame": "camera"}, "params": {}}
+  ],
+  "triggers": []
+}
