@@ -49,6 +49,7 @@ const height: u32 = 300;
 /// channels (hair) the channel lenses need.
 const reference_lenses = [_]struct { name: []const u8, segmentation_model: []const u8 }{
     .{ .name = "shader-tint", .segmentation_model = single_class_model_path },
+    .{ .name = "warm-lut", .segmentation_model = single_class_model_path },
     .{ .name = "beauty-baseline", .segmentation_model = single_class_model_path },
     .{ .name = "background-swap", .segmentation_model = single_class_model_path },
     .{ .name = "trigger-anim", .segmentation_model = single_class_model_path },
