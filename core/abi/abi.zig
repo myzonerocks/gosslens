@@ -151,6 +151,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_capture_photo(goss_engine *engine, goss_session *session, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_capture_photo_as(goss_engine *engine, goss_session *session, uint32_t format, uint32_t quality, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_recording_start(goss_engine *engine, goss_session *session, const uint8_t *path, size_t path_len, const goss_recording_config *config)",
+    "goss_status goss_engine_recording_set_realtime(goss_engine *engine, bool realtime)",
     "goss_status goss_engine_recording_stop(goss_engine *engine)",
     "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
     "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
@@ -468,6 +469,9 @@ pub const Engine = struct {
     /// frame of recording_session; frames commit two engine frames
     /// after they render so the GPU has finished writing them.
     recording: ?media_recording.Recording = null,
+    /// Whether the next recording expects frames in real time. An offline lane clears it so the
+    /// writer never paces frames that carry their own clock.
+    recording_realtime: bool = true,
     recording_session: ?*Session = null,
     /// External render targets per encoder pool buffer, keyed by the
     /// native texture pointer - the pool cycles a few buffers, each
@@ -6112,6 +6116,15 @@ pub const RecordingConfig = extern struct {
 /// the file at path. One recording per engine; every subsequent
 /// goss_engine_render_frame of this session appends one video frame at
 /// the frame's own timestamp until goss_engine_recording_stop.
+/// Tells the next recording whether frames arrive in real time. True is the live camera and
+/// the default; an offline lane rendering a clip faster than real time passes false, so the
+/// writer stamps the frames' own timestamps instead of pacing them to the clock.
+pub export fn goss_engine_recording_set_realtime(engine: ?*Engine, realtime: bool) Status {
+    const e = engine orelse return .invalid_argument;
+    e.recording_realtime = realtime;
+    return .ok;
+}
+
 pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, path: ?[*]const u8, path_len: usize, config: ?*const RecordingConfig) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
@@ -6131,6 +6144,7 @@ pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, 
         .height = height,
         .bitrate_bps = cfg.bitrate_bps,
         .codec = @enumFromInt(cfg.codec),
+        .realtime = e.recording_realtime,
     }) catch return .invalid_argument;
     e.recording_session = s;
     e.recording_warmups = 0;
