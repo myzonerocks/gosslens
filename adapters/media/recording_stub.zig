@@ -21,6 +21,9 @@ pub const Config = struct {
     height: u32,
     bitrate_bps: u32 = 0,
     codec: Codec = .h264,
+    /// Whether frames arrive in real time. Kept for parity with the Apple recorder's writer
+    /// pacing; this backend appends frames as they are given regardless, so it is unused here.
+    realtime: bool = true,
 };
 
 pub const Error = error{
