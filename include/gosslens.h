@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 103u
+#define GOSS_ABI_MINOR 104u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -986,6 +986,11 @@ goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t p
  * platform. out_style is the style (0 light, 1 medium, 2 heavy, 3 soft, 4
  * rigid, 5 success, 6 warning, 7 failure); out_intensity is a 0..1 hint. */
 goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity);
+
+/* The photosensitivity risk (0..1) the flash detector last reported for the
+ * frames this session was fed, the same value a lens reads as safety.flash_risk.
+ * The host shows its warning from it; the engine only measures. */
+goss_status goss_session_flash_risk(goss_session *session, float *out_risk);
 
 /* Grab and throw. goss_session_grab moves the nearest dynamic physics body to a
  * world point and, while it holds one, drags it there; the body is driven

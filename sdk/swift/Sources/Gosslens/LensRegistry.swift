@@ -465,6 +465,14 @@ extension GossSession {
         var intensity: Float = 0
         return goss_session_pull_haptic(handle, &style, &intensity) == GOSS_OK ? Haptic(style: style, intensity: intensity) : nil
     }
+    /// The photosensitivity risk (0..1) the flash detector last reported for the
+    /// frames this session was fed, the same value a lens reads as safety.flash_risk.
+    public func flashRisk() throws -> Float {
+        var risk: Float = 0
+        try checked(goss_session_flash_risk(handle, &risk))
+        return risk
+    }
+
     public func grab(x: Float, y: Float, z: Float) throws { try checked(goss_session_grab(handle, x, y, z)) }
     public func release() throws { try checked(goss_session_release(handle)) }
     public func addCollider(x: Float, y: Float, z: Float) throws { try checked(goss_session_add_collider(handle, x, y, z)) }

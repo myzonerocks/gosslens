@@ -1467,6 +1467,14 @@ export fn Java_com_gosslens_Gosslens_nativePullHaptic(env: *JniEnv, cls: jobject
     return @intFromEnum(rc);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeFlashRisk(env: *JniEnv, cls: jobject, session: i64) f32 {
+    _ = env;
+    _ = cls;
+    var risk: f32 = 0;
+    _ = abi.goss_session_flash_risk(sessionFromHandle(session), &risk);
+    return risk;
+}
+
 export fn Java_com_gosslens_Gosslens_nativeRelease(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;

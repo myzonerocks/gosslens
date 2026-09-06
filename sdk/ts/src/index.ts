@@ -1754,6 +1754,16 @@ export class GossSession {
     return result;
   }
 
+  /** The photosensitivity risk (0..1) the flash detector last reported for the frames this
+   * session was fed, the same value a lens reads as safety.flash_risk. */
+  flashRisk(): number {
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const status = this.mod.ccall("goss_session_flash_risk", "number", ["number", "number"], [this.handle, outPtr]);
+    const value = status === 0 ? this.mod.getValue(outPtr, "float") : 0;
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 4]);
+    return value;
+  }
+
   grab(x: number, y: number, z: number): void {
     this.mod.ccall("goss_session_grab", "number", ["number", "number", "number", "number"], [this.handle, x, y, z]);
   }

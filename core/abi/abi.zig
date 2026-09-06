@@ -288,6 +288,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle)",
     "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
     "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
+    "goss_status goss_session_flash_risk(goss_session *session, float *out_risk)",
     "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits)",
@@ -10309,6 +10310,16 @@ pub export fn goss_session_pull_haptic(session: ?*Session, out_style: ?*u32, out
     return .ok;
 }
 
+/// Reads the photosensitivity risk (0..1) the flash detector last reported for
+/// the frames this session was fed, the same value a lens reads as
+/// safety.flash_risk. The host shows its warning from it; the engine measures.
+pub export fn goss_session_flash_risk(session: ?*Session, out_risk: ?*f32) Status {
+    const s = session orelse return .invalid_argument;
+    const o = out_risk orelse return .invalid_argument;
+    o.* = s.flash_risk;
+    return .ok;
+}
+
 /// Compiles a text prompt into a GLF lens manifest on device, writing it into
 /// out_buf and its length into out_len. A null out_buf (or too small an out_cap)
 /// reports the length only, so the caller sizes a buffer then calls again; the
@@ -16963,6 +16974,22 @@ test "a haptic trigger surfaces through goss_session_pull_haptic" {
     try t.expectApproxEqAbs(@as(f32, 0.8), intensity, 1e-6);
     // The queue drains: a second pull reports none remain.
     try t.expectEqual(Status.again, goss_session_pull_haptic(session, &style, &intensity));
+}
+
+test "the host reads the flash risk a lens is fed" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var risk: f32 = -1;
+    try t.expectEqual(Status.ok, goss_session_flash_risk(session, &risk));
+    try t.expectEqual(@as(f32, 0), risk);
+    session.flash_risk = 0.75;
+    try t.expectEqual(Status.ok, goss_session_flash_risk(session, &risk));
+    try t.expectApproxEqAbs(@as(f32, 0.75), risk, 1e-6);
+    try t.expectEqual(Status.invalid_argument, goss_session_flash_risk(session, null));
+    try t.expectEqual(Status.invalid_argument, goss_session_flash_risk(null, &risk));
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {

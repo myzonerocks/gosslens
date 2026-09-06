@@ -197,6 +197,7 @@ object Gosslens {
     internal external fun nativeGrab(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeTouch(session: Long, phase: Int, pointerId: Int, x: Float, y: Float): Int
     internal external fun nativePullHaptic(session: Long, outBuffer: ByteBuffer): Int
+    internal external fun nativeFlashRisk(session: Long): Float
     internal external fun nativeRelease(session: Long): Int
     internal external fun nativeAddCollider(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeEraseCollider(session: Long, x: Float, y: Float, z: Float, radius: Float): Int
@@ -2025,6 +2026,9 @@ class GossSession private constructor(
         val fb = hapticBuffer.asFloatBuffer()
         return Haptic(fb.get(0).toInt(), fb.get(1))
     }
+    /// The photosensitivity risk (0..1) the flash detector last reported for the
+    /// frames this session was fed, the same value a lens reads as safety.flash_risk.
+    fun flashRisk(): Float = Gosslens.nativeFlashRisk(handle)
     fun grab(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeGrab(handle, x, y, z) == 0
     fun release(): Boolean = Gosslens.nativeRelease(handle) == 0
     fun addCollider(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeAddCollider(handle, x, y, z) == 0
