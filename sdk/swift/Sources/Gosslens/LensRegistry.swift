@@ -117,6 +117,14 @@ extension GossSession {
     /// `mic` (interleaved f32 at `sampleRate`/`channels`, or nil for silence)
     /// summed with the 48 kHz mono lens mixer resampled to that rate; returns
     /// the mixed interleaved s16. Advances the mixer once, replacing `pullAudio`.
+    /// The same fold from and into storage the caller keeps: `mic` interleaved floats or nil for
+    /// silence, `out` at least frameCount*channels 16-bit samples. Nothing here allocates.
+    public func mixOutputAudio(
+        mic: UnsafePointer<Float>?, into out: UnsafeMutablePointer<Int16>, frameCount: UInt32, sampleRate: UInt32, channels: UInt32,
+    ) throws {
+        try checked(goss_session_mix_output_audio(handle, mic, out, frameCount, sampleRate, channels))
+    }
+
     public func mixOutputAudio(mic: [Float]?, frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws -> [Int16] {
         var out = [Int16](repeating: 0, count: Int(frameCount) * Int(channels))
         try out.withUnsafeMutableBufferPointer { outBuffer in
