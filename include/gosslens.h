@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 104u
+#define GOSS_ABI_MINOR 105u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -892,6 +892,12 @@ goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const gos
 goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len);
 goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len);
 goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
+
+/* Graph thread. Hands a named source one BGRA or RGBA frame zero-copy: the one
+ * plane is a platform texture wrapped, not read, the way the camera's own frame
+ * is, so a second lens composites at no per-frame copy. The platform object must
+ * outlive the next rendered frame. */
+goss_status goss_session_submit_source_frame(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const goss_frame_planes *planes);
 goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement);
 goss_status goss_session_clear_layout(goss_session *session);
 /* arrangement 5 overlay stacks the sources full-frame over each other. A source

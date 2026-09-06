@@ -212,6 +212,17 @@ extension GossSession {
     }
 
     /// Uploads one RGBA/BGRA frame into a named source (pixelFormat 3 BGRA, 4 RGBA).
+    /// Zero-copy for a named source: one platform texture handle (an MTLTexture over the second
+    /// camera's buffer) wrapped, not read, so a second lens composites at no per-frame copy. The
+    /// platform object must outlive the next rendered frame.
+    public func submitSourceFrame(_ name: String, desc: GossFrameDesc, plane: UInt64) throws {
+        var raw = desc.raw
+        var framePlanes = goss_frame_planes(plane_count: 1, reserved: 0, planes: (plane, 0, 0))
+        try name.utf8CString.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_submit_source_frame(handle, buffer.baseAddress.map { UnsafeRawPointer($0).assumingMemoryBound(to: UInt8.self) }, name.utf8.count, &raw, &framePlanes))
+        }
+    }
+
     public func submitSourceFrame(_ name: String, rgba: [UInt8], width: UInt32, height: UInt32, stride: UInt32, pixelFormat: UInt32 = 4) throws {
         try rgba.withUnsafeBufferPointer { rb in
             guard let base = rb.baseAddress else { return }

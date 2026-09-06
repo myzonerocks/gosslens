@@ -1467,6 +1467,19 @@ export fn Java_com_gosslens_Gosslens_nativePullHaptic(env: *JniEnv, cls: jobject
     return @intFromEnum(rc);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitSourceFrame(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, plane0: i64, width: i32, height: i32, pixel_format: i32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var desc: abi.FrameDesc = std.mem.zeroes(abi.FrameDesc);
+    desc.width = @intCast(@max(width, 0));
+    desc.height = @intCast(@max(height, 0));
+    desc.pixel_format = @intCast(@max(pixel_format, 0));
+    var planes: abi.FramePlanes = std.mem.zeroes(abi.FramePlanes);
+    planes.plane_count = 1;
+    planes.planes[0] = @bitCast(plane0);
+    return @intFromEnum(abi.goss_session_submit_source_frame(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), &desc, &planes));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeFlashRisk(env: *JniEnv, cls: jobject, session: i64) f32 {
     _ = env;
     _ = cls;

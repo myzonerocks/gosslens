@@ -198,6 +198,7 @@ object Gosslens {
     internal external fun nativeTouch(session: Long, phase: Int, pointerId: Int, x: Float, y: Float): Int
     internal external fun nativePullHaptic(session: Long, outBuffer: ByteBuffer): Int
     internal external fun nativeFlashRisk(session: Long): Float
+    internal external fun nativeSubmitSourceFrame(session: Long, nameBuffer: ByteBuffer, nameLen: Int, plane0: Long, width: Int, height: Int, pixelFormat: Int): Int
     internal external fun nativeRelease(session: Long): Int
     internal external fun nativeAddCollider(session: Long, x: Float, y: Float, z: Float): Int
     internal external fun nativeEraseCollider(session: Long, x: Float, y: Float, z: Float, radius: Float): Int
@@ -2029,6 +2030,12 @@ class GossSession private constructor(
     /// The photosensitivity risk (0..1) the flash detector last reported for the
     /// frames this session was fed, the same value a lens reads as safety.flash_risk.
     fun flashRisk(): Float = Gosslens.nativeFlashRisk(handle)
+    /// Zero-copy for a named source: one platform texture handle wrapped, not read, so a second
+    /// lens composites at no per-frame copy. The platform object must outlive the next frame.
+    fun submitSourceFrame(name: String, plane: Long, width: Int, height: Int, pixelFormat: Int = Gosslens.PIXEL_BGRA8): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeSubmitSourceFrame(handle, buf, n, plane, width, height, pixelFormat) == 0
+    }
     fun grab(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeGrab(handle, x, y, z) == 0
     fun release(): Boolean = Gosslens.nativeRelease(handle) == 0
     fun addCollider(x: Float, y: Float, z: Float): Boolean = Gosslens.nativeAddCollider(handle, x, y, z) == 0

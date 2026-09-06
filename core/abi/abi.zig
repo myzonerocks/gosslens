@@ -178,6 +178,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
+    "goss_status goss_session_submit_source_frame(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const goss_frame_planes *planes)",
     "goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement)",
     "goss_status goss_session_clear_layout(goss_session *session)",
     "goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity)",
@@ -6850,6 +6851,27 @@ pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, nam
     s.source_dims[idx] = .{ @intCast(d.width), @intCast(d.height) };
     s.source_has_frame[idx] = true;
     if (s.source_segmenter[idx]) |seg| feedSourceSegmenter(s, seg, d, rgba_ptr, stride);
+    return .ok;
+}
+
+/// Hands a named source one BGRA or RGBA frame zero-copy: the one plane is a
+/// platform texture wrapped, not read, the way the camera's own frame is, so a
+/// second lens composites at no per-frame copy. The platform object must
+/// outlive the next rendered frame.
+pub export fn goss_session_submit_source_frame(session: ?*Session, name: ?[*]const u8, name_len: usize, desc: ?*const FrameDesc, planes: ?*const FramePlanes) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const p = planes orelse return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
+    if (d.pixel_format != pixel_format_bgra8 and d.pixel_format != pixel_format_rgba8) return .invalid_argument;
+    if (p.plane_count != 1) return .invalid_argument;
+    if (s.engine.renderer == null) return .renderer_unavailable;
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+    const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
+    _ = s.source_tex[idx].rebind(@intCast(d.width), @intCast(d.height), format, @intCast(p.planes[0]));
+    s.source_dims[idx] = .{ @intCast(d.width), @intCast(d.height) };
+    s.source_has_frame[idx] = true;
     return .ok;
 }
 
@@ -16974,6 +16996,28 @@ test "a haptic trigger surfaces through goss_session_pull_haptic" {
     try t.expectApproxEqAbs(@as(f32, 0.8), intensity, 1e-6);
     // The queue drains: a second pull reports none remain.
     try t.expectEqual(Status.again, goss_session_pull_haptic(session, &style, &intensity));
+}
+
+test "a named source takes a wrapped frame only with one plane and a packed format" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var desc = std.mem.zeroes(FrameDesc);
+    desc.width = 64;
+    desc.height = 64;
+    desc.pixel_format = pixel_format_bgra8;
+    var planes = std.mem.zeroes(FramePlanes);
+    planes.plane_count = 1;
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(null, "front", 5, &desc, &planes));
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(session, "front", 5, null, &planes));
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(session, "front", 5, &desc, null));
+    planes.plane_count = 2;
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(session, "front", 5, &desc, &planes));
+    planes.plane_count = 1;
+    desc.pixel_format = pixel_format_nv12;
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(session, "front", 5, &desc, &planes));
 }
 
 test "the host reads the flash risk a lens is fed" {
