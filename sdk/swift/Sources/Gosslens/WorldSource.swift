@@ -15,6 +15,10 @@ public final class GossWorldSource: NSObject, ARSessionDelegate {
     private var meshIndices: [UInt32] = []
     private var meshVersion = 0
     private let viewport: CGSize
+    private let cameraLock = NSLock()
+    private var cameraTransform = matrix_identity_float4x4
+    private var cameraProjection = matrix_identity_float4x4
+    private var cameraTracking = false
 
     /// ARKit owns the camera while this runs, so its frames are the picture: each one is handed
     /// here as the NV12 buffer ARKit captured, with its timestamp in microseconds, for the host
@@ -59,7 +63,13 @@ public final class GossWorldSource: NSObject, ARSessionDelegate {
         state.tracking_state = trackingState(frame.camera.trackingState)
         state.timestamp_us = Int64(frame.timestamp * 1_000_000)
         copyColumns(frame.camera.transform, into: &state.world_from_camera)
-        copyColumns(frame.camera.projectionMatrix(for: .portrait, viewportSize: viewport, zNear: 0.1, zFar: 100), into: &state.projection)
+        let projection = frame.camera.projectionMatrix(for: .portrait, viewportSize: viewport, zNear: 0.1, zFar: 100)
+        copyColumns(projection, into: &state.projection)
+        cameraLock.lock()
+        cameraTransform = frame.camera.transform
+        cameraProjection = projection
+        cameraTracking = frame.camera.trackingState == .normal
+        cameraLock.unlock()
 
         planes.removeAll(keepingCapacity: true)
         anchors.removeAll(keepingCapacity: true)
@@ -154,6 +164,31 @@ public final class GossWorldSource: NSObject, ARSessionDelegate {
                 _ = goss_session_submit_world_mesh(engine.handle, v.baseAddress, v.count / 3, i.baseAddress, i.count)
             }
         }
+    }
+
+    /// A point on the screen put into the world, `depth` metres along the ray the camera sees it
+    /// on, or nil until the world tracks. The ray comes from the projection this source hands the
+    /// engine, so a world stroke lands under the finger that drew it.
+    public func worldPoint(at screen: CGPoint, depth: Float) -> SIMD3<Float>? {
+        cameraLock.lock()
+        let transform = cameraTransform
+        let projection = cameraProjection
+        let tracking = cameraTracking
+        cameraLock.unlock()
+        guard tracking else { return nil }
+        return Self.unproject(screen, viewport: viewport, projection: projection, camera: transform, depth: depth)
+    }
+
+    /// Pure: the screen point through the inverse projection into camera space, out along the
+    /// camera's own frame to `depth` metres, then into the world.
+    public static func unproject(_ screen: CGPoint, viewport: CGSize, projection: simd_float4x4, camera: simd_float4x4, depth: Float) -> SIMD3<Float> {
+        let ndc = SIMD4<Float>(Float(screen.x / viewport.width) * 2 - 1, 1 - Float(screen.y / viewport.height) * 2, 1, 1)
+        var eye = projection.inverse * ndc
+        eye /= eye.w
+        let direction = simd_normalize(SIMD3<Float>(eye.x, eye.y, eye.z))
+        let point = direction * depth
+        let world = camera * SIMD4<Float>(point, 1)
+        return SIMD3<Float>(world.x, world.y, world.z)
     }
 
     private func trackingState(_ state: ARCamera.TrackingState) -> UInt32 {
