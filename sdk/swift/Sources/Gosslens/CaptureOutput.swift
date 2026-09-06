@@ -152,8 +152,19 @@ extension GossEngine {
     /// muxes it as the audio track.
     public func submitAudio(session: GossSession, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32, timestampUs: Int64) throws {
         try samples.withUnsafeBufferPointer { buffer in
-            try checked(goss_session_submit_audio(session.handle, buffer.baseAddress, frameCount, sampleRate, channels, timestampUs))
+            try submitAudio(
+                session: session, samples: buffer, frameCount: frameCount, sampleRate: sampleRate,
+                channels: channels, timestampUs: timestampUs,
+            )
         }
+    }
+
+    /// The same feed from storage the caller keeps, so a tap that reuses one buffer copies nothing.
+    public func submitAudio(
+        session: GossSession, samples: UnsafeBufferPointer<Float>, frameCount: UInt32, sampleRate: UInt32,
+        channels: UInt32, timestampUs: Int64,
+    ) throws {
+        try checked(goss_session_submit_audio(session.handle, samples.baseAddress, frameCount, sampleRate, channels, timestampUs))
     }
 
     /// Renders the composited frame straight into an external BGRA MTLTexture
