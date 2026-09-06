@@ -17,6 +17,18 @@ extension GossEngine {
     /// and reads the composited output back as RGBA8, row 0 first, at
     /// the renderer's real dimensions - the returned width and height,
     /// which the caller's requested size only bounds.
+    /// Reads the composited frame back into storage the caller owns, at least width*height*4
+    /// bytes; returns the size actually written. A still read straight into the buffer an image
+    /// is built over is copied once, by the engine, and never again.
+    public func captureFrame(
+        session: GossSession?, into out: UnsafeMutablePointer<UInt8>, capacity: Int, width: UInt32, height: UInt32,
+    ) throws -> (width: UInt32, height: UInt32) {
+        var outWidth: UInt32 = 0
+        var outHeight: UInt32 = 0
+        try checked(goss_engine_capture_frame(handle, session?.handle, out, capacity, &outWidth, &outHeight))
+        return (outWidth, outHeight)
+    }
+
     public func captureFrame(session: GossSession?, width: UInt32, height: UInt32) throws -> (pixels: [UInt8], width: UInt32, height: UInt32) {
         var data = [UInt8](repeating: 0, count: Int(width) * Int(height) * 4)
         var outWidth: UInt32 = 0
