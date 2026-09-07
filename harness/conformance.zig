@@ -3515,7 +3515,7 @@ fn dubEnergy(gpa: std.mem.Allocator, engine: *abi.Engine, dir: []const u8, enabl
         _ = abi.goss_session_submit_audio(session, samples.ptr, 512, 48000, 1, @intCast(1000 + k * 1000));
         _ = abi.goss_session_tick_lens(session, 16000, &signals);
     }
-    var out = [_]i16{0} ** 4096;
+    var out: [4096]i16 = @splat(0);
     _ = abi.goss_session_pull_audio(session, &out, 2048);
     var e: u64 = 0;
     for (out) |v| e += @abs(@as(i64, v));
@@ -8655,8 +8655,8 @@ fn proveMediaLibrary(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
 
     // Vault: seal a blob, open it back, then confirm a flipped byte fails.
-    const key = [_]u8{7} ** 32;
-    const nonce = [_]u8{3} ** 12;
+    const key: [32]u8 = @splat(7);
+    const nonce: [12]u8 = @splat(3);
     const plain = "a private capture blob";
     const aad = "capture-2026";
     var sealed_len: usize = 0;
@@ -8682,7 +8682,7 @@ fn proveMediaLibrary(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     }
 
     // Best-take: a flat 4x4 frame and a checkerboard one; the sharp one wins.
-    const flat = [_]u8{128} ** 16;
+    const flat: [16]u8 = @splat(128);
     const sharp = [_]u8{ 0, 255, 0, 255, 255, 0, 255, 0, 0, 255, 0, 255, 255, 0, 255, 0 };
     var frames: [32]u8 = undefined;
     @memcpy(frames[0..16], &flat);
@@ -13558,7 +13558,7 @@ fn maxChannelSpread(buf: []const u8) u8 {
 /// How many distinct byte values one channel takes across the frame - a
 /// quantized image collapses to a handful, a photo spans most of the range.
 fn distinctChannelValues(buf: []const u8, channel: usize) usize {
-    var seen = [_]bool{false} ** 256;
+    var seen: [256]bool = @splat(false);
     var i: usize = channel;
     while (i < buf.len) : (i += 4) seen[buf[i]] = true;
     var n: usize = 0;
@@ -15050,7 +15050,7 @@ fn proveHostileManifest(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     {
         const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
         defer abi.destroySession(session);
-        const garbage = [_]u8{0xab} ** 64;
+        const garbage: [64]u8 = @splat(0xab);
         if (abi.goss_session_enable_face_tracking(session, &garbage, garbage.len, 1) == .ok) {
             std.debug.print("conformance: FAIL a garbage face bundle was accepted\n", .{});
             return false;

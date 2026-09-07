@@ -674,7 +674,7 @@ pub const WarpField = struct {
     /// liquify only: local push/pull points summed with smooth falloff, each
     /// pulling nearby pixels along its direction. Slots past point_count stay
     /// zeroed and contribute nothing.
-    points: [warp_point_max]LiquifyPoint = [_]LiquifyPoint{.{}} ** warp_point_max,
+    points: [warp_point_max]LiquifyPoint = @splat(.{}),
     point_count: usize = 0,
     /// The mask channel the displacement is confined to: only pixels the mask
     /// marks move, the rest stay put, so a body-slim reshapes the person and

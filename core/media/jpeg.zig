@@ -90,7 +90,7 @@ const Code = struct { bits: u16 = 0, size: u8 = 0 };
 // Canonical Huffman assignment (Annex C): sizes flatten from the bit
 // counts, codes increment within a size and shift up between sizes.
 fn buildTable(bits: [16]u8, vals: []const u8) [256]Code {
-    var table = [_]Code{.{}} ** 256;
+    var table: [256]Code = @splat(.{});
     var code: u16 = 0;
     var k: usize = 0;
     var len: u8 = 1;

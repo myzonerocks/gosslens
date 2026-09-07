@@ -107,7 +107,7 @@ test "the mixer decodes, plays, and mixes deterministically" {
     const sound = try m.loadMemory(&wav);
 
     // No voice yet: silence.
-    var out = [_]i16{0} ** pcm.len;
+    var out: [pcm.len]i16 = @splat(0);
     m.pull(&out, pcm.len);
     try std.testing.expectEqual(@as(u32, 0), m.activeVoices());
     for (out) |s| try std.testing.expectEqual(@as(i16, 0), s);
@@ -122,7 +122,7 @@ test "the mixer decodes, plays, and mixes deterministically" {
     // Two voices at half gain sum back to the source, deterministically.
     m.play(sound, false, 0.5);
     m.play(sound, false, 0.5);
-    var out2 = [_]i16{0} ** pcm.len;
+    var out2: [pcm.len]i16 = @splat(0);
     m.pull(&out2, pcm.len);
     try std.testing.expectEqualSlices(i16, &pcm, &out2);
 }
@@ -153,13 +153,13 @@ test "the mixer fades a voice in and out linearly" {
 
     // Fade in over 4 frames: the constant tone ramps from silence to full.
     m.playFade(sound, false, 1.0, 4, 0);
-    var fin = [_]i16{0} ** pcm.len;
+    var fin: [pcm.len]i16 = @splat(0);
     m.pull(&fin, pcm.len);
     try std.testing.expectEqualSlices(i16, &[_]i16{ 0, 250, 500, 750, 1000, 1000, 1000, 1000 }, &fin);
 
     // Fade out over 4 frames: the tone ramps down into its end.
     m.playFade(sound, false, 1.0, 0, 4);
-    var fout = [_]i16{0} ** pcm.len;
+    var fout: [pcm.len]i16 = @splat(0);
     m.pull(&fout, pcm.len);
     try std.testing.expectEqualSlices(i16, &[_]i16{ 1000, 1000, 1000, 1000, 1000, 750, 500, 250 }, &fout);
 }
@@ -192,21 +192,21 @@ test "a stereo mixer pans a voice across the field with equal power" {
 
     // Hard left: the left channel carries the tone, the right is silent.
     m.playPan(sound, false, 1.0, 0, 0, -1.0);
-    var left = [_]i16{0} ** (frames * 2);
+    var left: [frames * 2]i16 = @splat(0);
     m.pull(&left, frames);
     try std.testing.expectEqual(@as(i16, 1000), left[0]);
     try std.testing.expectEqual(@as(i16, 0), left[1]);
 
     // Hard right: mirror image.
     m.playPan(sound, false, 1.0, 0, 0, 1.0);
-    var right = [_]i16{0} ** (frames * 2);
+    var right: [frames * 2]i16 = @splat(0);
     m.pull(&right, frames);
     try std.testing.expectEqual(@as(i16, 0), right[0]);
     try std.testing.expectEqual(@as(i16, 1000), right[1]);
 
     // Centred: equal power, about 0.707 into each channel, so both read together.
     m.playPan(sound, false, 1.0, 0, 0, 0.0);
-    var mid = [_]i16{0} ** (frames * 2);
+    var mid: [frames * 2]i16 = @splat(0);
     m.pull(&mid, frames);
     try std.testing.expectEqual(mid[0], mid[1]);
     try std.testing.expect(mid[0] > 690 and mid[0] < 720);

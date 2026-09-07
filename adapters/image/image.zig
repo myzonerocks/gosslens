@@ -199,7 +199,11 @@ test "swapRedBlue turns rgba into bgra" {
 
 test "argbToNv12 encodes bt709 video-range anchors" {
     // Solid white lands near video-range luma 235, neutral chroma 128.
-    const white = [_]u8{ 255, 255, 255, 255 } ** 4;
+    const white = comptime blk: {
+        var a: [(4) * 4]u8 = undefined;
+        for (0..4) |i| a[i * 4 ..][0..4].* = .{ 255, 255, 255, 255 };
+        break :blk a;
+    };
     var y: [4]u8 = undefined;
     var uv: [2]u8 = undefined;
     try argbToNv12(&white, 2, 2, .bt709, .video, &y, &uv);

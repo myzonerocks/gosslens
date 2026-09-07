@@ -157,9 +157,9 @@ fn testBundle(gpa: std.mem.Allocator) ![]u8 {
     const name = "model.tflite";
     const body = "weights-bytes";
     try appendInt(&out, gpa, u32, local_signature);
-    try out.appendSlice(gpa, &(.{0} ** 4));
+    try out.appendSlice(gpa, &@as([4]u8, @splat(0)));
     try appendInt(&out, gpa, u16, 0); // stored
-    try out.appendSlice(gpa, &(.{0} ** 8));
+    try out.appendSlice(gpa, &@as([8]u8, @splat(0)));
     try appendInt(&out, gpa, u32, body.len);
     try appendInt(&out, gpa, u32, body.len);
     try appendInt(&out, gpa, u16, name.len);
@@ -169,21 +169,21 @@ fn testBundle(gpa: std.mem.Allocator) ![]u8 {
 
     const central_start: u32 = @intCast(out.items.len);
     try appendInt(&out, gpa, u32, central_signature);
-    try out.appendSlice(gpa, &(.{0} ** 6));
+    try out.appendSlice(gpa, &@as([6]u8, @splat(0)));
     try appendInt(&out, gpa, u16, 0); // stored
-    try out.appendSlice(gpa, &(.{0} ** 8));
+    try out.appendSlice(gpa, &@as([8]u8, @splat(0)));
     try appendInt(&out, gpa, u32, body.len);
     try appendInt(&out, gpa, u32, body.len);
     try appendInt(&out, gpa, u16, name.len);
     try appendInt(&out, gpa, u16, 0);
     try appendInt(&out, gpa, u16, 0);
-    try out.appendSlice(gpa, &(.{0} ** 8));
+    try out.appendSlice(gpa, &@as([8]u8, @splat(0)));
     try appendInt(&out, gpa, u32, 0); // local header offset
     try out.appendSlice(gpa, name);
     const central_size: u32 = @intCast(out.items.len - central_start);
 
     try appendInt(&out, gpa, u32, eocd_signature);
-    try out.appendSlice(gpa, &(.{0} ** 4));
+    try out.appendSlice(gpa, &@as([4]u8, @splat(0)));
     try appendInt(&out, gpa, u16, 1);
     try appendInt(&out, gpa, u16, 1);
     try appendInt(&out, gpa, u32, central_size);

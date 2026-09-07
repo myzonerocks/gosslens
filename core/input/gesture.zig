@@ -58,7 +58,7 @@ const Pointer = struct {
 };
 
 pub const Recognizer = struct {
-    pointers: [max_pointers]Pointer = [_]Pointer{.{}} ** max_pointers,
+    pointers: [max_pointers]Pointer = @splat(.{}),
     last_x: f32 = 0,
     last_y: f32 = 0,
 
@@ -84,7 +84,7 @@ pub const Recognizer = struct {
     /// Clears every finger and pending edge without disturbing the clock, so a
     /// lens change or a lost touch session starts clean.
     pub fn reset(self: *Recognizer) void {
-        self.pointers = [_]Pointer{.{}} ** max_pointers;
+        self.pointers = @splat(.{});
         self.two_active = false;
         self.pending_tap = false;
         self.pending_double = false;

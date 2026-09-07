@@ -1247,7 +1247,7 @@ test "camera.focus and camera.exposure read the one-tick change pulses" {
 }
 
 test "gaze reads from the eyeLook blendshapes and centres with no face" {
-    var shapes = [_]f32{0} ** face.blendshape_count;
+    var shapes: [face.blendshape_count]f32 = @splat(0);
     // Both eyes turned to the subject's left: left eye out, right eye in.
     shapes[face.blendshapeIndex("eyeLookOutLeft").?] = 0.8;
     shapes[face.blendshapeIndex("eyeLookInRight").?] = 0.8;
@@ -1260,7 +1260,7 @@ test "gaze reads from the eyeLook blendshapes and centres with no face" {
     var at = try compileOk("gaze.at_camera");
     defer at.deinit();
     try t.expect(!evaluate(at.root, .{})); // no face is not looking at the camera
-    var centred = [_]f32{0} ** face.blendshape_count;
+    var centred: [face.blendshape_count]f32 = @splat(0);
     try t.expect(evaluate(at.root, .{ .blendshapes = &centred })); // neutral eyes
     try t.expect(!evaluate(at.root, .{ .blendshapes = &shapes })); // gaze off to the side
 }

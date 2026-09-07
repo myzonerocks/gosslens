@@ -277,7 +277,7 @@ test "palm anchors repeat the stride-16 grid three times in sequence" {
 
 test "palm decode carries seven keypoints per detection" {
     const anchors = [_]Anchor{.{ .x = 0.5, .y = 0.5 }};
-    var raw_boxes = [_]f32{0} ** 18;
+    var raw_boxes: [18]f32 = @splat(0);
     raw_boxes[2] = 48;
     raw_boxes[3] = 48;
     raw_boxes[4] = 9.6; // first keypoint offset in input pixels
@@ -301,7 +301,7 @@ test "anchors cover the unit square from the first cell center" {
 
 test "decode drops weak anchors and merges duplicates" {
     const anchors = [_]Anchor{ .{ .x = 0.25, .y = 0.25 }, .{ .x = 0.26, .y = 0.25 }, .{ .x = 0.75, .y = 0.75 } };
-    var raw_boxes = [_]f32{0} ** (3 * 16);
+    var raw_boxes: [3 * 16]f32 = @splat(0);
     for (0..3) |at| {
         raw_boxes[at * 16 + 2] = 32; // quarter of the input square
         raw_boxes[at * 16 + 3] = 32;
@@ -318,7 +318,7 @@ test "decode drops weak anchors and merges duplicates" {
 
 test "distant detections survive the merge separately" {
     const anchors = [_]Anchor{ .{ .x = 0.25, .y = 0.25 }, .{ .x = 0.75, .y = 0.75 } };
-    var raw_boxes = [_]f32{0} ** (2 * 16);
+    var raw_boxes: [2 * 16]f32 = @splat(0);
     for (0..2) |at| {
         raw_boxes[at * 16 + 2] = 16;
         raw_boxes[at * 16 + 3] = 16;

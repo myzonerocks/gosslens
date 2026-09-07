@@ -391,7 +391,11 @@ pub fn main(init_args: std.process.Init) !u8 {
     // isolates what this proof actually cares about (submitLutPass
     // binds the right texture on the right unit and the fixed program
     // runs), not whether the strip-LUT arithmetic itself is exact.
-    const magenta = [_]u8{ 255, 0, 255, 255 } ** 4;
+    const magenta = comptime blk: {
+        var a: [(4) * 4]u8 = undefined;
+        for (0..4) |i| a[i * 4 ..][0..4].* = .{ 255, 0, 255, 255 };
+        break :blk a;
+    };
     const lut_texture = render.Renderer.createStaticTexture(2, 2, &magenta);
     defer render.c.bgfx_destroy_texture(lut_texture);
     const lut_sampler_uniform = c.bgfx_create_uniform("s_texLut", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);
@@ -408,10 +412,14 @@ pub fn main(init_args: std.process.Init) !u8 {
     // above uses, here proving submitBlendPass binds background on unit
     // 1 and mask on unit 2 correctly (unit 0, the frame, is provably
     // ignored since mask=0 everywhere).
-    const cyan = [_]u8{ 0, 255, 255, 255 } ** 4;
+    const cyan = comptime blk: {
+        var a: [(4) * 4]u8 = undefined;
+        for (0..4) |i| a[i * 4 ..][0..4].* = .{ 0, 255, 255, 255 };
+        break :blk a;
+    };
     const blend_background_texture = render.Renderer.createStaticTexture(2, 2, &cyan);
     defer render.c.bgfx_destroy_texture(blend_background_texture);
-    const zero_mask = [_]u8{0} ** 4;
+    const zero_mask: [4]u8 = @splat(0);
     const blend_mask_texture = render.Renderer.createMaskTexture(2, 2, &zero_mask);
     defer render.c.bgfx_destroy_texture(blend_mask_texture);
     const blend_background_uniform = c.bgfx_create_uniform("s_texBackground", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);

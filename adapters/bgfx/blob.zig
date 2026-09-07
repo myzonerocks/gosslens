@@ -118,7 +118,7 @@ fn testBlob(gpa: std.mem.Allocator) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     try out.appendSlice(gpa, &.{ 'C', 'S', 'H', 11 });
-    try out.appendSlice(gpa, &(.{0} ** 8));
+    try out.appendSlice(gpa, &@as([8]u8, @splat(0)));
     try out.appendSlice(gpa, &.{ 1, 0 }); // one uniform
     try out.append(gpa, 5);
     try out.appendSlice(gpa, "u_yuv");
