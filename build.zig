@@ -1627,11 +1627,15 @@ fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8, tr
 /// `header` that sees every include path and macro the module itself sees. Called once the
 /// module's paths and macros are all on it, since it reads them at this moment.
 fn attachC(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) void {
+    // Translation needs the C library's own headers wherever the module does not say
+    // otherwise; an Android module states its sysroot instead, since Zig's bundled bionic
+    // headers would clash with the NDK's.
+    const target = module.resolved_target.?;
     const tc = b.addTranslateC(.{
         .root_source_file = b.path(header),
-        .target = module.resolved_target.?,
+        .target = target,
         .optimize = module.optimize.?,
-        .link_libc = module.link_libc orelse false,
+        .link_libc = module.link_libc orelse !target.result.abi.isAndroid(),
     });
     for (module.include_dirs.items) |dir| switch (dir) {
         .path => |path| tc.addIncludePath(path),
