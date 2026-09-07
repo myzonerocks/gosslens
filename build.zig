@@ -3870,13 +3870,13 @@ fn addUtf8Range(b: *std.Build, module: *std.Build.Module) void {
 }
 
 fn addProtocTool(b: *std.Build) ?*std.Build.Step.Compile {
-    b.build_root.handle.access(b.graph.io, ".vendor/protobuf/src/google/protobuf/message.cc", .{}) catch return null;
-    const module = b.createModule(.{ .target = b.graph.host, .optimize = .ReleaseFast });
+    rootDir(b).handle.access(b.graph.io, ".vendor/protobuf/src/google/protobuf/message.cc", .{}) catch return null;
+    const module = b.createModule(.{ .target = b.graph.host, .optimize = opt_fast });
     module.link_libcpp = true;
     module.addIncludePath(b.path(".vendor/protobuf/src"));
     module.addIncludePath(b.path(".vendor/protobuf/third_party/utf8_range"));
     module.addIncludePath(b.path(".vendor/abseil"));
-    module.linkLibrary(buildAbseilLib(b, b.graph.host, .ReleaseFast, null));
+    module.linkLibrary(buildAbseilLib(b, b.graph.host, opt_fast, null));
     var sources: std.ArrayList([]const u8) = .empty;
     protobufSources(b, &sources, true);
     sources.append(b.allocator, "tools/protoc_cpp_main.cc") catch @panic("oom");
