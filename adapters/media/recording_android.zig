@@ -6,12 +6,7 @@
 const std = @import("std");
 const pcm = @import("pcm.zig");
 
-const c = @cImport({
-    @cInclude("media/NdkMediaCodec.h");
-    @cInclude("media/NdkMediaMuxer.h");
-    @cInclude("media/NdkMediaFormat.h");
-    @cInclude("android/native_window.h");
-});
+const c = @import("c");
 
 /// How the vended native handle binds: a sampleable texture, or a
 /// platform window the renderer presents into.

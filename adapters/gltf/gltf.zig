@@ -6,9 +6,7 @@
 
 const std = @import("std");
 const math = @import("math");
-const c = @cImport({
-    @cInclude("cgltf.h");
-});
+const c = @import("c");
 
 pub const Error = error{
     OutOfMemory,
@@ -1123,8 +1121,7 @@ test "decodes a material's metallic, roughness and emissive factors" {
     @memcpy(buf[36..42], std.mem.sliceAsBytes(&idx));
     var b64: [64]u8 = undefined;
     const enc = std.base64.standard.Encoder.encode(&b64, &buf);
-    const json = try std.fmt.allocPrint(gpa,
-        "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0}}]," ++
+    const json = try std.fmt.allocPrint(gpa, "{{\"asset\":{{\"version\":\"2.0\"}},\"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\"nodes\":[{{\"mesh\":0}}]," ++
         "\"meshes\":[{{\"primitives\":[{{\"attributes\":{{\"POSITION\":0}},\"indices\":1,\"material\":0}}]}}]," ++
         "\"materials\":[{{\"pbrMetallicRoughness\":{{\"baseColorFactor\":[0.5,0.5,0.5,1.0],\"metallicFactor\":0.25,\"roughnessFactor\":0.75}},\"emissiveFactor\":[0.5,0.1,0.0]}}]," ++
         "\"accessors\":[{{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"min\":[0,0,0],\"max\":[1,1,0]}},{{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}}]," ++

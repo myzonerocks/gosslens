@@ -348,16 +348,18 @@ test "decodes a two-frame gif with a global palette" {
     // A 2x1 GIF89a: frame 0 red, frame 1 green, hand-assembled.
     const bytes = [_]u8{
         'G', 'I', 'F', '8', '9', 'a',
-        2,    0,    1,    0, // 2x1 logical screen
-        0x80, 0,    0, // global table flag, size code 0 -> 2 entries
-        255,  0,    0, // color 0 red
-        0,    255,  0, // color 1 green
+        2, 0, 1, 0, // 2x1 logical screen
+        0x80, 0, 0, // global table flag, size code 0 -> 2 entries
+        255, 0, 0, // color 0 red
+        0, 255, 0, // color 1 green
         0x21, 0xF9, 4, 0, 10, 0, 0, 0, // GCE, 10cs delay
         0x2C, 0, 0, 0, 0, 2, 0, 1, 0, 0, // image descriptor 2x1
-        2, 2, 0x04, 0x0A, 0x00, // lzw: clear, 0, 0, end
-        0x21, 0xF9, 4, 0, 10, 0, 0, 0,
-        0x2C, 0, 0, 0, 0, 2, 0, 1, 0, 0,
-        2, 2, 0x4C, 0x0A, 0x00, // lzw: clear, 1, 1, end
+        2,    2,    0x04, 0x0A, 0x00, // lzw: clear, 0, 0, end
+        0x21, 0xF9, 4,    0,    10,
+        0,    0,    0,    0x2C, 0,
+        0,    0,    0,    2,    0,
+        1,    0,    0,
+        2,    2, 0x4C, 0x0A, 0x00, // lzw: clear, 1, 1, end
         0x3B,
     };
     const decoded = try decode(gpa, &bytes);
@@ -378,12 +380,12 @@ test "rejects a non-gif header" {
 test "rejects a frame outside the logical screen" {
     const gpa = std.testing.allocator;
     const bytes = [_]u8{
-        'G', 'I', 'F', '8', '9', 'a',
-        2, 0, 2, 0, 0x80, 0, 0,
-        0, 0, 0, 255, 255, 255,
-        0x2C, 0, 0, 0, 0, 4, 0, 4, 0, 0, // 4x4 frame in a 2x2 screen
-        2, 2, 0x04, 0x0A, 0x00,
-        0x3B,
+        'G', 'I', 'F', '8', '9',  'a',
+        2,   0,   2,   0,   0x80, 0,
+        0,   0,   0,   0,   255,  255,
+        255,
+        0x2C, 0, 0,    0,    0,    4,    0, 4, 0, 0, // 4x4 frame in a 2x2 screen
+        2,    2, 0x04, 0x0A, 0x00, 0x3B,
     };
     try std.testing.expectError(Error.BadImage, decode(gpa, &bytes));
 }
@@ -391,11 +393,12 @@ test "rejects a frame outside the logical screen" {
 test "rejects an out-of-range lzw minimum code size" {
     const gpa = std.testing.allocator;
     const bytes = [_]u8{
-        'G', 'I', 'F', '8', '9', 'a',
-        2, 0, 2, 0, 0x80, 0, 0,
-        0, 0, 0, 255, 255, 255,
+        'G', 'I', 'F', '8', '9',  'a',
+        2,   0,   2,   0,   0x80, 0,
+        0,   0,   0,   0,   255,  255,
+        255,
         0x2C, 0, 0, 0, 0, 2, 0, 2, 0, 0, // 2x2 frame in a 2x2 screen
-        32, 0x00, // a code size of 32 does not fit the twelve-bit table
+        32,   0x00, // a code size of 32 does not fit the twelve-bit table
         0x3B,
     };
     try std.testing.expectError(Error.BadImage, decode(gpa, &bytes));

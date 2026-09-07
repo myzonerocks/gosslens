@@ -6,10 +6,7 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cDefine("VK_USE_PLATFORM_ANDROID_KHR", "1");
-    @cInclude("vulkan/vulkan.h");
-});
+const c = @import("vk_probe_c");
 
 pub fn vulkanReady() bool {
     var app_info: c.VkApplicationInfo = std.mem.zeroes(c.VkApplicationInfo);

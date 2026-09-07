@@ -6,11 +6,7 @@
 const std = @import("std");
 const image = @import("image");
 
-const c = @cImport({
-    @cInclude("media/NdkMediaExtractor.h");
-    @cInclude("media/NdkMediaCodec.h");
-    @cInclude("media/NdkMediaFormat.h");
-});
+const c = @import("c");
 
 /// Whether a real decoder exists on this target.
 pub const supported = true;

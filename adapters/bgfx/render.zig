@@ -23,9 +23,7 @@ pub const android_vk = if (builtin.os.tag == .linux and builtin.abi.isAndroid())
 else
     struct {};
 
-pub const c = @cImport({
-    @cInclude("bgfx/c99/bgfx.h");
-});
+pub const c = @import("c");
 
 pub const invalid_handle: u16 = std.math.maxInt(u16);
 

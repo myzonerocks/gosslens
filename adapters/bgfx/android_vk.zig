@@ -16,11 +16,7 @@ const std = @import("std");
 const blob = @import("blob.zig");
 const blobs = @import("shader_blobs");
 
-const c = @cImport({
-    @cDefine("VK_USE_PLATFORM_ANDROID_KHR", "1");
-    @cInclude("vulkan/vulkan.h");
-    @cInclude("android/hardware_buffer.h");
-});
+const c = @import("vk_c");
 
 comptime {
     _ = &Context.init;

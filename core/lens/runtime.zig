@@ -1004,9 +1004,9 @@ pub const Lens = struct {
             const gr = node.grade orelse manifest.GradeField{};
             const hue_rad: f32 = gr.hue * (std.math.pi / 180.0);
             try out.append(gpa, .{ .graph_index = node.graph_index, .grade = .{
-                gr.exposure, gr.contrast, gr.saturation, gr.temperature,
-                gr.brightness, hue_rad,   gr.tint,       gr.grayscale,
-                gr.invert,    gr.posterize, 0,           0,
+                gr.exposure,   gr.contrast,  gr.saturation, gr.temperature,
+                gr.brightness, hue_rad,      gr.tint,       gr.grayscale,
+                gr.invert,     gr.posterize, 0,             0,
             }, .mask_channel = gr.mask_channel });
         }
         return out.toOwnedSlice(gpa);

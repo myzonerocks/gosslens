@@ -241,8 +241,8 @@ test "a known 2x2 image round-trips through the std decoder-free checks" {
     // Without a decoder in std, assert the structural invariants: the
     // signature, chunk framing, IHDR fields, and determinism.
     const pixels = [16]u8{
-        255, 0,   0,   255, 0, 255, 0, 255,
-        0,   0,   255, 255, 9, 9,   9, 255,
+        255, 0, 0,   255, 0, 255, 0, 255,
+        0,   0, 255, 255, 9, 9,   9, 255,
     };
     var a: std.ArrayList(u8) = .empty;
     defer a.deinit(t.allocator);

@@ -6,11 +6,7 @@
 const std = @import("std");
 const image = @import("image");
 
-const c = @cImport({
-    @cInclude("media/NdkMediaCodec.h");
-    @cInclude("media/NdkMediaMuxer.h");
-    @cInclude("media/NdkMediaFormat.h");
-});
+const c = @import("c");
 
 pub const supported = true;
 

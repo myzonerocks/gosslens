@@ -744,6 +744,7 @@ pub fn build(b: *std.Build) void {
         runtime_module.link_libc = true;
         runtime_module.addImport("ml_delegate", b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = target, .optimize = optimize }));
         runtime_module.addIncludePath(b.path(".vendor/litert"));
+        attachC(b, runtime_module, "c", "adapters/tracking/runtime_c.h");
         // MediaPipe's segmentation models need a custom TFLite op the
         // stock interpreter can't resolve on its own (adapters/tracking/
         // transpose_conv_bias.zig) - built here rather than folded into
@@ -954,6 +955,7 @@ pub fn build(b: *std.Build) void {
         // The image loader implementation arrives inside the beauty
         // archive; the harness only includes the declarations.
         tracking_module.addIncludePath(b.path(".vendor/gpupixel/third_party/stb/include/stb"));
+        attachC(b, tracking_module, "stb", "harness/stb_c.h");
         const tracking_exe = b.addExecutable(.{ .name = "tracking_harness", .root_module = tracking_module });
         const run_tracking = b.addRunArtifact(tracking_exe);
         run_tracking.setCwd(b.path("."));
@@ -989,6 +991,7 @@ pub fn build(b: *std.Build) void {
         runtime_wasi.link_libc = true;
         runtime_wasi.addImport("ml_delegate", b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = wasi_target, .optimize = wasi_optimize }));
         runtime_wasi.addIncludePath(b.path(".vendor/litert"));
+        attachC(b, runtime_wasi, "c", "adapters/tracking/runtime_c.h");
         // The segmentation core the web module drives directly: runtime,
         // sampler, and the custom upsample op the segmenters need.
         const segment_wasi = b.createModule(.{
@@ -1247,6 +1250,7 @@ pub fn build(b: *std.Build) void {
         addBgfxCallbacks(b, render_module);
         if (shader_blobs_module) |sb| render_module.addImport("shader_blobs", sb);
         if (host_asset) |am| render_module.addImport("image", am.image) else render_module.addImport("image", imageStubModule(b, target, optimize));
+        attachC(b, render_module, "c", "adapters/bgfx/render_c.h");
 
         const harness_module = b.createModule(.{
             .root_source_file = b.path("harness/desktop.zig"),
@@ -1276,6 +1280,7 @@ pub fn build(b: *std.Build) void {
                 .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
             });
         }
+        attachC(b, harness_module, "c", "harness/desktop_c.h");
         const harness_exe = b.addExecutable(.{
             .name = "harness",
             .root_module = harness_module,
@@ -1375,6 +1380,7 @@ pub fn build(b: *std.Build) void {
             runtime_conformance.link_libc = true;
             runtime_conformance.addImport("ml_delegate", b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = target, .optimize = optimize }));
             runtime_conformance.addIncludePath(b.path(".vendor/litert"));
+            attachC(b, runtime_conformance, "c", "adapters/tracking/runtime_c.h");
             const transpose_conv_bias_conformance = b.createModule(.{
                 .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
                 .target = target,
@@ -1515,6 +1521,8 @@ pub fn build(b: *std.Build) void {
         // paired stb_image_impl.c source file.
         conformance_module.addIncludePath(b.path(".vendor/gpupixel/third_party/stb/include/stb"));
         conformance_module.link_libc = true;
+        attachC(b, conformance_module, "c", "harness/conformance_c.h");
+        attachC(b, conformance_module, "stb", "harness/stb_c.h");
         const conformance_exe = b.addExecutable(.{
             .name = "conformance",
             .root_module = conformance_module,
@@ -1615,6 +1623,26 @@ fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8, tr
     module.addCMacro("__ANDROID_MIN_SDK_VERSION__", b.fmt("{d}", .{android_api_level}));
 }
 
+/// Hands a module the C it used to @cImport, as an import named `name`: a translate-c step over
+/// `header` that sees every include path and macro the module itself sees. Called once the
+/// module's paths and macros are all on it, since it reads them at this moment.
+fn attachC(b: *std.Build, module: *std.Build.Module, name: []const u8, header: []const u8) void {
+    const tc = b.addTranslateC(.{
+        .root_source_file = b.path(header),
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
+        .link_libc = module.link_libc orelse false,
+    });
+    for (module.include_dirs.items) |dir| switch (dir) {
+        .path => |path| tc.addIncludePath(path),
+        .path_system => |path| tc.addSystemIncludePath(path),
+        .path_after => |path| tc.addAfterIncludePath(path),
+        else => {},
+    };
+    for (module.c_macros.items) |macro| tc.defineCMacroRaw(macro[2..]);
+    module.addImport(name, tc.createModule());
+}
+
 /// Gives a module that compiles vendored C its target's sysroot include
 /// paths - android's NDK, ios's Apple SDK, or emscripten's vendored sysroot -
 /// so quickjs and miniaudio build on device and web like the render adapter's
@@ -1695,6 +1723,9 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     render_android.addCMacro("_Nonnull", "");
     render_android.addCMacro("_Nullable", "");
     addBgfxCallbacks(b, render_android);
+    attachC(b, render_android, "c", "adapters/bgfx/render_c.h");
+    attachC(b, render_android, "vk_c", "adapters/bgfx/android_vk_c.h");
+    attachC(b, render_android, "vk_probe_c", "adapters/bgfx/vulkan_probe_c.h");
     render_android.addImport("shader_blobs", addShaderBlobs(b, shaderc_tool, android_target, optimize));
     const abi_android = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
@@ -1794,6 +1825,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         addNdkPaths(b, runtime_android, sysroot, abi_triple);
         runtime_android.addCMacro("_Nonnull", "");
         runtime_android.addCMacro("_Nullable", "");
+        attachC(b, runtime_android, "c", "adapters/tracking/runtime_c.h");
         const tracking_android = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/tracking.zig"),
             .target = android_target,
@@ -2222,8 +2254,12 @@ fn photoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     }
     if (android) {
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot, androidTriple(target.result.cpu.arch));
+        module.addCMacro("_Nonnull", "");
+        module.addCMacro("_Nullable", "");
         module.linkSystemLibrary("mediandk", .{});
         module.linkSystemLibrary("android", .{});
+        attachC(b, module, "c", "adapters/image/photo_android_c.h");
     }
     return module;
 }
@@ -2249,7 +2285,13 @@ fn mediaVideoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
     });
-    if (android) module.addImport("image", image_module.?);
+    if (android) {
+        module.addImport("image", image_module.?);
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot, androidTriple(target.result.cpu.arch));
+        module.addCMacro("_Nonnull", "");
+        module.addCMacro("_Nullable", "");
+        attachC(b, module, "c", "adapters/media/video_android_c.h");
+    }
     if (apple) {
         module.addCSourceFile(.{
             .file = b.path("adapters/media/video_apple.mm"),
@@ -2287,8 +2329,11 @@ fn recordingModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         // zig's bundled bionic headers with the sysroot's and conflict;
         // libc itself links at the shared-library level.
         if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot, androidTriple(target.result.cpu.arch));
+        module.addCMacro("_Nonnull", "");
+        module.addCMacro("_Nullable", "");
         module.linkSystemLibrary("mediandk", .{});
         module.linkSystemLibrary("android", .{});
+        attachC(b, module, "c", "adapters/media/recording_android_c.h");
     }
     if (apple) {
         module.addCSourceFile(.{
@@ -2406,6 +2451,7 @@ fn gltfModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     });
     m.link_libc = true;
     addCTargetSysroot(b, m, target);
+    attachC(b, m, "c", "adapters/gltf/gltf_c.h");
     return m;
 }
 
@@ -2430,6 +2476,7 @@ fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     image_module.link_libc = true;
     image_module.linkLibrary(buildLibyuvLib(b, target, optimize, null));
     addCTargetSysroot(b, image_module, target);
+    attachC(b, image_module, "c", "adapters/image/image_c.h");
     const asset_module = b.createModule(.{
         .root_source_file = b.path("adapters/asset/asset.zig"),
         .target = target,
@@ -4002,6 +4049,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     render_ios.link_libc = true;
     addAppleSdkPaths(b, render_ios);
     addBgfxCallbacks(b, render_ios);
+    attachC(b, render_ios, "c", "adapters/bgfx/render_c.h");
     render_ios.addImport("shader_blobs", addShaderBlobs(b, shaderc_tool, ios_target, optimize));
     const abi_ios = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
@@ -4120,6 +4168,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         runtime_ios.addImport("ml_delegate", b.createModule(.{ .root_source_file = b.path("core/tracking/ml_delegate.zig"), .target = ios_target, .optimize = optimize }));
         runtime_ios.addIncludePath(b.path(".vendor/litert"));
         addAppleSdkPaths(b, runtime_ios);
+        attachC(b, runtime_ios, "c", "adapters/tracking/runtime_c.h");
         const tracking_ios = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/tracking.zig"),
             .target = ios_target,
@@ -4657,6 +4706,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     render_em.addIncludePath(b.path(".vendor/bx/include"));
     render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
     addBgfxCallbacks(b, render_em);
+    attachC(b, render_em, "c", "adapters/bgfx/render_c.h");
 
     const abi_em = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
@@ -4961,6 +5011,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
     render_em.addImport("image", imageStubModule(b, em_target, opt_small));
     addBgfxCallbacks(b, render_em);
+    attachC(b, render_em, "c", "adapters/bgfx/render_c.h");
 
     const driver_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/wasm_emscripten_core_smoke.zig"),

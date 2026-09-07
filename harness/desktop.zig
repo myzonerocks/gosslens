@@ -11,12 +11,7 @@ const gltf = @import("gltf");
 const render = @import("render");
 const image = @import("image");
 
-const c = @cImport({
-    @cDefine("GLFW_INCLUDE_NONE", "1");
-    @cInclude("GLFW/glfw3.h");
-    @cInclude("bgfx/c99/bgfx.h");
-    @cInclude("lodepng.h");
-});
+const c = @import("c");
 
 extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 
