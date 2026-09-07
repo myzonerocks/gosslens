@@ -2236,7 +2236,7 @@ test "onnx rejects a tensor shaped past the sandbox bound" {
     });
     var engine = try Engine.init(testing.allocator, model);
     defer engine.deinit();
-    const x = [_]f32{0} ** 16;
+    const x: [16]f32 = @splat(0);
     try engine.writeInput(0, std.mem.sliceAsBytes(&x));
     try testing.expectError(error.ModelRejected, engine.invoke());
 }

@@ -472,7 +472,7 @@ test "gesture names resolve to their own index" {
 }
 
 test "pinch fires only when the finger tips close on the palm scale" {
-    var landmarks = [_]f32{0} ** (landmark_count * 3);
+    var landmarks: [landmark_count * 3]f32 = @splat(0);
     // Palm scale: wrist at the origin, middle knuckle 100 px up.
     landmarks[middle_mcp_idx * 3 + 1] = 100;
     // Spread: tips 80 px apart, wider than 0.4 of the palm.

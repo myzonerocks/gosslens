@@ -46,7 +46,11 @@ export fn goss_core_smoke_render_frame(out_name: [*]u8, out_name_cap: i32) i32 {
 
     // 2x2 solid red - trivial content; the point is that the real
     // shader program creates and submits without a validation error.
-    const red_pixels = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const red_pixels = comptime blk: {
+        var a: [(4) * 4]u8 = undefined;
+        for (0..4) |i| a[i * 4 ..][0..4].* = .{ 255, 0, 0, 255 };
+        break :blk a;
+    };
     const texture = render.Renderer.createStaticTexture(2, 2, &red_pixels);
     defer renderer.destroyTexture(texture);
     renderer.submitPreview(0, .{ .bgra = .{ .texture = texture } }, 0, false);
@@ -73,7 +77,11 @@ export fn goss_core_smoke_read_texture() i32 {
     // A source texture is not itself read-back-capable, so the contract
     // is: blit it into a BGFX_TEXTURE_READ_BACK target, then read that.
     // A view id past every draw runs the blit against a finished frame.
-    const red_pixels = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const red_pixels = comptime blk: {
+        var a: [(4) * 4]u8 = undefined;
+        for (0..4) |i| a[i * 4 ..][0..4].* = .{ 255, 0, 0, 255 };
+        break :blk a;
+    };
     const source = render.Renderer.createStaticTexture(2, 2, &red_pixels);
     defer renderer.destroyTexture(source);
     const readback = render.Renderer.createReadbackTexture(2, 2) catch return -1;

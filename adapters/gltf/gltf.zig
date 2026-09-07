@@ -967,7 +967,7 @@ test "external buffer references are refused" {
 }
 
 test "garbage bytes are not an asset" {
-    const garbage = [_]u8{0xff} ** 64;
+    const garbage: [64]u8 = @splat(0xff);
     const result = Asset.parse(t.allocator, &garbage);
     try t.expect(result == Error.MalformedAsset or result == Error.UnsupportedAsset);
 }

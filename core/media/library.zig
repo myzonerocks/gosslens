@@ -162,8 +162,8 @@ test "search ranks nearest by cosine and keeps top-k in order" {
 }
 
 test "seal round-trips under the key and rejects tampering" {
-    const key = [_]u8{7} ** key_length;
-    const nonce = [_]u8{3} ** nonce_length;
+    const key: [key_length]u8 = @splat(7);
+    const nonce: [nonce_length]u8 = @splat(3);
     const plain = "a private capture blob";
     const aad = "capture-2026";
     var sealed: [64]u8 = undefined;
@@ -178,7 +178,7 @@ test "seal round-trips under the key and rejects tampering" {
 
 test "best-take prefers the sharp frame, then honors openness" {
     // Two 4x4 frames: a flat one and a checkerboard (high Laplacian variance).
-    const flat = [_]u8{128} ** 16;
+    const flat: [16]u8 = @splat(128);
     const sharp = [_]u8{ 0, 255, 0, 255, 255, 0, 255, 0, 0, 255, 0, 255, 255, 0, 255, 0 };
     var frames: [32]u8 = undefined;
     @memcpy(frames[0..16], &flat);

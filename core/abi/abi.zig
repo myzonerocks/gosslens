@@ -16102,7 +16102,7 @@ test "face tracking on a build without the inference stack refuses" {
     var result: FaceResult = undefined;
     try t.expectEqual(Status.again, goss_session_face_result(session, &result));
     const desc: FrameDesc = .{ .width = 2, .height = 2, .pixel_format = 0, .color_standard = 0, .color_range = 0, .flags = 0, .timestamp_us = 0 };
-    const planes = [_]u8{0} ** 8;
+    const planes: [8]u8 = @splat(0);
     try t.expectEqual(Status.again, goss_session_track_frame(session, &desc, &planes, 2, &planes, 2));
     goss_session_disable_face_tracking(session);
     try t.expectEqual(Status.invalid_argument, goss_session_face_result(session, null));
@@ -16398,7 +16398,7 @@ test "beauty on a build without the effects engine refuses" {
 
     try t.expectEqual(Status.unsupported, goss_session_enable_beauty(session, "res"));
     try t.expectEqual(Status.again, goss_session_set_beauty(session, 0, 0.5));
-    var pixels = [_]u8{0} ** 16;
+    var pixels: [16]u8 = @splat(0);
     try t.expectEqual(Status.again, goss_session_beautify_frame(session, &pixels, 2, 2, &pixels));
     goss_session_disable_beauty(session);
 }
