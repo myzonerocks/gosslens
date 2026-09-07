@@ -797,6 +797,41 @@ export class GossEngine {
     return { trackId, votes };
   }
 
+  /// The times, in seconds from the buffer's start, of every beat in a piece of
+  /// audio, from the same onset detector a lens's beat trigger rides. Samples are
+  /// interleaved f32, and a montage cut to these meets its sound on the beat.
+  beatMap(samples: Float32Array, frameCount: number, sampleRate: number, channels: number): number[] {
+    const bytes = samples.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes || 4]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    this.mod.HEAPF32.set(samples, ptr >> 2);
+    const sized = this.mod.ccall(
+      "goss_engine_beat_map",
+      "number",
+      ["number", "number", "number", "number", "number", "number", "number", "number"],
+      [this.handle, ptr, frameCount, sampleRate, channels, 0, 0, countPtr],
+    );
+    const count = sized === 0 ? new DataView(this.mod.HEAPU8.buffer, countPtr, 4).getUint32(0, true) : 0;
+    const out: number[] = [];
+    if (count > 0) {
+      const timesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [count * 8]) as number;
+      const status = this.mod.ccall(
+        "goss_engine_beat_map",
+        "number",
+        ["number", "number", "number", "number", "number", "number", "number", "number"],
+        [this.handle, ptr, frameCount, sampleRate, channels, timesPtr, count, countPtr],
+      );
+      if (status === 0) {
+        const view = new DataView(this.mod.HEAPU8.buffer, timesPtr, count * 8);
+        for (let i = 0; i < count; i += 1) out.push(Number(view.getBigInt64(i * 8, true)) / 1_000_000);
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [timesPtr, count * 8]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+    return out;
+  }
+
   /// Releases the persistent wrap the engine keeps per external live
   /// texture handle - the pair of the native SDKs' renderToLiveTexture,
   /// for a host retiring a publish surface before the engine goes away.
@@ -2703,6 +2738,18 @@ export class GossSession {
       ["number", "number", "number"],
       [this.handle, this.framePixelsPtr, width, height],
     );
+  }
+
+  /// Submits a bare camera pose and projection, for a host driving a scan with
+  /// no platform world session behind it: a selfie scan on the front camera,
+  /// where the depth comes from a lens's own net rather than a sensor. Both
+  /// matrices are column-major, sixteen numbers.
+  submitCameraPose(worldFromCamera: ArrayLike<number>, projection: ArrayLike<number>, timestampUs: number): void {
+    if (worldFromCamera.length !== 16 || projection.length !== 16) return;
+    this.submitWorld({ trackingState: 2, worldFromCamera, projection, timestampUs }, [], [], {
+      ambientIntensity: 1000,
+      colorTemperatureKelvin: 6500,
+    });
   }
 
   /// Feeds the platform's world understanding into the session: camera

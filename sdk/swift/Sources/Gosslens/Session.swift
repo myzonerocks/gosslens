@@ -183,6 +183,28 @@ public final class GossSession: @unchecked Sendable {
         _ = goss_session_submit_world_mesh(handle, vertices, vertices.count / 3, indices, indices.count)
     }
 
+    /// Submits a bare camera pose and projection, for a host driving a scan without a platform
+    /// world session behind it: a selfie scan on the front camera, where the depth comes from a
+    /// lens's own net rather than a sensor. Both matrices are column-major, sixteen floats.
+    public func submitCameraPose(worldFromCamera: [Float], projection: [Float], timestampUs: Int64) {
+        guard worldFromCamera.count == 16, projection.count == 16 else { return }
+        var state = goss_world_state()
+        state.tracking_state = 2
+        state.timestamp_us = timestampUs
+        withUnsafeMutablePointer(to: &state.world_from_camera) { pose in
+            pose.withMemoryRebound(to: Float.self, capacity: 16) { out in
+                for i in 0 ..< 16 { out[i] = worldFromCamera[i] }
+            }
+        }
+        withUnsafeMutablePointer(to: &state.projection) { proj in
+            proj.withMemoryRebound(to: Float.self, capacity: 16) { out in
+                for i in 0 ..< 16 { out[i] = projection[i] }
+            }
+        }
+        var light = goss_world_light(ambient_intensity: 1000, color_temperature_kelvin: 6500)
+        _ = goss_session_submit_world(handle, &state, nil, 0, nil, 0, &light)
+    }
+
     /// Casts a world-space ray against the submitted world mesh, returning the
     /// nearest surface hit position and its ray distance, or nil when no mesh is
     /// submitted or the ray misses. A tap-to-place lens anchors content there.

@@ -43,6 +43,7 @@ object Gosslens {
     internal external fun nativeMusicAddReference(engine: Long, trackId: Int, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeMusicClearReferences(engine: Long)
     internal external fun nativeMusicIdentify(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativeBeatMap(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
     internal external fun nativeSessionDestroy(session: Long)
     internal external fun nativeSubmitFrameCopy(
@@ -677,6 +678,24 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         return if (votes == 0) null else MusicMatch(out.getInt(0), votes)
     }
 
+    /** The times, in seconds from the buffer's start, of every beat in a piece of
+     * audio, from the same onset detector a lens's beat trigger rides. Samples are
+     * interleaved f32, and a take cut to these meets its sound on the beat. */
+    fun beatMap(samples: FloatArray, frameCount: Int, sampleRate: Int, channels: Int): DoubleArray {
+        val buf = ByteBuffer.allocateDirect(maxOf(samples.size, 1) * 4).order(ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(samples)
+        val countBuffer = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        val empty = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeBeatMap(handle, buf, frameCount, sampleRate, channels, empty, 0, countBuffer) != 0) return DoubleArray(0)
+        val count = countBuffer.getInt(0)
+        if (count <= 0) return DoubleArray(0)
+        val times = ByteBuffer.allocateDirect(count * 8).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeBeatMap(handle, buf, frameCount, sampleRate, channels, times, count, countBuffer) != 0) return DoubleArray(0)
+        val out = DoubleArray(count)
+        for (i in 0 until count) out[i] = times.getLong(i * 8) / 1_000_000.0
+        return out
+    }
+
     /** Starts recording the session's rendered frames, effects baked
      * in, into an MP4 at [path]. One recording per engine; every
      * rendered frame appends until [stopRecording].
@@ -1228,6 +1247,25 @@ class GossSession private constructor(
     ): Boolean = Gosslens.nativeSubmitWorld(
         handle, stateBuffer, planesBuffer, planeCount, anchorsBuffer, anchorCount, lightBuffer,
     ) == 0
+
+    /** Submits a bare camera pose and projection, for a host driving a scan with no
+     * platform world session behind it: a selfie scan on the front camera, where the
+     * depth comes from a lens's own net rather than a sensor. Both matrices are
+     * column-major, sixteen floats. */
+    fun submitCameraPose(worldFromCamera: FloatArray, projection: FloatArray, timestampUs: Long): Boolean {
+        if (worldFromCamera.size != 16 || projection.size != 16) return false
+        // The world state as the ABI lays it out: tracking state, the two matrices, the stamp.
+        val state = ByteBuffer.allocateDirect(4 + 64 + 64 + 8).order(ByteOrder.nativeOrder())
+        state.putInt(2)
+        for (v in worldFromCamera) state.putFloat(v)
+        for (v in projection) state.putFloat(v)
+        state.putLong(timestampUs)
+        state.rewind()
+        val light = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        light.putFloat(1000f); light.putFloat(6500f); light.rewind()
+        val none = ByteBuffer.allocateDirect(1)
+        return submitWorld(state, none, 0, none, 0, light)
+    }
 
     /** Stands the segmentation worker up from a raw model - a selfie or hair
      * segmenter .tflite; [model] is a direct buffer of the model bytes. Once

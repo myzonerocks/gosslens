@@ -257,6 +257,15 @@ export fn Java_com_gosslens_Gosslens_nativeMusicIdentify(env: *JniEnv, cls: jobj
     return @intFromEnum(rc);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeBeatMap(env: *JniEnv, cls: jobject, engine: i64, samples_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32, out_buffer: jobject, capacity: i32, count_buffer: jobject) i32 {
+    _ = cls;
+    const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const count_bytes = getDirectBufferAddress(env, count_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_count: *align(1) u32 = @ptrCast(count_bytes);
+    const times: ?[*]i64 = if (capacity > 0) @ptrCast(@alignCast(getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument))) else null;
+    return @intFromEnum(abi.goss_engine_beat_map(engineFromHandle(engine), @ptrCast(@alignCast(samples)), @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0)), times, @intCast(@max(capacity, 0)), out_count));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSetDubbing(env: *JniEnv, cls: jobject, session: i64, enabled: i32) i32 {
     _ = env;
     _ = cls;
