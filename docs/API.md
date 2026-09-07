@@ -163,6 +163,8 @@ file must move together.
 | `goss_engine_music_add_reference` | `addMusicReference(trackId, samples, frameCount, sampleRate, channels)`, fingerprinting a reference recording and registering it under `trackId` in the engine's on-device music catalog; model-free, and re-adding a `trackId` layers more landmarks in | all SDKs |
 | `goss_engine_music_clear_references` | `clearMusicReferences()`, emptying the music catalog | all SDKs |
 | `goss_engine_music_identify` | `identifyMusic(samples, frameCount, sampleRate, channels, minVotes)`, fingerprinting a captured snippet and matching it against the catalog; returns the best track and its landmark-agreement vote count (a `MusicMatch`), or nothing below `minVotes`, so a few seconds of noisy audio still identifies | all SDKs |
+| `goss_session_read_reconstruction` | `readReconstruction()`, the guided scan's gaussians (fourteen floats each: xyz, scale, a rotation quaternion, opacity, rgb), which is what a client writes into a moment file | all SDKs |
+| `goss_session_write_reconstruction` | `writeReconstruction(gaussians)`, putting a reconstruction back so a moment captured on one client opens on another | all SDKs |
 | `goss_engine_beat_map` | `beatMap(samples, frameCount, sampleRate, channels)`, the time of every beat in a piece of audio from the same onset detector the `audio.beat` trigger rides, in seconds from the buffer's start; deterministic, so a montage cut to a sound meets it in the same places on every client | all SDKs |
 
 ### CaptureOutput

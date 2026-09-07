@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 106u
+#define GOSS_ABI_MINOR 108u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -718,6 +718,17 @@ goss_status goss_session_capture_provenance(goss_session *session, uint8_t *out_
  * reconstruction is deterministic. goss_session_reset_capture clears the scan. */
 goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance);
 goss_status goss_session_reset_capture(goss_session *session);
+
+/* Graph thread. Copies the scan's reconstruction out as gaussians, fourteen
+ * floats each: xyz, scale, a rotation quaternion, opacity and rgb. A NULL out
+ * sizes it, so a caller asks for the count and then for the floats. This is what
+ * a client writes into a moment file. */
+goss_status goss_session_read_reconstruction(goss_session *session, float *out, uint32_t capacity, uint32_t *out_count);
+
+/* Graph thread. Puts a reconstruction back, replacing whatever the scan held, so
+ * a moment captured on one client opens on another. count is gaussians, not
+ * floats. */
+goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count);
 
 /* Submits one exposure of an HDR bracket, fed only to bracket-source
  * temporal.fuse nodes (the live camera feeds the rest); the fusion publishes

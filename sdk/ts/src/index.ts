@@ -2740,6 +2740,54 @@ export class GossSession {
     );
   }
 
+  /// The scan's reconstruction as gaussians, fourteen numbers each: xyz, scale,
+  /// a rotation quaternion, opacity and rgb. This is what a client writes into a
+  /// moment file.
+  readReconstruction(): Float32Array {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const sized = this.mod.ccall(
+      "goss_session_read_reconstruction",
+      "number",
+      ["number", "number", "number", "number"],
+      [this.handle, 0, 0, countPtr],
+    );
+    const count = sized === 0 ? new DataView(this.mod.HEAPU8.buffer, countPtr, 4).getUint32(0, true) : 0;
+    let out = new Float32Array(0);
+    if (count > 0) {
+      const floats = count * 14;
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [floats * 4]) as number;
+      const status = this.mod.ccall(
+        "goss_session_read_reconstruction",
+        "number",
+        ["number", "number", "number", "number"],
+        [this.handle, ptr, count, countPtr],
+      );
+      if (status === 0) out = new Float32Array(this.mod.HEAPF32.subarray(ptr >> 2, (ptr >> 2) + floats));
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, floats * 4]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+    return out;
+  }
+
+  /// Puts a reconstruction back, replacing whatever the scan held, so a moment
+  /// captured on one client opens on another.
+  writeReconstruction(gaussians: Float32Array): void {
+    if (gaussians.length === 0) {
+      this.mod.ccall("goss_session_write_reconstruction", "number", ["number", "number", "number"], [this.handle, 0, 0]);
+      return;
+    }
+    const bytes = gaussians.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    this.mod.HEAPF32.set(gaussians, ptr >> 2);
+    this.mod.ccall(
+      "goss_session_write_reconstruction",
+      "number",
+      ["number", "number", "number"],
+      [this.handle, ptr, gaussians.length / 14],
+    );
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+  }
+
   /// Submits a bare camera pose and projection, for a host driving a scan with
   /// no platform world session behind it: a selfie scan on the front camera,
   /// where the depth comes from a lens's own net rather than a sensor. Both

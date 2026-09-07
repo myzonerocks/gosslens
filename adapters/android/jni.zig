@@ -257,6 +257,21 @@ export fn Java_com_gosslens_Gosslens_nativeMusicIdentify(env: *JniEnv, cls: jobj
     return @intFromEnum(rc);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeReadReconstruction(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, capacity: i32, count_buffer: jobject) i32 {
+    _ = cls;
+    const count_bytes = getDirectBufferAddress(env, count_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_count: *align(1) u32 = @ptrCast(count_bytes);
+    const out: ?[*]f32 = if (capacity > 0) @ptrCast(@alignCast(getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument))) else null;
+    return @intFromEnum(abi.goss_session_read_reconstruction(sessionFromHandle(session), out, @intCast(@max(capacity, 0)), out_count));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeWriteReconstruction(env: *JniEnv, cls: jobject, session: i64, buffer: jobject, count: i32) i32 {
+    _ = cls;
+    if (count <= 0) return @intFromEnum(abi.goss_session_write_reconstruction(sessionFromHandle(session), null, 0));
+    const bytes = getDirectBufferAddress(env, buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_write_reconstruction(sessionFromHandle(session), @ptrCast(@alignCast(bytes)), @intCast(count)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeBeatMap(env: *JniEnv, cls: jobject, engine: i64, samples_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32, out_buffer: jobject, capacity: i32, count_buffer: jobject) i32 {
     _ = cls;
     const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

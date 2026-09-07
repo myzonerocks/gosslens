@@ -44,6 +44,8 @@ object Gosslens {
     internal external fun nativeMusicClearReferences(engine: Long)
     internal external fun nativeMusicIdentify(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeBeatMap(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
+    internal external fun nativeReadReconstruction(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
+    internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
     internal external fun nativeSessionDestroy(session: Long)
     internal external fun nativeSubmitFrameCopy(
@@ -1247,6 +1249,32 @@ class GossSession private constructor(
     ): Boolean = Gosslens.nativeSubmitWorld(
         handle, stateBuffer, planesBuffer, planeCount, anchorsBuffer, anchorCount, lightBuffer,
     ) == 0
+
+    /** The scan's reconstruction as gaussians, fourteen floats each: xyz, scale, a
+     * rotation quaternion, opacity and rgb. This is what a client writes into a
+     * moment file. */
+    fun readReconstruction(): FloatArray {
+        val countBuffer = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        val empty = ByteBuffer.allocateDirect(1)
+        if (Gosslens.nativeReadReconstruction(handle, empty, 0, countBuffer) != 0) return FloatArray(0)
+        val count = countBuffer.getInt(0)
+        if (count <= 0) return FloatArray(0)
+        val floats = count * 14
+        val out = ByteBuffer.allocateDirect(floats * 4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeReadReconstruction(handle, out, count, countBuffer) != 0) return FloatArray(0)
+        val result = FloatArray(floats)
+        out.asFloatBuffer().get(result)
+        return result
+    }
+
+    /** Puts a reconstruction back, replacing whatever the scan held, so a moment
+     * captured on one client opens on another. */
+    fun writeReconstruction(gaussians: FloatArray): Boolean {
+        if (gaussians.isEmpty()) return Gosslens.nativeWriteReconstruction(handle, ByteBuffer.allocateDirect(1), 0) == 0
+        val buf = ByteBuffer.allocateDirect(gaussians.size * 4).order(ByteOrder.nativeOrder())
+        buf.asFloatBuffer().put(gaussians)
+        return Gosslens.nativeWriteReconstruction(handle, buf, gaussians.size / 14) == 0
+    }
 
     /** Submits a bare camera pose and projection, for a host driving a scan with no
      * platform world session behind it: a selfie scan on the front camera, where the

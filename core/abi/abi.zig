@@ -303,6 +303,8 @@ pub const abi_functions = [_][]const u8{
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
     "goss_status goss_engine_beat_map(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t *out_times_us, uint32_t capacity, uint32_t *out_count)",
+    "goss_status goss_session_read_reconstruction(goss_session *session, float *out, uint32_t capacity, uint32_t *out_count)",
+    "goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -8507,6 +8509,32 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
     s.capture_covered = 0;
     s.capture_poses.clearRetainingCapacity();
     s.recon_gaussians.clearRetainingCapacity();
+    return .ok;
+}
+
+/// Copies the scan's reconstruction out as gaussians, fourteen floats each: xyz,
+/// scale, a rotation quaternion, opacity and rgb. A null buffer sizes it, so a
+/// caller asks for the count and then for the floats.
+pub export fn goss_session_read_reconstruction(session: ?*Session, out: ?[*]f32, capacity: u32, out_count: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    const count: u32 = @intCast(s.recon_gaussians.items.len / 14);
+    if (out_count) |p| p.* = count;
+    const buffer = out orelse return .ok;
+    const wanted = @min(count, capacity);
+    if (wanted == 0) return .ok;
+    @memcpy(buffer[0 .. wanted * 14], s.recon_gaussians.items[0 .. wanted * 14]);
+    return .ok;
+}
+
+/// Puts a reconstruction back, replacing whatever the scan held, so a moment
+/// captured on one client opens on another. Count is gaussians, not floats.
+pub export fn goss_session_write_reconstruction(session: ?*Session, gaussians: ?[*]const f32, count: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.recon_gaussians.clearRetainingCapacity();
+    if (count == 0) return .ok;
+    const src = gaussians orelse return .invalid_argument;
+    const floats = @as(usize, count) * 14;
+    s.recon_gaussians.appendSlice(s.engine.gpa, src[0..floats]) catch return .out_of_memory;
     return .ok;
 }
 
