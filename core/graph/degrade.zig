@@ -66,8 +66,9 @@ pub const Controller = struct {
     }
 
     /// One call per frame with measured inputs; returns a transition when
-    /// the level changes. Serious thermal pressure degrades immediately at
-    /// full dwell speed; critical jumps straight to passthrough.
+    /// the level changes. Serious thermal pressure degrades a frame above the
+    /// recovery line at full dwell speed and leaves a cheap frame alone, since a
+    /// pass that costs a millisecond buys nothing by going; critical jumps to passthrough.
     pub fn step(c: *Controller, inputs: Inputs) ?Transition {
         if (inputs.thermal == .critical) {
             c.over_streak = 0;
@@ -82,7 +83,8 @@ pub const Controller = struct {
 
         const degrade_threshold = c.config.budget_us / 100 * c.config.degrade_pct;
         const recover_threshold = c.config.budget_us / 100 * c.config.recover_pct;
-        const over = inputs.frame_time_us > degrade_threshold or inputs.thermal == .serious;
+        const over = inputs.frame_time_us > degrade_threshold or
+            (inputs.thermal == .serious and inputs.frame_time_us > recover_threshold);
         const under = inputs.frame_time_us < recover_threshold and inputs.thermal == .nominal;
 
         if (over) {
@@ -180,10 +182,17 @@ test "critical thermal jumps straight to passthrough and recovery walks back" {
     try t.expectEqual(Level.beauty_simplified, up.to);
 }
 
-test "serious thermal degrades even under budget" {
+test "serious thermal degrades a frame above the recovery line even under budget" {
     var c = Controller.init(test_config);
-    const tr = stepMany(&c, .{ .frame_time_us = 8_000, .thermal = .serious }, 3).?;
+    const above = test_config.budget_us / 100 * test_config.recover_pct + 1;
+    const tr = stepMany(&c, .{ .frame_time_us = above, .thermal = .serious }, 3).?;
     try t.expectEqual(Level.reduced_ml_cadence, tr.to);
+}
+
+test "serious thermal leaves a cheap frame alone" {
+    var c = Controller.init(test_config);
+    try t.expect(stepMany(&c, .{ .frame_time_us = 1_000, .thermal = .serious }, 100) == null);
+    try t.expectEqual(Level.full, c.level);
 }
 
 test "the ladder walks all the way down and stops" {
