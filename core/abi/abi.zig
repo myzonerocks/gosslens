@@ -302,6 +302,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
+    "goss_status goss_engine_beat_map(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t *out_times_us, uint32_t capacity, uint32_t *out_count)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -10543,6 +10544,30 @@ pub export fn goss_engine_music_clear_references(engine: ?*Engine) void {
 /// best track id and its landmark-agreement vote count; a vote count of zero means
 /// no track met min_votes. The match is the track and time offset the snippet's
 /// landmarks most agree on, so a few seconds of noisy audio still identifies.
+/// Every beat in a buffer, in microseconds from its start, from the onset
+/// detector the audio.beat trigger rides. Writes up to capacity and always
+/// reports the full count, so a caller sizes a buffer and asks again.
+pub export fn goss_engine_beat_map(engine: ?*Engine, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, out_times_us: ?[*]i64, capacity: u32, out_count: ?*u32) Status {
+    _ = engine orelse return .invalid_argument;
+    const src = samples orelse return .invalid_argument;
+    if (frame_count == 0 or channels == 0 or sample_rate == 0) return .invalid_argument;
+    const hop = audio_analysis.hop_size;
+    var analysis = audio_analysis.Analysis{};
+    var found: u32 = 0;
+    var at: usize = 0;
+    while (at < frame_count) : (at += hop) {
+        const end = @min(at + hop, @as(usize, frame_count));
+        analysis.feed(src[at * channels .. end * channels], channels);
+        if (!analysis.beat) continue;
+        if (out_times_us) |out| {
+            if (found < capacity) out[found] = @intFromFloat(@as(f64, @floatFromInt(end)) * 1_000_000.0 / @as(f64, @floatFromInt(sample_rate)));
+        }
+        found += 1;
+    }
+    if (out_count) |p| p.* = found;
+    return .ok;
+}
+
 pub export fn goss_engine_music_identify(engine: ?*Engine, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, min_votes: u32, out_track_id: ?*u32, out_votes: ?*u32) Status {
     const e = engine orelse return .invalid_argument;
     const src = samples orelse return .invalid_argument;

@@ -182,6 +182,17 @@ public final class GossEngine: @unchecked Sendable {
         try checked(goss_engine_music_add_reference(handle, trackID, samples, frameCount, sampleRate, channels))
     }
 
+    /// The times, in seconds from the buffer's start, of every beat in a piece of audio, from the
+    /// same onset detector a lens's beat trigger rides. Samples are interleaved f32.
+    public func beatMap(samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws -> [Double] {
+        var count: UInt32 = 0
+        try checked(goss_engine_beat_map(handle, samples, frameCount, sampleRate, channels, nil, 0, &count))
+        guard count > 0 else { return [] }
+        var times = [Int64](repeating: 0, count: Int(count))
+        try checked(goss_engine_beat_map(handle, samples, frameCount, sampleRate, channels, &times, count, &count))
+        return times.prefix(Int(count)).map { Double($0) / 1_000_000 }
+    }
+
     /// Empties the engine's music catalog.
     public func clearMusicReferences() {
         goss_engine_music_clear_references(handle)

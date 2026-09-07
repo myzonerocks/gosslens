@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 105u
+#define GOSS_ABI_MINOR 106u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -1188,6 +1188,13 @@ void goss_engine_music_clear_references(goss_engine *engine);
  * The match is the track and time offset the snippet most agrees on, so a few
  * seconds of noisy audio still identifies. */
 goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes);
+
+/* Any thread. Walks a whole buffer through the same energy-flux onset detector
+ * the audio.beat trigger rides and writes the time of every beat, in
+ * microseconds from the buffer's start, into out_times_us (up to capacity).
+ * out_count always receives the full number found, so a caller can size a
+ * buffer and ask again. Deterministic for the same samples. */
+goss_status goss_engine_beat_map(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t *out_times_us, uint32_t capacity, uint32_t *out_count);
 
 #if !defined(__cplusplus) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(goss_frame_desc) == 32, "goss_frame_desc layout is frozen");
