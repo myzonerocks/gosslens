@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 108u
+#define GOSS_ABI_MINOR 109u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -718,6 +718,12 @@ goss_status goss_session_capture_provenance(goss_session *session, uint8_t *out_
  * reconstruction is deterministic. goss_session_reset_capture clears the scan. */
 goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance);
 goss_status goss_session_reset_capture(goss_session *session);
+
+/* Any thread. What the last drawn frame did with the active lens: the stages
+ * ready to draw, the stages it has, and whether the beauty bridge ran. Zero
+ * ready over a non-zero total is a lens the engine activated and is drawing
+ * nothing of, which is what a host shows instead of an unchanged picture. */
+goss_status goss_session_chain_report(goss_session *session, uint32_t *out_ready, uint32_t *out_total, uint32_t *out_beauty);
 
 /* Graph thread. Copies the scan's reconstruction out as gaussians, fourteen
  * floats each: xyz, scale, a rotation quaternion, opacity and rgb. A NULL out

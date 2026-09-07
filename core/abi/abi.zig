@@ -303,6 +303,7 @@ pub const abi_functions = [_][]const u8{
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
     "goss_status goss_engine_beat_map(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t *out_times_us, uint32_t capacity, uint32_t *out_count)",
+    "goss_status goss_session_chain_report(goss_session *session, uint32_t *out_ready, uint32_t *out_total, uint32_t *out_beauty)",
     "goss_status goss_session_read_reconstruction(goss_session *session, float *out, uint32_t capacity, uint32_t *out_count)",
     "goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count)",
 };
@@ -1304,6 +1305,13 @@ pub const Session = struct {
     /// chain position is already known. Owned, rebuilt every
     /// activation, freed on teardown.
     chain_order: []runtime.CompositePass = &.{},
+    /// What the last drawn frame did with the active lens: how many of its stages were ready to
+    /// draw, how many it has, and whether the beauty bridge ran. Read through
+    /// goss_session_chain_report, which is how a host tells a lens that is working from one that
+    /// is silently doing nothing.
+    chain_total: u32 = 0,
+    chain_ready: u32 = 0,
+    chain_beauty: bool = false,
     /// One background loader per currently-spliced lut.pass node still
     /// waiting on its LUT image, keyed by graph index. Started at
     /// activation (directory-based only, same reason as shader_programs
@@ -2697,6 +2705,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // here when their value changed, before the chain reads their textures.
     refreshDynamicText(s);
     var ready_count: usize = 0;
+    s.chain_total = @intCast(s.chain_order.len);
     for (s.chain_order) |entry| {
         // A node a hide or swap_subgraph action hid does not draw and is not
         // counted, so the frame passes through it like any inactive pass.
@@ -2843,7 +2852,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         };
         if (ready) ready_count += 1;
     }
+    s.chain_ready = @intCast(ready_count);
     const beauty_active = anyBeautyActive(s);
+    s.chain_beauty = beauty_active;
     const capture_out_width: u16 = if (s.capture_requested and s.capture_res_width != 0) s.capture_res_width else @intCast(r.width);
     const capture_out_height: u16 = if (s.capture_requested and s.capture_res_height != 0) s.capture_res_height else @intCast(r.height);
     if (s.capture_requested) try ensureCaptureTarget(e, capture_out_width, capture_out_height);
@@ -8515,6 +8526,17 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
 /// Copies the scan's reconstruction out as gaussians, fourteen floats each: xyz,
 /// scale, a rotation quaternion, opacity and rgb. A null buffer sizes it, so a
 /// caller asks for the count and then for the floats.
+/// What the last drawn frame did with the active lens: the stages ready to draw, the stages it
+/// has, and whether the beauty bridge ran. Zero ready over a non-zero total is a lens the engine
+/// activated and is drawing nothing of.
+pub export fn goss_session_chain_report(session: ?*Session, out_ready: ?*u32, out_total: ?*u32, out_beauty: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (out_ready) |p| p.* = s.chain_ready;
+    if (out_total) |p| p.* = s.chain_total;
+    if (out_beauty) |p| p.* = if (s.chain_beauty) 1 else 0;
+    return .ok;
+}
+
 pub export fn goss_session_read_reconstruction(session: ?*Session, out: ?[*]f32, capacity: u32, out_count: ?*u32) Status {
     const s = session orelse return .invalid_argument;
     const count: u32 = @intCast(s.recon_gaussians.items.len / 14);
