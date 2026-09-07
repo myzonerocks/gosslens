@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
 
     const run_gate = b.addRunArtifact(gate_exe);
     run_gate.setCwd(b.path("."));
-    if (b.args) |args| run_gate.addArgs(args);
+    addUserArgs(b, run_gate);
     const gate_step = b.step("gate", "Run the source-tracked gate (-- --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-body <file>)");
     gate_step.dependOn(&run_gate.step);
 
@@ -50,7 +50,6 @@ pub fn build(b: *std.Build) void {
         ci_diff.addArgs(&.{ "--diff", "origin/main...HEAD" });
         ci_step.dependOn(&ci_diff.step);
     }
-
 
     const math_module = b.createModule(.{
         .root_source_file = b.path("core/math/math.zig"),
@@ -145,7 +144,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "abi", .module = abi_module }},
     });
-    const gosslens_header_text = b.build_root.handle.readFileAlloc(b.graph.io, "include/gosslens.h", b.allocator, .limited(1 << 20)) catch @panic("include/gosslens.h unreadable");
+    const gosslens_header_text = rootDir(b).handle.readFileAlloc(b.graph.io, "include/gosslens.h", b.allocator, .limited(1 << 20)) catch @panic("include/gosslens.h unreadable");
     const abi_dump_options = b.addOptions();
     abi_dump_options.addOption([]const u8, "gosslens_header", gosslens_header_text);
     abi_dump_module.addOptions("build_options", abi_dump_options);
@@ -157,7 +156,7 @@ pub fn build(b: *std.Build) void {
 
     const abi_check = b.addRunArtifact(abi_dump_exe);
     abi_check.setCwd(b.path("."));
-    if (b.args) |args| abi_check.addArgs(args) else abi_check.addArgs(&.{ "--check", "tools/abi-baseline.txt" });
+    addUserArgsOr(b, abi_check, &.{ "--check", "tools/abi-baseline.txt" });
     const abi_step = b.step("abi", "Check the ABI surface and header minor against the baseline (zig build abi-update regenerates both)");
     abi_step.dependOn(&abi_check.step);
     ci_step.dependOn(abi_step);
@@ -197,7 +196,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_vendor_sync = b.addRunArtifact(vendor_sync_exe);
     run_vendor_sync.setCwd(b.path("."));
-    if (b.args) |args| run_vendor_sync.addArgs(args);
+    addUserArgs(b, run_vendor_sync);
     const vendor_step = b.step("vendor-sync", "Fetch and verify vendored trees from third_party pins (-- --check to verify only)");
     vendor_step.dependOn(&run_vendor_sync.step);
     {
@@ -221,7 +220,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_fetch_models = b.addRunArtifact(fetch_models_exe);
     run_fetch_models.setCwd(b.path("."));
-    if (b.args) |args| run_fetch_models.addArgs(args);
+    addUserArgs(b, run_fetch_models);
     const fetch_models_step = b.step("fetch-models", "Fetch and verify model files from third_party/models.lock (-- --check to verify only)");
     fetch_models_step.dependOn(&run_fetch_models.step);
     {
@@ -286,15 +285,15 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("stroke", strokeModule(b, target, optimize));
     abi_module.addImport("world_board", worldBoardModule(b, target, optimize));
     const have_jolt = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
         break :blk true;
     };
     const have_quickjs = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/quickjs-ng/quickjs.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/quickjs-ng/quickjs.h", .{}) catch break :blk false;
         break :blk true;
     };
     const have_miniaudio = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/miniaudio/miniaudio.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/miniaudio/miniaudio.h", .{}) catch break :blk false;
         break :blk true;
     };
     abi_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
@@ -364,7 +363,7 @@ pub fn build(b: *std.Build) void {
     const lens_validate_step = b.step("lens-validate", "Validate a .glens bundle (-- <bundle-path>)");
     const lens_validate_run = b.addRunArtifact(lens_validator_exe);
     lens_validate_run.setCwd(b.path("."));
-    if (b.args) |args| lens_validate_run.addArgs(args);
+    addUserArgs(b, lens_validate_run);
     lens_validate_step.dependOn(&lens_validate_run.step);
 
     // The validator runs against every reference lens, in CI. One
@@ -563,7 +562,7 @@ pub fn build(b: *std.Build) void {
     // the build still works, vendor-sync included; only the steps that need
     // a vendor fail, closed, naming the exact command.
     const have_cgltf = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
         break :blk true;
     };
     const gltf_module: ?*std.Build.Module = if (have_cgltf)
@@ -585,8 +584,8 @@ pub fn build(b: *std.Build) void {
     // same probe because the image module is also the CPU conversion
     // authority.
     const have_image_stack = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/bimg/3rdparty/lodepng/lodepng.cpp", .{}) catch break :blk false;
-        b.build_root.handle.access(b.graph.io, ".vendor/libyuv/include/libyuv.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/bimg/3rdparty/lodepng/lodepng.cpp", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/libyuv/include/libyuv.h", .{}) catch break :blk false;
         break :blk true;
     };
     const host_asset: ?AssetModules = if (have_image_stack) realAssetModules(b, target, optimize, gltf_module) else blk: {
@@ -615,7 +614,7 @@ pub fn build(b: *std.Build) void {
     // only where its vendors are synced and the host is supported.
     const have_render_stack = blk: {
         for ([_][]const u8{ ".vendor/bx/src/amalgamated.cpp", ".vendor/bimg/src/image.cpp", ".vendor/bgfx/src/amalgamated.cpp", ".vendor/glfw/src/init.c" }) |probe| {
-            b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
+            rootDir(b).handle.access(b.graph.io, probe, .{}) catch break :blk false;
         }
         break :blk true;
     };
@@ -685,7 +684,7 @@ pub fn build(b: *std.Build) void {
             ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt",
             ".vendor/fft2d/fftsg2d.c",              ".vendor/abseil/absl/base/config.h",
         }) |probe| {
-            b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
+            rootDir(b).handle.access(b.graph.io, probe, .{}) catch break :blk false;
         }
         break :blk true;
     };
@@ -701,7 +700,7 @@ pub fn build(b: *std.Build) void {
             deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildRuyLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildFarmhashLib(b, target, optimize, null), .{}).step);
-        deps_step.dependOn(&b.addInstallArtifact(buildFlatbuffersLib(b, target, optimize, null), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildFlatbuffersLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildXnnpackLib(b, target, optimize, null, null), .{}).step);
         } else {
             deps_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
@@ -711,7 +710,7 @@ pub fn build(b: *std.Build) void {
     {
         const beauty_step = b.step("beauty-lib", "Build the beauty effects engine library");
         const gpupixel_present = blk: {
-            b.build_root.handle.access(b.graph.io, ".vendor/gpupixel/src/CMakeLists.txt", .{}) catch break :blk false;
+            rootDir(b).handle.access(b.graph.io, ".vendor/gpupixel/src/CMakeLists.txt", .{}) catch break :blk false;
             break :blk true;
         };
         if (gpupixel_present) {
@@ -976,7 +975,7 @@ pub fn build(b: *std.Build) void {
         });
         // Small mode: the web pays for bytes before it pays for cycles, and
         // the kernels keep their own inner-loop structure either way.
-        const wasi_optimize: std.builtin.OptimizeMode = .ReleaseSmall;
+        const wasi_optimize: std.builtin.OptimizeMode = opt_small;
         const cores_wasi = trackingCoreModules(b, wasi_target, wasi_optimize, b.createModule(.{
             .root_source_file = b.path("core/math/math.zig"),
             .target = wasi_target,
@@ -1079,93 +1078,93 @@ pub fn build(b: *std.Build) void {
     const wasm_step = b.step("wasm", "Build the gosslens core for the web");
     {
         const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
-        const math_wasm = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = wasm_target, .optimize = .ReleaseSmall });
-        const graph_wasm = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = wasm_target, .optimize = .ReleaseSmall });
+        const math_wasm = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = wasm_target, .optimize = opt_small });
+        const graph_wasm = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = wasm_target, .optimize = opt_small });
         const render_wasm = b.createModule(.{
             .root_source_file = b.path("adapters/bgfx/render_stub.zig"),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = opt_small,
             .imports = &.{.{ .name = "math", .module = math_wasm }},
         });
         const abi_wasm = b.createModule(.{
             .root_source_file = b.path("core/abi/abi.zig"),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = opt_small,
             .imports = &.{
                 .{ .name = "graph", .module = graph_wasm },
                 .{ .name = "math", .module = math_wasm },
                 .{ .name = "render", .module = render_wasm },
             },
         });
-        const tracking_cores_wasm = trackingCoreModules(b, wasm_target, .ReleaseSmall, math_wasm);
+        const tracking_cores_wasm = trackingCoreModules(b, wasm_target, opt_small, math_wasm);
         abi_wasm.addImport("face", tracking_cores_wasm.face);
-    abi_wasm.addImport("hand", tracking_cores_wasm.hand);
-    abi_wasm.addImport("pose", tracking_cores_wasm.pose);
-    abi_wasm.addImport("face_geometry", tracking_cores_wasm.face_geometry);
-    abi_wasm.addImport("png", pngModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("gif", gifModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("color", colorModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, .ReleaseSmall, null));
-    abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall, null));
-    abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("sfx", sfxModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("music", musicModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("barcode", barcodeModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("medialib", medialibModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("qr", qrModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("flash", flashModule(b, wasm_target, .ReleaseSmall));
-    const fft_abi_wasm = fftModule(b, wasm_target, .ReleaseSmall);
-    abi_wasm.addImport("formant", formantModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
-    abi_wasm.addImport("fingerprint", fingerprintModule(b, wasm_target, .ReleaseSmall, fft_abi_wasm));
-    abi_wasm.addImport("layout", compositeLayoutModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("geo", geoModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("world_mesh", worldMeshModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("font", fontModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("stroke", strokeModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("world_board", worldBoardModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
-    abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
-    abi_wasm.addImport("gesture", gestureModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
-    abi_wasm.addImport("particles", particlesModule(b, wasm_target, .ReleaseSmall));
-    abi_wasm.addImport("sph", sphModule(b, wasm_target, .ReleaseSmall));
+        abi_wasm.addImport("hand", tracking_cores_wasm.hand);
+        abi_wasm.addImport("pose", tracking_cores_wasm.pose);
+        abi_wasm.addImport("face_geometry", tracking_cores_wasm.face_geometry);
+        abi_wasm.addImport("png", pngModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("gif", gifModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("color", colorModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, opt_small, null));
+        abi_wasm.addImport("photo", photoModule(b, wasm_target, opt_small, null));
+        abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("sfx", sfxModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("music", musicModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("barcode", barcodeModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("medialib", medialibModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("qr", qrModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("flash", flashModule(b, wasm_target, opt_small));
+        const fft_abi_wasm = fftModule(b, wasm_target, opt_small);
+        abi_wasm.addImport("formant", formantModule(b, wasm_target, opt_small, fft_abi_wasm));
+        abi_wasm.addImport("fingerprint", fingerprintModule(b, wasm_target, opt_small, fft_abi_wasm));
+        abi_wasm.addImport("layout", compositeLayoutModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("geo", geoModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("world_mesh", worldMeshModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("font", fontModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("stroke", strokeModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("world_board", worldBoardModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("physics", physicsModule(b, wasm_target, opt_small, false));
+        abi_wasm.addImport("script", scriptModule(b, wasm_target, opt_small, false));
+        abi_wasm.addImport("gesture", gestureModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, opt_small, false));
+        abi_wasm.addImport("particles", particlesModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("sph", sphModule(b, wasm_target, opt_small));
         abi_wasm.addImport("face106", b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = opt_small,
             .imports = &.{.{ .name = "face", .module = tracking_cores_wasm.face }},
         }));
-        abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
-        abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
-        const stub_ml_tensor_wasm = mlTensorModule(b, wasm_target, .ReleaseSmall);
-        const sync_chain_wasm = syncMlChain(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.sampler);
-        abi_wasm.addImport("ml_infer", mlInferSyncModule(b, wasm_target, .ReleaseSmall, math_wasm, stub_ml_tensor_wasm, tracking_cores_wasm.sampler, sync_chain_wasm));
-        abi_wasm.addImport("diffusion", diffusionModule(b, wasm_target, .ReleaseSmall, sync_chain_wasm.engine, sync_chain_wasm.sample, tracking_cores_wasm.sampler, math_wasm, stub_ml_tensor_wasm, true));
-        abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
+        abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, opt_small, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
+        abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, opt_small, math_wasm));
+        const stub_ml_tensor_wasm = mlTensorModule(b, wasm_target, opt_small);
+        const sync_chain_wasm = syncMlChain(b, wasm_target, opt_small, tracking_cores_wasm.sampler);
+        abi_wasm.addImport("ml_infer", mlInferSyncModule(b, wasm_target, opt_small, math_wasm, stub_ml_tensor_wasm, tracking_cores_wasm.sampler, sync_chain_wasm));
+        abi_wasm.addImport("diffusion", diffusionModule(b, wasm_target, opt_small, sync_chain_wasm.engine, sync_chain_wasm.sample, tracking_cores_wasm.sampler, math_wasm, stub_ml_tensor_wasm, true));
+        abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, opt_small, tracking_cores_wasm.face));
         const lens_manifest_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/manifest.zig"),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = opt_small,
         });
-        lens_manifest_wasm.addImport("material", materialModule(b, wasm_target, .ReleaseSmall));
+        lens_manifest_wasm.addImport("material", materialModule(b, wasm_target, opt_small));
         const lens_trigger_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/trigger.zig"),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = opt_small,
             .imports = &.{ .{ .name = "face", .module = tracking_cores_wasm.face }, .{ .name = "hand", .module = tracking_cores_wasm.hand }, .{ .name = "pose", .module = tracking_cores_wasm.pose } },
         });
         const lens_animation_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/animation.zig"),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = opt_small,
         });
         const lens_runtime_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/runtime.zig"),
             .target = wasm_target,
-            .optimize = .ReleaseSmall,
+            .optimize = opt_small,
             .imports = &.{
                 .{ .name = "graph", .module = graph_wasm },
                 .{ .name = "manifest", .module = lens_manifest_wasm },
@@ -1176,17 +1175,17 @@ pub fn build(b: *std.Build) void {
         });
         abi_wasm.addImport("manifest", lens_manifest_wasm);
         abi_wasm.addImport("trigger", lens_trigger_wasm);
-        lens_runtime_wasm.addImport("logic", logicModule(b, wasm_target, .ReleaseSmall, lens_trigger_wasm));
+        lens_runtime_wasm.addImport("logic", logicModule(b, wasm_target, opt_small, lens_trigger_wasm));
         abi_wasm.addImport("runtime", lens_runtime_wasm);
         // Neither libc nor real threads exist for wasm32-freestanding -
         // the same reason directory-based lens activation already
         // refuses there (defaultIo's std.Io.Threaded can't even be
         // typed for this target). An asset loader needs both, so it
         // gets the same stub treatment as tracking/beauty above.
-        const image_wasm = imageStubModule(b, wasm_target, .ReleaseSmall);
+        const image_wasm = imageStubModule(b, wasm_target, opt_small);
         abi_wasm.addImport("image", image_wasm);
-        const gltf_stub_wasm = gltfStubModule(b, wasm_target, .ReleaseSmall, math_wasm);
-        abi_wasm.addImport("asset", assetStubModule(b, wasm_target, .ReleaseSmall, image_wasm, gltf_stub_wasm));
+        const gltf_stub_wasm = gltfStubModule(b, wasm_target, opt_small, math_wasm);
+        abi_wasm.addImport("asset", assetStubModule(b, wasm_target, opt_small, image_wasm, gltf_stub_wasm));
         abi_wasm.addImport("gltf", gltf_stub_wasm);
         const gosslens_wasm = b.addExecutable(.{ .name = "gosslens", .root_module = abi_wasm });
         gosslens_wasm.entry = .disabled;
@@ -1290,7 +1289,7 @@ pub fn build(b: *std.Build) void {
         const run_harness = b.addRunArtifact(harness_exe);
         run_harness.setCwd(b.path("."));
         run_harness.step.dependOn(lens_package_reference_step);
-        if (b.args) |args| run_harness.addArgs(args);
+        addUserArgs(b, run_harness);
         harness_step.dependOn(&run_harness.step);
 
         // The conformance harness drives a reference lens through the
@@ -1398,8 +1397,8 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "sampler", .module = sampler_module },
                     .{ .name = "face", .module = face_module },
                     .{ .name = "hand", .module = hand_core_module },
-                .{ .name = "pose", .module = pose_core_module },
-                .{ .name = "face_geometry", .module = face_geometry_core_module },
+                    .{ .name = "pose", .module = pose_core_module },
+                    .{ .name = "face_geometry", .module = face_geometry_core_module },
                     .{ .name = "tracker", .module = tracker_module },
                     .{ .name = "graph", .module = graph_module },
                     .{ .name = "math", .module = math_module },
@@ -1550,7 +1549,7 @@ pub fn build(b: *std.Build) void {
         const run_conformance = b.addRunArtifact(conformance_exe);
         run_conformance.setCwd(b.path("."));
         run_conformance.step.dependOn(lens_package_reference_step);
-        if (b.args) |args| run_conformance.addArgs(args);
+        addUserArgs(b, run_conformance);
         conformance_step.dependOn(&run_conformance.step);
         // The leak gates ride the merge bar where the render stack exists:
         // on macOS `zig build ci` runs the full conformance, submit and
@@ -1580,7 +1579,7 @@ fn ndkSysroot(b: *std.Build) ?[]const u8 {
     for ([_][]const u8{ "ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "ANDROID_NDK_LATEST_HOME" }) |name| {
         if (b.graph.environ_map.get(name)) |root| {
             const sysroot = b.pathJoin(&.{ root, "toolchains", "llvm", "prebuilt", prebuilt, "sysroot" });
-            b.build_root.handle.access(b.graph.io, sysroot, .{}) catch continue;
+            rootDir(b).handle.access(b.graph.io, sysroot, .{}) catch continue;
             return sysroot;
         }
     }
@@ -1589,7 +1588,7 @@ fn ndkSysroot(b: *std.Build) ?[]const u8 {
     else
         b.pathJoin(&.{ b.graph.environ_map.get("HOME") orelse return null, "Library", "Android", "sdk" });
     const sysroot = b.pathJoin(&.{ sdk, "ndk", ndk_version, "toolchains", "llvm", "prebuilt", prebuilt, "sysroot" });
-    b.build_root.handle.access(b.graph.io, sysroot, .{}) catch return null;
+    rootDir(b).handle.access(b.graph.io, sysroot, .{}) catch return null;
     return sysroot;
 }
 
@@ -1777,7 +1776,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("runtime", lens_runtime_android);
     const have_inference_stack = blk: {
         for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
-            b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
+            rootDir(b).handle.access(b.graph.io, probe, .{}) catch break :blk false;
         }
         break :blk true;
     };
@@ -1904,7 +1903,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
     const have_cgltf_android = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
         break :blk true;
     };
     const gltf_android = if (have_cgltf_android) gltfModule(b, android_target, optimize, math_android) else null;
@@ -2654,7 +2653,7 @@ fn mlInferStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
 }
 
 fn listFilesRecursive(b: *std.Build, dir_path: []const u8, suffix: []const u8, exclude: []const []const u8, out: *std.ArrayList([]const u8)) void {
-    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
+    var dir = rootDir(b).handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(b.graph.io);
     var it = dir.iterate();
     while (it.next(b.graph.io) catch return) |entry| {
@@ -2680,7 +2679,7 @@ fn listFilesRecursive(b: *std.Build, dir_path: []const u8, suffix: []const u8, e
 // Abseil from the pinned tree: every runtime library source, tests and
 // tooling excluded, one static archive.
 fn immintrinPath(b: *std.Build) []const u8 {
-    const lib_dir = b.graph.zig_lib_directory.path orelse ".";
+    const lib_dir = zigLibDir(b);
     return b.pathJoin(&.{ lib_dir, "include", "immintrin.h" });
 }
 
@@ -2694,9 +2693,8 @@ fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     var sources: std.ArrayList([]const u8) = .empty;
     var absl_excludes: std.ArrayList([]const u8) = .empty;
     absl_excludes.appendSlice(b.allocator, &.{
-        "_test", "test_", "_benchmark", "benchmark", "_mock", "mock_", "matchers",
-        "test_util", "print_hash_of", "gaussian_distribution_gentables", "pool_urbg_gentables",
-        "_win.cc", "_emscripten.cc",
+        "_test",     "test_",         "_benchmark",                      "benchmark",           "_mock",   "mock_",          "matchers",
+        "test_util", "print_hash_of", "gaussian_distribution_gentables", "pool_urbg_gentables", "_win.cc", "_emscripten.cc",
     }) catch @panic("oom");
     // No signals to install a handler for on the web target.
     if (target.result.cpu.arch.isWasm()) {
@@ -2741,16 +2739,16 @@ fn buildCpuinfoLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     const arch = target.result.cpu.arch;
     if (arch == .x86_64) {
         for ([_][]const u8{
-            "x86/init.c",       "x86/info.c",              "x86/vendor.c",
-            "x86/uarch.c",      "x86/name.c",              "x86/topology.c",
-            "x86/isa.c",        "x86/cache/init.c",        "x86/cache/descriptor.c",
+            "x86/init.c",                "x86/info.c",       "x86/vendor.c",
+            "x86/uarch.c",               "x86/name.c",       "x86/topology.c",
+            "x86/isa.c",                 "x86/cache/init.c", "x86/cache/descriptor.c",
             "x86/cache/deterministic.c",
         }) |file| {
             files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
         }
         if (os == .linux) {
             for ([_][]const u8{
-                "linux/cpulist.c", "linux/multiline.c", "linux/processors.c", "linux/smallfile.c",
+                "linux/cpulist.c",  "linux/multiline.c",   "linux/processors.c", "linux/smallfile.c",
                 "x86/linux/init.c", "x86/linux/cpuinfo.c",
             }) |file| {
                 files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
@@ -2766,9 +2764,9 @@ fn buildCpuinfoLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         }
     } else if (os == .linux) {
         for ([_][]const u8{
-            "linux/cpulist.c",       "linux/multiline.c", "linux/processors.c", "linux/smallfile.c",
-            "arm/cache.c",           "arm/uarch.c",       "arm/linux/chipset.c", "arm/linux/clusters.c",
-            "arm/linux/cpuinfo.c",   "arm/linux/hwcap.c", "arm/linux/init.c",    "arm/linux/midr.c",
+            "linux/cpulist.c",         "linux/multiline.c", "linux/processors.c",  "linux/smallfile.c",
+            "arm/cache.c",             "arm/uarch.c",       "arm/linux/chipset.c", "arm/linux/clusters.c",
+            "arm/linux/cpuinfo.c",     "arm/linux/hwcap.c", "arm/linux/init.c",    "arm/linux/midr.c",
             "arm/linux/aarch64-isa.c",
         }) |file| {
             files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
@@ -2876,16 +2874,12 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     // common code they alone pull in), OpenCL, the experimental Rust
     // translator, frame capture, and code for platforms that aren't us.
     const angle_excludes = [_][]const u8{
-        "_unittest.cpp", "_test.cpp",    "_fuzzer.cpp",   "_unittest.mm", "_test.mm",
-        "/fuzz/",        "/tests/",
-        "/renderer/d3d/", "/renderer/vulkan/", "/renderer/wgpu/",
-        "/renderer/null/", "/renderer/gl/",    "/renderer/cl/",
-        "/dxgi_support_table", "/dxgi_format_map_autogen",
-        "/CL",           "/cl_",         "_cl_",         "validationCL", "PackedCLEnums",
-        "system_utils_linux", "system_utils_win",
-        "/common/gl/",   "/common/serializer/", "/common/vulkan/", "/common/spirv/",
-        "/compiler/translator/ir/", "/compiler/translator/hlsl/",
-        "/compiler/translator/spirv/", "/compiler/translator/wgsl/",
+        "_unittest.cpp",      "_test.cpp",                        "_fuzzer.cpp",                "_unittest.mm",                "_test.mm",
+        "/fuzz/",             "/tests/",                          "/renderer/d3d/",             "/renderer/vulkan/",           "/renderer/wgpu/",
+        "/renderer/null/",    "/renderer/gl/",                    "/renderer/cl/",              "/dxgi_support_table",         "/dxgi_format_map_autogen",
+        "/CL",                "/cl_",                             "_cl_",                       "validationCL",                "PackedCLEnums",
+        "system_utils_linux", "system_utils_win",                 "/common/gl/",                "/common/serializer/",         "/common/vulkan/",
+        "/common/spirv/",     "/compiler/translator/ir/",         "/compiler/translator/hlsl/", "/compiler/translator/spirv/", "/compiler/translator/wgsl/",
         "/libANGLE/capture/",
         // The real ASTC decoder needs an external codec this project
         // doesn't vendor; AstcDecompressorNoOp.cpp is ANGLE's own
@@ -2895,9 +2889,8 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         // for iOS is exactly SystemInfo.cpp + SystemInfo_apple.mm +
         // SystemInfo_ios.cpp - every other SystemInfo_*.{cpp,mm} here is
         // a different platform's file.
-        "SystemInfo_android", "SystemInfo_fuchsia", "SystemInfo_libpci",
-        "SystemInfo_linux",   "SystemInfo_macos",   "SystemInfo_vulkan",
-        "SystemInfo_win",     "SystemInfo_x11",
+        "SystemInfo_android",         "SystemInfo_fuchsia",          "SystemInfo_libpci",
+        "SystemInfo_linux",   "SystemInfo_macos",                 "SystemInfo_vulkan",          "SystemInfo_win",              "SystemInfo_x11",
     };
 
     var sources: std.ArrayList([]const u8) = .empty;
@@ -3065,11 +3058,11 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
             // The wrapper's own text never changes between builds, so a
             // vendor patch editing real_path's content alone leaves
             // zig's cache none the wiser. Forces the wrapper to change.
-            const real_content = b.build_root.handle.readFileAlloc(b.graph.io, real_path, b.allocator, .limited(1 << 20)) catch @panic("gpupixel source unreadable");
+            const real_content = rootDir(b).handle.readFileAlloc(b.graph.io, real_path, b.allocator, .limited(1 << 20)) catch @panic("gpupixel source unreadable");
             const fingerprint = std.hash.Wyhash.hash(0, real_content);
             const wrapper = wrappers.add(
                 b.fmt("{s}.mm", .{name}),
-                b.fmt("// fingerprint: {x}\n#include \"{s}\"\n", .{ fingerprint, b.pathFromRoot(real_path) }),
+                b.fmt("// fingerprint: {x}\n#include \"{s}\"\n", .{ fingerprint, fromRoot(b, real_path) }),
             );
             module.addCSourceFile(.{ .file = wrapper, .flags = flags.items });
         } else {
@@ -3119,7 +3112,7 @@ fn joltFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const u8
     flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE" }) catch @panic("OOM");
     if (target.result.os.tag == .emscripten) {
         flags.append(b.allocator, "-include") catch @panic("OOM");
-        flags.append(b.allocator, b.pathFromRoot("adapters/physics/em_thread_stub.h")) catch @panic("OOM");
+        flags.append(b.allocator, fromRoot(b, "adapters/physics/em_thread_stub.h")) catch @panic("OOM");
     }
     return flags.items;
 }
@@ -3174,7 +3167,7 @@ fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         }
     }.lessThan);
     const yuv_flags = [_][]const u8{
-        "-std=c++17",           "-fno-exceptions",         "-fno-sanitize=undefined", "-w",
+        "-std=c++17",           "-fno-exceptions",      "-fno-sanitize=undefined", "-w",
         "-DLIBYUV_DISABLE_SVE", "-DLIBYUV_DISABLE_SME",
     };
     for (yuv_sources.items) |file| {
@@ -3221,7 +3214,7 @@ fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // truth for what compiles on each processor; parsing them keeps this build
 // aligned with the pin instead of a hand-copied snapshot that would rot.
 fn cmakeSourceList(b: *std.Build, root: []const u8, cmake_path: []const u8, var_name: []const u8, out: *std.ArrayList([]const u8)) void {
-    const text = b.build_root.handle.readFileAlloc(b.graph.io, cmake_path, b.allocator, .limited(8 << 20)) catch |err|
+    const text = rootDir(b).handle.readFileAlloc(b.graph.io, cmake_path, b.allocator, .limited(8 << 20)) catch |err|
         std.debug.panic("unreadable cmake list {s}: {s}", .{ cmake_path, @errorName(err) });
     const open = b.fmt("SET({s}", .{var_name});
     var search: usize = 0;
@@ -3329,8 +3322,8 @@ fn xnnpackConfigureModule(b: *std.Build, module: *std.Build.Module, target: std.
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     for ([_][]const u8{
         ".vendor/xnnpack",             ".vendor/xnnpack/include", ".vendor/xnnpack/src",
-        ".vendor/pthreadpool/include",
-        ".vendor/fxdiv/include",       ".vendor/fp16/include", ".vendor/cpuinfo/include",
+        ".vendor/pthreadpool/include", ".vendor/fxdiv/include",   ".vendor/fp16/include",
+        ".vendor/cpuinfo/include",
     }) |dir| {
         module.addIncludePath(b.path(dir));
     }
@@ -3396,12 +3389,12 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         cmakeSourceList(b, ".vendor/xnnpack", ".vendor/xnnpack/CMakeLists.txt", group, &shared);
     }
     for ([_][]const u8{
-        "src/sanitizers.c",       "src/configs/hardware-config.c",     "src/xnnpack/init-once.c",
-        "src/indirection.c",      "src/microparams-init.c",            "src/normalization.c",
-        "src/pack-lh.cc",         "src/reference/packing.cc",          "src/allocator.c",
-        "src/cache.c",            "src/datatype.c",                    "src/operators/fingerprint_id.c",
+        "src/sanitizers.c",                  "src/configs/hardware-config.c",   "src/xnnpack/init-once.c",
+        "src/indirection.c",                 "src/microparams-init.c",          "src/normalization.c",
+        "src/pack-lh.cc",                    "src/reference/packing.cc",        "src/allocator.c",
+        "src/cache.c",                       "src/datatype.c",                  "src/operators/fingerprint_id.c",
         "src/operators/fingerprint_cache.c", "src/xnnpack/fingerprint_check.c", "src/memory.c",
-        "src/microkernel-utils.c", "src/mutex.c",                      "src/operator-run.c",
+        "src/microkernel-utils.c",           "src/mutex.c",                     "src/operator-run.c",
         "src/operator-utils.c",
     }) |file| {
         shared.append(b.allocator, b.fmt(".vendor/xnnpack/{s}", .{file})) catch @panic("oom");
@@ -3473,7 +3466,7 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         }
     }
 
-    const pin_text = b.build_root.handle.readFileAlloc(b.graph.io, "third_party/xnnpack/pin.zon", b.allocator, .limited(4096)) catch @panic("xnnpack pin unreadable");
+    const pin_text = rootDir(b).handle.readFileAlloc(b.graph.io, "third_party/xnnpack/pin.zon", b.allocator, .limited(4096)) catch @panic("xnnpack pin unreadable");
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(pin_text, &digest, .{});
     var id_source: std.ArrayList(u8) = .empty;
@@ -3577,14 +3570,14 @@ fn tfliteGroupSources(b: *std.Build, group: TfliteGroup, out: *std.ArrayList([]c
         b.fmt(".vendor/litert/tflite/{s}", .{group.dir});
     // A directory absent from the pinned tree is an empty group, exactly
     // like the shallow glob it mirrors.
-    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
+    var dir = rootDir(b).handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(b.graph.io);
     var it = dir.iterate();
     files: while (it.next(b.graph.io) catch null) |entry| {
         if (entry.kind != .file) continue;
         const name = entry.name;
         if (!std.mem.endsWith(u8, name, ".c") and !std.mem.endsWith(u8, name, ".cc")) continue;
-        const stem = name[0 .. std.mem.lastIndexOfScalar(u8, name, '.').?];
+        const stem = name[0..std.mem.lastIndexOfScalar(u8, name, '.').?];
         if (std.mem.endsWith(u8, stem, "_test") or std.mem.endsWith(u8, stem, "test_util")) continue;
         for (group.exclude_contains) |pattern| {
             if (std.mem.indexOf(u8, name, pattern) != null) continue :files;
@@ -3612,16 +3605,15 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         module.addIncludePath(b.path("adapters/tracking/wasi_std"));
         module.addCMacro("TFLITE_MMAP_DISABLED", "1");
         module.addCMacro("_WASI_EMULATED_MMAN", "1");
-        wasm_compat_flags = &.{ "-include", b.pathFromRoot("adapters/tracking/wasi_std/wasi_compat.h") };
+        wasm_compat_flags = &.{ "-include", fromRoot(b, "adapters/tracking/wasi_std/wasi_compat.h") };
     }
     for ([_][]const u8{
-        ".vendor/litert",           ".vendor/tensorflow",          ".vendor/tensorflow/third_party/xla",
-        ".vendor/flatbuffers/include",
-        ".vendor/abseil",           ".vendor/eigen",               ".vendor/ruy",
-        ".vendor/gemmlowp",         ".vendor/ml-dtypes",           ".vendor/farmhash/src",
-        ".vendor/neon2sse",
-        ".vendor/cpuinfo/include",  ".vendor/pthreadpool/include", ".vendor/xnnpack",
-        ".vendor/xnnpack/include",  ".vendor/fp16/include",
+        ".vendor/litert",              ".vendor/tensorflow", ".vendor/tensorflow/third_party/xla",
+        ".vendor/flatbuffers/include", ".vendor/abseil",     ".vendor/eigen",
+        ".vendor/ruy",                 ".vendor/gemmlowp",   ".vendor/ml-dtypes",
+        ".vendor/farmhash/src",        ".vendor/neon2sse",   ".vendor/cpuinfo/include",
+        ".vendor/pthreadpool/include", ".vendor/xnnpack",    ".vendor/xnnpack/include",
+        ".vendor/fp16/include",
     }) |dir| {
         module.addIncludePath(b.path(dir));
     }
@@ -3715,29 +3707,28 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
 }
 
 fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
-    b.build_root.handle.access(b.graph.io, ".vendor/flatbuffers/src/flatc_main.cpp", .{}) catch return null;
+    rootDir(b).handle.access(b.graph.io, ".vendor/flatbuffers/src/flatc_main.cpp", .{}) catch return null;
     const target = b.graph.host;
-    const module = b.createModule(.{ .target = target, .optimize = .ReleaseFast });
+    const module = b.createModule(.{ .target = target, .optimize = opt_fast });
     module.link_libcpp = true;
     module.addIncludePath(b.path(".vendor/flatbuffers/include"));
     module.addIncludePath(b.path(".vendor/flatbuffers"));
     module.addIncludePath(b.path(".vendor/flatbuffers/grpc"));
     const flags = [_][]const u8{ "-std=c++17", "-fno-exceptions", "-fno-sanitize=undefined", "-w" };
     const sources = [_][]const u8{
-        "src/idl_parser.cpp",          "src/idl_gen_text.cpp",     "src/reflection.cpp",
-        "src/util.cpp",                "src/idl_gen_binary.cpp",   "src/idl_gen_cpp.cpp",
-        "src/idl_gen_csharp.cpp",      "src/idl_gen_dart.cpp",     "src/idl_gen_kotlin.cpp",
-        "src/idl_gen_kotlin_kmp.cpp",  "src/idl_gen_go.cpp",       "src/idl_gen_java.cpp",
-        "src/idl_gen_ts.cpp",          "src/idl_gen_php.cpp",      "src/idl_gen_python.cpp",
-        "src/idl_gen_lobster.cpp",     "src/idl_gen_rust.cpp",     "src/idl_gen_fbs.cpp",
-        "src/idl_gen_grpc.cpp",        "src/idl_gen_json_schema.cpp", "src/idl_gen_swift.cpp",
-        "src/file_name_saving_file_manager.cpp", "src/file_binary_writer.cpp", "src/file_writer.cpp",
-        "src/flatc.cpp",               "src/flatc_main.cpp",       "src/binary_annotator.cpp",
-        "src/annotated_binary_text_gen.cpp", "src/bfbs_gen_lua.cpp", "src/bfbs_gen_nim.cpp",
-        "src/code_generators.cpp",     "include/codegen/python.cc",
-        "grpc/src/compiler/cpp_generator.cc", "grpc/src/compiler/go_generator.cc",
-        "grpc/src/compiler/java_generator.cc", "grpc/src/compiler/python_generator.cc",
-        "grpc/src/compiler/swift_generator.cc", "grpc/src/compiler/ts_generator.cc",
+        "src/idl_parser.cpp",                    "src/idl_gen_text.cpp",                "src/reflection.cpp",
+        "src/util.cpp",                          "src/idl_gen_binary.cpp",              "src/idl_gen_cpp.cpp",
+        "src/idl_gen_csharp.cpp",                "src/idl_gen_dart.cpp",                "src/idl_gen_kotlin.cpp",
+        "src/idl_gen_kotlin_kmp.cpp",            "src/idl_gen_go.cpp",                  "src/idl_gen_java.cpp",
+        "src/idl_gen_ts.cpp",                    "src/idl_gen_php.cpp",                 "src/idl_gen_python.cpp",
+        "src/idl_gen_lobster.cpp",               "src/idl_gen_rust.cpp",                "src/idl_gen_fbs.cpp",
+        "src/idl_gen_grpc.cpp",                  "src/idl_gen_json_schema.cpp",         "src/idl_gen_swift.cpp",
+        "src/file_name_saving_file_manager.cpp", "src/file_binary_writer.cpp",          "src/file_writer.cpp",
+        "src/flatc.cpp",                         "src/flatc_main.cpp",                  "src/binary_annotator.cpp",
+        "src/annotated_binary_text_gen.cpp",     "src/bfbs_gen_lua.cpp",                "src/bfbs_gen_nim.cpp",
+        "src/code_generators.cpp",               "include/codegen/python.cc",           "grpc/src/compiler/cpp_generator.cc",
+        "grpc/src/compiler/go_generator.cc",     "grpc/src/compiler/java_generator.cc", "grpc/src/compiler/python_generator.cc",
+        "grpc/src/compiler/swift_generator.cc",  "grpc/src/compiler/ts_generator.cc",
     };
     for (sources) |file| {
         module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/flatbuffers/{s}", .{file})), .flags = &flags });
@@ -3760,7 +3751,7 @@ fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
 var apple_sdk: ?[]const u8 = null;
 
 fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
-    const sdk = apple_sdk orelse b.sysroot orelse return;
+    const sdk = apple_sdk orelse sysrootOf(b) orelse return;
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "include" }) });
     module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "lib" }) });
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }) });
@@ -3773,7 +3764,7 @@ fn buildBgfxLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
 }
 
 fn buildBgfxLibFlags(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, extra_flags: []const []const u8) *std.Build.Step.Compile {
-    const debug_flag = if (optimize == .Debug) "-DBX_CONFIG_DEBUG=1" else "-DBX_CONFIG_DEBUG=0";
+    const debug_flag = if (optimize == opt_debug) "-DBX_CONFIG_DEBUG=1" else "-DBX_CONFIG_DEBUG=0";
 
     const bgfx_module = b.createModule(.{ .target = target, .optimize = optimize });
     bgfx_module.link_libc = true;
@@ -3818,10 +3809,10 @@ fn buildGlfwLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     glfw_module.addIncludePath(b.path(".vendor/glfw/src"));
     const glfw_flags = [_][]const u8{"-D_GLFW_COCOA"};
     for ([_][]const u8{
-        "context.c",      "egl_context.c",  "init.c",         "input.c",
-        "monitor.c",      "null_init.c",    "null_joystick.c", "null_monitor.c",
-        "null_window.c",  "osmesa_context.c", "platform.c",   "vulkan.c",
-        "window.c",       "macos_time.c",   "posix_module.c", "posix_thread.c",
+        "context.c",     "egl_context.c",    "init.c",          "input.c",
+        "monitor.c",     "null_init.c",      "null_joystick.c", "null_monitor.c",
+        "null_window.c", "osmesa_context.c", "platform.c",      "vulkan.c",
+        "window.c",      "macos_time.c",     "posix_module.c",  "posix_thread.c",
     }) |file| {
         glfw_module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/glfw/src/{s}", .{file})), .flags = &glfw_flags });
     }
@@ -3832,7 +3823,7 @@ fn buildGlfwLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
 }
 
 fn listFiles(b: *std.Build, dir_path: []const u8, suffix: []const u8) ?[][]const u8 {
-    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return null;
+    var dir = rootDir(b).handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return null;
     defer dir.close(b.graph.io);
     var files: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
@@ -3854,7 +3845,7 @@ fn listFiles(b: *std.Build, dir_path: []const u8, suffix: []const u8) ?[][]const
 // any reference lens exists) is not an error - an empty list.
 fn listReferenceLenses(b: *std.Build) [][]const u8 {
     const dir_path = "lenses/reference";
-    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return &.{};
+    var dir = rootDir(b).handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return &.{};
     defer dir.close(b.graph.io);
     var lenses: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
@@ -3957,7 +3948,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         return;
     };
     apple_sdk = b.option([]const u8, config.sdk_option_name, b.fmt("Path to the {s} SDK", .{config.sdk_name})) orelse
-        (if (config.abi == .none) b.sysroot else null) orelse
+        (if (config.abi == .none) sysrootOf(b) else null) orelse
         detectAppleSdk(b, config.xcrun_sdk);
     if (apple_sdk == null) {
         const missing = b.addFail(b.fmt(
@@ -4060,15 +4051,15 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     // build does, so hiding a vendor turns that subsystem into its stub
     // instead of leaving an empty library target that fails to link.
     const have_jolt_ios = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
         break :blk true;
     };
     const have_quickjs_ios = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/quickjs-ng/quickjs.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/quickjs-ng/quickjs.h", .{}) catch break :blk false;
         break :blk true;
     };
     const have_miniaudio_ios = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/miniaudio/miniaudio.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/miniaudio/miniaudio.h", .{}) catch break :blk false;
         break :blk true;
     };
     abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, have_jolt_ios));
@@ -4112,7 +4103,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("runtime", lens_runtime_ios);
     const have_inference_stack = blk: {
         for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
-            b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
+            rootDir(b).handle.access(b.graph.io, probe, .{}) catch break :blk false;
         }
         break :blk true;
     };
@@ -4259,7 +4250,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
     const have_cgltf_ios = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
         break :blk true;
     };
     const gltf_ios = if (have_cgltf_ios) gltfModule(b, ios_target, optimize, math_ios) else null;
@@ -4287,7 +4278,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     // ranlib rewrites zig's archives into the accepted layout.
     for (device_libs.items) |lib| {
         const install = b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = config.install_dir } } });
-        const fix = b.addSystemCommand(&.{ "ranlib", b.getInstallPath(.{ .custom = config.install_dir }, lib.out_filename) });
+        const fix = b.addSystemCommand(&.{ "ranlib", installedPath(b, config.install_dir, lib.out_filename) });
         fix.step.dependOn(&install.step);
         ios_step.dependOn(&fix.step);
     }
@@ -4299,12 +4290,12 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
 fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build.Step.Compile {
     _ = optimize;
     const step = b.step("shaderc", "Build the shader compiler from the vendored bgfx tree");
-    b.build_root.handle.access(b.graph.io, ".vendor/bgfx/tools/shaderc/shaderc.cpp", .{}) catch {
+    rootDir(b).handle.access(b.graph.io, ".vendor/bgfx/tools/shaderc/shaderc.cpp", .{}) catch {
         step.dependOn(&b.addFail("gosslens: .vendor/bgfx missing, run zig build vendor-sync").step);
         return null;
     };
     const target = b.graph.host;
-    const opt = .ReleaseFast;
+    const opt: std.builtin.OptimizeMode = opt_fast;
 
     const bgfx_dir = ".vendor/bgfx";
     const spirv_tools = ".vendor/bgfx/3rdparty/spirv-tools";
@@ -4521,7 +4512,7 @@ const EmToolchain = struct {
 // from PATH.
 fn emscriptenToolchain(b: *std.Build) ?EmToolchain {
     const present = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/emscripten/emscripten/em++", .{}) catch break :blk false;
+        rootDir(b).handle.access(b.graph.io, ".vendor/emscripten/emscripten/em++", .{}) catch break :blk false;
         break :blk true;
     };
     if (!present) return null;
@@ -4530,19 +4521,19 @@ fn emscriptenToolchain(b: *std.Build) ?EmToolchain {
     // system interpreter), so where its sync was legitimately skipped,
     // fall back to PATH's python3 instead of failing forever.
     const em_python = blk: {
-        b.build_root.handle.access(b.graph.io, ".vendor/emscripten-python/bin/python3", .{}) catch {
-            const system_python = b.findProgram(&.{"python3"}, &.{}) catch return null;
+        rootDir(b).handle.access(b.graph.io, ".vendor/emscripten-python/bin/python3", .{}) catch {
+            const system_python = findProgram(b, &.{"python3"}) catch return null;
             break :blk system_python;
         };
-        break :blk b.pathFromRoot(".vendor/emscripten-python/bin/python3");
+        break :blk fromRoot(b, ".vendor/emscripten-python/bin/python3");
     };
-    const node_exe = b.findProgram(&.{"node"}, &.{}) catch return null;
+    const node_exe = findProgram(b, &.{"node"}) catch return null;
     return .{
-        .em_plus_plus = b.pathFromRoot(".vendor/emscripten/emscripten/em++"),
-        .em_root = b.pathFromRoot(".vendor/emscripten"),
+        .em_plus_plus = fromRoot(b, ".vendor/emscripten/emscripten/em++"),
+        .em_root = fromRoot(b, ".vendor/emscripten"),
         .em_python = em_python,
-        .em_llvm_root = b.pathFromRoot(".vendor/emscripten/bin"),
-        .em_config = b.pathFromRoot("adapters/bgfx/em_config_empty"),
+        .em_llvm_root = fromRoot(b, ".vendor/emscripten/bin"),
+        .em_config = fromRoot(b, "adapters/bgfx/em_config_empty"),
         .node_exe = node_exe,
     };
 }
@@ -4644,16 +4635,16 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         return;
     }
     const em_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
-    const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = .ReleaseSmall });
-    const graph_em = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = em_target, .optimize = .ReleaseSmall });
-    const shader_blobs_em = addShaderBlobs(b, shaderc_exe.?, em_target, .ReleaseSmall);
-    const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
-    const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = .ReleaseSmall });
-    const lash_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = opt_small });
+    const graph_em = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = em_target, .optimize = opt_small });
+    const shader_blobs_em = addShaderBlobs(b, shaderc_exe.?, em_target, opt_small);
+    const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = opt_small });
+    const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = opt_small });
+    const lash_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = em_target, .optimize = opt_small });
     const render_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = em_target,
-        .optimize = .ReleaseSmall,
+        .optimize = opt_small,
         .imports = &.{
             .{ .name = "math", .module = math_em },
             .{ .name = "shader_blobs", .module = shader_blobs_em },
@@ -4670,7 +4661,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     const abi_em = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
         .target = em_target,
-        .optimize = .ReleaseSmall,
+        .optimize = opt_small,
         .imports = &.{
             .{ .name = "graph", .module = graph_em },
             .{ .name = "math", .module = math_em },
@@ -4682,48 +4673,48 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     // the em++ link step regardless, same as render_em's own
     // sysroot include path below.
     abi_em.link_libc = true;
-    const tracking_cores_em = trackingCoreModules(b, em_target, .ReleaseSmall, math_em);
+    const tracking_cores_em = trackingCoreModules(b, em_target, opt_small, math_em);
     abi_em.addImport("face", tracking_cores_em.face);
     abi_em.addImport("hand", tracking_cores_em.hand);
     abi_em.addImport("pose", tracking_cores_em.pose);
     abi_em.addImport("face_geometry", tracking_cores_em.face_geometry);
-    abi_em.addImport("png", pngModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("gif", gifModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("jpeg", jpegModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("color", colorModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("media_video", mediaVideoModule(b, em_target, .ReleaseSmall, null));
-    abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall, null));
-    abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("audio_mix", audioMixModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("sfx", sfxModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("music", musicModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("barcode", barcodeModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("medialib", medialibModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("qr", qrModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("flash", flashModule(b, em_target, .ReleaseSmall));
-    const fft_abi_em = fftModule(b, em_target, .ReleaseSmall);
-    abi_em.addImport("formant", formantModule(b, em_target, .ReleaseSmall, fft_abi_em));
-    abi_em.addImport("fingerprint", fingerprintModule(b, em_target, .ReleaseSmall, fft_abi_em));
-    abi_em.addImport("layout", compositeLayoutModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("geo", geoModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("world_mesh", worldMeshModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("font", fontModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("stroke", strokeModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("world_board", worldBoardModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, true));
-    abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, true));
-    abi_em.addImport("gesture", gestureModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, true));
-    abi_em.addImport("particles", particlesModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("sph", sphModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
-    abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
-    const stub_ml_tensor_em = mlTensorModule(b, em_target, .ReleaseSmall);
-    const sync_chain_em = syncMlChain(b, em_target, .ReleaseSmall, tracking_cores_em.sampler);
-    abi_em.addImport("ml_infer", mlInferSyncModule(b, em_target, .ReleaseSmall, math_em, stub_ml_tensor_em, tracking_cores_em.sampler, sync_chain_em));
-    abi_em.addImport("diffusion", diffusionModule(b, em_target, .ReleaseSmall, sync_chain_em.engine, sync_chain_em.sample, tracking_cores_em.sampler, math_em, stub_ml_tensor_em, true));
-    abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
+    abi_em.addImport("png", pngModule(b, em_target, opt_small));
+    abi_em.addImport("gif", gifModule(b, em_target, opt_small));
+    abi_em.addImport("jpeg", jpegModule(b, em_target, opt_small));
+    abi_em.addImport("color", colorModule(b, em_target, opt_small));
+    abi_em.addImport("media_recording", recordingModule(b, em_target, opt_small));
+    abi_em.addImport("media_video", mediaVideoModule(b, em_target, opt_small, null));
+    abi_em.addImport("photo", photoModule(b, em_target, opt_small, null));
+    abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, opt_small));
+    abi_em.addImport("audio_mix", audioMixModule(b, em_target, opt_small));
+    abi_em.addImport("sfx", sfxModule(b, em_target, opt_small));
+    abi_em.addImport("music", musicModule(b, em_target, opt_small));
+    abi_em.addImport("barcode", barcodeModule(b, em_target, opt_small));
+    abi_em.addImport("medialib", medialibModule(b, em_target, opt_small));
+    abi_em.addImport("qr", qrModule(b, em_target, opt_small));
+    abi_em.addImport("flash", flashModule(b, em_target, opt_small));
+    const fft_abi_em = fftModule(b, em_target, opt_small);
+    abi_em.addImport("formant", formantModule(b, em_target, opt_small, fft_abi_em));
+    abi_em.addImport("fingerprint", fingerprintModule(b, em_target, opt_small, fft_abi_em));
+    abi_em.addImport("layout", compositeLayoutModule(b, em_target, opt_small));
+    abi_em.addImport("geo", geoModule(b, em_target, opt_small));
+    abi_em.addImport("world_mesh", worldMeshModule(b, em_target, opt_small));
+    abi_em.addImport("font", fontModule(b, em_target, opt_small));
+    abi_em.addImport("stroke", strokeModule(b, em_target, opt_small));
+    abi_em.addImport("world_board", worldBoardModule(b, em_target, opt_small));
+    abi_em.addImport("physics", physicsModule(b, em_target, opt_small, true));
+    abi_em.addImport("script", scriptModule(b, em_target, opt_small, true));
+    abi_em.addImport("gesture", gestureModule(b, em_target, opt_small));
+    abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, opt_small, true));
+    abi_em.addImport("particles", particlesModule(b, em_target, opt_small));
+    abi_em.addImport("sph", sphModule(b, em_target, opt_small));
+    abi_em.addImport("tracking", trackingStubModule(b, em_target, opt_small, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
+    abi_em.addImport("segmentation", segmentationStubModule(b, em_target, opt_small, math_em));
+    const stub_ml_tensor_em = mlTensorModule(b, em_target, opt_small);
+    const sync_chain_em = syncMlChain(b, em_target, opt_small, tracking_cores_em.sampler);
+    abi_em.addImport("ml_infer", mlInferSyncModule(b, em_target, opt_small, math_em, stub_ml_tensor_em, tracking_cores_em.sampler, sync_chain_em));
+    abi_em.addImport("diffusion", diffusionModule(b, em_target, opt_small, sync_chain_em.engine, sync_chain_em.sample, tracking_cores_em.sampler, math_em, stub_ml_tensor_em, true));
+    abi_em.addImport("beauty", beautyStubModule(b, em_target, opt_small, tracking_cores_em.face));
     // Web's own beauty.reshape dispatch needs the 106-point
     // contour directly (no gpupixel bridge to hand raw
     // landmarks to on this target) - the same module the real
@@ -4731,23 +4722,23 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     const face106_em = b.createModule(.{
         .root_source_file = b.path("core/tracking/face106.zig"),
         .target = em_target,
-        .optimize = .ReleaseSmall,
+        .optimize = opt_small,
         .imports = &.{.{ .name = "face", .module = tracking_cores_em.face }},
     });
     abi_em.addImport("face106", face106_em);
-    const lens_manifest_em = b.createModule(.{ .root_source_file = b.path("core/lens/manifest.zig"), .target = em_target, .optimize = .ReleaseSmall });
-    lens_manifest_em.addImport("material", materialModule(b, em_target, .ReleaseSmall));
+    const lens_manifest_em = b.createModule(.{ .root_source_file = b.path("core/lens/manifest.zig"), .target = em_target, .optimize = opt_small });
+    lens_manifest_em.addImport("material", materialModule(b, em_target, opt_small));
     const lens_trigger_em = b.createModule(.{
         .root_source_file = b.path("core/lens/trigger.zig"),
         .target = em_target,
-        .optimize = .ReleaseSmall,
+        .optimize = opt_small,
         .imports = &.{ .{ .name = "face", .module = tracking_cores_em.face }, .{ .name = "hand", .module = tracking_cores_em.hand }, .{ .name = "pose", .module = tracking_cores_em.pose } },
     });
-    const lens_animation_em = b.createModule(.{ .root_source_file = b.path("core/lens/animation.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const lens_animation_em = b.createModule(.{ .root_source_file = b.path("core/lens/animation.zig"), .target = em_target, .optimize = opt_small });
     const lens_runtime_em = b.createModule(.{
         .root_source_file = b.path("core/lens/runtime.zig"),
         .target = em_target,
-        .optimize = .ReleaseSmall,
+        .optimize = opt_small,
         .imports = &.{
             .{ .name = "graph", .module = graph_em },
             .{ .name = "manifest", .module = lens_manifest_em },
@@ -4758,13 +4749,13 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     });
     abi_em.addImport("manifest", lens_manifest_em);
     abi_em.addImport("trigger", lens_trigger_em);
-    lens_runtime_em.addImport("logic", logicModule(b, em_target, .ReleaseSmall, lens_trigger_em));
+    lens_runtime_em.addImport("logic", logicModule(b, em_target, opt_small, lens_trigger_em));
     abi_em.addImport("runtime", lens_runtime_em);
-    const image_em = imageStubModule(b, em_target, .ReleaseSmall);
+    const image_em = imageStubModule(b, em_target, opt_small);
     abi_em.addImport("image", image_em);
     render_em.addImport("image", image_em);
-    const gltf_stub_em = gltfStubModule(b, em_target, .ReleaseSmall, math_em);
-    abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em, gltf_stub_em));
+    const gltf_stub_em = gltfStubModule(b, em_target, opt_small, math_em);
+    abi_em.addImport("asset", assetStubModule(b, em_target, opt_small, image_em, gltf_stub_em));
     abi_em.addImport("gltf", gltf_stub_em);
 
     // A static library, not addObject: with C++ in the module graph,
@@ -4780,8 +4771,8 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     link.addArg("-Wl,--no-whole-archive");
     // The module graph's dependent static libraries do not fold into the
     // emitted archive, so the link takes them alongside, lazily.
-    link.addFileArg(buildJoltLib(b, em_target, .ReleaseSmall).getEmittedBin());
-    link.addFileArg(buildQuickjsLib(b, em_target, .ReleaseSmall).getEmittedBin());
+    link.addFileArg(buildJoltLib(b, em_target, opt_small).getEmittedBin());
+    link.addFileArg(buildQuickjsLib(b, em_target, opt_small).getEmittedBin());
     for (bgfx_objects.items) |obj| link.addFileArg(obj);
     if (webgpu) {
         // emdawnwebgpu is this pinned Emscripten's WebGPU port
@@ -4855,7 +4846,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     // that a build failure instead of a runtime discovery.
     const exports_check_tool = b.addExecutable(.{
         .name = "wasm_exports_check",
-        .root_module = b.createModule(.{ .root_source_file = b.path("tools/wasm_exports_check.zig"), .target = b.graph.host, .optimize = .Debug }),
+        .root_module = b.createModule(.{ .root_source_file = b.path("tools/wasm_exports_check.zig"), .target = b.graph.host, .optimize = opt_debug }),
     });
     const exports_check = b.addRunArtifact(exports_check_tool);
     exports_check.addFileArg(wasm_out);
@@ -4943,15 +4934,15 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     };
 
     const em_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
-    const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = .ReleaseSmall });
-    const shader_blobs_em = addShaderBlobs(b, shaderc_tool, em_target, .ReleaseSmall);
-    const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
-    const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = .ReleaseSmall });
-    const lash_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = opt_small });
+    const shader_blobs_em = addShaderBlobs(b, shaderc_tool, em_target, opt_small);
+    const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = opt_small });
+    const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = opt_small });
+    const lash_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/lash_mesh.zig"), .target = em_target, .optimize = opt_small });
     const render_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = em_target,
-        .optimize = .ReleaseSmall,
+        .optimize = opt_small,
         .imports = &.{
             .{ .name = "math", .module = math_em },
             .{ .name = "shader_blobs", .module = shader_blobs_em },
@@ -4968,13 +4959,13 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     // on the search path, not Zig's own (nonexistent, for this target)
     // libc linkage.
     render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
-    render_em.addImport("image", imageStubModule(b, em_target, .ReleaseSmall));
+    render_em.addImport("image", imageStubModule(b, em_target, opt_small));
     addBgfxCallbacks(b, render_em);
 
     const driver_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/wasm_emscripten_core_smoke.zig"),
         .target = em_target,
-        .optimize = .ReleaseSmall,
+        .optimize = opt_small,
         .imports = &.{.{ .name = "render", .module = render_em }},
     });
     driver_em.link_libc = true;
@@ -5240,7 +5231,7 @@ fn addCxxDir(b: *std.Build, module: *std.Build.Module, dir: []const u8, flags: [
 }
 
 fn enforcePinnedZig(b: *std.Build) void {
-    const raw = b.build_root.handle.readFileAlloc(b.graph.io, ".zigversion", b.allocator, .limited(128)) catch |err|
+    const raw = rootDir(b).handle.readFileAlloc(b.graph.io, ".zigversion", b.allocator, .limited(128)) catch |err|
         std.process.fatal("gosslens: cannot read .zigversion: {t}", .{err});
     const pinned = std.mem.trim(u8, raw, " \t\r\n");
     if (std.mem.eql(u8, pinned, builtin.zig_version_string)) return;
@@ -5249,4 +5240,69 @@ fn enforcePinnedZig(b: *std.Build) void {
         return;
     }
     std.process.fatal("gosslens: expected Zig {s}, found {s}, run tools/toolchain-sync", .{ pinned, builtin.zig_version_string });
+}
+
+/// The arguments after "--" on the zig build line. The pinned Zig hands them to the script as
+/// b.args; master hands them to the run step at run time as a passthrough, so the step asks
+/// for them itself and the script never reads a field one of the two does not have.
+fn addUserArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (@hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args);
+    } else {
+        run.addPassthruArgs();
+    }
+}
+
+/// The same, with a default when nothing followed "--". On master the default is always
+/// given and the passthrough follows it, so an override lands after the default.
+fn addUserArgsOr(b: *std.Build, run: *std.Build.Step.Run, default: []const []const u8) void {
+    if (@hasField(std.Build, "args")) {
+        if (b.args) |args| run.addArgs(args) else run.addArgs(default);
+    } else {
+        run.addArgs(default);
+        run.addPassthruArgs();
+    }
+}
+
+/// The directory holding build.zig, whichever field this Zig keeps it in.
+fn rootDir(b: *std.Build) std.Build.Cache.Directory {
+    return if (@hasField(std.Build, "build_root")) b.build_root else b.root.root_dir;
+}
+
+// The optimize modes by whichever names this Zig gives them: the pinned one capitalises
+// them, master does not.
+const opt_debug: std.builtin.OptimizeMode = if (@hasField(std.builtin.OptimizeMode, "Debug")) .Debug else .debug;
+const opt_fast: std.builtin.OptimizeMode = if (@hasField(std.builtin.OptimizeMode, "ReleaseFast")) .ReleaseFast else .fast;
+const opt_small: std.builtin.OptimizeMode = if (@hasField(std.builtin.OptimizeMode, "ReleaseSmall")) .ReleaseSmall else .small;
+
+/// A path under the directory holding build.zig, as a string, on either Zig.
+fn fromRoot(b: *std.Build, sub_path: []const u8) []const u8 {
+    if (@hasDecl(std.Build, "pathFromRoot")) return b.pathFromRoot(sub_path);
+    return b.pathJoin(&.{ rootDir(b).path orelse ".", sub_path });
+}
+
+/// The --sysroot given to zig build, on the Zig that still carries one.
+fn sysrootOf(b: *std.Build) ?[]const u8 {
+    return if (@hasField(std.Build, "sysroot")) b.sysroot else null;
+}
+
+/// Zig's own lib directory: named on the pinned Zig, beside the compiler on master.
+fn zigLibDir(b: *std.Build) []const u8 {
+    if (@hasField(std.Build.Graph, "zig_lib_directory")) return b.graph.zig_lib_directory.path orelse ".";
+    return b.pathJoin(&.{ std.fs.path.dirname(b.graph.zig_exe) orelse ".", "lib" });
+}
+
+/// A program on PATH, through whichever arity this Zig's findProgram takes.
+fn findProgram(b: *std.Build, names: []const []const u8) ![]const u8 {
+    // Master finds programs lazily, as a step; the callers here want a path at configure time
+    // for optional tools, so on master they are simply not found and their steps stay off.
+    if (@hasDecl(std.Build.Step, "FindProgram")) return error.FileNotFound;
+    return b.findProgram(names, &.{});
+}
+
+/// Where an artifact lands under a custom install directory, on either Zig.
+fn installedPath(b: *std.Build, dir: []const u8, name: []const u8) []const u8 {
+    if (@hasDecl(std.Build, "getInstallPath")) return b.getInstallPath(.{ .custom = dir }, name);
+    const prefix: []const u8 = if (@hasField(std.Build, "install_prefix")) b.install_prefix else "zig-out";
+    return b.pathJoin(&.{ prefix, dir, name });
 }
