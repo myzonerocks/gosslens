@@ -260,16 +260,26 @@ export fn Java_com_gosslens_Gosslens_nativeMusicIdentify(env: *JniEnv, cls: jobj
 export fn Java_com_gosslens_Gosslens_nativeChainReport(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    // A direct buffer carries no alignment promise, so the ABI writes aligned locals that are
+    // copied out afterwards.
+    var ready: u32 = 0;
+    var total: u32 = 0;
+    var beauty: u32 = 0;
+    const status = abi.goss_session_chain_report(sessionFromHandle(session), &ready, &total, &beauty);
     const out: *align(1) [3]u32 = @ptrCast(out_bytes);
-    return @intFromEnum(abi.goss_session_chain_report(sessionFromHandle(session), &out[0], &out[1], &out[2]));
+    out.* = .{ ready, total, beauty };
+    return @intFromEnum(status);
 }
 
 export fn Java_com_gosslens_Gosslens_nativeReadReconstruction(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, capacity: i32, count_buffer: jobject) i32 {
     _ = cls;
     const count_bytes = getDirectBufferAddress(env, count_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    const out_count: *align(1) u32 = @ptrCast(count_bytes);
     const out: ?[*]f32 = if (capacity > 0) @ptrCast(@alignCast(getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument))) else null;
-    return @intFromEnum(abi.goss_session_read_reconstruction(sessionFromHandle(session), out, @intCast(@max(capacity, 0)), out_count));
+    var count: u32 = 0;
+    const status = abi.goss_session_read_reconstruction(sessionFromHandle(session), out, @intCast(@max(capacity, 0)), &count);
+    const out_count: *align(1) u32 = @ptrCast(count_bytes);
+    out_count.* = count;
+    return @intFromEnum(status);
 }
 
 export fn Java_com_gosslens_Gosslens_nativeWriteReconstruction(env: *JniEnv, cls: jobject, session: i64, buffer: jobject, count: i32) i32 {
@@ -283,9 +293,12 @@ export fn Java_com_gosslens_Gosslens_nativeBeatMap(env: *JniEnv, cls: jobject, e
     _ = cls;
     const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const count_bytes = getDirectBufferAddress(env, count_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    const out_count: *align(1) u32 = @ptrCast(count_bytes);
+    var count: u32 = 0;
     const times: ?[*]i64 = if (capacity > 0) @ptrCast(@alignCast(getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument))) else null;
-    return @intFromEnum(abi.goss_engine_beat_map(engineFromHandle(engine), @ptrCast(@alignCast(samples)), @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0)), times, @intCast(@max(capacity, 0)), out_count));
+    const status = abi.goss_engine_beat_map(engineFromHandle(engine), @ptrCast(@alignCast(samples)), @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0)), times, @intCast(@max(capacity, 0)), &count);
+    const out_count: *align(1) u32 = @ptrCast(count_bytes);
+    out_count.* = count;
+    return @intFromEnum(status);
 }
 
 export fn Java_com_gosslens_Gosslens_nativeSetDubbing(env: *JniEnv, cls: jobject, session: i64, enabled: i32) i32 {

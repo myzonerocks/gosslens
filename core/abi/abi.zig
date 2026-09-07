@@ -8523,9 +8523,6 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
     return .ok;
 }
 
-/// Copies the scan's reconstruction out as gaussians, fourteen floats each: xyz,
-/// scale, a rotation quaternion, opacity and rgb. A null buffer sizes it, so a
-/// caller asks for the count and then for the floats.
 /// What the last drawn frame did with the active lens: the stages ready to draw, the stages it
 /// has, and whether the beauty bridge ran. Zero ready over a non-zero total is a lens the engine
 /// activated and is drawing nothing of.
@@ -8537,6 +8534,9 @@ pub export fn goss_session_chain_report(session: ?*Session, out_ready: ?*u32, ou
     return .ok;
 }
 
+/// Copies the scan's reconstruction out as gaussians, fourteen floats each: xyz,
+/// scale, a rotation quaternion, opacity and rgb. A null buffer sizes it, so a
+/// caller asks for the count and then for the floats.
 pub export fn goss_session_read_reconstruction(session: ?*Session, out: ?[*]f32, capacity: u32, out_count: ?*u32) Status {
     const s = session orelse return .invalid_argument;
     const count: u32 = @intCast(s.recon_gaussians.items.len / 14);

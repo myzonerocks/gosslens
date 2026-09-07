@@ -260,7 +260,6 @@ fn clampSample(pixels: []const u8, width: u32, height: u32, sx: i64, sy: i64) [3
     return .{ pixels[i], pixels[i + 1], pixels[i + 2] };
 }
 
-
 /// The rows an MCU row can see. The whole-image encoder hands it every row; the streaming one
 /// hands it the band in hand and the row the band starts at. Sampling clamps to the picture, so an
 /// MCU hanging off the right or bottom edge repeats the edge exactly as it always has.
@@ -348,7 +347,6 @@ const Mcu = struct {
         }
     }
 };
-
 
 /// The markers before the scan: identity, quantisation, frame shape, and the Huffman tables.
 /// Shared, so the whole-image and streaming encoders can never write different headers.

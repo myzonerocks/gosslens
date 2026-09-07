@@ -63,12 +63,12 @@ pub const NodeParam = struct { name: []const u8, binding: ParamBinding };
 /// lens-format vocabulary; a running session without the class serves
 /// the zero mask, so the effect draws nothing rather than everywhere.
 pub const mask_channels = [_][]const u8{
-    "person",  "background", "hair",    "body_skin", "face_skin",
-    "clothes", "others",     "head",    "hand",      "lips",
-    "eyes",    "brows",      "iris",    "teeth",     "contour",
-    "highlight", "lash_line", "under_eye", "nasolabial", "sclera",
-    "t_zone",  "hair_matte", "sky",     "ground",    "building",
-    "ear",     "lid_inner",  "lid_center", "lid_outer", "lid_crease",
+    "person",    "background", "hair",       "body_skin",  "face_skin",
+    "clothes",   "others",     "head",       "hand",       "lips",
+    "eyes",      "brows",      "iris",       "teeth",      "contour",
+    "highlight", "lash_line",  "under_eye",  "nasolabial", "sclera",
+    "t_zone",    "hair_matte", "sky",        "ground",     "building",
+    "ear",       "lid_inner",  "lid_center", "lid_outer",  "lid_crease",
     "saliency",
 };
 
@@ -3315,7 +3315,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     if (iv == .object) {
                         var it: Interaction = .{};
                         try rejectUnknownKeys(diags, path, "sprite interaction", iv.object, &.{
-                            "drag", "pinch",          "rotate",          "tap_event",       "slider_param",
+                            "drag",            "pinch",      "rotate",     "tap_event",      "slider_param",
                             "slider_vertical", "slider_min", "slider_max", "carousel_param", "carousel_count",
                         });
                         if (getField(iv.object, "drag")) |b| {
