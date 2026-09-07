@@ -21517,8 +21517,8 @@ fn goldenSignature(gpa: std.mem.Allocator, engine: *abi.Engine, out: *[golden_bl
 /// Averages the readback into an 8x8 grid of RGB means. Every pixel is visited
 /// once, so this is linear in the frame and needs no scratch beyond the grid.
 fn goldenBlocks(pixels: []const u8, w: u32, h: u32, out: *[golden_blocks * golden_blocks * 3]u8) void {
-    var sums = [_]u64{0} ** (golden_blocks * golden_blocks * 3);
-    var counts = [_]u64{0} ** (golden_blocks * golden_blocks);
+    var sums: [golden_blocks * golden_blocks * 3]u64 = @splat(0);
+    var counts: [golden_blocks * golden_blocks]u64 = @splat(0);
     for (0..h) |y| {
         const by = @min(y * golden_blocks / h, golden_blocks - 1);
         for (0..w) |x| {
