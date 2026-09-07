@@ -257,6 +257,13 @@ export fn Java_com_gosslens_Gosslens_nativeMusicIdentify(env: *JniEnv, cls: jobj
     return @intFromEnum(rc);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeChainReport(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: *align(1) [3]u32 = @ptrCast(out_bytes);
+    return @intFromEnum(abi.goss_session_chain_report(sessionFromHandle(session), &out[0], &out[1], &out[2]));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReadReconstruction(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, capacity: i32, count_buffer: jobject) i32 {
     _ = cls;
     const count_bytes = getDirectBufferAddress(env, count_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

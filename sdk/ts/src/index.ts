@@ -2740,6 +2740,20 @@ export class GossSession {
     );
   }
 
+  /// What the last drawn frame did with the active lens: stages ready to draw,
+  /// stages it has, and whether the beauty bridge ran. Zero ready over a non-zero
+  /// total is a lens the engine activated and is drawing nothing of.
+  chainReport(): { ready: number; total: number; beauty: boolean } {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const status = this.mod.ccall("goss_session_chain_report", "number", ["number", "number", "number", "number"], [this.handle, ptr, ptr + 4, ptr + 8]);
+    const view = new DataView(this.mod.HEAPU8.buffer, ptr, 12);
+    const out = status === 0
+      ? { ready: view.getUint32(0, true), total: view.getUint32(4, true), beauty: view.getUint32(8, true) !== 0 }
+      : { ready: 0, total: 0, beauty: false };
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
+    return out;
+  }
+
   /// The scan's reconstruction as gaussians, fourteen numbers each: xyz, scale,
   /// a rotation quaternion, opacity and rgb. This is what a client writes into a
   /// moment file.

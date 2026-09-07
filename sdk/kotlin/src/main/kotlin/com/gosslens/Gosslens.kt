@@ -44,6 +44,7 @@ object Gosslens {
     internal external fun nativeMusicClearReferences(engine: Long)
     internal external fun nativeMusicIdentify(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, minVotes: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeBeatMap(engine: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
+    internal external fun nativeChainReport(session: Long, outBuffer: ByteBuffer): Int
     internal external fun nativeReadReconstruction(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
     internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
@@ -1250,6 +1251,15 @@ class GossSession private constructor(
         handle, stateBuffer, planesBuffer, planeCount, anchorsBuffer, anchorCount, lightBuffer,
     ) == 0
 
+    /** What the last drawn frame did with the active lens: stages ready to draw, stages it
+     * has, and whether the beauty bridge ran. Zero ready over a non-zero total is a lens the
+     * engine activated and is drawing nothing of. */
+    fun chainReport(): ChainReport {
+        val out = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeChainReport(handle, out) != 0) return ChainReport(0, 0, false)
+        return ChainReport(out.getInt(0), out.getInt(4), out.getInt(8) != 0)
+    }
+
     /** The scan's reconstruction as gaussians, fourteen floats each: xyz, scale, a
      * rotation quaternion, opacity and rgb. This is what a client writes into a
      * moment file. */
@@ -1275,6 +1285,8 @@ class GossSession private constructor(
         buf.asFloatBuffer().put(gaussians)
         return Gosslens.nativeWriteReconstruction(handle, buf, gaussians.size / 14) == 0
     }
+
+    data class ChainReport(val ready: Int, val total: Int, val beauty: Boolean)
 
     /** Submits a bare camera pose and projection, for a host driving a scan with no
      * platform world session behind it: a selfie scan on the front camera, where the

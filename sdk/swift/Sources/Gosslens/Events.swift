@@ -396,6 +396,17 @@ extension GossSession {
         try checked(goss_session_reset_capture(handle))
     }
 
+    /// What the last drawn frame did with the active lens: how many of its stages were ready to
+    /// draw, how many it has, and whether the beauty bridge ran. Zero ready over a non-zero total
+    /// is a lens the engine activated and is drawing nothing of.
+    public func chainReport() -> (ready: UInt32, total: UInt32, beauty: Bool) {
+        var ready: UInt32 = 0
+        var total: UInt32 = 0
+        var beauty: UInt32 = 0
+        _ = goss_session_chain_report(handle, &ready, &total, &beauty)
+        return (ready, total, beauty != 0)
+    }
+
     /// The scan's reconstruction as gaussians, fourteen floats each: xyz, scale, a rotation
     /// quaternion, opacity and rgb. This is what a client writes into a moment file.
     public func readReconstruction() throws -> [Float] {
