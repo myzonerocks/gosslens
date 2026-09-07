@@ -65,7 +65,7 @@ fn prepare(user_data: ?*anyopaque, context: ?*c.TfLiteOpaqueContext, node: ?*c.T
 fn tensorFloats(tensor: anytype) []f32 {
     if (c.TfLiteOpaqueTensorType(tensor) != c.kTfLiteFloat32) unreachable;
     const bytes = c.TfLiteOpaqueTensorData(tensor).?;
-    const floats: [*]f32 = @alignCast(@ptrCast(bytes));
+    const floats: [*]f32 = @ptrCast(@alignCast(bytes));
     const count = c.TfLiteOpaqueTensorByteSize(tensor) / @sizeOf(f32);
     return floats[0..count];
 }

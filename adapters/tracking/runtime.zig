@@ -9,13 +9,7 @@ const ml_delegate = @import("ml_delegate");
 
 pub const Backend = ml_delegate.Backend;
 
-pub const c = @cImport({
-    @cInclude("tflite/c/c_api.h");
-    @cInclude("tflite/core/c/c_api_opaque.h");
-    @cInclude("tflite/delegates/xnnpack/xnnpack_delegate.h");
-    @cInclude("tflite/delegates/coreml/coreml_delegate.h");
-    @cInclude("tflite/delegates/nnapi/nnapi_delegate_c_api.h");
-});
+pub const c = @import("c");
 
 pub const Error = error{
     ModelRejected,

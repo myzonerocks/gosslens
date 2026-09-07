@@ -16,8 +16,8 @@ pub const Landmark = sampler.Landmark;
 /// file the model embeds. Index zero is the no-gesture class.
 pub const gesture_count = 8;
 pub const gesture_names = [gesture_count][]const u8{
-    "None",      "Closed_Fist", "Open_Palm", "Pointing_Up",
-    "Thumb_Down", "Thumb_Up",   "Victory",   "ILoveYou",
+    "None",       "Closed_Fist", "Open_Palm", "Pointing_Up",
+    "Thumb_Down", "Thumb_Up",    "Victory",   "ILoveYou",
 };
 
 /// The gesture's index in gesture_names, or null for an unknown name.

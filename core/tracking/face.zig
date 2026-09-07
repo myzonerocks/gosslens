@@ -24,19 +24,19 @@ pub const region_scale = 1.5;
 /// by locating the length-52 offset vector and walking it) rather than
 /// assumed from the published category list, though it matches it.
 pub const blendshape_names = [blendshape_count][]const u8{
-    "_neutral",         "browDownLeft",      "browDownRight",     "browInnerUp",
-    "browOuterUpLeft",  "browOuterUpRight",  "cheekPuff",         "cheekSquintLeft",
-    "cheekSquintRight", "eyeBlinkLeft",      "eyeBlinkRight",     "eyeLookDownLeft",
-    "eyeLookDownRight", "eyeLookInLeft",     "eyeLookInRight",    "eyeLookOutLeft",
-    "eyeLookOutRight",  "eyeLookUpLeft",     "eyeLookUpRight",    "eyeSquintLeft",
-    "eyeSquintRight",   "eyeWideLeft",       "eyeWideRight",      "jawForward",
-    "jawLeft",          "jawOpen",           "jawRight",          "mouthClose",
-    "mouthDimpleLeft",  "mouthDimpleRight",  "mouthFrownLeft",    "mouthFrownRight",
+    "_neutral",         "browDownLeft",      "browDownRight",      "browInnerUp",
+    "browOuterUpLeft",  "browOuterUpRight",  "cheekPuff",          "cheekSquintLeft",
+    "cheekSquintRight", "eyeBlinkLeft",      "eyeBlinkRight",      "eyeLookDownLeft",
+    "eyeLookDownRight", "eyeLookInLeft",     "eyeLookInRight",     "eyeLookOutLeft",
+    "eyeLookOutRight",  "eyeLookUpLeft",     "eyeLookUpRight",     "eyeSquintLeft",
+    "eyeSquintRight",   "eyeWideLeft",       "eyeWideRight",       "jawForward",
+    "jawLeft",          "jawOpen",           "jawRight",           "mouthClose",
+    "mouthDimpleLeft",  "mouthDimpleRight",  "mouthFrownLeft",     "mouthFrownRight",
     "mouthFunnel",      "mouthLeft",         "mouthLowerDownLeft", "mouthLowerDownRight",
-    "mouthPressLeft",   "mouthPressRight",   "mouthPucker",       "mouthRight",
-    "mouthRollLower",   "mouthRollUpper",    "mouthShrugLower",   "mouthShrugUpper",
-    "mouthSmileLeft",   "mouthSmileRight",   "mouthStretchLeft",  "mouthStretchRight",
-    "mouthUpperUpLeft", "mouthUpperUpRight", "noseSneerLeft",     "noseSneerRight",
+    "mouthPressLeft",   "mouthPressRight",   "mouthPucker",        "mouthRight",
+    "mouthRollLower",   "mouthRollUpper",    "mouthShrugLower",    "mouthShrugUpper",
+    "mouthSmileLeft",   "mouthSmileRight",   "mouthStretchLeft",   "mouthStretchRight",
+    "mouthUpperUpLeft", "mouthUpperUpRight", "noseSneerLeft",      "noseSneerRight",
 };
 
 /// The blendshape's index in blendshape_names/Result.blendshapes, or null
@@ -123,15 +123,15 @@ pub fn regionLandmark(region: Region) u16 {
 /// at 61 and 291 and the rest in order around the lip, so a face-part matte
 /// fills this polygon straight from tracking.
 pub const outer_lip_loop = [_]u16{
-    61, 146, 91,  181, 84,  17,  314, 405, 321, 375,
-    291, 409, 270, 269, 267, 0,   37,  39,  40,  185,
+    61,  146, 91,  181, 84,  17, 314, 405, 321, 375,
+    291, 409, 270, 269, 267, 0,  37,  39,  40,  185,
 };
 
 /// The inner-lip contour as a closed ring, the mouth aperture inside the
 /// outer lip, so a face-part matte fills the teeth when the mouth opens.
 pub const inner_lip_loop = [_]u16{
-    78,  95,  88,  178, 87,  14,  317, 402, 318, 324,
-    308, 415, 310, 311, 312, 13,  82,  81,  80,  191,
+    78,  95,  88,  178, 87,  14, 317, 402, 318, 324,
+    308, 415, 310, 311, 312, 13, 82,  81,  80,  191,
 };
 
 /// Each eye's lid contour as a closed ring, the outer corner first (263 and

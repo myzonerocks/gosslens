@@ -98,142 +98,140 @@ pub const pose = WithKeypoints(pose_keypoint_count);
 /// The decode shapes for one model family's keypoint count.
 pub fn WithKeypoints(comptime family_keypoints: u32) type {
     return struct {
+        pub const Detection = struct {
+            score: f32,
+            /// Box center and size, normalized to the model input square.
+            x: f32,
+            y: f32,
+            width: f32,
+            height: f32,
+            keypoints: [family_keypoints][2]f32,
 
-pub const Detection = struct {
-    score: f32,
-    /// Box center and size, normalized to the model input square.
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    keypoints: [family_keypoints][2]f32,
-
-    fn overlap(a: *const Detection, b: *const Detection) f32 {
-        const ax0 = a.x - a.width * 0.5;
-        const ay0 = a.y - a.height * 0.5;
-        const bx0 = b.x - b.width * 0.5;
-        const by0 = b.y - b.height * 0.5;
-        const x0 = @max(ax0, bx0);
-        const y0 = @max(ay0, by0);
-        const x1 = @min(ax0 + a.width, bx0 + b.width);
-        const y1 = @min(ay0 + a.height, by0 + b.height);
-        if (x1 <= x0 or y1 <= y0) return 0;
-        const shared = (x1 - x0) * (y1 - y0);
-        const total = a.width * a.height + b.width * b.height - shared;
-        if (total <= 0) return 0;
-        return shared / total;
-    }
-};
-
-/// Decodes raw model output into `out`, returning the accepted slice.
-/// `raw_boxes` holds 4 box values then the keypoint pairs per anchor, in
-/// model input pixels; `raw_scores` holds one logit per anchor. Candidates
-/// below `min_score` are dropped before any allocation-free merge work.
-pub fn decode(
-    raw_boxes: []const f32,
-    raw_scores: []const f32,
-    anchors: []const Anchor,
-    input_size: f32,
-    min_score: f32,
-    out: []Detection,
-) []Detection {
-    std.debug.assert(raw_boxes.len == anchors.len * (4 + family_keypoints * 2));
-    std.debug.assert(raw_scores.len == anchors.len);
-    const min_logit = scoreToLogit(min_score);
-    const values_per_anchor = 4 + family_keypoints * 2;
-
-    var count: usize = 0;
-    for (anchors, 0..) |anchor, at| {
-        // Clamped comparison in logit space skips the transcendental for
-        // the overwhelming majority of anchors.
-        const logit = std.math.clamp(raw_scores[at], -100.0, 100.0);
-        if (logit < min_logit) continue;
-        if (count == out.len) break;
-
-        const raw = raw_boxes[at * values_per_anchor ..][0..values_per_anchor];
-        var detection: Detection = .{
-            .score = sigmoid(logit),
-            .x = anchor.x + raw[0] / input_size,
-            .y = anchor.y + raw[1] / input_size,
-            .width = raw[2] / input_size,
-            .height = raw[3] / input_size,
-            .keypoints = undefined,
-        };
-        for (0..family_keypoints) |keypoint| {
-            detection.keypoints[keypoint] = .{
-                anchor.x + raw[4 + keypoint * 2] / input_size,
-                anchor.y + raw[4 + keypoint * 2 + 1] / input_size,
-            };
-        }
-        out[count] = detection;
-        count += 1;
-    }
-    return mergeOverlapping(out[0..count]);
-}
-
-/// Score-weighted merge of overlapping detections, in place. Candidates
-/// are sorted by score; each survivor absorbs every remaining candidate
-/// that overlaps it past the threshold, averaging geometry by score.
-fn mergeOverlapping(candidates: []Detection) []Detection {
-    const min_overlap = 0.3;
-    std.mem.sort(Detection, candidates, {}, struct {
-        fn byScore(_: void, a: Detection, b: Detection) bool {
-            return a.score > b.score;
-        }
-    }.byScore);
-
-    var kept: usize = 0;
-    var remaining = candidates.len;
-    while (remaining > kept) {
-        const anchor_box = candidates[kept];
-        var merged = anchor_box;
-        var weight = anchor_box.score;
-        merged.x *= weight;
-        merged.y *= weight;
-        merged.width *= weight;
-        merged.height *= weight;
-        for (&merged.keypoints) |*keypoint| {
-            keypoint[0] *= weight;
-            keypoint[1] *= weight;
-        }
-
-        // Partition survivors ahead of the read cursor so the pass stays
-        // linear in the candidate count for each kept detection.
-        var write = kept + 1;
-        for (candidates[kept + 1 .. remaining]) |candidate| {
-            if (anchor_box.overlap(&candidate) >= min_overlap) {
-                const w = candidate.score;
-                merged.x += candidate.x * w;
-                merged.y += candidate.y * w;
-                merged.width += candidate.width * w;
-                merged.height += candidate.height * w;
-                for (&merged.keypoints, candidate.keypoints) |*keypoint, other| {
-                    keypoint[0] += other[0] * w;
-                    keypoint[1] += other[1] * w;
-                }
-                weight += w;
-            } else {
-                candidates[write] = candidate;
-                write += 1;
+            fn overlap(a: *const Detection, b: *const Detection) f32 {
+                const ax0 = a.x - a.width * 0.5;
+                const ay0 = a.y - a.height * 0.5;
+                const bx0 = b.x - b.width * 0.5;
+                const by0 = b.y - b.height * 0.5;
+                const x0 = @max(ax0, bx0);
+                const y0 = @max(ay0, by0);
+                const x1 = @min(ax0 + a.width, bx0 + b.width);
+                const y1 = @min(ay0 + a.height, by0 + b.height);
+                if (x1 <= x0 or y1 <= y0) return 0;
+                const shared = (x1 - x0) * (y1 - y0);
+                const total = a.width * a.height + b.width * b.height - shared;
+                if (total <= 0) return 0;
+                return shared / total;
             }
-        }
-        remaining = write;
+        };
 
-        merged.x /= weight;
-        merged.y /= weight;
-        merged.width /= weight;
-        merged.height /= weight;
-        for (&merged.keypoints) |*keypoint| {
-            keypoint[0] /= weight;
-            keypoint[1] /= weight;
-        }
-        merged.score = anchor_box.score;
-        candidates[kept] = merged;
-        kept += 1;
-    }
-    return candidates[0..kept];
-}
+        /// Decodes raw model output into `out`, returning the accepted slice.
+        /// `raw_boxes` holds 4 box values then the keypoint pairs per anchor, in
+        /// model input pixels; `raw_scores` holds one logit per anchor. Candidates
+        /// below `min_score` are dropped before any allocation-free merge work.
+        pub fn decode(
+            raw_boxes: []const f32,
+            raw_scores: []const f32,
+            anchors: []const Anchor,
+            input_size: f32,
+            min_score: f32,
+            out: []Detection,
+        ) []Detection {
+            std.debug.assert(raw_boxes.len == anchors.len * (4 + family_keypoints * 2));
+            std.debug.assert(raw_scores.len == anchors.len);
+            const min_logit = scoreToLogit(min_score);
+            const values_per_anchor = 4 + family_keypoints * 2;
 
+            var count: usize = 0;
+            for (anchors, 0..) |anchor, at| {
+                // Clamped comparison in logit space skips the transcendental for
+                // the overwhelming majority of anchors.
+                const logit = std.math.clamp(raw_scores[at], -100.0, 100.0);
+                if (logit < min_logit) continue;
+                if (count == out.len) break;
+
+                const raw = raw_boxes[at * values_per_anchor ..][0..values_per_anchor];
+                var detection: Detection = .{
+                    .score = sigmoid(logit),
+                    .x = anchor.x + raw[0] / input_size,
+                    .y = anchor.y + raw[1] / input_size,
+                    .width = raw[2] / input_size,
+                    .height = raw[3] / input_size,
+                    .keypoints = undefined,
+                };
+                for (0..family_keypoints) |keypoint| {
+                    detection.keypoints[keypoint] = .{
+                        anchor.x + raw[4 + keypoint * 2] / input_size,
+                        anchor.y + raw[4 + keypoint * 2 + 1] / input_size,
+                    };
+                }
+                out[count] = detection;
+                count += 1;
+            }
+            return mergeOverlapping(out[0..count]);
+        }
+
+        /// Score-weighted merge of overlapping detections, in place. Candidates
+        /// are sorted by score; each survivor absorbs every remaining candidate
+        /// that overlaps it past the threshold, averaging geometry by score.
+        fn mergeOverlapping(candidates: []Detection) []Detection {
+            const min_overlap = 0.3;
+            std.mem.sort(Detection, candidates, {}, struct {
+                fn byScore(_: void, a: Detection, b: Detection) bool {
+                    return a.score > b.score;
+                }
+            }.byScore);
+
+            var kept: usize = 0;
+            var remaining = candidates.len;
+            while (remaining > kept) {
+                const anchor_box = candidates[kept];
+                var merged = anchor_box;
+                var weight = anchor_box.score;
+                merged.x *= weight;
+                merged.y *= weight;
+                merged.width *= weight;
+                merged.height *= weight;
+                for (&merged.keypoints) |*keypoint| {
+                    keypoint[0] *= weight;
+                    keypoint[1] *= weight;
+                }
+
+                // Partition survivors ahead of the read cursor so the pass stays
+                // linear in the candidate count for each kept detection.
+                var write = kept + 1;
+                for (candidates[kept + 1 .. remaining]) |candidate| {
+                    if (anchor_box.overlap(&candidate) >= min_overlap) {
+                        const w = candidate.score;
+                        merged.x += candidate.x * w;
+                        merged.y += candidate.y * w;
+                        merged.width += candidate.width * w;
+                        merged.height += candidate.height * w;
+                        for (&merged.keypoints, candidate.keypoints) |*keypoint, other| {
+                            keypoint[0] += other[0] * w;
+                            keypoint[1] += other[1] * w;
+                        }
+                        weight += w;
+                    } else {
+                        candidates[write] = candidate;
+                        write += 1;
+                    }
+                }
+                remaining = write;
+
+                merged.x /= weight;
+                merged.y /= weight;
+                merged.width /= weight;
+                merged.height /= weight;
+                for (&merged.keypoints) |*keypoint| {
+                    keypoint[0] /= weight;
+                    keypoint[1] /= weight;
+                }
+                merged.score = anchor_box.score;
+                candidates[kept] = merged;
+                kept += 1;
+            }
+            return candidates[0..kept];
+        }
     };
 }
 

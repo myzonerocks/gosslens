@@ -124,8 +124,8 @@ const bone_joints = [bone_count][3]u16{
 };
 
 const bone_names = [bone_count][]const u8{
-    "left_elbow",    "right_elbow", "left_knee", "right_knee",
-    "left_shoulder", "right_shoulder", "left_hip", "right_hip",
+    "left_elbow",    "right_elbow",    "left_knee", "right_knee",
+    "left_shoulder", "right_shoulder", "left_hip",  "right_hip",
 };
 
 /// The index of a bone by name, for the trigger grammar; null if unknown.

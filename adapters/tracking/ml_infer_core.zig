@@ -724,4 +724,3 @@ pub const TemporalCore = struct {
         return core.in_sq.layout == .nchw;
     }
 };
-

@@ -6,9 +6,7 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("lodepng.h");
-});
+const c = @import("c");
 
 // libyuv's own header drags in libc headers zig's C translator cannot
 // digest on every target sysroot; these two are plain C signatures,

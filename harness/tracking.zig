@@ -29,7 +29,7 @@ const builtin = @import("builtin");
 /// where one exists and the tracking pipeline everywhere.
 const beauty_available = builtin.os.tag == .macos;
 
-const stb = @cImport(@cInclude("stb_image.h"));
+const stb = @import("stb");
 
 extern fn goss_beauty_create(resource_path: ?[*:0]const u8) ?*anyopaque;
 extern fn goss_beauty_destroy(handle: ?*anyopaque) void;

@@ -24,11 +24,8 @@ const face_mesh_topology = @import("face_mesh_topology");
 const material = @import("material");
 const gltf = @import("gltf");
 
-const c = @cImport({
-    @cDefine("GLFW_INCLUDE_NONE", "1");
-    @cInclude("GLFW/glfw3.h");
-});
-const stb = @cImport(@cInclude("stb_image.h"));
+const c = @import("c");
+const stb = @import("stb");
 
 extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 
