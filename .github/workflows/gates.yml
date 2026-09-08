@@ -22,15 +22,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/cache@v4
-        id: zigtool
+      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # shell has, pinned by flake.lock.
+      - name: set up nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          path: .local/zig
-          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
-      - name: toolchain
-        run: |
-          tools/toolchain-sync
-          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+          nix_path: nixpkgs=channel:nixos-unstable
       - name: pr body shape
         if: github.event_name == 'pull_request'
         env:
@@ -40,7 +37,7 @@ jobs:
           zig build gate -- --pr-body "$RUNNER_TEMP/pr_body.txt"
       - name: commit provenance
         if: github.event_name == 'pull_request'
-        run: zig build gate -- --log "origin/${{ github.base_ref }}..HEAD"
+        run: nix develop -c zig build gate -- --log "origin/${{ github.base_ref }}..HEAD"
       - uses: actions/cache@v4
         id: vendor
         with:
@@ -49,14 +46,14 @@ jobs:
             .vendor-archives
           key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
       - name: vendor sync
-        run: zig build vendor-sync
+        run: nix develop -c zig build vendor-sync
       - uses: actions/cache@v4
         id: models
         with:
           path: .models
           key: models-${{ hashFiles('third_party/models.lock') }}
       - name: fetch models
-        run: zig build fetch-models
+        run: nix develop -c zig build fetch-models
       - uses: actions/cache/restore@v4
         id: zigcache
         with:
@@ -67,7 +64,7 @@ jobs:
           restore-keys: |
             zigcache-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: gate suite
-        run: zig build ci
+        run: nix develop -c zig build ci
         env:
           GOSS_PROBES: "1"
       - uses: actions/cache/save@v4
@@ -89,15 +86,12 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        id: zigtool
+      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # shell has, pinned by flake.lock.
+      - name: set up nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          path: .local/zig
-          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
-      - name: toolchain
-        run: |
-          tools/toolchain-sync
-          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+          nix_path: nixpkgs=channel:nixos-unstable
       - uses: actions/cache@v4
         id: vendor
         with:
@@ -106,14 +100,14 @@ jobs:
             .vendor-archives
           key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
       - name: vendor sync
-        run: zig build vendor-sync
+        run: nix develop -c zig build vendor-sync
       - uses: actions/cache@v4
         id: models
         with:
           path: .models
           key: models-${{ hashFiles('third_party/models.lock') }}
       - name: fetch models
-        run: zig build fetch-models
+        run: nix develop -c zig build fetch-models
       - uses: actions/cache/restore@v4
         id: zigcache
         with:
@@ -124,7 +118,7 @@ jobs:
           restore-keys: |
             zigcache-tracking-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: tracking harness
-        run: zig build tracking-harness
+        run: nix develop -c zig build tracking-harness
       - uses: actions/cache/save@v4
         if: github.ref == 'refs/heads/main'
         with:
@@ -144,15 +138,12 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        id: zigtool
+      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # shell has, pinned by flake.lock.
+      - name: set up nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          path: .local/zig
-          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
-      - name: toolchain
-        run: |
-          tools/toolchain-sync
-          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+          nix_path: nixpkgs=channel:nixos-unstable
       - uses: actions/cache@v4
         id: vendor
         with:
@@ -161,14 +152,14 @@ jobs:
             .vendor-archives
           key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
       - name: vendor sync
-        run: zig build vendor-sync
+        run: nix develop -c zig build vendor-sync
       - uses: actions/cache@v4
         id: models
         with:
           path: .models
           key: models-${{ hashFiles('third_party/models.lock') }}
       - name: fetch models
-        run: zig build fetch-models
+        run: nix develop -c zig build fetch-models
       - uses: actions/cache/restore@v4
         id: zigcache
         with:
@@ -183,7 +174,7 @@ jobs:
       # the real Apple media and beauty shims compile, and the headless lifecycle
       # leak proof in the test step runs here.
       - name: build and test
-        run: zig build test --summary all
+        run: nix develop -c zig build test --summary all
         env:
           GOSS_PROBES: "1"
       - uses: actions/cache/save@v4
@@ -205,15 +196,12 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        id: zigtool
+      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # shell has, pinned by flake.lock.
+      - name: set up nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          path: .local/zig
-          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
-      - name: toolchain
-        run: |
-          tools/toolchain-sync
-          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+          nix_path: nixpkgs=channel:nixos-unstable
       - uses: actions/cache@v4
         id: vendor
         with:
@@ -222,7 +210,7 @@ jobs:
             .vendor-archives
           key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
       - name: vendor sync
-        run: zig build vendor-sync
+        run: nix develop -c zig build vendor-sync
       - uses: actions/cache/restore@v4
         id: zigcache
         with:
@@ -233,7 +221,7 @@ jobs:
           restore-keys: |
             zigcache-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: android library
-        run: zig build android
+        run: nix develop -c zig build android
       - uses: actions/cache/save@v4
         if: github.ref == 'refs/heads/main'
         with:
@@ -269,15 +257,12 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        id: zigtool
+      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # shell has, pinned by flake.lock.
+      - name: set up nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          path: .local/zig
-          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
-      - name: toolchain
-        run: |
-          tools/toolchain-sync
-          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+          nix_path: nixpkgs=channel:nixos-unstable
       - uses: actions/cache@v4
         id: vendor
         with:
@@ -286,7 +271,7 @@ jobs:
             .vendor-archives
           key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
       - name: vendor sync
-        run: zig build vendor-sync
+        run: nix develop -c zig build vendor-sync
       - uses: actions/cache/restore@v4
         id: zigcache
         with:
@@ -297,9 +282,9 @@ jobs:
           restore-keys: |
             zigcache-lens-shaders-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: lens validator shader tests
-        run: zig build test -Dlens-shaders=true
+        run: nix develop -c zig build test -Dlens-shaders=true
       - name: validate reference lenses
-        run: zig build lens-validate-reference
+        run: nix develop -c zig build lens-validate-reference
       - uses: actions/cache/save@v4
         if: github.ref == 'refs/heads/main'
         with:
@@ -334,18 +319,18 @@ jobs:
             .vendor-archives
           key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
       - name: vendor sync
-        run: zig build vendor-sync
+        run: nix develop -c zig build vendor-sync
       - uses: actions/cache@v4
         with:
           path: .models
           key: models-${{ hashFiles('third_party/models.lock') }}
       - name: fetch models
-        run: zig build fetch-models
+        run: nix develop -c zig build fetch-models
       # The pixel conformance suite renders through bgfx/Metal, which a
       # macos runner has and a Linux runner does not, moving the render
       # proofs off the local-only bar. A headless runner that cannot
       # present surfaces the gap here rather than hiding it.
       - name: conformance
-        run: zig build conformance
+        run: nix develop -c zig build conformance
         env:
           GOSS_PROBES: "1"
