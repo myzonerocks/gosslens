@@ -1693,6 +1693,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .{ .cpu = .x86_64, .dir = "x86_64" },
     }) |abi_target| {
         const so = addAndroidSlice(b, abi_target, sysroot, optimize, shaderc_tool, flatc_exe);
+        stripShipped(so.root_module, optimize);
         android_step.dependOn(&b.addInstallArtifact(so, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("android/{s}", .{abi_target.dir}) } } }).step);
     }
 }
@@ -4043,6 +4044,19 @@ fn listReferenceLenses(b: *std.Build) [][]const u8 {
 // the version is written, and a mismatching compiler fails closed here. The
 // shadow lane (weekly build against Zig master) is the one sanctioned bypass,
 // via GOSS_ALLOW_ZIG_MISMATCH=1.
+// A shipped library carries no debug tables: a release build of every compile a client links
+// takes strip, which is where nine tenths of the archive's bytes were (Zig keeps -g on at
+// ReleaseFast). Symbol tables stay, so a crash log still names the frame.
+fn stripShipped(module: *std.Build.Module, optimize: std.builtin.OptimizeMode) void {
+    if (optimize == .Debug or module.strip == true) return;
+    module.strip = true;
+    for (module.link_objects.items) |obj| switch (obj) {
+        .other_step => |lib| stripShipped(lib.root_module, optimize),
+        else => {},
+    };
+    for (module.import_table.values()) |dep| stripShipped(dep, optimize);
+}
+
 fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
     addIosStepImpl(b, optimize, shaderc_exe, flatc_exe, .{
         .abi = .none,
@@ -4458,6 +4472,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     // Apple's linker requires 8-byte archive member alignment; the system
     // ranlib rewrites zig's archives into the accepted layout.
     for (device_libs.items) |lib| {
+        stripShipped(lib.root_module, optimize);
         const install = b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = config.install_dir } } });
         const fix = b.addSystemCommand(&.{ "ranlib", installedPath(b, config.install_dir, lib.out_filename) });
         fix.step.dependOn(&install.step);
