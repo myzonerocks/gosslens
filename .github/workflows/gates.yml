@@ -34,7 +34,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr_body.txt"
-          zig build gate -- --pr-body "$RUNNER_TEMP/pr_body.txt"
+          nix develop -c zig build gate -- --pr-body "$RUNNER_TEMP/pr_body.txt"
       - name: commit provenance
         if: github.event_name == 'pull_request'
         run: nix develop -c zig build gate -- --log "origin/${{ github.base_ref }}..HEAD"
@@ -78,7 +78,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+            echo "cache health: vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   tracking:
@@ -130,7 +130,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+            echo "cache health: vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   macos-build:
@@ -188,7 +188,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+            echo "cache health: vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   android:
@@ -233,7 +233,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+            echo "cache health: vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   web:
@@ -296,7 +296,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "cache health: zigtool=${{ steps.zigtool.outputs.cache-hit || 'miss' }} vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
+            echo "cache health: vendor=${{ steps.vendor.outputs.cache-hit || 'miss' }} models=${{ steps.models.outputs.cache-hit || 'miss' }} zigcache=${{ steps.zigcache.outputs.cache-matched-key || 'miss' }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
   macos-conformance:
@@ -304,14 +304,12 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      # The runner uses the repository's flake, so it builds with the zig 0.16.0 a developer's
+      # shell has, pinned by flake.lock.
+      - name: set up nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          path: .local/zig
-          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
-      - name: toolchain
-        run: |
-          tools/toolchain-sync
-          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+          nix_path: nixpkgs=channel:nixos-unstable
       - uses: actions/cache@v4
         with:
           path: |
