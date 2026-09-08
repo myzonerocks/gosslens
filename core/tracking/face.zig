@@ -326,9 +326,8 @@ test "every region maps to an in-range landmark and reads its point" {
         landmarks[i * 3 + 1] = @floatFromInt(i * 2);
         landmarks[i * 3 + 2] = @floatFromInt(i * 3);
     }
-    inline for (std.meta.fields(Region)) |field| {
-        const region: Region = @enumFromInt(field.value);
-        const idx = region_landmark[field.value];
+    inline for (comptime std.meta.tags(Region)) |region| {
+        const idx = region_landmark[@intFromEnum(region)];
         try t.expect(idx < landmark_count);
         const p = regionPoint(&landmarks, region);
         try t.expectEqual(@as(f32, @floatFromInt(idx)), p[0]);

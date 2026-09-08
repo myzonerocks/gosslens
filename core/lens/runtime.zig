@@ -769,10 +769,7 @@ pub const BodyReshapePassNode = struct {
     params: [body_reshape_param_count]f32,
 };
 
-pub const body_reshape_param_count = blk: {
-    const info = @typeInfo(manifest.BodyReshapeField).@"struct";
-    break :blk if (@hasField(@TypeOf(info), "field_names")) info.field_names.len else info.fields.len;
-};
+pub const body_reshape_param_count = std.meta.fieldNames(manifest.BodyReshapeField).len;
 
 pub const TrailPassNode = struct {
     graph_index: graph.NodeIndex,
@@ -1466,8 +1463,8 @@ pub const Lens = struct {
             if (node.node_type != .reshape_bank) continue;
             const rf = node.reshape orelse manifest.ReshapeField{};
             var params: [66]f32 = undefined;
-            inline for (std.meta.fields(manifest.ReshapeField), 0..) |f, i| {
-                params[i] = @field(rf, f.name);
+            inline for (comptime std.meta.fieldNames(manifest.ReshapeField), 0..) |name, i| {
+                params[i] = @field(rf, name);
             }
             try out.append(gpa, .{ .graph_index = node.graph_index, .params = params });
         }
@@ -1485,8 +1482,8 @@ pub const Lens = struct {
             if (node.node_type != .reshape_body) continue;
             const bf = node.body_reshape orelse manifest.BodyReshapeField{};
             var params: [body_reshape_param_count]f32 = undefined;
-            inline for (std.meta.fields(manifest.BodyReshapeField), 0..) |f, i| {
-                params[i] = @field(bf, f.name);
+            inline for (comptime std.meta.fieldNames(manifest.BodyReshapeField), 0..) |name, i| {
+                params[i] = @field(bf, name);
             }
             try out.append(gpa, .{ .graph_index = node.graph_index, .params = params });
         }
