@@ -769,7 +769,10 @@ pub const BodyReshapePassNode = struct {
     params: [body_reshape_param_count]f32,
 };
 
-pub const body_reshape_param_count = @typeInfo(manifest.BodyReshapeField).@"struct".fields.len;
+pub const body_reshape_param_count = blk: {
+    const info = @typeInfo(manifest.BodyReshapeField).@"struct";
+    break :blk if (@hasField(@TypeOf(info), "field_names")) info.field_names.len else info.fields.len;
+};
 
 pub const TrailPassNode = struct {
     graph_index: graph.NodeIndex,

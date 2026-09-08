@@ -14,12 +14,21 @@ const abi_types = abi.abi_surface_types;
 
 const abi_functions = abi.abi_functions;
 
+fn fieldNames(comptime T: type) []const [:0]const u8 {
+    const info = @typeInfo(T).@"struct";
+    if (@hasField(@TypeOf(info), "field_names")) return info.field_names;
+    comptime var names: [info.fields.len][:0]const u8 = undefined;
+    inline for (info.fields, 0..) |field, i| names[i] = field.name;
+    const frozen = names;
+    return &frozen;
+}
+
 fn writeSurface(w: anytype) !void {
     try w.print("abi {d}.{d}\n", .{ abi.abi_major, abi.abi_minor });
     inline for (abi_types) |T| {
         try w.print("type {s} size={d} align={d}\n", .{ @typeName(T), @sizeOf(T), @alignOf(T) });
-        inline for (@typeInfo(T).@"struct".fields) |field| {
-            try w.print("  field {s} offset={d} size={d}\n", .{ field.name, @offsetOf(T, field.name), @sizeOf(field.type) });
+        inline for (comptime fieldNames(T)) |name| {
+            try w.print("  field {s} offset={d} size={d}\n", .{ name, @offsetOf(T, name), @sizeOf(@FieldType(T, name)) });
         }
     }
     for (abi_functions) |f| {

@@ -309,7 +309,7 @@ const Gate = struct {
             try g.flag("provenance: {s} contains banned token '{s}'", .{ context, tok });
         }
         for (banned_message_tokens) |tok| {
-            if (std.ascii.indexOfIgnoreCase(message, tok) != null) {
+            if (indexOfIgnoreCase(message, tok) != null) {
                 try g.flag("provenance: {s} contains banned token '{s}'", .{ context, tok });
                 break;
             }
@@ -912,6 +912,15 @@ fn scanQuoted(text: []const u8, i: usize, quote: u8) usize {
     return @min(j + 1, text.len);
 }
 
+fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len > haystack.len) return null;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.startsWithIgnoreCase(haystack[i..], needle)) return i;
+    }
+    return null;
+}
+
 fn isIdentChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
@@ -1055,7 +1064,7 @@ fn looksBinary(content: []const u8) bool {
 
 fn findBannedToken(text: []const u8) ?[]const u8 {
     for (banned_tokens) |tok| {
-        if (std.ascii.indexOfIgnoreCase(text, tok) != null) return tok;
+        if (indexOfIgnoreCase(text, tok) != null) return tok;
     }
     return null;
 }
@@ -1071,7 +1080,7 @@ fn findPhaseNomenclature(text: []const u8) ?[]const u8 {
     for (phase_words) |word| {
         var start: usize = 0;
         while (start < text.len) {
-            const rel = std.ascii.indexOfIgnoreCase(text[start..], word) orelse break;
+            const rel = indexOfIgnoreCase(text[start..], word) orelse break;
             const idx = start + rel;
             start = idx + 1;
             if (idx > 0 and isIdentChar(text[idx - 1])) continue;
@@ -1163,7 +1172,7 @@ fn isChecklistLine(line: []const u8) bool {
 
 fn findVerboseMarker(line: []const u8) ?[]const u8 {
     for (verbose_comment_markers) |marker| {
-        if (std.ascii.indexOfIgnoreCase(line, marker) != null) return marker;
+        if (indexOfIgnoreCase(line, marker) != null) return marker;
     }
     if (hasIsoDate(line)) return "a dated timeline entry, not a fact about the code";
     return null;
