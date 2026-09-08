@@ -13,26 +13,29 @@ is in the [root README](../../README.md#what-you-get).
 
 ## Install
 
-Each release attaches a prebuilt, checksummed `GosslensKit.xcframework` and
-pins the package manifest to it, so there is no Zig and no build step.
-
-In Xcode, File > Add Package Dependencies, and paste the repository URL:
+Each release attaches a prebuilt, checksummed `GosslensKit.xcframework` and the
+root `Package.swift` names it, so a bare dependency needs no Zig and no build
+step. In Xcode, File > Add Package Dependencies, and paste the repository URL:
 
 ```
 https://github.com/myzonerocks/gosslens
 ```
 
-Xcode offers the newest release and writes the version rule for you. For a
-`Package.swift`, name the oldest version you support and SwiftPM resolves
-forward to the newest release on its own, so this line stays correct as new
-versions ship:
+For a `Package.swift`, name the oldest version you support and SwiftPM resolves
+forward on its own:
 
 ```swift
 .package(url: "https://github.com/myzonerocks/gosslens", from: "0.11.1")
 ```
 
+Two products come with it. `Gosslens` is the Swift SDK every app wants. Add
+`GosslensKit` as well only where your own code imports the C module,
+`import CGosslens`, since a binary target is not visible to a client on its
+own:
+
 ```swift
 .product(name: "Gosslens", package: "gosslens")
+.product(name: "GosslensKit", package: "gosslens")
 ```
 
 Every published version is on the
@@ -45,29 +48,31 @@ Every published version is on the
 
 ### Building from source
 
-Prefer compiling the engine yourself, from a clone or your own fork? Build the
-two slices, point SwiftPM at your checkout, and set the per-slice search paths:
+The same manifest serves a checkout. Build the three slices and assemble the
+XCFramework into `zig-out/`; the manifest resolves that one instead of the release
+whenever it is there, so the app's dependency never changes between the two:
 
 ```sh
 zig build ios
 zig build ios-simulator
+zig build ios-simulator-x86
+tools/build-xcframework.sh
 ```
+
+Then depend on the checkout by path, with the same products as above:
 
 ```swift
 .package(path: "../gosslens")
 ```
 
-```text
-LIBRARY_SEARCH_PATHS[sdk=iphoneos*]        = .../gosslens/zig-out/ios
-LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = .../gosslens/zig-out/ios-simulator
-```
-
-Each simulator arch builds on its own (`zig build ios-simulator` for arm64,
-`ios-simulator-x86` for Intel); the released XCFramework lipos both into one
-universal simulator slice, so it runs on Apple-silicon and Intel Macs alike.
-Build a from-source checkout with `ONLY_ACTIVE_ARCH=YES` against a concrete
-simulator. Auto-link warnings for `AudioUnit`, `CoreAudioTypes`, or
-`UIUtilities` at the final link are expected and benign.
+With XcodeGen, `packages: Gosslens: path: ../gosslens` and the two product
+dependencies on the target. No library or header search paths, no link list:
+the XCFramework carries all of it. A checkout without the kit in `zig-out/` resolves the
+release, so a machine that never built the engine still builds the app. The
+simulator slice is universal (`ios-simulator` for arm64, `ios-simulator-x86`
+for Intel), so it runs on Apple-silicon and Intel Macs alike. Auto-link
+warnings for `AudioUnit`, `CoreAudioTypes`, or `UIUtilities` at the final link
+are expected and benign.
 
 ## The render loop
 

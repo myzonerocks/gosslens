@@ -161,24 +161,8 @@ jobs:
       # with the header and a module map so Swift can `import`.
       - name: assemble xcframework
         run: |
-          set -euo pipefail
-          mkdir -p headers
-          cp include/gosslens.h headers/
-          printf 'module CGosslens {\n  header "gosslens.h"\n  export *\n}\n' > headers/module.modulemap
-          libtool -static -o device.a zig-out/ios/*.a
-          # The simulator slice is universal: merge each arch's archives, then
-          # lipo the two into one fat library so the XCFramework runs on both
-          # Apple-silicon and Intel Macs.
-          libtool -static -o sim-arm64.a zig-out/ios-simulator/*.a
-          libtool -static -o sim-x86_64.a zig-out/ios-simulator-x86_64/*.a
-          lipo -create sim-arm64.a sim-x86_64.a -output sim.a
-          xcodebuild -create-xcframework \
-            -library device.a -headers headers \
-            -library sim.a -headers headers \
-            -output GosslensKit.xcframework
-          zip -ry GosslensKit.xcframework.zip GosslensKit.xcframework
-          swift package compute-checksum GosslensKit.xcframework.zip > GosslensKit.checksum.txt
-          cat GosslensKit.checksum.txt
+          tools/build-xcframework.sh
+          cp zig-out/GosslensKit.xcframework.zip zig-out/GosslensKit.checksum.txt .
       - uses: actions/upload-artifact@v4
         with:
           name: apple
