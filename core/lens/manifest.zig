@@ -3102,9 +3102,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 try diags.add(path.slice(), "reshape must be an object", .{});
             } else {
                 var field: ReshapeField = .{};
-                inline for (std.meta.fields(ReshapeField)) |f| {
-                    if (getField(rv.object, f.name)) |v| {
-                        @field(field, f.name) = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse @field(field, f.name))), -1.0, 1.0);
+                inline for (comptime std.meta.fieldNames(ReshapeField)) |name| {
+                    if (getField(rv.object, name)) |v| {
+                        @field(field, name) = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse @field(field, name))), -1.0, 1.0);
                     }
                 }
                 reshape_field = field;
@@ -3122,9 +3122,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 try diags.add(path.slice(), "body must be an object", .{});
             } else {
                 var field: BodyReshapeField = .{};
-                inline for (std.meta.fields(BodyReshapeField)) |f| {
-                    if (getField(bv.object, f.name)) |v| {
-                        @field(field, f.name) = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse @field(field, f.name))), -1.0, 1.0);
+                inline for (comptime std.meta.fieldNames(BodyReshapeField)) |name| {
+                    if (getField(bv.object, name)) |v| {
+                        @field(field, name) = std.math.clamp(@as(f32, @floatCast(numberOf(v) orelse @field(field, name))), -1.0, 1.0);
                     }
                 }
                 body_reshape_field = field;

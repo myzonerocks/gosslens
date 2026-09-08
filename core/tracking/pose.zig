@@ -247,9 +247,8 @@ test "every body joint maps to an in-range landmark and reads its point" {
         landmarks[i * 3 + 1] = @floatFromInt(i * 2);
         landmarks[i * 3 + 2] = @floatFromInt(i * 3);
     }
-    inline for (std.meta.fields(Joint)) |field| {
-        const joint: Joint = @enumFromInt(field.value);
-        const idx = joint_landmark[field.value];
+    inline for (comptime std.meta.tags(Joint)) |joint| {
+        const idx = joint_landmark[@intFromEnum(joint)];
         try t.expect(idx < landmark_count);
         const p = jointPoint(&landmarks, joint);
         try t.expectEqual(@as(f32, @floatFromInt(idx)), p[0]);

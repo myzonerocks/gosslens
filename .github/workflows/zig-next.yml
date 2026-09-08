@@ -12,6 +12,9 @@ on:
 jobs:
   shadow:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +27,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/zig-master"
           tar -xJf zig-master.tar.xz -C "$RUNNER_TEMP/zig-master" --strip-components=1
           rm zig-master.tar.xz
+      - name: vendor sync on master
+        run: GOSS_ALLOW_ZIG_MISMATCH=1 "$RUNNER_TEMP/zig-master/zig" build vendor-sync
       - name: build and test on master
         id: build
         continue-on-error: true

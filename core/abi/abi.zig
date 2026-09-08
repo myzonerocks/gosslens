@@ -9969,7 +9969,7 @@ fn setupScriptFromSource(s: *Session, src: []const u8) void {
     };
     var built: usize = 0;
     for (params, 0..) |p, i| {
-        names[i] = s.engine.gpa.dupeZ(u8, p.name) catch {
+        names[i] = dupeZ(s.engine.gpa, p.name) catch {
             for (names[0..built]) |n| s.engine.gpa.free(n);
             s.engine.gpa.free(names);
             engine.destroy();
@@ -9999,6 +9999,11 @@ const script_signal_names = blk: {
 
 /// Fills the script's signal-value array from the live signals, or zeroes it
 /// when there are none (a lifecycle event fires outside a tick).
+fn dupeZ(gpa: std.mem.Allocator, text: []const u8) ![:0]u8 {
+    if (@hasDecl(std.mem.Allocator, "dupeZ")) return gpa.dupeZ(u8, text);
+    return gpa.dupeSentinel(u8, text, 0);
+}
+
 fn fillScriptSignals(out: *[script_signal_names.len]f64, signals: ?*const trigger.Signals) void {
     const sig = signals orelse {
         @memset(out, 0);

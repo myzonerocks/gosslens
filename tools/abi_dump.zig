@@ -18,8 +18,8 @@ fn writeSurface(w: anytype) !void {
     try w.print("abi {d}.{d}\n", .{ abi.abi_major, abi.abi_minor });
     inline for (abi_types) |T| {
         try w.print("type {s} size={d} align={d}\n", .{ @typeName(T), @sizeOf(T), @alignOf(T) });
-        inline for (@typeInfo(T).@"struct".fields) |field| {
-            try w.print("  field {s} offset={d} size={d}\n", .{ field.name, @offsetOf(T, field.name), @sizeOf(field.type) });
+        inline for (comptime std.meta.fieldNames(T)) |name| {
+            try w.print("  field {s} offset={d} size={d}\n", .{ name, @offsetOf(T, name), @sizeOf(@FieldType(T, name)) });
         }
     }
     for (abi_functions) |f| {
