@@ -95,3 +95,8 @@ sdk/kotlin/demo/src/main/assets/
 !sdk/ts/demo/res/*.png
 *.webp
 *.bmp
+
+# The flake shell for direnv is tracked; a local override goes in .envrc.local.
+!.envrc
+.envrc.local
+!nix/**
