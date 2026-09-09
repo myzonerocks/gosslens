@@ -19,6 +19,7 @@ export class GossMicInput {
   private session: GossSession;
   private context: AudioContext | null = null;
   private stream: MediaStream | null = null;
+  private ownsStream = true;
   private node: AudioWorkletNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
 
@@ -26,12 +27,14 @@ export class GossMicInput {
     this.session = session;
   }
 
-  /// Requests the microphone and starts forwarding its PCM to the
-  /// engine. Call from a user gesture; browsers gate both getUserMedia
-  /// and the AudioContext behind one.
-  async start(): Promise<void> {
+  /// Starts forwarding the microphone's PCM to the engine: the stream the
+  /// page already holds, or a fresh microphone request. Call from a user
+  /// gesture; browsers gate both getUserMedia and the AudioContext behind one.
+  async start(stream?: MediaStream): Promise<void> {
     if (this.context) return;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const owned = !stream;
+    const mic = stream ?? (await navigator.mediaDevices.getUserMedia({ audio: true }));
+    this.ownsStream = owned;
     const context = new AudioContext();
     const moduleUrl = URL.createObjectURL(new Blob([captureProcessor], { type: "text/javascript" }));
     try {
@@ -39,7 +42,7 @@ export class GossMicInput {
     } finally {
       URL.revokeObjectURL(moduleUrl);
     }
-    const source = context.createMediaStreamSource(stream);
+    const source = context.createMediaStreamSource(mic);
     const node = new AudioWorkletNode(context, "goss-mic-capture", { numberOfOutputs: 0 });
     const rate = context.sampleRate;
     node.port.onmessage = (event) => {
@@ -49,7 +52,7 @@ export class GossMicInput {
     source.connect(node);
     await context.resume();
     this.context = context;
-    this.stream = stream;
+    this.stream = mic;
     this.source = source;
     this.node = node;
   }
@@ -60,7 +63,7 @@ export class GossMicInput {
     this.node?.disconnect();
     this.source = null;
     this.node = null;
-    this.stream?.getTracks().forEach((track) => track.stop());
+    if (this.ownsStream) this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = null;
     const context = this.context;
     this.context = null;
