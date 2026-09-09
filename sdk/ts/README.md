@@ -106,7 +106,9 @@ engine.renderFrame(session);
 
 The renderer wraps the texture in place, so keep it alive until the next submitted frame has
 rendered; two textures taken in turn are enough. `engine.releaseTexture(name)` forgets the
-name; the page deletes the texture itself. The trackers (`GossFaceTracker` and the rest) are
+name; the page deletes the texture itself. A second source composited beside the camera (a
+dual stage's front card, a duet) rides the same road through
+`session.submitSourceFrameTexture(name, textureName, width, height)` after `defineSource`. The trackers (`GossFaceTracker` and the rest) are
 exported from the package entry, so a worker imports them the way a page imports the engine.
 
 ## Camera controls
