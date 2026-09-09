@@ -1051,10 +1051,11 @@ pub fn build(b: *std.Build) void {
     } else {
         tracking_wasm_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
     }
-    addIosStep(b, optimize, shaderc_exe, flatc_exe);
-    addIosSimulatorStep(b, optimize, shaderc_exe, flatc_exe);
-    addIosSimulatorX86Step(b, optimize, shaderc_exe, flatc_exe);
-    addAndroidStep(b, optimize, shaderc_exe, flatc_exe);
+    const ship = shipOptimize(b, optimize);
+    addIosStep(b, ship, shaderc_exe, flatc_exe);
+    addIosSimulatorStep(b, ship, shaderc_exe, flatc_exe);
+    addIosSimulatorX86Step(b, ship, shaderc_exe, flatc_exe);
+    addAndroidStep(b, ship, shaderc_exe, flatc_exe);
 
     // Separate from wasm_step: needs the opt-in emscripten vendors most builds never touch.
     const wasm_bgfx_smoke_step = b.step("wasm-bgfx-smoke", "Compile+link bgfx's real GL backend for wasm32-emscripten (needs emscripten vendors synced)");
@@ -4044,6 +4045,12 @@ fn listReferenceLenses(b: *std.Build) [][]const u8 {
 // the version is written, and a mismatching compiler fails closed here. The
 // shadow lane (weekly build against Zig master) is the one sanctioned bypass,
 // via GOSS_ALLOW_ZIG_MISMATCH=1.
+/// The mode a shipped slice is built in: the one -Doptimize named, else ReleaseFast, so a
+/// library that leaves the checkout is never a debug build unless one was asked for.
+fn shipOptimize(b: *std.Build, optimize: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
+    return if (b.user_input_options.contains("optimize")) optimize else opt_fast;
+}
+
 // A shipped library carries no debug tables: a release build of every compile a client links
 // takes strip, which is where nine tenths of the archive's bytes were (Zig keeps -g on at
 // ReleaseFast). Symbol tables stay, so a crash log still names the frame.
