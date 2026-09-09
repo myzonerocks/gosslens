@@ -7,7 +7,7 @@ CaptureOutput, Events.
 
 | Capability | iOS | Android | Web |
 |------------|-----|---------|-----|
-| Live capture | demonstrated on device | built, no hardware yet | demonstrated in browser |
+| Live capture | demonstrated on device | built, no hardware yet | demonstrated in browser; the zero-copy texture ingress (submitFrameTexture, a page-made texture named through the exported GL table) wired 2026-09-09 and proven by the goss web camera across three browsers |
 | Preview render | demonstrated on device | built, no hardware yet | demonstrated in browser on the WebGL2 build; the WebGPU build renders and tracks but lens activation crashes its Asyncify-instrumented engine today |
 | Face tracking | demonstrated on device | built, no hardware yet | demonstrated in browser |
 | Segmentation | proven in the host harness, multiclass with per-class lens channels | built, no hardware yet | demonstrated in browser, the sync segmentation core on the wasm tracking module, subject and per-class channels fed back through set_segmentation_mask and set_segmentation_class_mask |
