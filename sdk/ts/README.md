@@ -486,7 +486,7 @@ to your track's rate and sums it in, so there is nothing to hand-mix (pass `null
 for the mic to send the lens sound over silence). `pullAudio` still pulls the lens
 sound alone for local WebAudio playback with no call in progress; `GossAudioOutput`
 wraps that playback (an `AudioWorklet` it owns, `start()` from a gesture, `pump()`
-each frame beside `tickLens`). `GossMicInput` captures the microphone into
+each frame beside `tickLens`). `GossMicInput` captures the microphone, or the stream the page hands `start`, into
 `submitAudio` so level and beat triggers fire in the browser at whatever rate
 the browser chose - the engine resamples to its own fixed ring rate, so an
 `audio.infer` model reads the same window here as on a phone - and
