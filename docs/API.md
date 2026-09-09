@@ -148,6 +148,7 @@ file must move together.
 |---|---|---|
 | `goss_engine_create` | `GossEngine.create(config)` | all SDKs |
 | `goss_engine_destroy` | `destroy()`; Kotlin may use `close()` | all SDKs |
+| _(SDK helper, no C entry)_ | `adoptTexture(texture)` names a page-made WebGL texture in the module's exported GL table for `submitFrameTexture`; `releaseTexture(name)` forgets it | web |
 | `goss_engine_init_renderer` | `initRenderer(surface, width, height)` | all SDKs |
 | `goss_engine_resize` | `resize(width, height)` | all SDKs |
 | `goss_engine_render_frame` | `renderFrame(session)` | all SDKs |
@@ -209,7 +210,7 @@ the capability is present on all three platforms; only the mechanism differs.
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_session_submit_frame` | `submitFrame(desc, planes)` | native zero-copy-capable SDKs |
+| `goss_session_submit_frame` | `submitFrame(desc, planes)`; on web `submitFrameTexture(name, width, height, rotationDegrees, mirrored, timestampUs)`, the one plane a texture the page uploaded the video into and named through `adoptTexture` | zero-copy-capable SDKs, web included |
 | `goss_session_submit_frame_copy` | `submitFrameCopy(y, yStride, uv, uvStride, width, height, rotationDegrees, mirrored, colorStandard, colorRange, timestampUs)` | platforms that expose this copy path |
 | `goss_session_submit_hardware_buffer` | `submitHardwareBuffer(buffer, width, height, rotationDegrees, mirrored, timestampUs)` | Android |
 | `goss_session_submit_frame_rgba_copy` | `submitFrameRgbaCopy(rgba, stride, width, height, pixelFormat, rotationDegrees, mirrored, timestampUs)` | copy-path SDKs |

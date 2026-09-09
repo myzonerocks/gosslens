@@ -86,6 +86,29 @@ session.submitFrameRgbaCopy(rgba, width * 4, width, height);
 engine.renderFrame(session);
 ```
 
+## Zero-copy frames
+
+The copy submit above reads the video back through a 2D canvas and copies it into wasm
+memory every frame. A page that owns its camera hands frames over without either: upload the
+video element into a texture created in the canvas's own WebGL2 context (`engine.gl`), name it
+once through `engine.adoptTexture(texture)`, and submit that name as the frame's one plane:
+
+```typescript
+const gl = engine.gl!;
+const texture = gl.createTexture()!;
+const name = engine.adoptTexture(texture);
+// per camera frame
+gl.bindTexture(gl.TEXTURE_2D, texture);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+session.submitFrameTexture(name, video.videoWidth, video.videoHeight, 0, mirrored);
+engine.renderFrame(session);
+```
+
+The renderer wraps the texture in place, so keep it alive until the next submitted frame has
+rendered; two textures taken in turn are enough. `engine.releaseTexture(name)` forgets the
+name; the page deletes the texture itself. The trackers (`GossFaceTracker` and the rest) are
+exported from the package entry, so a worker imports them the way a page imports the engine.
+
 ## Camera controls
 
 The engine never touches the camera. It holds declarative intent you set,

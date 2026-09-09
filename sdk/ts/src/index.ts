@@ -289,6 +289,9 @@ interface EngineModule {
   getValue(ptr: number, type: string): number;
   setValue(ptr: number, value: number, type: string): void;
   stringToNewUTF8(value: string): number;
+  /// Emscripten's GL object table, exported so a texture the page fills can be
+  /// named to the engine as a zero-copy plane handle.
+  GL: { textures: Array<WebGLTexture | null>; getNewId(table: unknown[]): number };
 }
 
 type EngineModuleFactory = (overrides?: Record<string, unknown>) => Promise<EngineModule>;
@@ -397,7 +400,9 @@ export class Gosslens {
   /// build shares the full one's filename and abi version, so check the rail
   /// you need here before feeding real bytes to an enable call.
   capabilities(): number {
-    return this.mod.ccall("goss_capabilities", "number", [], []) as number;
+    // A 64-bit mask crosses as a BigInt on a build that passes wasm i64s through; the bits in
+    // use fit a number, and a number is what every caller masks against.
+    return Number(this.mod.ccall("goss_capabilities", "number", [], []));
   }
 
   /// Loads gosslens_web.js and checks its ABI major version. A
@@ -469,7 +474,9 @@ export class GossEngine {
   /// canvas to a 'webgpu' context instead, and a canvas can only ever
   /// bind one context type for its lifetime. capturePixels() branches
   /// on this: readPixels when set, goss_engine_capture_frame otherwise.
-  private gl: WebGL2RenderingContext | null = null;
+  /// The canvas's own WebGL2 context once the renderer is up: the context a page-made
+  /// texture for the zero-copy frame road must be created in. Null on the WebGPU build.
+  gl: WebGL2RenderingContext | null = null;
   /// bgfx's HTML5 backend keeps referencing the canvas selector string
   /// for the renderer's life, so the engine owns it and frees it in
   /// destroy() once goss_engine_destroy has torn the renderer down.
@@ -541,6 +548,23 @@ export class GossEngine {
     // getContext("webgl2") with null, never the wrong context.
     this.canvas = canvas;
     this.gl = canvas.getContext("webgpu") ? null : canvas.getContext("webgl2");
+  }
+
+  /// Registers a texture the page created in this canvas's own WebGL2 context
+  /// in emscripten's GL table, and returns the name the engine knows it by:
+  /// the plane handle submitFrameTexture takes. The page keeps the texture
+  /// alive until the next submitted frame has rendered.
+  adoptTexture(texture: WebGLTexture): number {
+    const table = this.mod.GL;
+    const id = table.getNewId(table.textures);
+    table.textures[id] = texture;
+    return id;
+  }
+
+  /// Forgets a name adoptTexture handed out. The page deletes the texture itself.
+  releaseTexture(name: number): void {
+    const table = this.mod.GL;
+    if (table.textures[name] !== undefined) table.textures[name] = null;
   }
 
   resize(width: number, height: number): void {
@@ -1140,6 +1164,7 @@ export class GossSession {
   /// tick - the frame descriptor is a fixed 32 bytes, the pixel buffer
   /// tracks the video's current resolution.
   private frameDescPtr: number;
+  private framePlanesPtr = 0;
   private framePixelsPtr = 0;
   private framePixelsCapacity = 0;
   /// Fixed capacity: GOSS_FACE_LANDMARK_COUNT never changes.
@@ -2725,6 +2750,32 @@ export class GossSession {
     );
   }
 
+  /// Zero-copy: hands over one RGBA frame the page already uploaded to a
+  /// texture adoptTexture named, as goss_session_submit_frame takes it. No
+  /// readback, no wasm copy; the renderer wraps the texture in place. The
+  /// status comes back so a caller can count a refused frame.
+  submitFrameTexture(name: number, width: number, height: number, rotationDegrees?: number, mirrored = false, timestampUs?: number): number {
+    this.frameWidth = width;
+    this.frameHeight = height;
+    const rotationQuarters = ((rotationDegrees ?? (this.videoFlipped ? 180 : 0)) / 90) & 3;
+    const flags = (mirrored ? FRAME_FLAG_MIRROR : 0) | (rotationQuarters << FRAME_ROTATION_SHIFT);
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, GossPixelFormat.Rgba8, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, flags, "i32");
+    const stampUs = timestampUs ?? Math.round(performance.now() * 1000);
+    this.mod.setValue(this.frameDescPtr + 24, stampUs >>> 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, Math.floor(stampUs / 4294967296), "i32");
+    if (this.framePlanesPtr === 0) this.framePlanesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [32]);
+    this.mod.setValue(this.framePlanesPtr, 1, "i32");
+    this.mod.setValue(this.framePlanesPtr + 4, 0, "i32");
+    this.mod.setValue(this.framePlanesPtr + 8, name, "i32");
+    this.mod.setValue(this.framePlanesPtr + 12, 0, "i32");
+    return this.mod.ccall("goss_session_submit_frame", "number", ["number", "number", "number"], [this.handle, this.frameDescPtr, this.framePlanesPtr]);
+  }
+
   /// The web selfie path: runs each selfie-source splat.cloud once over one
   /// RGBA8 still (row major), so a photoreal avatar is generated from one photo
   /// and then held off the live camera. Reuses the per-session frame staging.
@@ -2896,6 +2947,7 @@ export class GossSession {
       if (ptr !== 0 && size !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [ptr, size]);
     };
     free(this.frameDescPtr, 32);
+    free(this.framePlanesPtr, 32);
     free(this.landmarksPtr, GOSS_FACE_LANDMARK_COUNT * 3 * 4);
     free(this.signalsPtr, LENS_SIGNALS_BYTES);
     free(this.segmentationMaskPtr, GOSS_SEGMENTATION_MASK_SIDE * GOSS_SEGMENTATION_MASK_SIDE * 4);
@@ -3131,3 +3183,7 @@ export type { GossXRFrameLike } from "./world.js";
 export { GossAudioOutput } from "./audio-output.js";
 export { GossMicInput } from "./mic-input.js";
 export { GossVideoTexture } from "./video-texture.js";
+// The trackers the tracking module runs, so a page reaches them through the one package entry
+// the way the Swift and Kotlin SDKs carry theirs.
+export { GossFaceTracker, GossHandTracker, GossPoseTracker, GossSegmenter, GOSS_FACE_BLENDSHAPE_COUNT, GOSS_MAX_HANDS } from "./tracking.js";
+export type { GossFaceResult, GossHand, GossHandResult, GossPoseResult } from "./tracking.js";

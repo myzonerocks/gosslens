@@ -5019,7 +5019,8 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         "-sLINKABLE=1",
         "-sMODULARIZE=1",
         "-sEXPORT_NAME=GosslensWebModule",
-        "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,stringToNewUTF8,UTF8ToString,getValue,setValue",
+        // GL is the object table a page-made texture is named through for the zero-copy frame road.
+        "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,stringToNewUTF8,UTF8ToString,getValue,setValue,GL",
         // A real ES module (import GosslensWebModule from
         // "./gosslens_web.js") rather than a plain-global
         // factory function a <script> tag would have to expose -
