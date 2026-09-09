@@ -1556,6 +1556,31 @@ export class GossSession {
       this.mod.ccall("goss_session_submit_source_frame_rgba_copy", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, this.frameDescPtr, rgbaPtr, stride]));
   }
 
+  /// Zero-copy: hands a named source one RGBA frame the page already uploaded
+  /// to a texture adoptTexture named, the way submitFrameTexture hands the
+  /// camera's. No readback and no wasm copy; a second lens composites at no
+  /// per-frame cost. The status comes back so a caller can count a refusal.
+  submitSourceFrameTexture(name: string, textureName: number, width: number, height: number): number {
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, GossPixelFormat.Rgba8, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, 1, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 24, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
+    if (this.framePlanesPtr === 0) this.framePlanesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [32]);
+    this.mod.setValue(this.framePlanesPtr, 1, "i32");
+    this.mod.setValue(this.framePlanesPtr + 4, 0, "i32");
+    this.mod.setValue(this.framePlanesPtr + 8, textureName, "i32");
+    this.mod.setValue(this.framePlanesPtr + 12, 0, "i32");
+    let status = 0;
+    this.withName(name, (ptr, len) => {
+      status = this.mod.ccall("goss_session_submit_source_frame", "number", ["number", "number", "number", "number", "number"], [this.handle, ptr, len, this.frameDescPtr, this.framePlanesPtr]);
+    });
+    return status;
+  }
+
   /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid.
   setLayout(arrangement: number): void {
     this.mod.ccall("goss_session_set_layout", "number", ["number", "number"], [this.handle, arrangement]);
