@@ -211,10 +211,15 @@ jobs:
           zig build vendor-sync -- --only emscripten
           zig build vendor-sync -- --only emscripten-python
       - uses: oven-sh/setup-bun@v2
+      # The wrapper's version is the release's own, stamped from the tag so a
+      # pre-release never tries to publish over the version already on npm.
       - name: pack the js wrapper
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (inputs.version != '' && format('v{0}', inputs.version)) || '' }}
         run: |
           set -euo pipefail
           cd sdk/ts
+          [ -z "${RELEASE_TAG}" ] || npm version --no-git-tag-version --allow-same-version "${RELEASE_TAG#v}"
           bun install
           bun run build
           bun pm pack --destination "$GITHUB_WORKSPACE"
@@ -276,6 +281,8 @@ jobs:
           notes="SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
           assets=(dist/android/gosslens-android-jniLibs.zip dist/apple/GosslensKit.xcframework.zip dist/web/*.tgz)
           [ -f dist/web/gosslens-web-engine.zip ] && assets+=(dist/web/gosslens-web-engine.zip)
+          # A version with a pre-release label is a pre-release on GitHub too.
+          case "${RELEASE_TAG#v}" in *-*) target+=(--prerelease) ;; esac
           gh release create "${RELEASE_TAG}" "${target[@]}" "${assets[@]}" --title "${RELEASE_TAG}" --notes "$notes"
       # A SwiftPM consumer resolves the version tag, so the pin lives in the
       # commit the tag points at: rebuild the tag on a commit carrying the
@@ -363,4 +370,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-          npm publish --access public --provenance dist/web/*.tgz
+          # A pre-release publishes under the next tag, so latest keeps pointing at the last release.
+          tag=latest
+          case "${RELEASE_TAG#v}" in *-*) tag=next ;; esac
+          npm publish --access public --provenance --tag "$tag" dist/web/*.tgz
