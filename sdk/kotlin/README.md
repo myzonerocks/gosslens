@@ -35,6 +35,11 @@ No repository declaration and no toolchain. Every
 published version is on the
 [releases page](https://github.com/myzonerocks/gosslens/releases).
 
+The library needs Android 10 (API 29), the floor the engine is built against, and
+compiles against API 36. An app with a lower `minSdk` overrides the library's floor
+in its manifest, `<uses-sdk tools:overrideLibrary="com.gosslens" />`, and keeps the
+engine off below Android 10, so the plain camera stands there.
+
 Gradle also accepts a dynamic version such as `latest.release` or `0.10.+`,
 which resolves to the newest match at build time. It costs reproducibility:
 two machines resolving a day apart can compile against different versions,
