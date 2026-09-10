@@ -329,10 +329,18 @@ An empty array clears them, leaving an `undistort.pass` inert.
 
 ## World tracking
 
-A world-anchored lens and the AR brush ride ARCore's world pose. The demo's
-[`WorldFeeder`](demo/src/main/kotlin/com/gosslens/demo/WorldFeeder.kt) feeds each
-ARCore frame in, so the `worldTrackingState` a scripted lens reads and the world
-frame AR strokes anchor to both stay live.
+A world-anchored lens and the AR brush ride ARCore's world pose. `GossARCoreWorldSource`
+feeds each ARCore frame in, so the `worldTrackingState` a scripted lens reads and the
+world-anchored content it draws follow the phone. The app owns the ARCore session and adds
+the ARCore runtime itself, `com.google.ar:core`; this SDK compiles against it only.
+
+```kotlin
+val world = GossARCoreWorldSource(session)
+// each ARCore update:
+world.onFrame(arSession.update())
+// when the world lens comes off:
+world.stop()
+```
 
 ## Geofilters
 

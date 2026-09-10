@@ -31,6 +31,12 @@ android {
     }
 }
 
+// ARCore is compile-only: GossARCoreWorldSource reads its frames, and an app that wears a world
+// lens adds the runtime itself, so one that never does carries none of it.
+dependencies {
+    compileOnly("com.google.ar:core:1.56.0")
+}
+
 // Publishes the AAR - the prebuilt .so already inside - to Maven Central through
 // the Sonatype Central Portal, so an Android app adds one coordinate and never
 // runs Zig or the NDK. Coordinates and POM come from gradle.properties; the token
