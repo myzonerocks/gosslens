@@ -14,8 +14,8 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "GosslensKit",
-            url: "https://github.com/myzonerocks/gosslens/releases/download/v0.12.0-alpha.3/GosslensKit.xcframework.zip",
-            checksum: "e86e32eb3a33ba8a167a320e6bcc493cb0917dfc1a506e6334f814e78008d911"
+            url: "https://github.com/myzonerocks/gosslens/releases/download/v0.12.0-alpha.5/GosslensKit.xcframework.zip",
+            checksum: "a9357875db2955fd7bdc421728dbdb25360313929a118df4fb4573d734c5fdad"
         ),
         .target(
             name: "Gosslens",
