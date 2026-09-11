@@ -15,8 +15,8 @@ let kit: Target = FileManager.default.fileExists(atPath: localKit)
     ? .binaryTarget(name: "GosslensKit", path: "zig-out/GosslensKit.xcframework")
     : .binaryTarget(
         name: "GosslensKit",
-        url: "https://github.com/myzonerocks/gosslens/releases/download/v0.12.0-alpha.6/GosslensKit.xcframework.zip",
-        checksum: "179b2b15da634cc18ae97d23eaf1d676627384cf1f0482c0d069de25d390763c"
+        url: "https://github.com/myzonerocks/gosslens/releases/download/v0.12.0/GosslensKit.xcframework.zip",
+        checksum: "e6013c85e99b95952c1959a4553249c89ff780a6dc4b678de0dda9efab86e83d"
     )
 let package = Package(
     name: "Gosslens",
