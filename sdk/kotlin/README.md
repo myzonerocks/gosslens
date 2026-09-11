@@ -27,7 +27,7 @@ publishes the signed artifact to Maven Central. Add one coordinate:
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.github.avosa:gosslens:0.12.0-alpha.6")
+    implementation("io.github.avosa:gosslens:0.12.0")
 }
 ```
 
@@ -59,7 +59,7 @@ dependencyResolutionManagement {
 
 // build.gradle.kts
 dependencies {
-    implementation("com.github.myzonerocks:gosslens:v0.12.0-alpha.6")
+    implementation("com.github.myzonerocks:gosslens:v0.12.0")
 }
 ```
 
