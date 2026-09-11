@@ -366,11 +366,17 @@ jobs:
           if ! git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
             branch="release-pin-${RELEASE_TAG}"
             git push -f "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
+            title="release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs"
+            body="The ${RELEASE_TAG} XCFramework pin and the install-doc versions, carried onto main. The tag already serves consumers; this keeps a reader of main current."
+            # The release token opens it while its own permissions allow; the job
+            # token is the fallback, so a token that loses pull-request write
+            # strands a branch instead of the pin.
             if gh pr view "${branch}" --json number >/dev/null 2>&1; then
               echo "pin PR already open for ${branch}"
+            elif GH_TOKEN="${RELEASE_PAT}" gh pr create --base main --head "${branch}" --title "${title}" --body "${body}"; then
+              echo "pin PR opened by the release token"
             else
-              GH_TOKEN="${RELEASE_PAT}" gh pr create --base main --head "${branch}" \
-                --title "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs" \
-                --body "The ${RELEASE_TAG} XCFramework pin and the install-doc versions, carried onto main. The tag already serves consumers; this keeps a reader of main current."
+              echo "the release token cannot open pull requests; opening with the job token" >&2
+              gh pr create --base main --head "${branch}" --title "${title}" --body "${body}"
             fi
           fi
