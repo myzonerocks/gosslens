@@ -35,6 +35,11 @@ No repository declaration and no toolchain. Every
 published version is on the
 [releases page](https://github.com/myzonerocks/gosslens/releases).
 
+The library needs Android 10 (API 29), the floor the engine is built against, and
+compiles against API 36. An app with a lower `minSdk` overrides the library's floor
+in its manifest, `<uses-sdk tools:overrideLibrary="com.gosslens" />`, and keeps the
+engine off below Android 10, so the plain camera stands there.
+
 Gradle also accepts a dynamic version such as `latest.release` or `0.10.+`,
 which resolves to the newest match at build time. It costs reproducibility:
 two machines resolving a day apart can compile against different versions,
@@ -150,9 +155,15 @@ in [the lens spec](../../lenses/SPEC.md).
 
 ### Bring-your-own models
 
-A lens's `ml.infer` and companion nodes load their model files from the bundle
-directory, or from memory: `provideLensAsset(name, bytes)` stages a model
-under the name the manifest uses ahead of a JSON activation, `mlOutput(nodeId,
+A lens loads its files from the bundle directory, or from memory:
+`provideLensAsset(name, bytes)` stages any bundle asset under the name the
+manifest uses ahead of a JSON activation - images, LUTs, sprites, face textures,
+glTF models and shader binaries (as `shaders/<stem>.<profile>.bin`) as well as
+the inference nets, so a lens fetched over the network runs exactly as an
+unpacked directory does. `spriteTransform(nodeId)` reads where a placed sprite,
+label or video node currently draws: its rect and its turn in degrees, after the
+authored angle, any bound parameter and any gesture - for drawing selection
+handles or persisting where a sticker was left. `mlOutput(nodeId,
 tensor)` reads a node's whole published output tensor back, and
 `mlMask(nodeId)` reads a mask binding resampled to the segmentation plane.
 `Gosslens.capabilities()` reports which rails this build compiled real.
@@ -318,10 +329,18 @@ An empty array clears them, leaving an `undistort.pass` inert.
 
 ## World tracking
 
-A world-anchored lens and the AR brush ride ARCore's world pose. The demo's
-[`WorldFeeder`](demo/src/main/kotlin/com/gosslens/demo/WorldFeeder.kt) feeds each
-ARCore frame in, so the `worldTrackingState` a scripted lens reads and the world
-frame AR strokes anchor to both stay live.
+A world-anchored lens and the AR brush ride ARCore's world pose. `GossARCoreWorldSource`
+feeds each ARCore frame in, so the `worldTrackingState` a scripted lens reads and the
+world-anchored content it draws follow the phone. The app owns the ARCore session and adds
+the ARCore runtime itself, `com.google.ar:core`; this SDK compiles against it only.
+
+```kotlin
+val world = GossARCoreWorldSource(session)
+// each ARCore update:
+world.onFrame(arSession.update())
+// when the world lens comes off:
+world.stop()
+```
 
 ## Geofilters
 
@@ -355,7 +374,9 @@ val ribbon = session.brushVertices()
 
 `setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x, y, z)`/`endARStroke` are the
 world-anchored twin: points are pushed in the world frame world tracking reports,
-so a stroke stays fixed in the scene.
+so a stroke stays fixed in the scene. `undoARStroke`/`redoARStroke`/`clearARStrokes`
+are its stacks - the same undo/redo pair the screen brush has, so one brush rail
+drives both; a fresh stroke drops the redo future, as in any editor.
 
 ## Compositing
 
@@ -409,6 +430,13 @@ engine.stopRecording()
 `GossAudioOutput` routes lens sounds to the speaker: `start()` it once after
 the session exists and call `pump()` each frame beside `tickLens`, and the
 mixer plays through an `AudioTrack` it owns; `stop()` releases it.
+
+`GossMicInput` is the other direction: `start()` opens an `AudioRecord` and
+submits every block, so level, beat and `audio.infer` all run without you
+writing the float conversion; `stop()` releases it. It does not request
+`RECORD_AUDIO` - the app owns that, and a call may already hold the microphone.
+The engine resamples whatever rate the platform granted, so it submits the
+granted rate rather than the requested one.
 
 `GossRecordingPolicy` and `GossCaptureUi` from Camera controls carry the clip
 cap, timer, night mode and the rest for your recorder and capture chrome; the

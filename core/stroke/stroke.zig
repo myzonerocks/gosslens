@@ -134,6 +134,9 @@ pub const Board = struct {
             write += 1;
         }
         self.count = write;
+        // An erase is an edit like any other, so the redo future goes with it - otherwise a redo
+        // after an erase puts back a stroke from a branch the board has already left.
+        if (removed > 0) self.redo_count = 0;
         return removed;
     }
 
@@ -491,4 +494,21 @@ test "clear drops everything" {
     try t.expectEqual(@as(u16, 0), b.count);
     var out: [max_vertices]f32 = undefined;
     try t.expectEqual(@as(usize, 0), b.buildVertices(&out));
+}
+
+test "erasing drops the redo future so a redo cannot resurrect a left branch" {
+    var b = Board{};
+    b.begin();
+    b.point(0.1, 0.1);
+    b.point(0.9, 0.9);
+    b.end();
+    b.begin();
+    b.point(0.1, 0.9);
+    b.point(0.9, 0.1);
+    b.end();
+    b.undo();
+    try t.expectEqual(@as(u16, 1), b.count);
+    try t.expectEqual(@as(usize, 1), b.eraseAt(0.5, 0.5, 0.2));
+    b.redoLast();
+    try t.expectEqual(@as(u16, 0), b.count);
 }

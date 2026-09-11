@@ -117,6 +117,14 @@ extension GossSession {
     /// `mic` (interleaved f32 at `sampleRate`/`channels`, or nil for silence)
     /// summed with the 48 kHz mono lens mixer resampled to that rate; returns
     /// the mixed interleaved s16. Advances the mixer once, replacing `pullAudio`.
+    /// The same fold from and into storage the caller keeps: `mic` interleaved floats or nil for
+    /// silence, `out` at least frameCount*channels 16-bit samples. Nothing here allocates.
+    public func mixOutputAudio(
+        mic: UnsafePointer<Float>?, into out: UnsafeMutablePointer<Int16>, frameCount: UInt32, sampleRate: UInt32, channels: UInt32,
+    ) throws {
+        try checked(goss_session_mix_output_audio(handle, mic, out, frameCount, sampleRate, channels))
+    }
+
     public func mixOutputAudio(mic: [Float]?, frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws -> [Int16] {
         var out = [Int16](repeating: 0, count: Int(frameCount) * Int(channels))
         try out.withUnsafeMutableBufferPointer { outBuffer in
@@ -204,17 +212,40 @@ extension GossSession {
     }
 
     /// Uploads one RGBA/BGRA frame into a named source (pixelFormat 3 BGRA, 4 RGBA).
-    public func submitSourceFrame(_ name: String, rgba: [UInt8], width: UInt32, height: UInt32, stride: UInt32, pixelFormat: UInt32 = 4) throws {
-        var mutableName = name
-        var desc = goss_frame_desc(width: width, height: height, pixel_format: pixelFormat, color_standard: 0, color_range: 1, flags: 0, timestamp_us: 0)
-        try mutableName.withUTF8 { nb in
-            try rgba.withUnsafeBufferPointer { rb in
-                try checked(goss_session_submit_source_frame_rgba_copy(handle, nb.baseAddress, nb.count, &desc, rb.baseAddress, stride))
-            }
+    /// Zero-copy for a named source: one platform texture handle (an MTLTexture over the second
+    /// camera's buffer) wrapped, not read, so a second lens composites at no per-frame copy. The
+    /// platform object must outlive the next rendered frame.
+    public func submitSourceFrame(_ name: String, desc: GossFrameDesc, plane: UInt64) throws {
+        var raw = desc.raw
+        var framePlanes = goss_frame_planes(plane_count: 1, reserved: 0, planes: (plane, 0, 0))
+        try name.utf8CString.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_submit_source_frame(handle, buffer.baseAddress.map { UnsafeRawPointer($0).assumingMemoryBound(to: UInt8.self) }, name.utf8.count, &raw, &framePlanes))
         }
     }
 
-    /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid.
+    public func submitSourceFrame(_ name: String, rgba: [UInt8], width: UInt32, height: UInt32, stride: UInt32, pixelFormat: UInt32 = 4) throws {
+        try rgba.withUnsafeBufferPointer { rb in
+            guard let base = rb.baseAddress else { return }
+            try submitSourceFrame(
+                name, rgba: base, width: width, height: height, stride: stride,
+                pixelFormat: GossPixelFormat(rawValue: pixelFormat) ?? .rgba8,
+            )
+        }
+    }
+
+    /// The same upload from a pointer, the sibling of `submitFrameRgbaCopy`: a lane feeding a
+    /// source every frame hands the decoder's own buffer over rather than copying it into an
+    /// array first, and a clip that was filmed sideways says so here as a camera frame does.
+    public func submitSourceFrame(_ name: String, rgba: UnsafePointer<UInt8>, width: UInt32, height: UInt32, stride: UInt32, pixelFormat: GossPixelFormat = .rgba8, rotationDegrees: UInt32 = 0, mirrored: Bool = false, timestampUs: Int64 = 0) throws {
+        var mutableName = name
+        var raw = GossFrameDesc(width: width, height: height, pixelFormat: pixelFormat, rotationDegrees: rotationDegrees, mirrored: mirrored, timestampUs: timestampUs).raw
+        try mutableName.withUTF8 { nb in
+            try checked(goss_session_submit_source_frame_rgba_copy(handle, nb.baseAddress, nb.count, &raw, rgba, stride))
+        }
+    }
+
+    /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip,
+    /// 4 grid, 5 overlay, where every source covers the whole frame and stacks by opacity.
     public func setLayout(_ arrangement: UInt32) throws {
         try checked(goss_session_set_layout(handle, arrangement))
     }
@@ -224,8 +255,9 @@ extension GossSession {
     }
 
     /// Sets a source's composite blend: opacity, key mode (0 none, 1 matte from
-    /// the source alpha, 2 chroma-key), the chroma color, and a match
-    /// similarity. The name "camera" addresses the live camera base.
+    /// the source alpha, 2 chroma-key, 3 a supplied per-source mask), the chroma
+    /// color, and a match similarity. The name "camera" addresses the live camera
+    /// base, which has no source mask.
     public func setSourceComposite(_ name: String, opacity: Float = 1, key: UInt32 = 0, chroma: (r: Float, g: Float, b: Float) = (0, 0, 0), similarity: Float = 0) throws {
         var b = Array(name.utf8)
         try b.withUnsafeMutableBufferPointer { buf in
@@ -416,6 +448,28 @@ extension GossSession {
     public func addARStrokePoint(x: Float, y: Float, z: Float) throws { try checked(goss_session_ar_brush_point(handle, x, y, z)) }
     public func endARStroke() throws { try checked(goss_session_ar_brush_end(handle)) }
     public func undoARStroke() throws { try checked(goss_session_ar_brush_undo(handle)) }
+    public func redoARStroke() throws { try checked(goss_session_ar_brush_redo(handle)) }
+
+    /// Where a placed sprite.2d, text.2d or video.texture node currently draws: its rect in
+    /// normalized coordinates and its turn in degrees clockwise - the authored angle, plus any
+    /// bound parameter, plus any gesture the wearer applied. Nil for an unknown node.
+    public struct SpriteTransform: Equatable {
+        public let x: Float
+        public let y: Float
+        public let width: Float
+        public let height: Float
+        public let rotation: Float
+    }
+
+    public func spriteTransform(nodeId: String) -> SpriteTransform? {
+        var x: Float = 0, y: Float = 0, w: Float = 0, h: Float = 0, r: Float = 0
+        let bytes = Array(nodeId.utf8)
+        let ok = bytes.withUnsafeBufferPointer { buffer in
+            goss_session_sprite_transform(handle, buffer.baseAddress, buffer.count, &x, &y, &w, &h, &r) == GOSS_OK
+        }
+        guard ok else { return nil }
+        return SpriteTransform(x: x, y: y, width: w, height: h, rotation: r)
+    }
     public func clearARStrokes() throws { try checked(goss_session_ar_brush_clear(handle)) }
     /// Feeds one screen touch event so the engine recognizes the gestures a
     /// lens reacts to. phase is 0 began, 1 moved, 2 ended, 3 cancelled;
@@ -430,6 +484,14 @@ extension GossSession {
         var intensity: Float = 0
         return goss_session_pull_haptic(handle, &style, &intensity) == GOSS_OK ? Haptic(style: style, intensity: intensity) : nil
     }
+    /// The photosensitivity risk (0..1) the flash detector last reported for the
+    /// frames this session was fed, the same value a lens reads as safety.flash_risk.
+    public func flashRisk() throws -> Float {
+        var risk: Float = 0
+        try checked(goss_session_flash_risk(handle, &risk))
+        return risk
+    }
+
     public func grab(x: Float, y: Float, z: Float) throws { try checked(goss_session_grab(handle, x, y, z)) }
     public func release() throws { try checked(goss_session_release(handle)) }
     public func addCollider(x: Float, y: Float, z: Float) throws { try checked(goss_session_add_collider(handle, x, y, z)) }

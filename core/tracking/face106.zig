@@ -19,14 +19,14 @@ pub const base_point_count = 106;
 pub const point_count = 111;
 
 pub const mesh_index = [base_point_count]u16{
-    139, 34, 34, 116, 123, 147, 147, 213, 192, 135, 135, 169, 170,
+    139, 34,  34,  116, 123, 147, 147, 213, 192, 135, 135, 169, 170,
     140, 140, 171, 152, 396, 369, 369, 395, 394, 364, 364, 416, 433,
-    376, 376, 352, 345, 264, 264, 368, 71, 68, 104, 105, 66, 296,
-    334, 333, 298, 301, 168, 197, 5, 1, 165, 167, 0, 393, 391,
-    113, 30, 158, 154, 153, 25, 381, 385, 260, 342, 255, 380, 63,
-    63, 52, 65, 295, 282, 293, 293, 29, 144, 160, 259, 373, 387,
-    244, 464, 49, 279, 203, 423, 43, 96, 87, 14, 317, 325, 273,
-    335, 421, 200, 201, 106, 43, 181, 16, 405, 273, 405, 17, 181,
+    376, 376, 352, 345, 264, 264, 368, 71,  68,  104, 105, 66,  296,
+    334, 333, 298, 301, 168, 197, 5,   1,   165, 167, 0,   393, 391,
+    113, 30,  158, 154, 153, 25,  381, 385, 260, 342, 255, 380, 63,
+    63,  52,  65,  295, 282, 293, 293, 29,  144, 160, 259, 373, 387,
+    244, 464, 49,  279, 203, 423, 61,  40,  37,  0,   267, 270, 291,
+    321, 314, 17,  84,  91,  78,  81,  13,  311, 308, 402, 14,  178,
     160, 387,
 };
 
@@ -200,4 +200,34 @@ test "transformPoint stays inside the unit square" {
             }
         }
     }
+}
+
+test "the mouth rides both lips and its own opening" {
+    // The lip points are the mediapipe lip ring and nothing else: an entry from the brow, the
+    // chin or a cheek put the lipstick mesh over the wrong half of a face, and a repeated one
+    // collapsed a triangle so the upper lip was never painted.
+    const outer = mesh_index[84..96];
+    const inner = mesh_index[96..104];
+    const lip_ring = [_]u16{
+        61, 40, 37, 0,   267, 270, 291, 321, 314, 17, 84, 91,
+        78, 81, 13, 311, 308, 402, 14,  178,
+    };
+    var seen = std.AutoHashMap(u16, void).init(t.allocator);
+    defer seen.deinit();
+    for (outer) |point| {
+        try t.expect(std.mem.indexOfScalar(u16, &lip_ring, point) != null);
+        try t.expect(seen.get(point) == null);
+        try seen.put(point, {});
+    }
+    for (inner) |point| {
+        try t.expect(std.mem.indexOfScalar(u16, &lip_ring, point) != null);
+        try t.expect(seen.get(point) == null);
+        try seen.put(point, {});
+    }
+    // The upper lip's centre sits above the lower lip's on any face looking at the camera, and
+    // the inner pair straddles the opening, which is what makes a speaking mouth follow.
+    try t.expectEqual(@as(u16, 0), mesh_index[87]);
+    try t.expectEqual(@as(u16, 17), mesh_index[93]);
+    try t.expectEqual(@as(u16, 13), mesh_index[98]);
+    try t.expectEqual(@as(u16, 14), mesh_index[102]);
 }

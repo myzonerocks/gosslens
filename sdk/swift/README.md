@@ -13,26 +13,29 @@ is in the [root README](../../README.md#what-you-get).
 
 ## Install
 
-Each release attaches a prebuilt, checksummed `GosslensKit.xcframework` and
-pins the package manifest to it, so there is no Zig and no build step.
-
-In Xcode, File > Add Package Dependencies, and paste the repository URL:
+Each release attaches a prebuilt, checksummed `GosslensKit.xcframework` and the
+root `Package.swift` names it, so a bare dependency needs no Zig and no build
+step. In Xcode, File > Add Package Dependencies, and paste the repository URL:
 
 ```
 https://github.com/myzonerocks/gosslens
 ```
 
-Xcode offers the newest release and writes the version rule for you. For a
-`Package.swift`, name the oldest version you support and SwiftPM resolves
-forward to the newest release on its own, so this line stays correct as new
-versions ship:
+For a `Package.swift`, name the oldest version you support and SwiftPM resolves
+forward on its own:
 
 ```swift
 .package(url: "https://github.com/myzonerocks/gosslens", from: "0.12.0-alpha.6")
 ```
 
+Two products come with it. `Gosslens` is the Swift SDK every app wants. Add
+`GosslensKit` as well only where your own code imports the C module,
+`import CGosslens`, since a binary target is not visible to a client on its
+own:
+
 ```swift
 .product(name: "Gosslens", package: "gosslens")
+.product(name: "GosslensKit", package: "gosslens")
 ```
 
 Every published version is on the
@@ -45,29 +48,31 @@ Every published version is on the
 
 ### Building from source
 
-Prefer compiling the engine yourself, from a clone or your own fork? Build the
-two slices, point SwiftPM at your checkout, and set the per-slice search paths:
+The same manifest serves a checkout. Build the three slices and assemble the
+XCFramework into `zig-out/`; the manifest resolves that one instead of the release
+whenever it is there, so the app's dependency never changes between the two:
 
 ```sh
 zig build ios
 zig build ios-simulator
+zig build ios-simulator-x86
+tools/build-xcframework.sh
 ```
+
+Then depend on the checkout by path, with the same products as above:
 
 ```swift
 .package(path: "../gosslens")
 ```
 
-```text
-LIBRARY_SEARCH_PATHS[sdk=iphoneos*]        = .../gosslens/zig-out/ios
-LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = .../gosslens/zig-out/ios-simulator
-```
-
-Each simulator arch builds on its own (`zig build ios-simulator` for arm64,
-`ios-simulator-x86` for Intel); the released XCFramework lipos both into one
-universal simulator slice, so it runs on Apple-silicon and Intel Macs alike.
-Build a from-source checkout with `ONLY_ACTIVE_ARCH=YES` against a concrete
-simulator. Auto-link warnings for `AudioUnit`, `CoreAudioTypes`, or
-`UIUtilities` at the final link are expected and benign.
+With XcodeGen, `packages: Gosslens: path: ../gosslens` and the two product
+dependencies on the target. No library or header search paths, no link list:
+the XCFramework carries all of it. A checkout without the kit in `zig-out/` resolves the
+release, so a machine that never built the engine still builds the app. The
+simulator slice is universal (`ios-simulator` for arm64, `ios-simulator-x86`
+for Intel), so it runs on Apple-silicon and Intel Macs alike. Auto-link
+warnings for `AudioUnit`, `CoreAudioTypes`, or `UIUtilities` at the final link
+are expected and benign.
 
 ## The render loop
 
@@ -157,9 +162,15 @@ in [the lens spec](../../lenses/SPEC.md).
 
 ### Bring-your-own models
 
-A lens's `ml.infer` and companion nodes load their model files from the bundle
-directory, or from memory: `provideLensAsset(name:bytes:)` stages a model under
-the name the manifest uses ahead of a JSON activation, `mlOutput(_:tensor:)`
+A lens loads its files from the bundle directory, or from memory:
+`provideLensAsset(name:bytes:)` stages any bundle asset under the name the
+manifest uses ahead of a JSON activation - images, LUTs, sprites, face textures,
+glTF models and shader binaries (as `shaders/<stem>.<profile>.bin`) as well as
+the inference nets, so a lens fetched over the network runs exactly as an
+unpacked directory does. `spriteTransform(nodeId:)` reads where a placed
+sprite, label or video node currently draws: its rect and its turn in degrees,
+after the authored angle, any bound parameter and any gesture - for drawing
+selection handles or persisting where a sticker was left. `mlOutput(_:tensor:)`
 reads a node's whole published output tensor back, and `mlMask(_:)` reads a
 mask binding resampled to the segmentation plane. `Gosslens.capabilities()`
 reports which rails this build compiled real. `submitHands(_:)` feeds hands
@@ -378,7 +389,9 @@ let ribbon = try session.brushVertices()
 
 `setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x:y:z:)`/`endARStroke` are the
 world-anchored twin: points are pushed in the world frame world tracking reports,
-so a stroke stays fixed in the scene.
+so a stroke stays fixed in the scene. `undoARStroke`/`redoARStroke`/`clearARStrokes`
+are its stacks - the same undo/redo pair the screen brush has, so one brush rail
+drives both; a fresh stroke drops the redo future, as in any editor.
 
 ## Capture and recording
 
@@ -484,7 +497,12 @@ audioTrack.send(mixed)   // publish; pass mic: nil for lens sound over silence
 call in progress; in a call, `mixOutputAudio` replaces it. `GossAudioOutput`
 routes that local playback to the speaker for you: `start()` it once after the
 session exists and call `pump()` each frame beside `tickLens`, and lens sounds
-play through an `AVAudioEngine` source it owns.
+play through an `AVAudioEngine` source it owns. `GossMicInput` is the other
+direction: `start()` taps the device microphone and submits every buffer, so
+level, beat and `audio.infer` all run without you writing the interleave. It
+does not request permission or configure `AVAudioSession` - the app owns that,
+and a call may already hold the microphone. The engine resamples whatever rate
+the hardware granted, so pass it through rather than converting first.
 
 When the lens carries an `audio.infer` node with a caption binding, the engine
 runs on-device ASR over the mic and `captionText` reads the decoded text by the

@@ -104,6 +104,9 @@ void* recording_open_impl(const uint8_t* path, size_t path_len,
     AVAssetWriterInput* input =
         [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeVideo
                                        outputSettings:settings];
+    // The writer always takes real-time input. Told otherwise it applies full backpressure and
+    // the readiness spin below gives up on a slower host, so whether a viewfinder is presented
+    // is the engine's business and never the writer's.
     input.expectsMediaDataInRealTime = YES;
     if (![writer canAddInput:input]) return nullptr;
     [writer addInput:input];

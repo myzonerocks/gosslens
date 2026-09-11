@@ -257,6 +257,50 @@ export fn Java_com_gosslens_Gosslens_nativeMusicIdentify(env: *JniEnv, cls: jobj
     return @intFromEnum(rc);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeChainReport(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    // A direct buffer carries no alignment promise, so the ABI writes aligned locals that are
+    // copied out afterwards.
+    var ready: u32 = 0;
+    var total: u32 = 0;
+    var beauty: u32 = 0;
+    const status = abi.goss_session_chain_report(sessionFromHandle(session), &ready, &total, &beauty);
+    const out: *align(1) [3]u32 = @ptrCast(out_bytes);
+    out.* = .{ ready, total, beauty };
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeReadReconstruction(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, capacity: i32, count_buffer: jobject) i32 {
+    _ = cls;
+    const count_bytes = getDirectBufferAddress(env, count_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: ?[*]f32 = if (capacity > 0) @ptrCast(@alignCast(getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument))) else null;
+    var count: u32 = 0;
+    const status = abi.goss_session_read_reconstruction(sessionFromHandle(session), out, @intCast(@max(capacity, 0)), &count);
+    const out_count: *align(1) u32 = @ptrCast(count_bytes);
+    out_count.* = count;
+    return @intFromEnum(status);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeWriteReconstruction(env: *JniEnv, cls: jobject, session: i64, buffer: jobject, count: i32) i32 {
+    _ = cls;
+    if (count <= 0) return @intFromEnum(abi.goss_session_write_reconstruction(sessionFromHandle(session), null, 0));
+    const bytes = getDirectBufferAddress(env, buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_write_reconstruction(sessionFromHandle(session), @ptrCast(@alignCast(bytes)), @intCast(count)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeBeatMap(env: *JniEnv, cls: jobject, engine: i64, samples_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32, out_buffer: jobject, capacity: i32, count_buffer: jobject) i32 {
+    _ = cls;
+    const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const count_bytes = getDirectBufferAddress(env, count_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var count: u32 = 0;
+    const times: ?[*]i64 = if (capacity > 0) @ptrCast(@alignCast(getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument))) else null;
+    const status = abi.goss_engine_beat_map(engineFromHandle(engine), @ptrCast(@alignCast(samples)), @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0)), times, @intCast(@max(capacity, 0)), &count);
+    const out_count: *align(1) u32 = @ptrCast(count_bytes);
+    out_count.* = count;
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeSetDubbing(env: *JniEnv, cls: jobject, session: i64, enabled: i32) i32 {
     _ = env;
     _ = cls;
@@ -985,7 +1029,7 @@ export fn Java_com_gosslens_Gosslens_nativeCaptureLiveFrame(env: *JniEnv, cls: j
     return @intFromEnum(status);
 }
 
-export fn Java_com_gosslens_Gosslens_nativeRecordingStart(env: *JniEnv, cls: jobject, engine: i64, session: i64, path_buffer: jobject, path_len: i32, width: i32, height: i32, bitrate: i32, codec: i32) i32 {
+export fn Java_com_gosslens_Gosslens_nativeRecordingStart(env: *JniEnv, cls: jobject, engine: i64, session: i64, path_buffer: jobject, path_len: i32, width: i32, height: i32, bitrate: i32, codec: i32, realtime: i32) i32 {
     _ = cls;
     const path = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const config: abi.RecordingConfig = .{
@@ -994,6 +1038,8 @@ export fn Java_com_gosslens_Gosslens_nativeRecordingStart(env: *JniEnv, cls: job
         .bitrate_bps = @intCast(@max(bitrate, 0)),
         .codec = @intCast(@max(codec, 0)),
     };
+    const set = abi.goss_engine_recording_set_realtime(engineFromHandle(engine), realtime != 0);
+    if (set != .ok) return @intFromEnum(set);
     return @intFromEnum(abi.goss_engine_recording_start(engineFromHandle(engine), sessionFromHandle(session), @ptrCast(path), @intCast(@max(path_len, 0)), &config));
 }
 
@@ -1413,10 +1459,24 @@ export fn Java_com_gosslens_Gosslens_nativeArBrushEnd(env: *JniEnv, cls: jobject
     return @intFromEnum(abi.goss_session_ar_brush_end(sessionFromHandle(session)));
 }
 
+/// out_buffer takes five floats: x, y, w, h, then the turn in degrees.
+export fn Java_com_gosslens_Gosslens_nativeSpriteTransform(env: *JniEnv, cls: jobject, session: i64, node_id_buffer: jobject, node_id_len: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const node_id = getDirectBufferAddress(env, node_id_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: [*]f32 = @ptrCast(@alignCast(getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument)));
+    return @intFromEnum(abi.goss_session_sprite_transform(sessionFromHandle(session), @ptrCast(node_id), @intCast(@max(node_id_len, 0)), &out[0], &out[1], &out[2], &out[3], &out[4]));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeArBrushUndo(env: *JniEnv, cls: jobject, session: i64) i32 {
     _ = env;
     _ = cls;
     return @intFromEnum(abi.goss_session_ar_brush_undo(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeArBrushRedo(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_ar_brush_redo(sessionFromHandle(session)));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeArBrushClear(env: *JniEnv, cls: jobject, session: i64) i32 {
@@ -1449,6 +1509,27 @@ export fn Java_com_gosslens_Gosslens_nativePullHaptic(env: *JniEnv, cls: jobject
         out[1] = intensity;
     }
     return @intFromEnum(rc);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSubmitSourceFrame(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, plane0: i64, width: i32, height: i32, pixel_format: i32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var desc: abi.FrameDesc = std.mem.zeroes(abi.FrameDesc);
+    desc.width = @intCast(@max(width, 0));
+    desc.height = @intCast(@max(height, 0));
+    desc.pixel_format = @intCast(@max(pixel_format, 0));
+    var planes: abi.FramePlanes = std.mem.zeroes(abi.FramePlanes);
+    planes.plane_count = 1;
+    planes.planes[0] = @bitCast(plane0);
+    return @intFromEnum(abi.goss_session_submit_source_frame(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), &desc, &planes));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeFlashRisk(env: *JniEnv, cls: jobject, session: i64) f32 {
+    _ = env;
+    _ = cls;
+    var risk: f32 = 0;
+    _ = abi.goss_session_flash_risk(sessionFromHandle(session), &risk);
+    return risk;
 }
 
 export fn Java_com_gosslens_Gosslens_nativeRelease(env: *JniEnv, cls: jobject, session: i64) i32 {

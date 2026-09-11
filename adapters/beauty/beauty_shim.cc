@@ -235,21 +235,25 @@ bool glContextAlive() {
   return alive;
 }
 
-// The vendored filters swallow a missing makeup or whiten image into a
-// silent no-op, so name every absent required file once at create.
-void warnMissingResources(const char* resource_path) {
+// SourceImage::Create asserts and aborts the process when a lookup image is
+// not there, so a create over an incomplete resource directory refuses rather
+// than calling in: the host gets the nullptr it already handles.
+bool missingResources(const char* resource_path) {
   static const char* const kRequired[] = {
       "res/mouth.png",        "res/blusher.png",     "res/lookup_gray.png",
       "res/lookup_origin.png", "res/lookup_skin.png", "res/lookup_light.png",
   };
+  bool missing = false;
   for (const char* rel : kRequired) {
     std::error_code ec;
     if (!std::filesystem::exists(std::filesystem::path(resource_path) / rel,
                                  ec)) {
       std::fprintf(stderr, "gosslens beauty: resource missing: %s/%s\n",
                    resource_path, rel);
+      missing = true;
     }
   }
+  return missing;
 }
 
 }  // namespace
@@ -261,8 +265,10 @@ void* goss_beauty_create(const char* resource_path) {
     return nullptr;
   }
   if (resource_path != nullptr) {
+    if (missingResources(resource_path)) {
+      return nullptr;
+    }
     gpupixel::GPUPixel::SetResourcePath(resource_path);
-    warnMissingResources(resource_path);
   }
   auto* context = new (std::nothrow) BeautyContext();
   if (context == nullptr) {

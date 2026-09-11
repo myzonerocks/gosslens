@@ -86,6 +86,31 @@ session.submitFrameRgbaCopy(rgba, width * 4, width, height);
 engine.renderFrame(session);
 ```
 
+## Zero-copy frames
+
+The copy submit above reads the video back through a 2D canvas and copies it into wasm
+memory every frame. A page that owns its camera hands frames over without either: upload the
+video element into a texture created in the canvas's own WebGL2 context (`engine.gl`), name it
+once through `engine.adoptTexture(texture)`, and submit that name as the frame's one plane:
+
+```typescript
+const gl = engine.gl!;
+const texture = gl.createTexture()!;
+const name = engine.adoptTexture(texture);
+// per camera frame
+gl.bindTexture(gl.TEXTURE_2D, texture);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+session.submitFrameTexture(name, video.videoWidth, video.videoHeight, 0, mirrored);
+engine.renderFrame(session);
+```
+
+The renderer wraps the texture in place, so keep it alive until the next submitted frame has
+rendered; two textures taken in turn are enough. `engine.releaseTexture(name)` forgets the
+name; the page deletes the texture itself. A second source composited beside the camera (a
+dual stage's front card, a duet) rides the same road through
+`session.submitSourceFrameTexture(name, textureName, width, height)` after `defineSource`. The trackers (`GossFaceTracker` and the rest) are
+exported from the package entry, so a worker imports them the way a page imports the engine.
+
 ## Camera controls
 
 The engine never touches the camera. It holds declarative intent you set,
@@ -154,8 +179,14 @@ script node last wrote.
 
 A lens's `ml.infer`, `audio.infer`, `temporal.fuse`, `splat.cloud`, and
 `diffusion` nodes run real inference in the page through the engine's
-synchronous web rail. Stage each model file under the name the manifest uses
-before activating, then feed frames with `trackFrame` and read results back:
+synchronous web rail. Stage each file under the name the manifest uses
+before activating - `provideLensAsset` covers every bundle asset, not just the
+nets: images, LUTs, sprites, face textures, glTF models and shader binaries (as
+`shaders/<stem>.<profile>.bin`), so a lens fetched over the network runs exactly
+as an unpacked directory does. Then feed frames with `trackFrame` and read
+results back (`spriteTransform(nodeId)` reads where a placed sprite, label or
+video node currently draws - its rect and its turn in degrees, after the authored
+angle, any bound parameter and any gesture):
 
 ```typescript
 session.provideLensAsset("net.onnx", modelBytes);
@@ -384,7 +415,9 @@ const ribbon = session.brushVertices();
 
 `setARBrushStyle`/`beginARStroke`/`addARStrokePoint(x, y, z)`/`endARStroke` are the
 world-anchored twin: points are pushed in the world frame world tracking reports,
-so a stroke stays fixed in the scene.
+so a stroke stays fixed in the scene. `undoARStroke`/`redoARStroke`/`clearARStrokes`
+are its stacks - the same undo/redo pair the screen brush has, so one brush rail
+drives both; a fresh stroke drops the redo future, as in any editor.
 
 ## Capture and recording
 
@@ -455,8 +488,10 @@ to your track's rate and sums it in, so there is nothing to hand-mix (pass `null
 for the mic to send the lens sound over silence). `pullAudio` still pulls the lens
 sound alone for local WebAudio playback with no call in progress; `GossAudioOutput`
 wraps that playback (an `AudioWorklet` it owns, `start()` from a gesture, `pump()`
-each frame beside `tickLens`). `GossMicInput` captures the microphone into
-`submitAudio` so level and beat triggers fire in the browser, and
+each frame beside `tickLens`). `GossMicInput` captures the microphone, or the stream the page hands `start`, into
+`submitAudio` so level and beat triggers fire in the browser at whatever rate
+the browser chose - the engine resamples to its own fixed ring rate, so an
+`audio.infer` model reads the same window here as on a phone - and
 `GossVideoTexture` plays an MP4 through the browser's decoder into a named
 source a lens composites.
 

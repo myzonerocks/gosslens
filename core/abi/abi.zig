@@ -151,6 +151,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_capture_photo(goss_engine *engine, goss_session *session, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_capture_photo_as(goss_engine *engine, goss_session *session, uint32_t format, uint32_t quality, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height)",
     "goss_status goss_engine_recording_start(goss_engine *engine, goss_session *session, const uint8_t *path, size_t path_len, const goss_recording_config *config)",
+    "goss_status goss_engine_recording_set_realtime(goss_engine *engine, bool realtime)",
     "goss_status goss_engine_recording_stop(goss_engine *engine)",
     "goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)",
     "goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)",
@@ -177,6 +178,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
+    "goss_status goss_session_submit_source_frame(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const goss_frame_planes *planes)",
     "goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement)",
     "goss_status goss_session_clear_layout(goss_session *session)",
     "goss_status goss_session_set_source_composite(goss_session *session, const uint8_t *name, size_t name_len, float opacity, uint32_t key_mode, float key_r, float key_g, float key_b, float similarity)",
@@ -209,6 +211,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_ar_brush_point(goss_session *session, float x, float y, float z)",
     "goss_status goss_session_ar_brush_end(goss_session *session)",
     "goss_status goss_session_ar_brush_undo(goss_session *session)",
+    "goss_status goss_session_ar_brush_redo(goss_session *session)",
     "goss_status goss_session_ar_brush_clear(goss_session *session)",
     "goss_status goss_session_grab(goss_session *session, float x, float y, float z)",
     "goss_status goss_session_release(goss_session *session)",
@@ -238,6 +241,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_allow_model_digest(goss_session *session, const uint8_t *digest)",
     "goss_status goss_session_clear_model_allowlist(goss_session *session)",
     "goss_status goss_session_provide_lens_asset(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *bytes, size_t len)",
+    "goss_status goss_session_sprite_transform(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out_x, float *out_y, float *out_w, float *out_h, float *out_rotation)",
     "goss_status goss_session_ml_output(goss_session *session, const uint8_t *node_id, size_t node_id_len, uint32_t tensor, float *out, size_t capacity, size_t *out_len)",
     "goss_status goss_session_ml_mask(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out, size_t capacity, size_t *out_len)",
     "void goss_session_disable_segmentation(goss_session *session)",
@@ -285,6 +289,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_release_live_texture(goss_engine *engine, uint64_t native_handle)",
     "goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t pointer_id, float x, float y)",
     "goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity)",
+    "goss_status goss_session_flash_risk(goss_session *session, float *out_risk)",
     "goss_status goss_compile_prompt(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_generate_song(goss_engine *engine, const uint8_t *prompt, size_t prompt_len, uint32_t sample_rate, uint32_t seed, uint32_t bars, uint8_t *out_buf, size_t out_cap, size_t *out_len)",
     "goss_status goss_engine_scan_barcode(goss_engine *engine, const uint8_t *luminance, uint32_t width, uint32_t height, uint8_t *out_digits)",
@@ -297,6 +302,10 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_music_add_reference(goss_engine *engine, uint32_t track_id, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "void goss_engine_music_clear_references(goss_engine *engine)",
     "goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes)",
+    "goss_status goss_engine_beat_map(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t *out_times_us, uint32_t capacity, uint32_t *out_count)",
+    "goss_status goss_session_chain_report(goss_session *session, uint32_t *out_ready, uint32_t *out_total, uint32_t *out_beauty)",
+    "goss_status goss_session_read_reconstruction(goss_session *session, float *out, uint32_t capacity, uint32_t *out_count)",
+    "goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -466,11 +475,14 @@ pub const Engine = struct {
     /// frame of recording_session; frames commit two engine frames
     /// after they render so the GPU has finished writing them.
     recording: ?media_recording.Recording = null,
+    /// Whether a viewfinder is watching the recording. An offline lane clears it and the
+    /// composite goes straight to the encoder, skipping a present nobody sees.
+    recording_realtime: bool = true,
     recording_session: ?*Session = null,
-    /// External render targets per encoder pool buffer, keyed by the
-    /// native texture pointer - the pool cycles a few buffers, each
-    /// needing its own persistent wrap.
-    recording_slots: std.AutoHashMapUnmanaged(usize, RecordingSlot) = .empty,
+    /// The one external wrap a recording composites into. A framebuffer
+    /// resolves its attachment's native pointer per frame, so one texture
+    /// and one target serve every buffer the encoder pool vends.
+    recording_wrap: RecordingSlot = .{},
     recording_pending: [2]?PendingRecordingFrame = .{ null, null },
     recording_pending_at: u8 = 0,
     /// The slot the current frame's composite renders into, when this
@@ -636,6 +648,12 @@ const PendingGlbCollider = struct {
 const SpriteMask = struct { channel: u8, over: bool, strength: f32 = 1 };
 
 pub const Session = struct {
+    /// Mask scratch for the per-frame matte and segmentation polls. On the session, which lives
+    /// on the heap, rather than a local in each poll: a 256x256 float mask is a quarter of a
+    /// megabyte, and eleven of them as locals on the render path overflowed any thread but the
+    /// main one. Two slots, because the sclera matte holds a mask and an iris at once.
+    mask_scratch: [2][segmentation.mask_len]f32 = undefined,
+
     /// Engine-side audio analysis, fed by goss_session_submit_audio;
     /// once fed, its level and beat outrank the host's tick value.
     audio: audio_analysis.Analysis = .{},
@@ -762,6 +780,10 @@ pub const Session = struct {
     audio_ring: [audio_ring_len]f32 = @splat(0),
     audio_ring_pos: usize = 0,
     audio_ring_filled: bool = false,
+    /// Brings the device's own microphone rate to the ring's fixed one, carrying its phase across
+    /// buffers. Without it the ring held whatever rate the handset used and every audio model read
+    /// a rate-shifted window - the same speech answered differently per device.
+    audio_resampler: audio_analysis.MicResampler = .{},
     /// Scratch the tick copies a worker's window into, in chronological order,
     /// before handing it to the inference core. Allocated when the first audio
     /// worker loads, sized to the ring.
@@ -1129,6 +1151,9 @@ pub const Session = struct {
     /// filesystem-less host (the web) feeds model, reference, and label bytes
     /// through; keys and values are session-owned copies.
     staged_assets: std.StringHashMapUnmanaged([]u8) = .{},
+    /// Temp files a staged clip was spilled to, because the platform decoder opens by path and
+    /// cannot be handed bytes. Deleted when the lens goes, so a session leaves nothing behind.
+    spilled_assets: std.ArrayList([]u8) = .empty,
     /// The newest host-submitted hands, preferred over the built-in worker so
     /// a platform's own tracker drives the same hand signals and joints.
     submitted_hands: hand.Result = std.mem.zeroes(hand.Result),
@@ -1280,6 +1305,13 @@ pub const Session = struct {
     /// chain position is already known. Owned, rebuilt every
     /// activation, freed on teardown.
     chain_order: []runtime.CompositePass = &.{},
+    /// What the last drawn frame did with the active lens: how many of its stages were ready to
+    /// draw, how many it has, and whether the beauty bridge ran. Read through
+    /// goss_session_chain_report, which is how a host tells a lens that is working from one that
+    /// is silently doing nothing.
+    chain_total: u32 = 0,
+    chain_ready: u32 = 0,
+    chain_beauty: bool = false,
     /// One background loader per currently-spliced lut.pass node still
     /// waiting on its LUT image, keyed by graph index. Started at
     /// activation (directory-based only, same reason as shader_programs
@@ -1440,6 +1472,12 @@ pub const Session = struct {
     sprite_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     sprite_rects: std.AutoHashMapUnmanaged(graph.NodeIndex, [5]f32) = .empty,
+    /// A sprite.2d or text.2d node's authored turn in degrees, and the parameter
+    /// name that replaces it live. A gesture's turn adds to this, so an authored
+    /// angle is where the sticker starts rather than something the first drag
+    /// discards. Read back through goss_session_sprite_transform.
+    sprite_rotations: std.AutoHashMapUnmanaged(graph.NodeIndex, f32) = .empty,
+    sprite_rotation_params: std.AutoHashMapUnmanaged(graph.NodeIndex, []const u8) = .empty,
     /// Extruded 3D text nodes: the glyph block mesh and its color, drawn via
     /// the model path, by graph index.
     text3d_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, struct { mesh: render.Renderer.ModelMesh, color: [4]f32 }) = .empty,
@@ -2667,6 +2705,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // here when their value changed, before the chain reads their textures.
     refreshDynamicText(s);
     var ready_count: usize = 0;
+    s.chain_total = @intCast(s.chain_order.len);
     for (s.chain_order) |entry| {
         // A node a hide or swap_subgraph action hid does not draw and is not
         // counted, so the frame passes through it like any inactive pass.
@@ -2813,7 +2852,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         };
         if (ready) ready_count += 1;
     }
+    s.chain_ready = @intCast(ready_count);
     const beauty_active = anyBeautyActive(s);
+    s.chain_beauty = beauty_active;
     const capture_out_width: u16 = if (s.capture_requested and s.capture_res_width != 0) s.capture_res_width else @intCast(r.width);
     const capture_out_height: u16 = if (s.capture_requested and s.capture_res_height != 0) s.capture_res_height else @intCast(r.height);
     if (s.capture_requested) try ensureCaptureTarget(e, capture_out_width, capture_out_height);
@@ -3870,6 +3911,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.tile = if (is_final) s.capture_tile else null;
                 // The frame passes through whole; the mesh then draws
                 // only its own triangles over it. No tracked face means
                 // no draw, the capability's defined degradation.
@@ -4003,6 +4045,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.tile = if (is_final) s.capture_tile else null;
                 // The frame passes through whole; the lash strip then rises off
                 // each tracked upper lid over it. No tracked face means no draw,
                 // the capability's defined degradation.
@@ -4108,7 +4151,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     const sc = @max(rect[2], 0.1) * 0.7;
                     // Place the text at its rect centre and rotate it so the
                     // extruded sides show rather than reading as a flat label.
-                    const model = math.Mat4.translation(.{ cx * 0.7, cy * 0.7, 0 }).mul(math.Mat4.rotationY(0.6)).mul(math.Mat4.rotationX(0.25)).mul(math.Mat4.scaling(.{ sc, sc, sc }));
+                    // The Y/X tilt shows the extruded sides; the authored turn rides on top of it
+                    // about the screen normal, so a 3D banner tilts like a flat one.
+                    const turn: f32 = spriteTurn(s, entry.graph_index);
+                    const model = math.Mat4.translation(.{ cx * 0.7, cy * 0.7, 0 }).mul(math.Mat4.rotationZ(std.math.degreesToRadians(turn))).mul(math.Mat4.rotationY(0.6)).mul(math.Mat4.rotationX(0.25)).mul(math.Mat4.scaling(.{ sc, sc, sc }));
                     r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
                     r.drawModelMesh(mesh_view, text3d.mesh, model, text3d.color, aspect);
                     if (output) |target| {
@@ -4208,14 +4254,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
                 // An interactive sprite draws at its dragged and scaled rect,
                 // keeping its own opacity, and turned by any live rotation.
-                var sprite_rotation: f32 = 0;
+                var sprite_rotation: f32 = std.math.degreesToRadians(spriteTurn(s, entry.graph_index));
                 if (s.sprite_interactions.get(entry.graph_index)) |si| {
                     const tr = si.rect();
                     rect[0] = tr[0];
                     rect[1] = tr[1];
                     rect[2] = tr[2];
                     rect[3] = tr[3];
-                    sprite_rotation = si.rot;
+                    sprite_rotation += si.rot;
                 }
                 drawn += 1;
                 const blit_view = next_view_id;
@@ -4944,11 +4990,15 @@ fn blitCaptureToSwapChain(e: *Engine, r: *render.Renderer, view_id: u8) void {
 
 /// The recording sibling of blitCaptureToSwapChain: a recorded frame's
 /// composite lands in the encoder's own surface, so the swap chain
-/// still needs a passthrough of it to display normally.
+/// still needs a passthrough of it to display normally. An offline
+/// recording has no viewfinder and the present costs a display
+/// refresh, so it draws the encoder pass alone.
 fn blitRecordingToSwapChain(e: *Engine, r: *render.Renderer, view_id: u8) void {
     const target = e.recording_frame_target orelse return;
-    render.Renderer.setViewTarget(view_id, null, @intCast(r.width), @intCast(r.height));
-    r.submitShaderPass(view_id, r.passthroughProgram(), target.texture, r.default_mask_texture);
+    if (e.recording_realtime) {
+        render.Renderer.setViewTarget(view_id, null, @intCast(r.width), @intCast(r.height));
+        r.submitShaderPass(view_id, r.passthroughProgram(), target.texture, r.default_mask_texture);
+    }
     if (recording_binds_window) {
         if (e.recording_window_target) |window| {
             const rec = &(e.recording.?);
@@ -5009,6 +5059,8 @@ pub fn destroySession(session: *Session) void {
     session.text3d_meshes.deinit(session.engine.gpa);
     session.video_textures.deinit(session.engine.gpa);
     session.sprite_rects.deinit(session.engine.gpa);
+    session.sprite_rotations.deinit(session.engine.gpa);
+    session.sprite_rotation_params.deinit(session.engine.gpa);
     session.sprite_opacity_params.deinit(session.engine.gpa);
     session.sprite_placement_params.deinit(session.engine.gpa);
     session.sprite_interactions.deinit(session.engine.gpa);
@@ -5164,6 +5216,8 @@ pub fn destroySession(session: *Session) void {
         session.engine.gpa.free(entry.key_ptr.*);
         session.engine.gpa.free(entry.value_ptr.*);
     }
+    clearSpilledAssets(session);
+    session.spilled_assets.deinit(session.engine.gpa);
     session.staged_assets.deinit(session.engine.gpa);
     session.capture_poses.deinit(session.engine.gpa);
     session.recon_gaussians.deinit(session.engine.gpa);
@@ -5380,17 +5434,13 @@ fn prepareRecordingFrame(e: *Engine, r: *render.Renderer) ?media_recording.Frame
     const width: u16 = @intCast(rec.config.width);
     const height: u16 = @intCast(rec.config.height);
     const key = @intFromPtr(frame.native_texture);
+    const wrap = &e.recording_wrap;
     if (recording_binds_window) {
         // The window is not sampleable, so the composite lands in the
         // capture target (sampleable) and re-presents into both the
         // swap chain and the encoder window each frame.
-        const slot = e.recording_slots.getOrPut(e.gpa, key) catch {
-            rec.abortFrame(frame);
-            return null;
-        };
-        if (!slot.found_existing) slot.value_ptr.* = .{};
-        if (slot.value_ptr.target == null) {
-            slot.value_ptr.target = render.Renderer.createWindowTarget(frame.native_texture, width, height) catch {
+        if (wrap.target == null) {
+            wrap.target = render.Renderer.createWindowTarget(frame.native_texture, width, height) catch {
                 e.recording_warmups += 1;
                 rec.abortFrame(frame);
                 return null;
@@ -5401,28 +5451,23 @@ fn prepareRecordingFrame(e: *Engine, r: *render.Renderer) ?media_recording.Frame
             rec.abortFrame(frame);
             return null;
         };
-        e.recording_window_target = slot.value_ptr.target;
+        e.recording_window_target = wrap.target;
         e.recording_frame_target = e.capture_target;
         return frame;
     }
-    const slot = e.recording_slots.getOrPut(e.gpa, key) catch {
-        rec.abortFrame(frame);
-        return null;
-    };
-    if (!slot.found_existing) slot.value_ptr.* = .{};
-    const wrapped = r.wrapExternalRenderTarget(&slot.value_ptr.persistent, width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, key) orelse {
+    const wrapped = r.wrapExternalRenderTarget(&wrap.persistent, width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, key) orelse {
         e.recording_warmups += 1;
         rec.abortFrame(frame);
         return null;
     };
-    if (slot.value_ptr.target == null) {
-        slot.value_ptr.target = render.Renderer.createExternalTarget(wrapped) catch {
+    if (wrap.target == null) {
+        wrap.target = render.Renderer.createExternalTarget(wrapped) catch {
             e.recording_warmups += 1;
             rec.abortFrame(frame);
             return null;
         };
     }
-    e.recording_frame_target = slot.value_ptr.target;
+    e.recording_frame_target = wrap.target;
     return frame;
 }
 
@@ -5466,13 +5511,9 @@ fn finishRecording(e: *Engine) bool {
     } else {
         ok = false;
     }
-    var it = e.recording_slots.valueIterator();
-    while (it.next()) |slot| {
-        if (slot.target) |target| render.Renderer.destroyOffscreenTarget(target);
-        slot.persistent.deinit();
-    }
-    e.recording_slots.deinit(e.gpa);
-    e.recording_slots = .empty;
+    if (e.recording_wrap.target) |target| render.Renderer.destroyOffscreenTarget(target);
+    e.recording_wrap.persistent.deinit();
+    e.recording_wrap = .{};
     e.recording = null;
     e.recording_session = null;
     e.recording_frame_target = null;
@@ -5623,6 +5664,14 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     return e.capture_target;
 }
 
+/// The capture target's real size is the only size readTexture writes, so a
+/// readback into a buffer sized from the size that was *asked for* overruns the
+/// heap whenever the two differ - a composite that fell back leaves the previous
+/// capture's target in place, and that is enough. Checked at every readback.
+fn captureTargetMatches(e: *const Engine, width: u32, height: u32) bool {
+    return e.capture_width == width and e.capture_height == height;
+}
+
 pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
@@ -5641,6 +5690,8 @@ pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, ou
     const staging = e.capture_staging orelse return .renderer_unavailable;
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, data);
+    // bgfx writes the copy at ready_frame, so this waits rather than
+    // giving up: abandoning it frees a buffer the GPU still writes into.
     while (r.frame() < ready_frame) {}
     return .ok;
 }
@@ -5681,6 +5732,8 @@ pub export fn goss_engine_capture_live_frame(engine: ?*Engine, session: ?*Sessio
         }
         render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
         const ready_frame = render.Renderer.readTexture(staging, e.capture_convert.ptr);
+        // bgfx writes the copy at ready_frame, so this waits rather than
+        // giving up: abandoning it frees a buffer the GPU still writes into.
         while (r.frame() < ready_frame) {}
         // The readback is packed RGBA and argbToNv12 reads R,G,B in that
         // order, so no swizzle first. BT.709 video range broadcast default.
@@ -5690,6 +5743,8 @@ pub export fn goss_engine_capture_live_frame(engine: ?*Engine, session: ?*Sessio
 
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, data);
+    // bgfx writes the copy at ready_frame, so this waits rather than
+    // giving up: abandoning it frees a buffer the GPU still writes into.
     while (r.frame() < ready_frame) {}
     if (format == pixel_format_bgra8) image.swapRedBlue(data[0..rgba_size]) catch return .unsupported;
     return .ok;
@@ -5824,6 +5879,8 @@ pub export fn goss_engine_capture_photo(engine: ?*Engine, session: ?*Session, ou
     const staging = e.capture_staging orelse return .renderer_unavailable;
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
+    // bgfx writes the copy at ready_frame, so this waits rather than
+    // giving up: abandoning it frees a buffer the GPU still writes into.
     while (r.frame() < ready_frame) {}
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -5852,6 +5909,31 @@ pub const photo_supported = photo.supported;
 /// out_len so a too-small buffer can be retried. JPEG is the engine's
 /// own encoder - on every target, never gated on a platform backend;
 /// HEIC routes to the platform. color_space picks the JPEG ICC profile.
+/// A capture written band by band, in whichever format was asked for. Both encoders hold their
+/// own state across bands, so the tiling loop hands rows to one of these and never branches.
+const BandSink = union(enum) {
+    png: png.StreamEncoder,
+    jpeg: jpeg.StreamEncoder,
+
+    fn writeBand(self: *BandSink, rows: []const u8, count: u32) !void {
+        switch (self.*) {
+            inline else => |*enc| try enc.writeBand(rows, count),
+        }
+    }
+
+    fn finish(self: *BandSink) !void {
+        switch (self.*) {
+            inline else => |*enc| try enc.finish(),
+        }
+    }
+
+    fn deinit(self: *BandSink) void {
+        switch (self.*) {
+            inline else => |*enc| enc.deinit(),
+        }
+    }
+};
+
 fn encodeLossyPhoto(gpa: std.mem.Allocator, pixels: []const u8, width: u32, height: u32, format: u32, quality: u32, color_space: u32, orientation: u8, data: []u8, out_len: *usize) Status {
     if (format == 1) {
         var encoded: std.ArrayList(u8) = .empty;
@@ -5898,6 +5980,8 @@ pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session,
     const staging = e.capture_staging orelse return .renderer_unavailable;
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
+    // bgfx writes the copy at ready_frame, so this waits rather than
+    // giving up: abandoning it frees a buffer the GPU still writes into.
     while (r.frame() < ready_frame) {}
 
     return encodeLossyPhoto(gpa, pixels, e.capture_width, e.capture_height, format, quality, 0, 1, data[0..out_capacity], len_out);
@@ -6039,6 +6123,16 @@ pub const RecordingConfig = extern struct {
 /// the file at path. One recording per engine; every subsequent
 /// goss_engine_render_frame of this session appends one video frame at
 /// the frame's own timestamp until goss_engine_recording_stop.
+/// Tells the next recording whether a viewfinder is watching it. True is the live camera and
+/// the default; an offline lane rendering a clip faster than real time passes false, and the
+/// composite then goes straight to the encoder rather than waiting on a display refresh to
+/// present a frame nobody sees. Frames carry their own timestamps either way.
+pub export fn goss_engine_recording_set_realtime(engine: ?*Engine, realtime: bool) Status {
+    const e = engine orelse return .invalid_argument;
+    e.recording_realtime = realtime;
+    return .ok;
+}
+
 pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, path: ?[*]const u8, path_len: usize, config: ?*const RecordingConfig) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
@@ -6077,6 +6171,22 @@ pub export fn goss_engine_recording_stop(engine: ?*Engine) Status {
 /// and beat analysis always consumes it (driving audio.level and
 /// audio.beat triggers), and an active recording of this session muxes
 /// it as the audio track where the backend supports audio.
+/// Writes resampled microphone samples straight into the session's ring, so the resampler needs
+/// no buffer of its own between it and the ring.
+const RingSink = struct {
+    session: *Session,
+
+    pub fn put(self: *RingSink, v: f32) void {
+        const s = self.session;
+        s.audio_ring[s.audio_ring_pos] = v;
+        s.audio_ring_pos += 1;
+        if (s.audio_ring_pos >= audio_ring_len) {
+            s.audio_ring_pos = 0;
+            s.audio_ring_filled = true;
+        }
+    }
+};
+
 pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, timestamp_us: i64) Status {
     const s = session orelse return .invalid_argument;
     const data = samples orelse return .invalid_argument;
@@ -6086,19 +6196,21 @@ pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f
     s.audio_engine_fed = true;
     s.audio_timestamp_us = timestamp_us;
 
-    // Downmix each frame to mono and write it into the microphone ring, so an
-    // audio.infer worker reads a window of the latest samples off the frame path.
+    // Downmix each frame to mono, resample to the ring's fixed rate, and write it in, so an
+    // audio.infer worker reads a window of the latest samples at one rate on every device.
+    // The mono pass runs in chunks so a long buffer needs no allocation.
     var fi: usize = 0;
-    while (fi < frame_count) : (fi += 1) {
-        var mono: f32 = 0;
-        for (0..channels) |ch| mono += slice[fi * channels + ch];
-        mono /= @floatFromInt(channels);
-        s.audio_ring[s.audio_ring_pos] = mono;
-        s.audio_ring_pos += 1;
-        if (s.audio_ring_pos >= audio_ring_len) {
-            s.audio_ring_pos = 0;
-            s.audio_ring_filled = true;
+    var mono: [512]f32 = undefined;
+    var sink: RingSink = .{ .session = s };
+    while (fi < frame_count) {
+        const take = @min(mono.len, frame_count - fi);
+        for (0..take) |k| {
+            var sum: f32 = 0;
+            for (0..channels) |ch| sum += slice[(fi + k) * channels + ch];
+            mono[k] = sum / @as(f32, @floatFromInt(channels));
         }
+        s.audio_resampler.feed(mono[0..take], sample_rate, &sink);
+        fi += take;
     }
 
     const e = s.engine;
@@ -6169,17 +6281,11 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     };
     const render_w: u32 = @as(u32, still_w) * supersample;
     const render_h: u32 = @as(u32, still_h) * supersample;
-    // Above the max texture size a single target is impossible, so the
-    // output composites in tiles and stitches. The perspective 3D content
-    // (model, cloth, hair, particles) tiles through the per-tile
-    // sub-frustum crop; the screen-space face-mesh overlay and rotated or
-    // mirrored plain frames stay single-target under the cap.
+    // Above the max texture size a single target is impossible, so the output composites in tiles
+    // and stitches. The perspective 3D content tiles through the per-tile sub-frustum crop, and a
+    // turned or mirrored frame tiles because the turn rides the sampling rather than a transform
+    // on the quad. The screen-space face-mesh overlay is still single-target under the cap.
     const tile_cap: u32 = if (s.capture_tile_cap != 0) s.capture_tile_cap else 16384;
-    const has_screenspace_mesh = s.mesh_face_textures.count() > 0 or s.paint_face_textures.count() > 0 or s.face_swap_textures.count() > 0 or s.lash_params.count() > 0;
-    const rot = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
-    const upright = rot == 0 and (current.desc.flags & frame_flag_mirror) == 0;
-    const tileable = !has_screenspace_mesh and upright;
-    if ((render_w > tile_cap or render_h > tile_cap) and !tileable) return .invalid_argument;
 
     const gpa = e.gpa;
     const render_size = @as(usize, render_w) * @as(usize, render_h) * 4;
@@ -6200,11 +6306,11 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
         s.capture_aspect = 0;
     }
 
-    // Streaming tiled PNG: encode each tile-row band as it finishes and
-    // free it, so peak memory is one band plus the compressed output, not
-    // the whole render buffer - what lets a large capture fit in a phone's
-    // RAM. Supersample and the lossy formats keep the full-buffer path.
-    if ((cols > 1 or rows > 1) and cfg.format == 0 and supersample == 1 and !s.capture_no_stream) {
+    // Encode each band as it finishes and free it, so peak memory is one band plus the output
+    // rather than the whole render buffer - what lets a large capture fit in a phone's RAM.
+    // A supersampled capture streams too: the band walks the output, so each renders its own
+    // taller slice and downsamples before encoding, instead of holding the enlarged buffer.
+    if ((cols > 1 or rows > 1) and (cfg.format == 0 or cfg.format == 1) and !s.capture_no_stream) {
         const space = color.Space.fromInt(cfg.color_space);
         var tags: png.ColorTags = .{};
         if (space != .srgb) {
@@ -6213,18 +6319,36 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
         }
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(gpa);
-        var enc: png.StreamEncoder = undefined;
-        enc.begin(gpa, &encoded, render_w, render_h, .{
-            .bit_depth = if (cfg.bit_depth == 16) 16 else 8,
-            .color = tags,
-        }) catch return .out_of_memory;
+        var enc: BandSink = if (cfg.format == 1) .{ .jpeg = undefined } else .{ .png = undefined };
+        switch (enc) {
+            .png => |*p_| p_.begin(gpa, &encoded, still_w, still_h, .{
+                .bit_depth = if (cfg.bit_depth == 16) 16 else 8,
+                .color = tags,
+            }) catch return .out_of_memory,
+            .jpeg => |*j_| j_.begin(gpa, &encoded, still_w, still_h, .{
+                .quality = if (cfg.quality == 0) 90 else @intCast(cfg.quality),
+                .orientation = 1,
+                .icc_profile = color.iccProfile(cfg.color_space),
+            }) catch return .out_of_memory,
+        }
         defer enc.deinit();
-        const band = gpa.alloc(u8, @as(usize, render_w) * @min(tile_cap, render_h) * 4) catch return .out_of_memory;
+        // The band is a whole number of output rows, so the box filter always sees complete
+        // source blocks: a band split mid-block would average across a seam.
+        const ss: u32 = supersample;
+        const out_band: u32 = @max(1, tile_cap / ss);
+        const band_rows: u32 = out_band * ss;
+        const band = gpa.alloc(u8, @as(usize, render_w) * @min(band_rows, render_h) * 4) catch return .out_of_memory;
         defer gpa.free(band);
+        var shrunk: []u8 = &.{};
+        defer if (shrunk.len > 0) gpa.free(shrunk);
+        if (ss > 1) {
+            shrunk = gpa.alloc(u8, @as(usize, still_w) * out_band * 4) catch return .out_of_memory;
+        }
+        const band_count: u32 = (render_h + band_rows - 1) / band_rows;
         var ty: u32 = 0;
-        while (ty < rows) : (ty += 1) {
-            const tile_y = ty * tile_cap;
-            const th: u32 = @min(tile_cap, render_h - tile_y);
+        while (ty < band_count) : (ty += 1) {
+            const tile_y = ty * band_rows;
+            const th: u32 = @min(band_rows, render_h - tile_y);
             var tx: u32 = 0;
             while (tx < cols) : (tx += 1) {
                 const tile_x = tx * tile_cap;
@@ -6243,11 +6367,14 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
                     h.* = 0;
                     return .ok;
                 }
+                if (!captureTargetMatches(e, tw, th)) return .again;
                 const staging = e.capture_staging orelse return .renderer_unavailable;
                 const tile_buf = gpa.alloc(u8, @as(usize, tw) * @as(usize, th) * 4) catch return .out_of_memory;
                 defer gpa.free(tile_buf);
                 render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
                 const ready_frame = render.Renderer.readTexture(staging, tile_buf.ptr);
+                // bgfx writes the copy at ready_frame, so this waits rather than
+                // giving up: abandoning it frees a buffer the GPU still writes into.
                 while (r.frame() < ready_frame) {}
                 var row: u32 = 0;
                 while (row < th) : (row += 1) {
@@ -6256,11 +6383,19 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
                     @memcpy(band[dst..][0 .. @as(usize, tw) * 4], tile_buf[src..][0 .. @as(usize, tw) * 4]);
                 }
             }
-            enc.writeBand(band[0 .. @as(usize, render_w) * th * 4], th) catch return .out_of_memory;
+            if (ss > 1) {
+                const out_rows: u32 = th / ss;
+                if (out_rows > 0) {
+                    image.downsampleBox(band[0 .. @as(usize, render_w) * th * 4], render_w, th, shrunk[0 .. @as(usize, still_w) * out_rows * 4], still_w, out_rows) catch return .unsupported;
+                    enc.writeBand(shrunk[0 .. @as(usize, still_w) * out_rows * 4], out_rows) catch return .out_of_memory;
+                }
+            } else {
+                enc.writeBand(band[0 .. @as(usize, render_w) * th * 4], th) catch return .out_of_memory;
+            }
         }
         enc.finish() catch return .out_of_memory;
-        w.* = render_w;
-        h.* = render_h;
+        w.* = still_w;
+        h.* = still_h;
         len_out.* = encoded.items.len;
         if (out_capacity < encoded.items.len) return .invalid_argument;
         @memcpy(data[0..encoded.items.len], encoded.items);
@@ -6282,9 +6417,12 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
             h.* = 0;
             return .ok;
         }
+        if (!captureTargetMatches(e, render_w, render_h)) return .again;
         const staging = e.capture_staging orelse return .renderer_unavailable;
         render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
         const ready_frame = render.Renderer.readTexture(staging, rendered.ptr);
+        // bgfx writes the copy at ready_frame, so this waits rather than
+        // giving up: abandoning it frees a buffer the GPU still writes into.
         while (r.frame() < ready_frame) {}
     } else {
         // Composite each tile into its own small target and stitch the
@@ -6311,12 +6449,15 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
                     h.* = 0;
                     return .ok;
                 }
+                if (!captureTargetMatches(e, tw, th)) return .again;
                 const staging = e.capture_staging orelse return .renderer_unavailable;
                 const tile_size = @as(usize, tw) * @as(usize, th) * 4;
                 const tile_buf = gpa.alloc(u8, tile_size) catch return .out_of_memory;
                 defer gpa.free(tile_buf);
                 render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
                 const ready_frame = render.Renderer.readTexture(staging, tile_buf.ptr);
+                // bgfx writes the copy at ready_frame, so this waits rather than
+                // giving up: abandoning it frees a buffer the GPU still writes into.
                 while (r.frame() < ready_frame) {}
                 var row: u32 = 0;
                 while (row < th) : (row += 1) {
@@ -6727,6 +6868,27 @@ pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, nam
     return .ok;
 }
 
+/// Hands a named source one BGRA or RGBA frame zero-copy: the one plane is a
+/// platform texture wrapped, not read, the way the camera's own frame is, so a
+/// second lens composites at no per-frame copy. The platform object must
+/// outlive the next rendered frame.
+pub export fn goss_session_submit_source_frame(session: ?*Session, name: ?[*]const u8, name_len: usize, desc: ?*const FrameDesc, planes: ?*const FramePlanes) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const p = planes orelse return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
+    if (d.pixel_format != pixel_format_bgra8 and d.pixel_format != pixel_format_rgba8) return .invalid_argument;
+    if (p.plane_count != 1) return .invalid_argument;
+    if (s.engine.renderer == null) return .renderer_unavailable;
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+    const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
+    _ = s.source_tex[idx].rebind(@intCast(d.width), @intCast(d.height), format, @intCast(p.planes[0]));
+    s.source_dims[idx] = .{ @intCast(d.width), @intCast(d.height) };
+    s.source_has_frame[idx] = true;
+    return .ok;
+}
+
 /// Grows a scratch slice to at least `need` bytes, reusing it otherwise; null
 /// only if a grow ever fails, in which case the caller skips the frame.
 fn growScratch(gpa: std.mem.Allocator, buf: *[]u8, need: usize) ?[]u8 {
@@ -6773,8 +6935,9 @@ fn feedSourceSegmenter(s: *Session, seg: *segmentation.Segmentation, d: *const F
 }
 
 /// Sets the composite arrangement over the camera plus the named sources
-/// (0 custom, 1 side-by-side, 2 top-bottom, 3 picture-in-picture, 4 grid). The
-/// composite runs at the head of the render chain; the rest is unchanged.
+/// (0 custom, 1 side-by-side, 2 top-bottom, 3 picture-in-picture, 4 grid,
+/// 5 overlay, where every source covers the whole frame and stacks by opacity).
+/// The composite runs at the head of the render chain; the rest is unchanged.
 pub export fn goss_session_set_layout(session: ?*Session, arrangement: u32) Status {
     const s = session orelse return .invalid_argument;
     const total: u8 = s.source_count + 1; // camera is source 0
@@ -7150,6 +7313,14 @@ pub export fn goss_session_ar_brush_end(session: ?*Session) Status {
 pub export fn goss_session_ar_brush_undo(session: ?*Session) Status {
     const s = session orelse return .invalid_argument;
     s.ar_board.undo();
+    return .ok;
+}
+
+/// Puts back the last world stroke undo took off, so the AR rail offers the same
+/// undo/redo pair the screen brush already does. A fresh stroke drops the redo stack.
+pub export fn goss_session_ar_brush_redo(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.ar_board.redoLast();
     return .ok;
 }
 
@@ -7829,7 +8000,6 @@ pub export fn goss_session_submit_avatar_source_rgba(session: ?*Session, rgba: ?
     return .ok;
 }
 
-
 /// The session's reusable NV12 conversion planes, sized for width x height;
 /// grown when a larger frame arrives, never shrunk, freed at destroy.
 fn nv12Scratch(s: *Session, w: usize, h: usize) error{OutOfMemory}!struct { y: []u8, uv: []u8 } {
@@ -8350,6 +8520,43 @@ pub export fn goss_session_reset_capture(session: ?*Session) Status {
     s.capture_covered = 0;
     s.capture_poses.clearRetainingCapacity();
     s.recon_gaussians.clearRetainingCapacity();
+    return .ok;
+}
+
+/// What the last drawn frame did with the active lens: the stages ready to draw, the stages it
+/// has, and whether the beauty bridge ran. Zero ready over a non-zero total is a lens the engine
+/// activated and is drawing nothing of.
+pub export fn goss_session_chain_report(session: ?*Session, out_ready: ?*u32, out_total: ?*u32, out_beauty: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (out_ready) |p| p.* = s.chain_ready;
+    if (out_total) |p| p.* = s.chain_total;
+    if (out_beauty) |p| p.* = if (s.chain_beauty) 1 else 0;
+    return .ok;
+}
+
+/// Copies the scan's reconstruction out as gaussians, fourteen floats each: xyz,
+/// scale, a rotation quaternion, opacity and rgb. A null buffer sizes it, so a
+/// caller asks for the count and then for the floats.
+pub export fn goss_session_read_reconstruction(session: ?*Session, out: ?[*]f32, capacity: u32, out_count: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    const count: u32 = @intCast(s.recon_gaussians.items.len / 14);
+    if (out_count) |p| p.* = count;
+    const buffer = out orelse return .ok;
+    const wanted = @min(count, capacity);
+    if (wanted == 0) return .ok;
+    @memcpy(buffer[0 .. wanted * 14], s.recon_gaussians.items[0 .. wanted * 14]);
+    return .ok;
+}
+
+/// Puts a reconstruction back, replacing whatever the scan held, so a moment
+/// captured on one client opens on another. Count is gaussians, not floats.
+pub export fn goss_session_write_reconstruction(session: ?*Session, gaussians: ?[*]const f32, count: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.recon_gaussians.clearRetainingCapacity();
+    if (count == 0) return .ok;
+    const src = gaussians orelse return .invalid_argument;
+    const floats = @as(usize, count) * 14;
+    s.recon_gaussians.appendSlice(s.engine.gpa, src[0..floats]) catch return .out_of_memory;
     return .ok;
 }
 
@@ -9202,27 +9409,27 @@ fn fuseDepthIntoMask(session: *Session, mask: *[segmentation.mask_len]f32) void 
 /// mode-3 matte texture, so the composite keys the guest by the engine's own
 /// segmentation of its frame. No mask yet leaves the source showing whole.
 fn pollSourceSegmentation(session: *Session) void {
-    var mask: [segmentation.mask_len]f32 = undefined;
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
     for (0..session.source_count) |i| {
         const seg = session.source_segmenter[i] orelse continue;
-        if (!segmentation.readMask(seg, &mask)) continue;
-        _ = uploadMaskFromF32(&session.source_seg_mask[i], &mask);
+        if (!segmentation.readMask(seg, mask)) continue;
+        _ = uploadMaskFromF32(&session.source_seg_mask[i], mask);
     }
 }
 
 fn pollSegmentationMask(session: *Session) void {
     const worker = session.segmentation_worker orelse return;
-    var mask: [segmentation.mask_len]f32 = undefined;
-    if (!segmentation.readMask(worker, &mask)) return;
-    fuseDepthIntoMask(session, &mask);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    if (!segmentation.readMask(worker, mask)) return;
+    fuseDepthIntoMask(session, mask);
 
     clearSegmentationTextures(session);
-    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, &mask);
+    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
 
     // A harmonize.pass measures its region statistics from the CPU mask, so keep
     // a copy when one is active.
     if (session.wants_person_mask and session.person_mask.len == mask.len) {
-        @memcpy(session.person_mask, &mask);
+        @memcpy(session.person_mask, mask);
         session.person_mask_valid = true;
     }
 
@@ -9234,8 +9441,8 @@ fn pollSegmentationMask(session: *Session) void {
     for (1..manifest.mask_channels.len) |channel| {
         if (!maskChannelNeeded(session, @intCast(channel))) continue;
         const source = classChannelSource(class_count, channel) orelse continue;
-        if (!segmentation.readClassMask(worker, source, &mask)) continue;
-        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+        if (!segmentation.readClassMask(worker, source, mask)) continue;
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
     }
 }
 
@@ -9244,12 +9451,12 @@ fn pollSegmentationMask(session: *Session) void {
 /// so a scene-keyed pass draws nothing at no per-frame cost.
 fn pollSceneSegmentation(session: *Session) void {
     const worker = session.scene_worker orelse return;
-    var mask: [segmentation.mask_len]f32 = undefined;
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
     for (scene_class_order) |channel| {
         if (!maskChannelNeeded(session, channel)) continue;
         const source = sceneChannelSource(channel) orelse continue;
-        if (!segmentation.readClassMask(worker, source, &mask)) continue;
-        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+        if (!segmentation.readClassMask(worker, source, mask)) continue;
+        session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
     }
 }
 
@@ -9419,24 +9626,24 @@ fn pollScleraMatte(session: *Session, channel: u8) void {
     if (!maskChannelNeeded(session, channel)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
-    var iris: [segmentation.mask_len]f32 = undefined;
-    @memset(&iris, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
+    const iris: *[segmentation.mask_len]f32 = &session.mask_scratch[1];
+    @memset(iris, 0);
     var ring: [face.landmark_count][2]f32 = undefined;
     const eyes = [_][]const u16{ &face.left_eye_loop, &face.right_eye_loop };
     for (eyes) |loop| {
         for (loop, 0..) |idx, i| ring[i] = points[idx];
-        fillPolygon(ring[0..loop.len], &mask);
+        fillPolygon(ring[0..loop.len], mask);
     }
     const irises = [_][]const u16{ &face.left_iris_loop, &face.right_iris_loop };
     for (irises) |loop| {
         for (loop, 0..) |idx, i| ring[i] = points[idx];
-        fillPolygon(ring[0..loop.len], &iris);
+        fillPolygon(ring[0..loop.len], iris);
     }
-    for (&mask, iris) |*m, i| m.* *= (1.0 - i);
+    for (mask, iris) |*m, i| m.* *= (1.0 - i);
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
 }
 
 /// Builds the upper lash-line band matte from both eyes' upper lid arcs: each
@@ -9447,13 +9654,13 @@ fn pollLashLineMatte(session: *Session, channel: u8) void {
     if (!maskChannelNeeded(session, channel)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
     var band: [18][2]f32 = undefined;
-    fillPolygon(face.lashLineBand(&points, &face.left_eye_loop, &band), &mask);
-    fillPolygon(face.lashLineBand(&points, &face.right_eye_loop, &band), &mask);
+    fillPolygon(face.lashLineBand(&points, &face.left_eye_loop, &band), mask);
+    fillPolygon(face.lashLineBand(&points, &face.right_eye_loop, &band), mask);
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
 }
 
 /// Builds a contour or highlight matte from clustered face landmarks: each
@@ -9464,15 +9671,15 @@ fn pollFaceHullMatte(session: *Session, channel: u8, regions: []const []const u1
     if (!maskChannelNeeded(session, channel)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
     var cluster: [face.landmark_count][2]f32 = undefined;
     for (regions) |region| {
         for (region, 0..) |idx, i| cluster[i] = points[idx];
-        fillLandmarkHull(cluster[0..region.len], &mask);
+        fillLandmarkHull(cluster[0..region.len], mask);
     }
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
 }
 
 /// Builds a face-part matte channel from one or more landmark loops, unioned,
@@ -9483,15 +9690,15 @@ fn pollFacePartMatte(session: *Session, channel: u8, loops: []const []const u16)
     if (!maskChannelNeeded(session, channel)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, channel);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
     var ring: [face.landmark_count][2]f32 = undefined;
     for (loops) |loop| {
         for (loop, 0..) |idx, i| ring[i] = points[idx];
-        fillPolygon(ring[0..loop.len], &mask);
+        fillPolygon(ring[0..loop.len], mask);
     }
     clearClassTexture(session, channel);
-    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], &mask);
+    session.segmentation_class_textures[channel] = uploadMaskFromF32(&session.class_tex[channel], mask);
 }
 
 fn pollHeadMatte(session: *Session) void {
@@ -9499,11 +9706,11 @@ fn pollHeadMatte(session: *Session) void {
     if (!maskChannelNeeded(session, head)) return;
     var points: [face.landmark_count][2]f32 = undefined;
     if (!faceMattePoints(session, &points)) return clearClassTexture(session, head);
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
-    fillLandmarkHull(points[0..], &mask);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
+    fillLandmarkHull(points[0..], mask);
     clearClassTexture(session, head);
-    session.segmentation_class_textures[head] = uploadMaskFromF32(&session.class_tex[head], &mask);
+    session.segmentation_class_textures[head] = uploadMaskFromF32(&session.class_tex[head], mask);
 }
 
 fn pollHandMatte(session: *Session) void {
@@ -9517,18 +9724,18 @@ fn pollHandMatte(session: *Session) void {
     if (w <= 0 or h <= 0 or !tracking.hand_worker.readResult(worker, &result) or result.hand_count == 0) {
         return clearClassTexture(session, chan);
     }
-    var mask: [segmentation.mask_len]f32 = undefined;
-    @memset(&mask, 0);
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
+    @memset(mask, 0);
     var any = false;
     for (result.hands[0..result.hand_count]) |tracked| {
         if (tracked.presence < 0.5) continue;
         var pts: [hand.landmark_count][2]f32 = undefined;
         for (0..hand.landmark_count) |i| pts[i] = .{ tracked.landmarks[i * 3] / w, tracked.landmarks[i * 3 + 1] / h };
-        fillLandmarkHull(pts[0..], &mask);
+        fillLandmarkHull(pts[0..], mask);
         any = true;
     }
     clearClassTexture(session, chan);
-    if (any) session.segmentation_class_textures[chan] = uploadMaskFromF32(&session.class_tex[chan], &mask);
+    if (any) session.segmentation_class_textures[chan] = uploadMaskFromF32(&session.class_tex[chan], mask);
 }
 
 /// When the host submits depth and no in-engine segmenter runs, the depth
@@ -9541,7 +9748,7 @@ fn pollDepthOcclusion(session: *Session) void {
     const plane = (session.depth_near + session.depth_far) * 0.5;
     const bias: f32 = 0.02;
     const side = segmentation.mask_side;
-    var mask: [segmentation.mask_len]f32 = undefined;
+    const mask: *[segmentation.mask_len]f32 = &session.mask_scratch[0];
     for (0..side) |y| {
         for (0..side) |x| {
             const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(side));
@@ -9551,7 +9758,7 @@ fn pollDepthOcclusion(session: *Session) void {
         }
     }
     clearSegmentationTextures(session);
-    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, &mask);
+    session.segmentation_texture = uploadMaskFromF32(&session.seg_tex, mask);
 }
 
 fn destroyLutState(session: *Session) void {
@@ -9679,9 +9886,12 @@ fn destroySpriteState(session: *Session) void {
         session.engine.gpa.free(vid.rgba);
     }
     session.video_textures.clearRetainingCapacity();
+    clearSpilledAssets(session);
     session.text3d_meshes.clearRetainingCapacity();
     session.sprite_textures.clearRetainingCapacity();
     session.sprite_rects.clearRetainingCapacity();
+    session.sprite_rotations.clearRetainingCapacity();
+    session.sprite_rotation_params.clearRetainingCapacity();
     session.sprite_opacity_params.clearRetainingCapacity();
     session.sprite_placement_params.clearRetainingCapacity();
     session.sprite_interactions.clearRetainingCapacity();
@@ -9913,10 +10123,7 @@ fn loadScriptFile(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) 
     if (s.script_engine != null) return;
     const lens = if (s.active_lens) |*l| l else return;
     const file = lens.scriptFile() orelse return;
-    if (!bundleNameOk(file)) return;
-    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, file }) catch return;
-    defer gpa.free(path);
-    const src = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(256 * 1024)) catch return;
+    const src = readBundleAsset(s, gpa, bundle_path, file, 256 * 1024) orelse return;
     defer gpa.free(src);
     setupScriptFromSource(s, src);
 }
@@ -10176,6 +10383,16 @@ pub export fn goss_session_pull_haptic(session: ?*Session, out_style: ?*u32, out
     return .ok;
 }
 
+/// Reads the photosensitivity risk (0..1) the flash detector last reported for
+/// the frames this session was fed, the same value a lens reads as
+/// safety.flash_risk. The host shows its warning from it; the engine measures.
+pub export fn goss_session_flash_risk(session: ?*Session, out_risk: ?*f32) Status {
+    const s = session orelse return .invalid_argument;
+    const o = out_risk orelse return .invalid_argument;
+    o.* = s.flash_risk;
+    return .ok;
+}
+
 /// Compiles a text prompt into a GLF lens manifest on device, writing it into
 /// out_buf and its length into out_len. A null out_buf (or too small an out_cap)
 /// reports the length only, so the caller sizes a buffer then calls again; the
@@ -10377,6 +10594,30 @@ pub export fn goss_engine_music_clear_references(engine: ?*Engine) void {
 /// best track id and its landmark-agreement vote count; a vote count of zero means
 /// no track met min_votes. The match is the track and time offset the snippet's
 /// landmarks most agree on, so a few seconds of noisy audio still identifies.
+/// Every beat in a buffer, in microseconds from its start, from the onset
+/// detector the audio.beat trigger rides. Writes up to capacity and always
+/// reports the full count, so a caller sizes a buffer and asks again.
+pub export fn goss_engine_beat_map(engine: ?*Engine, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, out_times_us: ?[*]i64, capacity: u32, out_count: ?*u32) Status {
+    _ = engine orelse return .invalid_argument;
+    const src = samples orelse return .invalid_argument;
+    if (frame_count == 0 or channels == 0 or sample_rate == 0) return .invalid_argument;
+    const hop = audio_analysis.hop_size;
+    var analysis = audio_analysis.Analysis{};
+    var found: u32 = 0;
+    var at: usize = 0;
+    while (at < frame_count) : (at += hop) {
+        const end = @min(at + hop, @as(usize, frame_count));
+        analysis.feed(src[at * channels .. end * channels], channels);
+        if (!analysis.beat) continue;
+        if (out_times_us) |out| {
+            if (found < capacity) out[found] = @intFromFloat(@as(f64, @floatFromInt(end)) * 1_000_000.0 / @as(f64, @floatFromInt(sample_rate)));
+        }
+        found += 1;
+    }
+    if (out_count) |p| p.* = found;
+    return .ok;
+}
+
 pub export fn goss_engine_music_identify(engine: ?*Engine, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, min_votes: u32, out_track_id: ?*u32, out_votes: ?*u32) Status {
     const e = engine orelse return .invalid_argument;
     const src = samples orelse return .invalid_argument;
@@ -10561,65 +10802,10 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
         error.OutOfMemory => .out_of_memory,
         else => .invalid_argument,
     };
-    // The asset-free composite nodes (blur.pass, grade.pass, bloom.pass) need
-    // no bundle, so build the chain and their params here too - a lens
-    // activated from raw json, as on the web, gets its post-effects. Nodes
-    // that need packaged assets stay not-ready until a directory load.
-    createGradeParams(s, gpa) catch {};
-    createDehazeParams(s, gpa) catch {};
-    createRelightParams(s, gpa) catch {};
-    createGlareParams(s, gpa) catch {};
-    createVignetteParams(s, gpa) catch {};
-    createLowLightParams(s, gpa) catch {};
-    createUndistortParams(s, gpa) catch {};
-    createAwbParams(s, gpa) catch {};
-    createStabilizeParams(s, gpa) catch {};
-    createZoomParams(s, gpa) catch {};
-    createDereflectParams(s, gpa) catch {};
-    createHarmonizeParams(s, gpa) catch {};
-    createInpaintParams(s, gpa) catch {};
-    createRollingParams(s, gpa) catch {};
-    createParallaxParams(s, gpa) catch {};
-    createLashParams(s, gpa) catch {};
-    createBloomParams(s, gpa) catch {};
-    createDofParams(s, gpa) catch {};
-    createFogParams(s, gpa) catch {};
-    createOutlineParams(s, gpa) catch {};
-    createOccluderParams(s, gpa) catch {};
-    createCutoutParams(s, gpa) catch {};
-    createTintParams(s, gpa) catch {};
-    createSmoothParams(s, gpa) catch {};
-    createRetouchParams(s, gpa) catch {};
-    createMatteParams(s, gpa) catch {};
-    createHairMatteParams(s, gpa) catch {};
-    createStylizeParams(s, gpa) catch {};
-    createEdgeParams(s, gpa) catch {};
-    createWarpParams(s, gpa) catch {};
-    createReshapeParams(s, gpa) catch {};
-    createBodyReshapeParams(s, gpa) catch {};
-    createTrailParams(s, gpa) catch {};
-    createSsrParams(s, gpa) catch {};
-    createEnvParams(s, gpa) catch {};
-    // A particle fountain also needs no bundle (the CPU sim and its mesh are
-    // built from the field alone), so create it here too; the empty bundle
-    // path just means a glTF model's own asset never loads, degrading it,
-    // while the fountain runs. A sprite image would need a directory.
-    createModelLoaders(s, gpa, "") catch {};
-    // Text rasterizes from the built-in font and touches no file, and the
-    // audio-enhance state must reset here or a previous lens's echo and pitch
-    // settings would survive into this activation.
-    createTextTextures(s, gpa) catch {};
-    // The heavy inference loaders read through the staged-asset store first,
-    // so a JSON-activated lens (the web path) runs its models with no
-    // filesystem; an unstaged model just leaves that node inert.
-    s.ml_workers_loaded = 0;
-    createMlLoaders(s, gpa, "");
-    createTemporalLoaders(s, gpa, "");
-    createAudioLoaders(s, gpa, "");
-    resolveAudioEnhance(s);
-    createDiffusionLoaders(s, gpa, "");
-    createSplatLoaders(s, gpa, "");
-    buildChainOrder(s, gpa) catch {};
+    // No bundle directory: the same resource pass the directory path runs, with an empty
+    // bundle so every reader falls to the host-staged copies. A node whose asset was never
+    // staged stays inert, which is the capability degrade, not a failed activation.
+    createLensResources(s, gpa, "") catch {};
     return .ok;
 }
 
@@ -10640,13 +10826,11 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         std.log.info("gosslens: every shader.pass left inert - no shader profile for this backend ({t})", .{err});
         return;
     };
-    const io = defaultIo();
     for (passes) |pass| {
-        if (!bundleNameOk(pass.shader_stem)) continue;
-        const bin_path = std.fmt.allocPrint(gpa, "{s}/shaders/{s}.{s}.bin", .{ bundle_path, pass.shader_stem, tag }) catch continue;
-        defer gpa.free(bin_path);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, bin_path, gpa, .limited(256 * 1024)) catch |err| {
-            std.log.info("gosslens: shader.pass {s} left inert - {s} unreadable ({t})", .{ pass.shader_stem, bin_path, err });
+        var bin_buf: [512]u8 = undefined;
+        const bin_name = std.fmt.bufPrint(&bin_buf, "{s}.{s}.bin", .{ pass.shader_stem, tag }) catch continue;
+        const bytes = readBundleFile(session, gpa, bundle_path, "shaders", bin_name, 256 * 1024) orelse {
+            std.log.info("gosslens: shader.pass {s} left inert - shaders/{s} unreadable", .{ pass.shader_stem, bin_name });
             continue;
         };
         defer gpa.free(bytes);
@@ -11091,10 +11275,7 @@ fn createLutLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []co
     const luts = try lens.lutPassNodes(gpa, &session.lens_graph);
     defer gpa.free(luts);
     for (luts) |lut| {
-        if (!bundleNameOk(lut.lut_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, lut.lut_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{lut.lut_stem}) orelse continue;
         session.lut_loaders.put(gpa, lut.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11137,10 +11318,7 @@ fn createBlendLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     const blends = try lens.blendPassNodes(gpa, &session.lens_graph);
     defer gpa.free(blends);
     for (blends) |blend| {
-        if (!bundleNameOk(blend.background_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, blend.background_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{blend.background_stem}) orelse continue;
         session.blend_loaders.put(gpa, blend.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11182,10 +11360,7 @@ fn createEnvLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []co
     defer gpa.free(envs);
     for (envs) |ev| {
         const stem = ev.image_stem orelse continue;
-        if (!bundleNameOk(stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{stem}) orelse continue;
         session.env_loaders.put(gpa, ev.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11293,9 +11468,9 @@ const DynamicText = struct {
 /// when the node ships no GIF, so the caller falls back to a PNG.
 fn tryStartGifSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, sprite: runtime.SpriteNode) bool {
     if (session.engine.renderer == null) return false;
-    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.gif", .{ bundle_path, sprite.image_stem }) catch return false;
-    defer gpa.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(32 << 20)) catch return false;
+    var name_buf: [512]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}.gif", .{sprite.image_stem}) catch return false;
+    const bytes = readBundleAsset(session, gpa, bundle_path, name, 32 << 20) orelse return false;
     defer gpa.free(bytes);
     const decoded = gif.decode(gpa, bytes) catch return false;
     defer decoded.deinit(gpa);
@@ -11521,6 +11696,8 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
     defer gpa.free(sprites);
     for (sprites) |sprite| {
         session.sprite_rects.put(gpa, sprite.graph_index, .{ sprite.rect[0], sprite.rect[1], sprite.rect[2], sprite.rect[3], sprite.opacity }) catch {};
+        if (sprite.rotation != 0) session.sprite_rotations.put(gpa, sprite.graph_index, sprite.rotation) catch {};
+        if (sprite.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, sprite.graph_index, sprite.rotation_param) catch {};
         if (sprite.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, sprite.graph_index, sprite.opacity_param) catch {};
         if (sprite.x_param.len > 0 or sprite.y_param.len > 0 or sprite.w_param.len > 0 or sprite.h_param.len > 0) {
             session.sprite_placement_params.put(gpa, sprite.graph_index, .{ sprite.x_param, sprite.y_param, sprite.w_param, sprite.h_param }) catch {};
@@ -11546,9 +11723,7 @@ fn createSpriteLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: [
             startSpriteAnim(session, gpa, bundle_path, sprite);
             continue;
         }
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, sprite.image_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{sprite.image_stem}) orelse continue;
         session.sprite_loaders.put(gpa, sprite.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11569,7 +11744,7 @@ fn createVideoLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     for (videos) |v| {
         session.sprite_rects.put(gpa, v.graph_index, .{ v.rect[0], v.rect[1], v.rect[2], v.rect[3], v.opacity }) catch {};
         if (!bundleNameOk(v.source)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.mp4", .{ bundle_path, v.source }) catch continue;
+        const path = videoPathFor(session, gpa, bundle_path, v.source) orelse continue;
         defer gpa.free(path);
         var decoder = video.Decoder.open(path) orelse {
             std.log.info("gosslens: video.texture {s} left blank - {s} did not open on this decoder", .{ v.source, path });
@@ -11655,9 +11830,7 @@ fn startSpriteAnim(session: *Session, gpa: std.mem.Allocator, bundle_path: []con
     @memset(loaders, null);
     @memset(textures, .{ .idx = render.invalid_handle });
     for (0..n) |i| {
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}_{d}.png", .{ bundle_path, sprite.image_stem, i }) catch continue;
-        defer gpa.free(path);
-        loaders[i] = asset.ImageLoader.start(gpa, path) catch null;
+        loaders[i] = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}_{d}.png", .{ sprite.image_stem, i });
     }
     session.sprite_anims.put(gpa, sprite.graph_index, .{ .frames = n, .fps = sprite.fps, .loaders = loaders, .textures = textures, .play = sprite.play }) catch {
         for (loaders) |maybe| if (maybe) |l| l.deinit();
@@ -11800,6 +11973,8 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
                     continue;
                 };
                 session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
+                if (txt.rotation != 0) session.sprite_rotations.put(gpa, txt.graph_index, txt.rotation) catch {};
+                if (txt.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, txt.graph_index, txt.rotation_param) catch {};
             } else |_| {}
             continue;
         }
@@ -11820,6 +11995,8 @@ fn createTextTextures(session: *Session, gpa: std.mem.Allocator) !void {
         };
         session.sprite_rects.put(gpa, txt.graph_index, .{ txt.rect[0], txt.rect[1], txt.rect[2], txt.rect[3], txt.opacity }) catch {};
         if (txt.opacity_param.len > 0) session.sprite_opacity_params.put(gpa, txt.graph_index, txt.opacity_param) catch {};
+        if (txt.rotation != 0) session.sprite_rotations.put(gpa, txt.graph_index, txt.rotation) catch {};
+        if (txt.rotation_param.len > 0) session.sprite_rotation_params.put(gpa, txt.graph_index, txt.rotation_param) catch {};
         if (txt.anchor_face >= 0) session.sprite_anchor_faces.put(gpa, txt.graph_index, @intCast(txt.anchor_face)) catch {};
         // A live content source registers the node for per-frame refresh; the
         // static raster above stands in until the first frame resolves it.
@@ -11843,10 +12020,7 @@ fn createMeshFaceLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path:
     const meshes = try lens.meshFaceNodes(gpa, &session.lens_graph);
     defer gpa.free(meshes);
     for (meshes) |mesh| {
-        if (!bundleNameOk(mesh.texture_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, mesh.texture_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{mesh.texture_stem}) orelse continue;
         session.mesh_face_loaders.put(gpa, mesh.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11885,10 +12059,7 @@ fn createPaintFaceLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path
     const paints = try lens.paintFaceNodes(gpa, &session.lens_graph);
     defer gpa.free(paints);
     for (paints) |paint| {
-        if (!bundleNameOk(paint.texture_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, paint.texture_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{paint.texture_stem}) orelse continue;
         session.paint_face_loaders.put(gpa, paint.graph_index, loader) catch {
             loader.deinit();
         };
@@ -11939,10 +12110,7 @@ fn createFaceSwapLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path:
     const swaps = try lens.faceSwapNodes(gpa, &session.lens_graph);
     defer gpa.free(swaps);
     for (swaps) |swap| {
-        if (!bundleNameOk(swap.donor_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, swap.donor_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ImageLoader, session, gpa, bundle_path, "{s}.png", .{swap.donor_stem}) orelse continue;
         session.face_swap_loaders.put(gpa, swap.graph_index, loader) catch {
             loader.deinit();
         };
@@ -12040,11 +12208,9 @@ fn particlePattern(name: []const u8) particles.Pattern {
 /// static texture, best-effort, leaving the node on the built-in soft round
 /// default when the sprite is missing or unreadable.
 fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, graph_index: graph.NodeIndex, stem: []const u8) void {
-    if (comptime !has_file_io) return;
-    if (!bundleNameOk(stem)) return;
-    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch return;
-    defer gpa.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(4 * 1024 * 1024)) catch return;
+    var name_buf: [512]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}.png", .{stem}) catch return;
+    const bytes = readBundleAsset(session, gpa, bundle_path, name, 4 * 1024 * 1024) orelse return;
     defer gpa.free(bytes);
     const decoded = image.decode(gpa, bytes) catch return;
     defer gpa.free(decoded.rgba);
@@ -12056,7 +12222,9 @@ fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []
 
 /// One second of mono audio at 48 kHz, the largest window an audio.infer model
 /// may read from the ring.
-const audio_ring_len: usize = 48000;
+/// One second of microphone at the ring's fixed rate. The rate is the resampler's, not the
+/// device's, so this length is a duration rather than a sample count that varies per handset.
+const audio_ring_len: usize = audio_analysis.mic_rate;
 
 /// The most bytes a decoded caption holds.
 const caption_max: usize = 512;
@@ -13012,6 +13180,16 @@ fn readAudioWindow(session: *const Session, out: []f32) void {
     }
 }
 
+/// The rate the microphone ring holds, for a harness that has to describe a sound in seconds.
+pub fn micRate() u32 {
+    return audio_analysis.mic_rate;
+}
+
+/// Reads the ring the way an audio model does, for the conformance harness.
+pub fn readAudioWindowForTest(session: *const Session, out: []f32) void {
+    readAudioWindow(session, out);
+}
+
 /// Runs each audio.infer worker over the latest microphone window and reads its
 /// outputs into the parameters it binds, so the model drives the lens from the
 /// mic the way pollMlOutputs drives it from the camera.
@@ -13725,6 +13903,24 @@ const DiffusionWorker = struct {
 /// plain relative path with no empty, "." or ".." component, no leading
 /// separator, and no backslash, colon, or NUL anywhere. A manifest is
 /// untrusted content, so every loader path is built from a name this admits.
+/// Starts an off-thread load for one bundle asset, from a host-staged copy when the host provided
+/// one and from the bundle's assets/ directory otherwise. Both sources decode on the loader's own
+/// thread, so a filesystem-less host runs the same lenses as a directory install rather than
+/// silently losing every image, sprite and model.
+fn startBundleAsset(comptime L: type, s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, comptime fmt: []const u8, args: anytype) ?*L {
+    var name_buf: [512]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, fmt, args) catch {
+        std.log.info("gosslens: asset name over {d} bytes, refused", .{name_buf.len});
+        return null;
+    };
+    if (!bundleNameOk(name)) return null;
+    if (s.staged_assets.get(name)) |staged| return L.startBytes(gpa, staged) catch null;
+    if (comptime !has_file_io) return null;
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch return null;
+    defer gpa.free(path);
+    return L.start(gpa, path) catch null;
+}
+
 fn bundleRelative(name: []const u8) bool {
     if (name.len == 0) return false;
     if (name[0] == '/') return false;
@@ -13750,17 +13946,70 @@ fn bundleNameOk(name: []const u8) bool {
 /// escape the bundle or the asset is missing or oversized, each refusal logged.
 /// A host-staged copy wins over the bundle directory, so a filesystem-less
 /// build reads the same names from memory. The caller frees the returned bytes.
-fn readBundleAsset(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8, limit: usize) ?[]u8 {
-    if (!bundleNameOk(name)) return null;
+/// A path the platform video decoder can open for an asset, spilling a host-staged clip to a temp
+/// file first because the decoder takes a path and not bytes. The caller frees the returned path;
+/// the file itself is the session's until the lens is torn down.
+fn videoPathFor(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, source: []const u8) ?[]u8 {
+    var name_buf: [512]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}.mp4", .{source}) catch return null;
+    if (comptime !has_file_io) return null;
     if (s.staged_assets.get(name)) |staged| {
+        const dir = tempDirPath();
+        const sep: []const u8 = if (dir.len > 0 and dir[dir.len - 1] == '/') "" else "/";
+        const spill = std.fmt.allocPrint(gpa, "{s}{s}goss-{x}-{s}", .{ dir, sep, @intFromPtr(s), name }) catch return null;
+        std.Io.Dir.cwd().writeFile(defaultIo(), .{ .sub_path = spill, .data = staged }) catch {
+            gpa.free(spill);
+            return null;
+        };
+        const owned = gpa.dupe(u8, spill) catch {
+            gpa.free(spill);
+            return null;
+        };
+        s.spilled_assets.append(gpa, owned) catch gpa.free(owned);
+        return spill;
+    }
+    return std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch null;
+}
+
+/// The platform temp directory, with its trailing separator. iOS hands every process its own
+/// sandboxed TMPDIR; the fallback is only for hosts that set none.
+fn tempDirPath() []const u8 {
+    const set = std.c.getenv("TMPDIR") orelse return "/tmp/";
+    return std.mem.span(set);
+}
+
+/// Removes every temp file a staged clip was spilled to.
+fn clearSpilledAssets(s: *Session) void {
+    const gpa = s.engine.gpa;
+    for (s.spilled_assets.items) |path| {
+        if (comptime has_file_io) std.Io.Dir.cwd().deleteFile(defaultIo(), path) catch {};
+        gpa.free(path);
+    }
+    s.spilled_assets.clearRetainingCapacity();
+}
+
+fn readBundleAsset(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, name: []const u8, limit: usize) ?[]u8 {
+    return readBundleFile(s, gpa, bundle_path, "assets", name, limit);
+}
+
+/// The same read for a bundle subdirectory other than assets/. The staged key is the whole
+/// bundle-relative path, which is what a host that never unpacked a directory would name it.
+fn readBundleFile(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, subdir: []const u8, name: []const u8, limit: usize) ?[]u8 {
+    if (!bundleNameOk(name)) return null;
+    var key_buf: [640]u8 = undefined;
+    const key = if (std.mem.eql(u8, subdir, "assets"))
+        name
+    else
+        std.fmt.bufPrint(&key_buf, "{s}/{s}", .{ subdir, name }) catch return null;
+    if (s.staged_assets.get(key)) |staged| {
         if (staged.len > limit) {
-            std.log.info("gosslens: staged asset {s} over the {d}-byte bound, refused", .{ name, limit });
+            std.log.info("gosslens: staged asset {s} over the {d}-byte bound, refused", .{ key, limit });
             return null;
         }
         return gpa.dupe(u8, staged) catch null;
     }
     if (comptime !has_file_io) return null;
-    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}", .{ bundle_path, name }) catch return null;
+    const path = std.fmt.allocPrint(gpa, "{s}/{s}/{s}", .{ bundle_path, subdir, name }) catch return null;
     defer gpa.free(path);
     return std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(limit)) catch |err| {
         std.log.info("gosslens: bundle asset {s} unreadable ({t})", .{ name, err });
@@ -13785,9 +14034,53 @@ fn stageAsset(s: *Session, name: []const u8, bytes: []const u8) error{OutOfMemor
     try s.staged_assets.put(gpa, owned_name, owned_bytes);
 }
 
-/// Hands the engine one bundle asset's bytes under its manifest name ahead
-/// of a JSON lens activation, so a filesystem-less host (the web) runs the
-/// heavy inference nodes from memory. The name must stay bundle-relative;
+/// A placed node's turn in degrees before any gesture: the authored angle plus what a bound
+/// parameter reads. Additive, unlike the rect parameters, because an angle has a composable zero -
+/// an override would snap an authored 30-degree sticker flat the moment a lens bound a parameter
+/// it had not yet driven.
+fn spriteTurn(s: *Session, index: graph.NodeIndex) f32 {
+    var turn: f32 = s.sprite_rotations.get(index) orelse 0;
+    if (s.sprite_rotation_params.get(index)) |pname| {
+        if (s.active_lens) |*lens| {
+            if (lens.paramValue(pname)) |v| turn += v;
+        }
+    }
+    return turn;
+}
+
+/// Where a placed node currently draws: its rect after any drag and pinch, and its turn after the
+/// authored angle, a bound parameter, and any gesture. The draw reads these same values.
+fn spriteTransform(s: *Session, index: graph.NodeIndex) ?[5]f32 {
+    const stored = s.sprite_rects.get(index) orelse return null;
+    var rect: [4]f32 = .{ stored[0], stored[1], stored[2], stored[3] };
+    var turn: f32 = spriteTurn(s, index);
+    if (s.sprite_interactions.get(index)) |si| {
+        rect = si.rect();
+        turn += std.math.radiansToDegrees(si.rot);
+    }
+    return .{ rect[0], rect[1], rect[2], rect[3], turn };
+}
+
+/// Reads one placed node's live rect and turn, so a host can show a sticker's handles or persist
+/// where the wearer left it. Any of the out pointers may be null.
+pub export fn goss_session_sprite_transform(session: ?*Session, node_id: ?[*]const u8, node_id_len: usize, out_x: ?*f32, out_y: ?*f32, out_w: ?*f32, out_h: ?*f32, out_rotation: ?*f32) Status {
+    const s = session orelse return .invalid_argument;
+    const n = node_id orelse return .invalid_argument;
+    if (node_id_len == 0) return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .invalid_argument;
+    const id = n[0..node_id_len];
+    const index = lens.nodeIndexByName(id) orelse return .invalid_argument;
+    const placed = spriteTransform(s, index) orelse return .invalid_argument;
+    if (out_x) |o| o.* = placed[0];
+    if (out_y) |o| o.* = placed[1];
+    if (out_w) |o| o.* = placed[2];
+    if (out_h) |o| o.* = placed[3];
+    if (out_rotation) |o| o.* = placed[4];
+    return .ok;
+}
+
+/// Hands the engine one bundle asset's bytes under its manifest name ahead of a JSON activation,
+/// so a filesystem-less host runs the whole lens from memory. The name must stay bundle-relative;
 /// zero-length bytes remove a previously staged name.
 pub export fn goss_session_provide_lens_asset(session: ?*Session, name: ?[*]const u8, name_len: usize, bytes: ?[*]const u8, len: usize) Status {
     const s = session orelse return .invalid_argument;
@@ -14229,10 +14522,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                 }
             }
         }
-        if (!bundleNameOk(model.model_stem)) continue;
-        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.glb", .{ bundle_path, model.model_stem }) catch continue;
-        defer gpa.free(path);
-        const loader = asset.ModelLoader.start(gpa, path) catch continue;
+        const loader = startBundleAsset(asset.ModelLoader, session, gpa, bundle_path, "{s}.glb", .{model.model_stem}) orelse continue;
         session.model_loaders.put(gpa, model.graph_index, loader) catch {
             loader.deinit();
         };
@@ -14487,13 +14777,11 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
 // error set to just Unsupported there and break the OutOfMemory arm
 // goss_session_activate_lens_from_directory's catch already handles for
 // every other target.
-fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) anyerror!void {
-    if (comptime !has_file_io) return error.Unsupported;
-    const manifest_path = try std.fmt.allocPrint(gpa, "{s}/manifest.json", .{bundle_path});
-    defer gpa.free(manifest_path);
-    const manifest_json = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), manifest_path, gpa, .limited(manifest.max_manifest_bytes + 1));
-    defer gpa.free(manifest_json);
-    try activateLens(session, gpa, manifest_json);
+/// Every node type's resources, for both activation paths. An empty bundle_path is the
+/// filesystem-less host: each reader prefers a host-staged copy, so a JSON activation with
+/// its assets staged gets the same nodes a directory install does, and an unstaged asset
+/// leaves that one node inert. One list, so a new node type cannot reach only one path.
+fn createLensResources(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) anyerror!void {
     loadScriptFile(session, gpa, bundle_path);
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
@@ -14555,6 +14843,16 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createEnvParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
+}
+
+fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) anyerror!void {
+    if (comptime !has_file_io) return error.Unsupported;
+    const manifest_path = try std.fmt.allocPrint(gpa, "{s}/manifest.json", .{bundle_path});
+    defer gpa.free(manifest_path);
+    const manifest_json = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), manifest_path, gpa, .limited(manifest.max_manifest_bytes + 1));
+    defer gpa.free(manifest_json);
+    try activateLens(session, gpa, manifest_json);
+    try createLensResources(session, gpa, bundle_path);
 }
 
 pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bundle_path: ?[*]const u8, bundle_path_len: usize) Status {
@@ -16773,6 +17071,44 @@ test "a haptic trigger surfaces through goss_session_pull_haptic" {
     try t.expectApproxEqAbs(@as(f32, 0.8), intensity, 1e-6);
     // The queue drains: a second pull reports none remain.
     try t.expectEqual(Status.again, goss_session_pull_haptic(session, &style, &intensity));
+}
+
+test "a named source takes a wrapped frame only with one plane and a packed format" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var desc = std.mem.zeroes(FrameDesc);
+    desc.width = 64;
+    desc.height = 64;
+    desc.pixel_format = pixel_format_bgra8;
+    var planes = std.mem.zeroes(FramePlanes);
+    planes.plane_count = 1;
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(null, "front", 5, &desc, &planes));
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(session, "front", 5, null, &planes));
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(session, "front", 5, &desc, null));
+    planes.plane_count = 2;
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(session, "front", 5, &desc, &planes));
+    planes.plane_count = 1;
+    desc.pixel_format = pixel_format_nv12;
+    try t.expectEqual(Status.invalid_argument, goss_session_submit_source_frame(session, "front", 5, &desc, &planes));
+}
+
+test "the host reads the flash risk a lens is fed" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var risk: f32 = -1;
+    try t.expectEqual(Status.ok, goss_session_flash_risk(session, &risk));
+    try t.expectEqual(@as(f32, 0), risk);
+    session.flash_risk = 0.75;
+    try t.expectEqual(Status.ok, goss_session_flash_risk(session, &risk));
+    try t.expectApproxEqAbs(@as(f32, 0.75), risk, 1e-6);
+    try t.expectEqual(Status.invalid_argument, goss_session_flash_risk(session, null));
+    try t.expectEqual(Status.invalid_argument, goss_session_flash_risk(null, &risk));
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {

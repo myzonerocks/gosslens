@@ -1,0 +1,33 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.text-turned",
+  "version": "1.0.0",
+  "display_name": "Turned Text",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {
+      "id": "label",
+      "type": "text.2d",
+      "inputs": {
+        "frame": "camera"
+      },
+      "params": {},
+      "text": {
+        "content": "GO",
+        "x": 0.25,
+        "y": 0.4,
+        "w": 0.5,
+        "h": 0.2,
+        "color": [
+          1.0,
+          0.7,
+          0.2
+        ],
+        "rotation": 18.0
+      }
+    }
+  ],
+  "triggers": []
+}

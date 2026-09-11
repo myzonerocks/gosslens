@@ -161,24 +161,8 @@ jobs:
       # with the header and a module map so Swift can `import`.
       - name: assemble xcframework
         run: |
-          set -euo pipefail
-          mkdir -p headers
-          cp include/gosslens.h headers/
-          printf 'module CGosslens {\n  header "gosslens.h"\n  export *\n}\n' > headers/module.modulemap
-          libtool -static -o device.a zig-out/ios/*.a
-          # The simulator slice is universal: merge each arch's archives, then
-          # lipo the two into one fat library so the XCFramework runs on both
-          # Apple-silicon and Intel Macs.
-          libtool -static -o sim-arm64.a zig-out/ios-simulator/*.a
-          libtool -static -o sim-x86_64.a zig-out/ios-simulator-x86_64/*.a
-          lipo -create sim-arm64.a sim-x86_64.a -output sim.a
-          xcodebuild -create-xcframework \
-            -library device.a -headers headers \
-            -library sim.a -headers headers \
-            -output GosslensKit.xcframework
-          zip -ry GosslensKit.xcframework.zip GosslensKit.xcframework
-          swift package compute-checksum GosslensKit.xcframework.zip > GosslensKit.checksum.txt
-          cat GosslensKit.checksum.txt
+          tools/build-xcframework.sh
+          cp zig-out/GosslensKit.xcframework.zip zig-out/GosslensKit.checksum.txt .
       - uses: actions/upload-artifact@v4
         with:
           name: apple
@@ -227,10 +211,15 @@ jobs:
           zig build vendor-sync -- --only emscripten
           zig build vendor-sync -- --only emscripten-python
       - uses: oven-sh/setup-bun@v2
+      # The wrapper's version is the release's own, stamped from the tag so a
+      # pre-release never tries to publish over the version already on npm.
       - name: pack the js wrapper
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (inputs.version != '' && format('v{0}', inputs.version)) || '' }}
         run: |
           set -euo pipefail
           cd sdk/ts
+          [ -z "${RELEASE_TAG}" ] || npm version --no-git-tag-version --allow-same-version "${RELEASE_TAG#v}"
           bun install
           bun run build
           bun pm pack --destination "$GITHUB_WORKSPACE"
@@ -292,6 +281,8 @@ jobs:
           notes="SwiftPM binaryTarget checksum: $(cat dist/apple/GosslensKit.checksum.txt)"
           assets=(dist/android/gosslens-android-jniLibs.zip dist/apple/GosslensKit.xcframework.zip dist/web/*.tgz)
           [ -f dist/web/gosslens-web-engine.zip ] && assets+=(dist/web/gosslens-web-engine.zip)
+          # A version with a pre-release label is a pre-release on GitHub too.
+          case "${RELEASE_TAG#v}" in *-*) target+=(--prerelease) ;; esac
           gh release create "${RELEASE_TAG}" "${target[@]}" "${assets[@]}" --title "${RELEASE_TAG}" --notes "$notes"
       # A SwiftPM consumer resolves the version tag, so the pin lives in the
       # commit the tag points at: rebuild the tag on a commit carrying the
@@ -310,41 +301,6 @@ jobs:
           git commit -m "release ${RELEASE_TAG}: pin the swift xcframework binary target"
           git tag -f "${RELEASE_TAG}" HEAD
           git push -f origin "refs/tags/${RELEASE_TAG}"
-      # Carry the same pin onto main so a `branch: "main"` consumer and the next
-      # release both start from the current binary. Main is ruleset-protected, so
-      # this is best effort: with RELEASE_PAT it self-commits, without it the pin
-      # is a one-line follow-up PR and the tag above already serves consumers.
-      - name: carry the pin onto main
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
-        run: |
-          set -euo pipefail
-          [ -n "${RELEASE_PAT:-}" ] || { echo "no RELEASE_PAT; main pin is a follow-up PR, the tag already carries it"; exit 0; }
-          git fetch origin main
-          git checkout -B main-pin origin/main
-          checksum=$(cat dist/apple/GosslensKit.checksum.txt)
-          tools/pin-swift-xcframework.sh "${RELEASE_TAG}" "${checksum}"
-          # The install docs carry a real version a reader can paste; stamp it
-          # here so it names this release rather than drifting behind it.
-          tools/stamp-doc-versions.sh "${RELEASE_TAG}"
-          git diff --quiet Package.swift README.md sdk/swift/README.md sdk/kotlin/README.md && { echo "main already current"; exit 0; }
-          git add Package.swift README.md sdk/swift/README.md sdk/kotlin/README.md
-          git commit -m "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs"
-          # The branch rule declines a direct push even with the PAT, so fall
-          # back to a branch and a pull request rather than dropping the pin.
-          if ! git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
-            branch="release-pin-${RELEASE_TAG}"
-            git push -f "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
-            if gh pr view "${branch}" --json number >/dev/null 2>&1; then
-              echo "pin PR already open for ${branch}"
-            else
-              GH_TOKEN="${RELEASE_PAT}" gh pr create --base main --head "${branch}" \
-                --title "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs" \
-                --body "The ${RELEASE_TAG} XCFramework pin and the install-doc versions, carried onto main. The tag already serves consumers; this keeps a reader of main current."
-            fi
-          fi
       # Registry pushes need credentials, so they run only when the secrets are
       # set. Without them the Release still carries every installable binary.
       - name: set up jdk 21 for gradle
@@ -379,4 +335,42 @@ jobs:
         run: |
           set -euo pipefail
           echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
-          npm publish --access public --provenance dist/web/*.tgz
+          # A pre-release publishes under the next tag, so latest keeps pointing at the last release.
+          tag=latest
+          case "${RELEASE_TAG#v}" in *-*) tag=next ;; esac
+          npm publish --access public --provenance --tag "$tag" dist/web/*.tgz
+      # Carry the same pin onto main so a `branch: "main"` consumer and the next
+      # release start from the current binary. Last, after the registry pushes: it
+      # checks main out, and a publish built after it would ship main's SDK. Best
+      # effort: with RELEASE_PAT it self-commits, without it the pin is a follow-up PR.
+      - name: carry the pin onto main
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          [ -n "${RELEASE_PAT:-}" ] || { echo "no RELEASE_PAT; main pin is a follow-up PR, the tag already carries it"; exit 0; }
+          git fetch origin main
+          git checkout -B main-pin origin/main
+          checksum=$(cat dist/apple/GosslensKit.checksum.txt)
+          tools/pin-swift-xcframework.sh "${RELEASE_TAG}" "${checksum}"
+          # The install docs carry a real version a reader can paste; stamp it
+          # here so it names this release rather than drifting behind it.
+          tools/stamp-doc-versions.sh "${RELEASE_TAG}"
+          git diff --quiet Package.swift README.md sdk/swift/README.md sdk/kotlin/README.md && { echo "main already current"; exit 0; }
+          git add Package.swift README.md sdk/swift/README.md sdk/kotlin/README.md
+          git commit -m "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs"
+          # The branch rule declines a direct push even with the PAT, so fall
+          # back to a branch and a pull request rather than dropping the pin.
+          if ! git push "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
+            branch="release-pin-${RELEASE_TAG}"
+            git push -f "https://x-access-token:${RELEASE_PAT}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
+            if gh pr view "${branch}" --json number >/dev/null 2>&1; then
+              echo "pin PR already open for ${branch}"
+            else
+              GH_TOKEN="${RELEASE_PAT}" gh pr create --base main --head "${branch}" \
+                --title "release ${RELEASE_TAG}: pin the swift xcframework and stamp the install docs" \
+                --body "The ${RELEASE_TAG} XCFramework pin and the install-doc versions, carried onto main. The tag already serves consumers; this keeps a reader of main current."
+            fi
+          fi

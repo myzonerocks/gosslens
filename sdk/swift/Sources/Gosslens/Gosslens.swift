@@ -1,4 +1,6 @@
-import CGosslens
+// The C surface rides along for a package client: the app reaches the engine's own C
+// API through the same product, whichever way the package was resolved.
+@_exported import CGosslens
 
 /// ABI bootstrap and pure math - callable before any handle exists.
 public enum Gosslens {

@@ -9,7 +9,10 @@ plugins {
 
 android {
     namespace = "com.gosslens"
-    compileSdk = 37
+    // The platform the current Android Gradle plugin line compiles against; the AAR's compile floor
+    // follows it, so an app on that line takes the package. The library itself needs Android 10: the
+    // engine is built against API 29, and an app with a lower floor keeps it off below that.
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 29
@@ -26,6 +29,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
+}
+
+// ARCore is compile-only: GossARCoreWorldSource reads its frames, and an app that wears a world
+// lens adds the runtime itself, so one that never does carries none of it.
+dependencies {
+    compileOnly("com.google.ar:core:1.56.0")
 }
 
 // Publishes the AAR - the prebuilt .so already inside - to Maven Central through

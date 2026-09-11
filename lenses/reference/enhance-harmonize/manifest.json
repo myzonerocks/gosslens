@@ -1,0 +1,24 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.enhance-harmonize",
+  "version": "1.0.0",
+  "display_name": "Harmonize",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {
+      "id": "harmonize",
+      "type": "harmonize.pass",
+      "inputs": {
+        "frame": "camera"
+      },
+      "params": {},
+      "harmonize": {
+        "strength": 0.8,
+        "direction": 1
+      }
+    }
+  ],
+  "triggers": []
+}

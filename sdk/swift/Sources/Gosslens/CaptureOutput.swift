@@ -17,6 +17,18 @@ extension GossEngine {
     /// and reads the composited output back as RGBA8, row 0 first, at
     /// the renderer's real dimensions - the returned width and height,
     /// which the caller's requested size only bounds.
+    /// Reads the composited frame back into storage the caller owns, at least width*height*4
+    /// bytes; returns the size actually written. A still read straight into the buffer an image
+    /// is built over is copied once, by the engine, and never again.
+    public func captureFrame(
+        session: GossSession?, into out: UnsafeMutablePointer<UInt8>, capacity: Int, width: UInt32, height: UInt32,
+    ) throws -> (width: UInt32, height: UInt32) {
+        var outWidth: UInt32 = 0
+        var outHeight: UInt32 = 0
+        try checked(goss_engine_capture_frame(handle, session?.handle, out, capacity, &outWidth, &outHeight))
+        return (outWidth, outHeight)
+    }
+
     public func captureFrame(session: GossSession?, width: UInt32, height: UInt32) throws -> (pixels: [UInt8], width: UInt32, height: UInt32) {
         var data = [UInt8](repeating: 0, count: Int(width) * Int(height) * 4)
         var outWidth: UInt32 = 0
@@ -130,7 +142,10 @@ extension GossEngine {
     /// Starts recording the session's rendered frames, effects baked
     /// in, into an MP4 at path. One recording per engine; every
     /// rendered frame appends until stopRecording.
-    public func startRecording(session: GossSession, path: String, width: UInt32 = 0, height: UInt32 = 0, bitrate: UInt32 = 0, hevc: Bool = false) throws {
+    /// `realtime` false is for an offline lane with no viewfinder: the composite goes straight
+    /// to the encoder rather than waiting on a display refresh nobody is watching.
+    public func startRecording(session: GossSession, path: String, width: UInt32 = 0, height: UInt32 = 0, bitrate: UInt32 = 0, hevc: Bool = false, realtime: Bool = true) throws {
+        try checked(goss_engine_recording_set_realtime(handle, realtime))
         var config = goss_recording_config(width: width, height: height, bitrate_bps: bitrate, codec: hevc ? 1 : 0)
         let bytes = Array(path.utf8)
         try bytes.withUnsafeBufferPointer { buffer in
@@ -149,8 +164,19 @@ extension GossEngine {
     /// muxes it as the audio track.
     public func submitAudio(session: GossSession, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32, timestampUs: Int64) throws {
         try samples.withUnsafeBufferPointer { buffer in
-            try checked(goss_session_submit_audio(session.handle, buffer.baseAddress, frameCount, sampleRate, channels, timestampUs))
+            try submitAudio(
+                session: session, samples: buffer, frameCount: frameCount, sampleRate: sampleRate,
+                channels: channels, timestampUs: timestampUs,
+            )
         }
+    }
+
+    /// The same feed from storage the caller keeps, so a tap that reuses one buffer copies nothing.
+    public func submitAudio(
+        session: GossSession, samples: UnsafeBufferPointer<Float>, frameCount: UInt32, sampleRate: UInt32,
+        channels: UInt32, timestampUs: Int64,
+    ) throws {
+        try checked(goss_session_submit_audio(session.handle, samples.baseAddress, frameCount, sampleRate, channels, timestampUs))
     }
 
     /// Renders the composited frame straight into an external BGRA MTLTexture

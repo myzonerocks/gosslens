@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 100u
+#define GOSS_ABI_MINOR 109u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -343,6 +343,12 @@ goss_status goss_engine_recording_start(goss_engine *engine, goss_session *sessi
  * finalizing the container. */
 goss_status goss_engine_recording_stop(goss_engine *engine);
 
+/* Tells the next recording whether a viewfinder is watching it. True is the live camera and
+ * the default; an offline lane rendering a clip faster than real time passes false, and the
+ * composite then goes straight to the encoder rather than waiting on a display refresh.
+ * Frames carry their own timestamps either way. */
+goss_status goss_engine_recording_set_realtime(goss_engine *engine, bool realtime);
+
 /* Feeds interleaved f32 PCM into the session: the engine's own level
  * and beat analysis always consumes it (driving the audio.level and
  * audio.beat trigger signals), and an active recording of this session
@@ -575,8 +581,17 @@ goss_status goss_session_clear_model_allowlist(goss_session *session);
 /* Graph thread. Hands the engine one bundle asset's bytes under its
  * manifest name ahead of a JSON lens activation, so a filesystem-less host
  * (the web) runs the heavy inference nodes from memory. The name must stay
- * bundle-relative; zero-length bytes remove a previously staged name. */
+ * bundle-relative; zero-length bytes remove a previously staged name. Names
+ * every node type reads through, images included, so a host that fetches a
+ * lens over the network runs the same lens a directory install runs. */
 goss_status goss_session_provide_lens_asset(goss_session *session, const uint8_t *name, size_t name_len, const uint8_t *bytes, size_t len);
+
+/* Graph thread. Reads one placed node's live rect (normalized, origin
+ * top-left) and its turn in degrees clockwise: the authored angle, replaced
+ * by any bound parameter, plus any gesture the wearer applied. For a host
+ * drawing selection handles or persisting where a sticker was left. Any out
+ * pointer may be NULL. */
+goss_status goss_session_sprite_transform(goss_session *session, const uint8_t *node_id, size_t node_id_len, float *out_x, float *out_y, float *out_w, float *out_h, float *out_rotation);
 
 /* Graph thread. Copies one ml.infer node's whole published output tensor
  * into caller memory, the element count written to out_len. capacity is in
@@ -703,6 +718,23 @@ goss_status goss_session_capture_provenance(goss_session *session, uint8_t *out_
  * reconstruction is deterministic. goss_session_reset_capture clears the scan. */
 goss_status goss_session_capture_view(goss_session *session, goss_capture_guidance *out_guidance);
 goss_status goss_session_reset_capture(goss_session *session);
+
+/* Any thread. What the last drawn frame did with the active lens: the stages
+ * ready to draw, the stages it has, and whether the beauty bridge ran. Zero
+ * ready over a non-zero total is a lens the engine activated and is drawing
+ * nothing of, which is what a host shows instead of an unchanged picture. */
+goss_status goss_session_chain_report(goss_session *session, uint32_t *out_ready, uint32_t *out_total, uint32_t *out_beauty);
+
+/* Graph thread. Copies the scan's reconstruction out as gaussians, fourteen
+ * floats each: xyz, scale, a rotation quaternion, opacity and rgb. A NULL out
+ * sizes it, so a caller asks for the count and then for the floats. This is what
+ * a client writes into a moment file. */
+goss_status goss_session_read_reconstruction(goss_session *session, float *out, uint32_t capacity, uint32_t *out_count);
+
+/* Graph thread. Puts a reconstruction back, replacing whatever the scan held, so
+ * a moment captured on one client opens on another. count is gaussians, not
+ * floats. */
+goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count);
 
 /* Submits one exposure of an HDR bracket, fed only to bracket-source
  * temporal.fuse nodes (the live camera feeds the rest); the fusion publishes
@@ -872,10 +904,17 @@ goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const gos
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,
  * then set_layout to composite the camera (source 0) and the named sources
- * (arrangement: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid). */
+ * (arrangement: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid, 5 overlay,
+ * where every source covers the whole frame and stacks by opacity). */
 goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len);
 goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len);
 goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
+
+/* Graph thread. Hands a named source one BGRA or RGBA frame zero-copy: the one
+ * plane is a platform texture wrapped, not read, the way the camera's own frame
+ * is, so a second lens composites at no per-frame copy. The platform object must
+ * outlive the next rendered frame. */
+goss_status goss_session_submit_source_frame(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const goss_frame_planes *planes);
 goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement);
 goss_status goss_session_clear_layout(goss_session *session);
 /* arrangement 5 overlay stacks the sources full-frame over each other. A source
@@ -956,6 +995,7 @@ goss_status goss_session_ar_brush_begin(goss_session *session);
 goss_status goss_session_ar_brush_point(goss_session *session, float x, float y, float z);
 goss_status goss_session_ar_brush_end(goss_session *session);
 goss_status goss_session_ar_brush_undo(goss_session *session);
+goss_status goss_session_ar_brush_redo(goss_session *session);
 goss_status goss_session_ar_brush_clear(goss_session *session);
 
 /* Screen touch. Feed one event per finger so the engine recognizes the screen
@@ -969,6 +1009,11 @@ goss_status goss_session_touch(goss_session *session, uint32_t phase, uint32_t p
  * platform. out_style is the style (0 light, 1 medium, 2 heavy, 3 soft, 4
  * rigid, 5 success, 6 warning, 7 failure); out_intensity is a 0..1 hint. */
 goss_status goss_session_pull_haptic(goss_session *session, uint32_t *out_style, float *out_intensity);
+
+/* The photosensitivity risk (0..1) the flash detector last reported for the
+ * frames this session was fed, the same value a lens reads as safety.flash_risk.
+ * The host shows its warning from it; the engine only measures. */
+goss_status goss_session_flash_risk(goss_session *session, float *out_risk);
 
 /* Grab and throw. goss_session_grab moves the nearest dynamic physics body to a
  * world point and, while it holds one, drags it there; the body is driven
@@ -1160,6 +1205,13 @@ void goss_engine_music_clear_references(goss_engine *engine);
  * The match is the track and time offset the snippet most agrees on, so a few
  * seconds of noisy audio still identifies. */
 goss_status goss_engine_music_identify(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, uint32_t min_votes, uint32_t *out_track_id, uint32_t *out_votes);
+
+/* Any thread. Walks a whole buffer through the same energy-flux onset detector
+ * the audio.beat trigger rides and writes the time of every beat, in
+ * microseconds from the buffer's start, into out_times_us (up to capacity).
+ * out_count always receives the full number found, so a caller can size a
+ * buffer and ask again. Deterministic for the same samples. */
+goss_status goss_engine_beat_map(goss_engine *engine, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t *out_times_us, uint32_t capacity, uint32_t *out_count);
 
 #if !defined(__cplusplus) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(goss_frame_desc) == 32, "goss_frame_desc layout is frozen");

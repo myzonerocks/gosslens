@@ -289,6 +289,9 @@ interface EngineModule {
   getValue(ptr: number, type: string): number;
   setValue(ptr: number, value: number, type: string): void;
   stringToNewUTF8(value: string): number;
+  /// Emscripten's GL object table, exported so a texture the page fills can be
+  /// named to the engine as a zero-copy plane handle.
+  GL: { textures: Array<WebGLTexture | null>; getNewId(table: unknown[]): number };
 }
 
 type EngineModuleFactory = (overrides?: Record<string, unknown>) => Promise<EngineModule>;
@@ -397,7 +400,9 @@ export class Gosslens {
   /// build shares the full one's filename and abi version, so check the rail
   /// you need here before feeding real bytes to an enable call.
   capabilities(): number {
-    return this.mod.ccall("goss_capabilities", "number", [], []) as number;
+    // A 64-bit mask crosses as a BigInt on a build that passes wasm i64s through; the bits in
+    // use fit a number, and a number is what every caller masks against.
+    return Number(this.mod.ccall("goss_capabilities", "number", [], []));
   }
 
   /// Loads gosslens_web.js and checks its ABI major version. A
@@ -469,7 +474,9 @@ export class GossEngine {
   /// canvas to a 'webgpu' context instead, and a canvas can only ever
   /// bind one context type for its lifetime. capturePixels() branches
   /// on this: readPixels when set, goss_engine_capture_frame otherwise.
-  private gl: WebGL2RenderingContext | null = null;
+  /// The canvas's own WebGL2 context once the renderer is up: the context a page-made
+  /// texture for the zero-copy frame road must be created in. Null on the WebGPU build.
+  gl: WebGL2RenderingContext | null = null;
   /// bgfx's HTML5 backend keeps referencing the canvas selector string
   /// for the renderer's life, so the engine owns it and frees it in
   /// destroy() once goss_engine_destroy has torn the renderer down.
@@ -541,6 +548,23 @@ export class GossEngine {
     // getContext("webgl2") with null, never the wrong context.
     this.canvas = canvas;
     this.gl = canvas.getContext("webgpu") ? null : canvas.getContext("webgl2");
+  }
+
+  /// Registers a texture the page created in this canvas's own WebGL2 context
+  /// in emscripten's GL table, and returns the name the engine knows it by:
+  /// the plane handle submitFrameTexture takes. The page keeps the texture
+  /// alive until the next submitted frame has rendered.
+  adoptTexture(texture: WebGLTexture): number {
+    const table = this.mod.GL;
+    const id = table.getNewId(table.textures);
+    table.textures[id] = texture;
+    return id;
+  }
+
+  /// Forgets a name adoptTexture handed out. The page deletes the texture itself.
+  releaseTexture(name: number): void {
+    const table = this.mod.GL;
+    if (table.textures[name] !== undefined) table.textures[name] = null;
   }
 
   resize(width: number, height: number): void {
@@ -795,6 +819,41 @@ export class GossEngine {
     this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 8]);
     if (status !== 0 || votes === 0) return null;
     return { trackId, votes };
+  }
+
+  /// The times, in seconds from the buffer's start, of every beat in a piece of
+  /// audio, from the same onset detector a lens's beat trigger rides. Samples are
+  /// interleaved f32, and a montage cut to these meets its sound on the beat.
+  beatMap(samples: Float32Array, frameCount: number, sampleRate: number, channels: number): number[] {
+    const bytes = samples.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes || 4]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    this.mod.HEAPF32.set(samples, ptr >> 2);
+    const sized = this.mod.ccall(
+      "goss_engine_beat_map",
+      "number",
+      ["number", "number", "number", "number", "number", "number", "number", "number"],
+      [this.handle, ptr, frameCount, sampleRate, channels, 0, 0, countPtr],
+    );
+    const count = sized === 0 ? new DataView(this.mod.HEAPU8.buffer, countPtr, 4).getUint32(0, true) : 0;
+    const out: number[] = [];
+    if (count > 0) {
+      const timesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [count * 8]) as number;
+      const status = this.mod.ccall(
+        "goss_engine_beat_map",
+        "number",
+        ["number", "number", "number", "number", "number", "number", "number", "number"],
+        [this.handle, ptr, frameCount, sampleRate, channels, timesPtr, count, countPtr],
+      );
+      if (status === 0) {
+        const view = new DataView(this.mod.HEAPU8.buffer, timesPtr, count * 8);
+        for (let i = 0; i < count; i += 1) out.push(Number(view.getBigInt64(i * 8, true)) / 1_000_000);
+      }
+      this.mod.ccall("goss_free", null, ["number", "number"], [timesPtr, count * 8]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes || 4]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+    return out;
   }
 
   /// Releases the persistent wrap the engine keeps per external live
@@ -1105,6 +1164,7 @@ export class GossSession {
   /// tick - the frame descriptor is a fixed 32 bytes, the pixel buffer
   /// tracks the video's current resolution.
   private frameDescPtr: number;
+  private framePlanesPtr = 0;
   private framePixelsPtr = 0;
   private framePixelsCapacity = 0;
   /// Fixed capacity: GOSS_FACE_LANDMARK_COUNT never changes.
@@ -1496,6 +1556,31 @@ export class GossSession {
       this.mod.ccall("goss_session_submit_source_frame_rgba_copy", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, this.frameDescPtr, rgbaPtr, stride]));
   }
 
+  /// Zero-copy: hands a named source one RGBA frame the page already uploaded
+  /// to a texture adoptTexture named, the way submitFrameTexture hands the
+  /// camera's. No readback and no wasm copy; a second lens composites at no
+  /// per-frame cost. The status comes back so a caller can count a refusal.
+  submitSourceFrameTexture(name: string, textureName: number, width: number, height: number): number {
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, GossPixelFormat.Rgba8, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, 1, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 24, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
+    if (this.framePlanesPtr === 0) this.framePlanesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [32]);
+    this.mod.setValue(this.framePlanesPtr, 1, "i32");
+    this.mod.setValue(this.framePlanesPtr + 4, 0, "i32");
+    this.mod.setValue(this.framePlanesPtr + 8, textureName, "i32");
+    this.mod.setValue(this.framePlanesPtr + 12, 0, "i32");
+    let status = 0;
+    this.withName(name, (ptr, len) => {
+      status = this.mod.ccall("goss_session_submit_source_frame", "number", ["number", "number", "number", "number", "number"], [this.handle, ptr, len, this.frameDescPtr, this.framePlanesPtr]);
+    });
+    return status;
+  }
+
   /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid.
   setLayout(arrangement: number): void {
     this.mod.ccall("goss_session_set_layout", "number", ["number", "number"], [this.handle, arrangement]);
@@ -1704,6 +1789,32 @@ export class GossSession {
     this.mod.ccall("goss_session_ar_brush_undo", "number", ["number"], [this.handle]);
   }
 
+  redoARStroke(): void {
+    this.mod.ccall("goss_session_ar_brush_redo", "number", ["number"], [this.handle]);
+  }
+
+  /// Where a placed sprite.2d, text.2d or video.texture node currently draws: its rect in
+  /// normalized coordinates and its turn in degrees clockwise - the authored angle, plus any
+  /// bound parameter, plus any gesture. Null for an unknown node.
+  spriteTransform(nodeId: string): { x: number; y: number; w: number; h: number; rotation: number } | null {
+    const id = new TextEncoder().encode(nodeId);
+    // One scratch block holds the name then the five floats, aligned, so this needs no second
+    // allocation and no second buffer to keep in step with it.
+    const floatsAt = (id.length + 3) & ~3;
+    const base = this.scratch(floatsAt + 5 * 4);
+    this.mod.HEAPU8.set(id, base);
+    const out = base + floatsAt;
+    const status = this.mod.ccall(
+      "goss_session_sprite_transform",
+      "number",
+      ["number", "number", "number", "number", "number", "number", "number", "number"],
+      [this.handle, base, id.length, out, out + 4, out + 8, out + 12, out + 16],
+    );
+    if (status !== 0) return null;
+    const f = this.mod.HEAPF32;
+    return { x: f[out >> 2], y: f[(out + 4) >> 2], w: f[(out + 8) >> 2], h: f[(out + 12) >> 2], rotation: f[(out + 16) >> 2] };
+  }
+
   clearARStrokes(): void {
     this.mod.ccall("goss_session_ar_brush_clear", "number", ["number"], [this.handle]);
   }
@@ -1726,6 +1837,16 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [stylePtr, 4]);
     this.mod.ccall("goss_free", null, ["number", "number"], [intensityPtr, 4]);
     return result;
+  }
+
+  /** The photosensitivity risk (0..1) the flash detector last reported for the frames this
+   * session was fed, the same value a lens reads as safety.flash_risk. */
+  flashRisk(): number {
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const status = this.mod.ccall("goss_session_flash_risk", "number", ["number", "number"], [this.handle, outPtr]);
+    const value = status === 0 ? this.mod.getValue(outPtr, "float") : 0;
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 4]);
+    return value;
   }
 
   grab(x: number, y: number, z: number): void {
@@ -2654,6 +2775,32 @@ export class GossSession {
     );
   }
 
+  /// Zero-copy: hands over one RGBA frame the page already uploaded to a
+  /// texture adoptTexture named, as goss_session_submit_frame takes it. No
+  /// readback, no wasm copy; the renderer wraps the texture in place. The
+  /// status comes back so a caller can count a refused frame.
+  submitFrameTexture(name: number, width: number, height: number, rotationDegrees?: number, mirrored = false, timestampUs?: number): number {
+    this.frameWidth = width;
+    this.frameHeight = height;
+    const rotationQuarters = ((rotationDegrees ?? (this.videoFlipped ? 180 : 0)) / 90) & 3;
+    const flags = (mirrored ? FRAME_FLAG_MIRROR : 0) | (rotationQuarters << FRAME_ROTATION_SHIFT);
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, GossPixelFormat.Rgba8, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, flags, "i32");
+    const stampUs = timestampUs ?? Math.round(performance.now() * 1000);
+    this.mod.setValue(this.frameDescPtr + 24, stampUs >>> 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, Math.floor(stampUs / 4294967296), "i32");
+    if (this.framePlanesPtr === 0) this.framePlanesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [32]);
+    this.mod.setValue(this.framePlanesPtr, 1, "i32");
+    this.mod.setValue(this.framePlanesPtr + 4, 0, "i32");
+    this.mod.setValue(this.framePlanesPtr + 8, name, "i32");
+    this.mod.setValue(this.framePlanesPtr + 12, 0, "i32");
+    return this.mod.ccall("goss_session_submit_frame", "number", ["number", "number", "number"], [this.handle, this.frameDescPtr, this.framePlanesPtr]);
+  }
+
   /// The web selfie path: runs each selfie-source splat.cloud once over one
   /// RGBA8 still (row major), so a photoreal avatar is generated from one photo
   /// and then held off the live camera. Reuses the per-session frame staging.
@@ -2667,6 +2814,80 @@ export class GossSession {
       ["number", "number", "number"],
       [this.handle, this.framePixelsPtr, width, height],
     );
+  }
+
+  /// What the last drawn frame did with the active lens: stages ready to draw,
+  /// stages it has, and whether the beauty bridge ran. Zero ready over a non-zero
+  /// total is a lens the engine activated and is drawing nothing of.
+  chainReport(): { ready: number; total: number; beauty: boolean } {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const status = this.mod.ccall("goss_session_chain_report", "number", ["number", "number", "number", "number"], [this.handle, ptr, ptr + 4, ptr + 8]);
+    const view = new DataView(this.mod.HEAPU8.buffer, ptr, 12);
+    const out = status === 0
+      ? { ready: view.getUint32(0, true), total: view.getUint32(4, true), beauty: view.getUint32(8, true) !== 0 }
+      : { ready: 0, total: 0, beauty: false };
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 12]);
+    return out;
+  }
+
+  /// The scan's reconstruction as gaussians, fourteen numbers each: xyz, scale,
+  /// a rotation quaternion, opacity and rgb. This is what a client writes into a
+  /// moment file.
+  readReconstruction(): Float32Array {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const sized = this.mod.ccall(
+      "goss_session_read_reconstruction",
+      "number",
+      ["number", "number", "number", "number"],
+      [this.handle, 0, 0, countPtr],
+    );
+    const count = sized === 0 ? new DataView(this.mod.HEAPU8.buffer, countPtr, 4).getUint32(0, true) : 0;
+    let out = new Float32Array(0);
+    if (count > 0) {
+      const floats = count * 14;
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [floats * 4]) as number;
+      const status = this.mod.ccall(
+        "goss_session_read_reconstruction",
+        "number",
+        ["number", "number", "number", "number"],
+        [this.handle, ptr, count, countPtr],
+      );
+      if (status === 0) out = new Float32Array(this.mod.HEAPF32.subarray(ptr >> 2, (ptr >> 2) + floats));
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, floats * 4]);
+    }
+    this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+    return out;
+  }
+
+  /// Puts a reconstruction back, replacing whatever the scan held, so a moment
+  /// captured on one client opens on another.
+  writeReconstruction(gaussians: Float32Array): void {
+    if (gaussians.length === 0) {
+      this.mod.ccall("goss_session_write_reconstruction", "number", ["number", "number", "number"], [this.handle, 0, 0]);
+      return;
+    }
+    const bytes = gaussians.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    this.mod.HEAPF32.set(gaussians, ptr >> 2);
+    this.mod.ccall(
+      "goss_session_write_reconstruction",
+      "number",
+      ["number", "number", "number"],
+      [this.handle, ptr, gaussians.length / 14],
+    );
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+  }
+
+  /// Submits a bare camera pose and projection, for a host driving a scan with
+  /// no platform world session behind it: a selfie scan on the front camera,
+  /// where the depth comes from a lens's own net rather than a sensor. Both
+  /// matrices are column-major, sixteen numbers.
+  submitCameraPose(worldFromCamera: ArrayLike<number>, projection: ArrayLike<number>, timestampUs: number): void {
+    if (worldFromCamera.length !== 16 || projection.length !== 16) return;
+    this.submitWorld({ trackingState: 2, worldFromCamera, projection, timestampUs }, [], [], {
+      ambientIntensity: 1000,
+      colorTemperatureKelvin: 6500,
+    });
   }
 
   /// Feeds the platform's world understanding into the session: camera
@@ -2751,6 +2972,7 @@ export class GossSession {
       if (ptr !== 0 && size !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [ptr, size]);
     };
     free(this.frameDescPtr, 32);
+    free(this.framePlanesPtr, 32);
     free(this.landmarksPtr, GOSS_FACE_LANDMARK_COUNT * 3 * 4);
     free(this.signalsPtr, LENS_SIGNALS_BYTES);
     free(this.segmentationMaskPtr, GOSS_SEGMENTATION_MASK_SIDE * GOSS_SEGMENTATION_MASK_SIDE * 4);
@@ -2986,3 +3208,7 @@ export type { GossXRFrameLike } from "./world.js";
 export { GossAudioOutput } from "./audio-output.js";
 export { GossMicInput } from "./mic-input.js";
 export { GossVideoTexture } from "./video-texture.js";
+// The trackers the tracking module runs, so a page reaches them through the one package entry
+// the way the Swift and Kotlin SDKs carry theirs.
+export { GossFaceTracker, GossHandTracker, GossPoseTracker, GossSegmenter, GOSS_FACE_BLENDSHAPE_COUNT, GOSS_MAX_HANDS } from "./tracking.js";
+export type { GossFaceResult, GossHand, GossHandResult, GossPoseResult } from "./tracking.js";

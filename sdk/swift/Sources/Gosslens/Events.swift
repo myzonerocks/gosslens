@@ -396,6 +396,40 @@ extension GossSession {
         try checked(goss_session_reset_capture(handle))
     }
 
+    /// What the last drawn frame did with the active lens: how many of its stages were ready to
+    /// draw, how many it has, and whether the beauty bridge ran. Zero ready over a non-zero total
+    /// is a lens the engine activated and is drawing nothing of.
+    public func chainReport() -> (ready: UInt32, total: UInt32, beauty: Bool) {
+        var ready: UInt32 = 0
+        var total: UInt32 = 0
+        var beauty: UInt32 = 0
+        _ = goss_session_chain_report(handle, &ready, &total, &beauty)
+        return (ready, total, beauty != 0)
+    }
+
+    /// The scan's reconstruction as gaussians, fourteen floats each: xyz, scale, a rotation
+    /// quaternion, opacity and rgb. This is what a client writes into a moment file.
+    public func readReconstruction() throws -> [Float] {
+        var count: UInt32 = 0
+        try checked(goss_session_read_reconstruction(handle, nil, 0, &count))
+        guard count > 0 else { return [] }
+        var out = [Float](repeating: 0, count: Int(count) * 14)
+        try checked(goss_session_read_reconstruction(handle, &out, count, &count))
+        return Array(out.prefix(Int(count) * 14))
+    }
+
+    /// Puts a reconstruction back, replacing whatever the scan held, so a moment captured on one
+    /// client opens on another.
+    public func writeReconstruction(_ gaussians: [Float]) throws {
+        guard !gaussians.isEmpty else {
+            try checked(goss_session_write_reconstruction(handle, nil, 0))
+            return
+        }
+        try gaussians.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_write_reconstruction(handle, buffer.baseAddress, UInt32(gaussians.count / 14)))
+        }
+    }
+
     /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer
     /// node synthesizes its decoded caption or translation to speech and plays it
     /// into the lens mixer. Off by default; a host turns it on for a voice-over.
