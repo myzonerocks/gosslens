@@ -39,14 +39,14 @@ to the newest release on its own:
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "0.11.1")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.12.0-alpha.6-alpha.5-alpha.3")
 ```
 
 **Android - Kotlin**
 
 ```kotlin
 // build.gradle.kts
-implementation("io.github.avosa:gosslens:0.11.1")
+implementation("io.github.avosa:gosslens:0.12.0-alpha.6-alpha.5-alpha.3")
 ```
 
 **Web - TypeScript**
@@ -95,3 +95,7 @@ render-loop steps live in each platform's guide above.
 Apache 2.0. See [LICENSE.md](LICENSE.md). Third-party components retain their own
 licenses, recorded per component under `third_party/` and summarized in
 [NOTICE.md](NOTICE.md).
+
+## One shell
+
+With [Nix](https://nixos.org/download) the repository's flake gives zig 0.16.0, bun, a JDK and ffmpeg at the pinned version, the same on a developer's machine and the runner, while the Swift SDK builds with the system's Xcode: `nix/ensure.sh develop` opens it, installing Nix first when the machine has none, `nix develop -c zig build gate` runs the gate the way CI does, and [direnv](https://direnv.net) opens the shell on `cd` through the tracked `.envrc`. `flake.lock` pins nixpkgs; move it with `nix flake update`. Without Nix, `tools/toolchain-sync` still pins zig by `.zigversion`.
