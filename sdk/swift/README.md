@@ -25,7 +25,7 @@ For a `Package.swift`, name the oldest version you support and SwiftPM resolves
 forward on its own:
 
 ```swift
-.package(url: "https://github.com/myzonerocks/gosslens", from: "0.12.0-alpha.6-alpha.5-alpha.3")
+.package(url: "https://github.com/myzonerocks/gosslens", from: "0.12.0-alpha.6")
 ```
 
 Two products come with it. `Gosslens` is the Swift SDK every app wants. Add
