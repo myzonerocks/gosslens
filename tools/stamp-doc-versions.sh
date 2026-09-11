@@ -11,7 +11,9 @@ case "$version" in
   v*) version="${version#v}" ;;
 esac
 
-semver='[0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}'
+# The suffix is part of the version: without it a prerelease tag replaces the
+# numbers and leaves the old suffix behind, and every release compounds it.
+semver='[0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\(-[0-9A-Za-z.]\{1,\}\)\{0,1\}'
 
 # Maven coordinate, JitPack coordinate (v-prefixed), and the SwiftPM floor.
 sed -i.bak \
