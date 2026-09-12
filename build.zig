@@ -589,6 +589,31 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(memory_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(spatial_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(determinism_tests).step);
+
+    {
+        // The MCP server: the engine as tools an agent calls, over JSON-RPC on
+        // stdio. One static binary, speaking the protocol itself, because the
+        // point of a frozen C ABI is that a thin thing can sit on it.
+        const mcp = b.addExecutable(.{
+            .name = "gosslens-mcp",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/mcp/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        mcp.root_module.addImport("abi", abi_module);
+        b.installArtifact(mcp);
+        const run_mcp = b.addRunArtifact(mcp);
+        b.step("mcp", "Run the MCP server on stdio").dependOn(&run_mcp.step);
+
+        const mcp_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/mcp/server.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) });
+        test_step.dependOn(&b.addRunArtifact(mcp_tests).step);
+    }
     test_step.dependOn(&b.addRunArtifact(quiet_tests).step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
