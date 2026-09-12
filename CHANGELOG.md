@@ -5,6 +5,10 @@ A release moves that section under its tag with the date, and the release notes 
 
 ## Unreleased
 
+The engine reaches an agent rail: a camera, a clip or a screen in, one versioned record of what is
+in it out, and whatever an agent draws composited back, over a frozen C ABI that four SDKs and an
+MCP server all speak. Everything below is new since the last release.
+
 - The engine is real-time visual plumbing for agents, and the documents say so: one versioned
   record of everything it sees, the same record as JSON, a bounded event stream, budgeted frame
   egress, and annotations an agent draws back into the frame.

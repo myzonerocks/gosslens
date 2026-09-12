@@ -1749,6 +1749,11 @@ export fn Java_com_gosslens_Gosslens_nativeRaycastWorldMesh(env: *JniEnv, cls: j
     return @intFromEnum(abi.goss_session_raycast_world_mesh(sessionFromHandle(session), origin, direction, point, distance));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeScopeVerbCount(env: *JniEnv, cls: jobject) i32 {
+    _ = .{ env, cls };
+    return @intCast(abi.goss_scope_verb_count());
+}
+
 export fn Java_com_gosslens_Gosslens_nativeScopeVerbName(env: *JniEnv, cls: jobject, verb: i32, out_buffer: jobject, capacity: i32, len_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

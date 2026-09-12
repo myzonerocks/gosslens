@@ -623,6 +623,10 @@ public final class GossSession: @unchecked Sendable {
         verbs.reduce(0) { $0 | $1.bit }
     }
 
+    /// How many verbs this engine build knows, asked of the engine rather than
+    /// counted from the enum, so a newer engine behind this wrapper is not misread.
+    public static var verbCount: UInt32 { goss_scope_verb_count() }
+
     /// Narrows this session, and only ever narrows: anything running inside it can
     /// call this, so widening means a new session. A read out of scope is dropped
     /// from the record; a verb out of scope throws `.outOfScope`.

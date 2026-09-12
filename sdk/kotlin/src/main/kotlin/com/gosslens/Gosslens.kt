@@ -384,6 +384,7 @@ object Gosslens {
     internal external fun nativeSubmitWorldMesh(session: Long, verticesBuffer: ByteBuffer, vertexCount: Int, indicesBuffer: ByteBuffer, indexCount: Int): Int
     internal external fun nativeRaycastWorldMesh(session: Long, originBuffer: ByteBuffer, directionBuffer: ByteBuffer, pointBuffer: ByteBuffer, distanceBuffer: ByteBuffer): Int
     internal external fun nativeScopeVerbName(verb: Int, outBuffer: ByteBuffer, capacity: Int, lenBuffer: ByteBuffer): Int
+    internal external fun nativeScopeVerbCount(): Int
 
     internal external fun nativeDecodePng(inBuffer: ByteBuffer, inLen: Int, outBuffer: ByteBuffer?, capacity: Int, metaBuffer: ByteBuffer): Int
     internal external fun nativePathAcrossWorld(session: Long, startBuffer: ByteBuffer, goalBuffer: ByteBuffer, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
@@ -568,6 +569,10 @@ object Gosslens {
      * this one; STATUS_UNSUPPORTED means no amount of asking will help. */
     const val STATUS_OUT_OF_SCOPE = 9
     const val STATUS_UNSUPPORTED = 6
+
+    /** How many verbs this engine build knows, asked of the engine rather than
+     * counted from the enum, so a newer engine behind this wrapper is not misread. */
+    fun verbCount(): Int = nativeScopeVerbCount()
 
     fun abiVersion(): Int = nativeAbiVersion()
 

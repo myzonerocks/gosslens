@@ -3490,6 +3490,32 @@ export class GossSession {
     return this.mod.ccall("goss_perception_select_all", "number", [], []) as number;
   }
 
+  /// How many verbs this engine build knows, asked of the engine rather than taken
+  /// from the enum, so a newer engine behind this wrapper is not misread.
+  verbCount(): number {
+    return this.mod.ccall("goss_scope_verb_count", "number", [], []) as number;
+  }
+
+  /// The engine's own name for a verb, so a refusal reads as a sentence and a
+  /// permission prompt reads as words rather than a bitmask.
+  verbName(verb: GossVerb | number): string | null {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    let outPtr = 0;
+    let needed = 0;
+    try {
+      const args = ["number", "number", "number", "number"];
+      this.mod.ccall("goss_scope_verb_name", "number", args, [verb, 0, 0, lenPtr]);
+      needed = this.mod.HEAPU32[lenPtr >> 2]!;
+      if (needed === 0) return null;
+      outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      if (this.mod.ccall("goss_scope_verb_name", "number", args, [verb, outPtr, needed, lenPtr]) !== GOSS_OK) return null;
+      return new TextDecoder().decode(this.mod.HEAPU8.subarray(outPtr, outPtr + needed));
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+      if (outPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed]);
+    }
+  }
+
   /// One versioned record of what the engine currently sees. Every section
   /// carries its own tag, version and byte length, so a consumer built against an
   /// older schema steps over what it does not know. Sized in one retry.
