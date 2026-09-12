@@ -715,9 +715,7 @@ const Gate = struct {
             var number: usize = 0;
             while (lines.next()) |line| {
                 number += 1;
-                if (isCommentLine(line)) continue;
-                if (std.mem.indexOf(u8, line, "return") == null) continue;
-                if (countOccurrences(line, "toOwnedSlice") < 2) continue;
+                if (!movesTwoOwnedSlices(line)) continue;
                 try g.flag("ownership-transfer: '{s}':{d} moves two owned slices out in one return; take each into a local with its own errdefer first", .{ path, number });
             }
         }
@@ -737,15 +735,8 @@ const Gate = struct {
             var number: usize = 0;
             while (lines.next()) |line| {
                 number += 1;
-                if (isCommentLine(line)) continue;
-                if (std.mem.indexOf(u8, line, "catch {}") == null) continue;
-                // A drop the author decided on says so, the same form W9 takes.
-                if (std.mem.indexOf(u8, line, "// failure ignored:") != null) continue;
-                for ([_][]const u8{ ".put(", ".append(", "create", "Create", "acquire", "Acquire" }) |shape| {
-                    if (std.mem.indexOf(u8, line, shape) == null) continue;
-                    try g.flag("swallowed-failure: '{s}':{d} drops the failure of a '{s}' with an empty catch; release what was made, or record why the caller cannot know", .{ path, number, shape });
-                    break;
-                }
+                if (!dropsFailureSilently(line)) continue;
+                try g.flag("swallowed-failure: '{s}':{d} drops a failure with an empty catch; handle it, record it against the node, or say `// failure ignored: <reason>` on the line", .{ path, number });
             }
         }
     }
@@ -761,10 +752,7 @@ const Gate = struct {
             var number: usize = 0;
             while (lines.next()) |line| {
                 number += 1;
-                const trimmed = std.mem.trimStart(u8, line, " \t");
-                if (!std.mem.startsWith(u8, trimmed, "_ = c.")) continue;
-                if (std.mem.indexOf(u8, line, "// result ignored:") != null) continue;
-                if (returnIsNotAStatus(trimmed)) continue;
+                if (!ignoresVendorResult(line)) continue;
                 try g.flag("ignored-vendor-result: '{s}':{d} discards a vendor call's result; check it, or say `// result ignored: <reason>` on the line", .{ path, number });
             }
         }
@@ -954,6 +942,31 @@ fn zigCodeContainsWord(text: []const u8, word: []const u8) bool {
     return false;
 }
 
+/// How many times a word appears in code, skipping strings and comments. The
+/// counting sibling of zigCodeContainsWord.
+fn zigCodeCountWord(text: []const u8, word: []const u8) usize {
+    var found: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (skipZigTrivia(text, i)) |next| {
+            i = next;
+            continue;
+        }
+        if (std.mem.startsWith(u8, text[i..], word)) {
+            const before_ok = i == 0 or !isIdentChar(text[i - 1]);
+            const after = i + word.len;
+            const after_ok = after >= text.len or !isIdentChar(text[after]);
+            if (before_ok and after_ok) {
+                found += 1;
+                i = after;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    return found;
+}
+
 // If `text[i]` opens a Zig line comment, multiline string, string, or
 // char literal, the index just past it; otherwise null. One skipper
 // backs both the brace matcher and the keyword scan.
@@ -1089,6 +1102,36 @@ const not_a_status_calls = [_]struct { prefix: []const u8, returns: []const u8 }
     .{ .prefix = "_ = c.bgfx_get_avail_", .returns = "an availability count the caller already checked" },
     .{ .prefix = "_ = c.bgfx_alloc_", .returns = "the allocated buffer, filled through its out pointer" },
 };
+
+/// W4: the line hands two owned slices out of one return. The first call empties
+/// its source on success, so an errdefer over that source protects nothing when
+/// the second one fails.
+fn movesTwoOwnedSlices(line: []const u8) bool {
+    if (isCommentLine(line)) return false;
+    if (!zigCodeContainsWord(line, "return")) return false;
+    return zigCodeCountWord(line, "toOwnedSlice") >= 2;
+}
+
+/// W5: the line drops a failure and says nothing about why. Every empty catch
+/// counts, not only one over a create: a script handler and a physics joint both
+/// failed silently under a narrower shape list that neither of them matched.
+fn dropsFailureSilently(line: []const u8) bool {
+    if (isCommentLine(line)) return false;
+    // Code-aware, so the gate's own tests, which carry these shapes as string
+    // literals, are not flagged as the thing they test for.
+    if (!zigCodeContainsWord(line, "catch {}")) return false;
+    return std.mem.indexOf(u8, line, "// failure ignored:") == null;
+}
+
+/// W9: the line discards a vendor call's result with no reason, and that result
+/// is one that can encode failure.
+fn ignoresVendorResult(line: []const u8) bool {
+    if (isCommentLine(line)) return false;
+    const trimmed = std.mem.trimStart(u8, line, " \t");
+    if (!std.mem.startsWith(u8, trimmed, "_ = c.")) return false;
+    if (std.mem.indexOf(u8, line, "// result ignored:") != null) return false;
+    return !returnIsNotAStatus(trimmed);
+}
 
 fn returnIsNotAStatus(trimmed: []const u8) bool {
     for (not_a_status_calls) |entry| {
@@ -1704,4 +1747,45 @@ test "file-scope var forms are recognized, const and extern decls are not" {
     // Shape only; a plain var is a file-scope var, and carries no
     // platform token for checkPlatformReferences to flag.
     try std.testing.expect(isFileScopeVar("var harness_io: std.Io = undefined;", true));
+}
+
+test "two ownership transfers in one return are flagged, one is not" {
+    try std.testing.expect(movesTwoOwnedSlices("    return .{ .a = try x.toOwnedSlice(gpa), .b = try y.toOwnedSlice(gpa) };"));
+    try std.testing.expect(!movesTwoOwnedSlices("    return .{ .a = try x.toOwnedSlice(gpa), .b = b };"));
+    // A comment describing the shape is prose, and a line with no return is a
+    // local that an errdefer can still protect.
+    try std.testing.expect(!movesTwoOwnedSlices("    // two toOwnedSlice toOwnedSlice calls in a return"));
+    try std.testing.expect(!movesTwoOwnedSlices("    const a = try x.toOwnedSlice(gpa); const b = try y.toOwnedSlice(gpa);"));
+}
+
+test "an empty catch is flagged unless the line states the reason" {
+    try std.testing.expect(dropsFailureSilently("    list.append(gpa, item) catch {};"));
+    try std.testing.expect(dropsFailureSilently("    engine.event(\"onTap\", a, b) catch {};"));
+    try std.testing.expect(!dropsFailureSilently("    list.append(gpa, item) catch {}; // failure ignored: the next poll retries"));
+    try std.testing.expect(!dropsFailureSilently("    // catch {} in prose is not code"));
+    // A catch that does something is not a drop.
+    try std.testing.expect(!dropsFailureSilently("    list.append(gpa, item) catch noteOom(s, index);"));
+}
+
+test "a discarded vendor result is flagged unless named or known not to be a status" {
+    try std.testing.expect(ignoresVendorResult("    _ = c.JPH_Body_SetFriction(body, 0.5);"));
+    try std.testing.expect(!ignoresVendorResult("    _ = c.JPH_Body_SetFriction(body, 0.5); // result ignored: the setter cannot fail"));
+    // Not a vendor call at all.
+    try std.testing.expect(!ignoresVendorResult("    _ = self.something();"));
+    // A call whose return is not a status is exempt by name.
+    for (not_a_status_calls) |entry| {
+        var line_buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "    {s}arg);", .{entry.prefix}) catch continue;
+        try std.testing.expect(!ignoresVendorResult(line));
+    }
+}
+
+test "the three W predicates read code, not the strings that describe it" {
+    // The gate's own tests carry these shapes as literals; flagging them would
+    // make the gate fail on the proof that it works.
+    try std.testing.expect(!dropsFailureSilently("    try expect(p(\"x catch {};\"));"));
+    try std.testing.expect(!movesTwoOwnedSlices("    const s = \"return a.toOwnedSlice(g), b.toOwnedSlice(g)\";"));
+    try std.testing.expect(!ignoresVendorResult("    // _ = c.JPH_Thing(x);"));
+    try std.testing.expectEqual(@as(usize, 2), zigCodeCountWord("a.toOwnedSlice(g) b.toOwnedSlice(g)", "toOwnedSlice"));
+    try std.testing.expectEqual(@as(usize, 0), zigCodeCountWord("\"toOwnedSlice toOwnedSlice\"", "toOwnedSlice"));
 }

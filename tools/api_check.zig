@@ -36,6 +36,7 @@ const no_ts_wrapper = [_]Exception{
     .{ .op = "goss_engine_request_screenshot", .why = "the page owns file output; the SDK exports a PNG off the canvas" },
     .{ .op = "goss_session_activate_lens_from_directory", .why = "no filesystem in the page; a bundle stages in through provide_lens_asset" },
     .{ .op = "goss_session_submit_hardware_buffer", .why = "no platform hardware buffer in a browser" },
+    .{ .op = "goss_session_submit_source_hardware_buffer", .why = "no platform hardware buffer in a browser; a page source arrives as a texture" },
 };
 
 const Exception = struct { op: []const u8, why: []const u8 };
@@ -45,6 +46,52 @@ fn excepted(list: []const Exception, op: []const u8) bool {
         if (std.mem.eql(u8, e.op, op)) return true;
     }
     return false;
+}
+
+/// Header enums each SDK mirrors as its own enum. A value added in the header
+/// and missed in one SDK is silent: Kotlin reads an ordinal, so a missing case
+/// shifts every reason after it, and nothing in a build would say so. The
+/// prefix is the header's; the case spellings are derived from the tail.
+const mirrored_enums = [_][]const u8{
+    "GOSS_NODE_REASON_",
+    "GOSS_NODE_STATE_",
+    "GOSS_DEGRADE_",
+    "GOSS_THERMAL_",
+};
+
+/// The tail of a header enum member, spelled the way each SDK spells a case.
+/// CONSTRAINT_FAILED stays itself for Kotlin, becomes constraintFailed for
+/// Swift and ConstraintFailed for TypeScript.
+fn spellCase(arena: Allocator, tail: []const u8, comptime style: enum { kotlin, lower_camel, upper_camel }) ![]const u8 {
+    if (style == .kotlin) return tail;
+    var out: std.ArrayList(u8) = .empty;
+    var upper_next = style == .upper_camel;
+    for (tail) |ch| {
+        if (ch == '_') {
+            upper_next = true;
+            continue;
+        }
+        try out.append(arena, if (upper_next) std.ascii.toUpper(ch) else std.ascii.toLower(ch));
+        upper_next = false;
+    }
+    return out.items;
+}
+
+/// Every `<prefix><TAIL> = ` member of one header enum, tails only.
+fn collectEnumTails(arena: Allocator, header: []const u8, prefix: []const u8) !std.ArrayList([]const u8) {
+    var tails: std.ArrayList([]const u8) = .empty;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, header, at, prefix)) |start| {
+        at = start + prefix.len;
+        if (start > 0 and isIdentChar(header[start - 1])) continue;
+        var end = at;
+        while (end < header.len and isIdentChar(header[end])) end += 1;
+        // A member, not a use: the declaration assigns a value.
+        const rest = std.mem.trimStart(u8, header[end..], " \t");
+        if (!std.mem.startsWith(u8, rest, "=")) continue;
+        try tails.append(arena, header[at..end]);
+    }
+    return tails;
 }
 
 const Check = struct {
@@ -198,6 +245,26 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
 
+    // Every value of a mirrored enum reaches all three SDKs, spelled each one's
+    // way. The Kotlin reader decodes by ordinal, so a missing case there does not
+    // fail to compile, it mislabels every value after the gap.
+    const kotlin = try c.read("sdk/kotlin/src/main/kotlin/com/gosslens/Gosslens.kt");
+    for (mirrored_enums) |prefix| {
+        const tails = try collectEnumTails(arena, header, prefix);
+        if (tails.items.len == 0) {
+            try c.flag("{s} names no enum member in include/gosslens.h; drop it from mirrored_enums or fix the prefix", .{prefix});
+            continue;
+        }
+        for (tails.items) |tail| {
+            const as_kotlin = try spellCase(arena, tail, .kotlin);
+            const as_swift = try spellCase(arena, tail, .lower_camel);
+            const as_ts = try spellCase(arena, tail, .upper_camel);
+            if (!namesOp(kotlin, as_kotlin)) try c.flag("{s}{s} has no Kotlin case '{s}'", .{ prefix, tail, as_kotlin });
+            if (!namesOp(swift, as_swift)) try c.flag("{s}{s} has no Swift case '{s}'", .{ prefix, tail, as_swift });
+            if (!namesOp(ts, as_ts)) try c.flag("{s}{s} has no TypeScript case '{s}'", .{ prefix, tail, as_ts });
+        }
+    }
+
     if (c.violations.items.len != 0) {
         for (c.violations.items) |v| std.debug.print("api-check: {s}\n", .{v});
         std.debug.print("api-check: {d} violation(s) across {d} operations\n", .{ c.violations.items.len, header_ops.items.len });
@@ -226,4 +293,30 @@ test "a name inside a longer identifier does not count as coverage" {
     try std.testing.expect(namesOp("call goss_abi_version() first", "goss_abi_version"));
     try std.testing.expect(!namesOp("wrap_goss_abi_version_shim()", "goss_abi_version"));
     try std.testing.expect(namesOp("`goss_session_brush_end`", "goss_session_brush_end"));
+}
+
+test "a header enum member is spelled each SDK's way" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try std.testing.expectEqualStrings("CONSTRAINT_FAILED", try spellCase(a, "CONSTRAINT_FAILED", .kotlin));
+    try std.testing.expectEqualStrings("constraintFailed", try spellCase(a, "CONSTRAINT_FAILED", .lower_camel));
+    try std.testing.expectEqualStrings("ConstraintFailed", try spellCase(a, "CONSTRAINT_FAILED", .upper_camel));
+    // A single word still lowercases its tail.
+    try std.testing.expectEqualStrings("none", try spellCase(a, "NONE", .lower_camel));
+    try std.testing.expectEqualStrings("None", try spellCase(a, "NONE", .upper_camel));
+}
+
+test "enum members are collected, uses of the same name are not" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const header =
+        "    GOSS_NODE_REASON_NONE = 0,\n" ++
+        "    GOSS_NODE_REASON_OUT_OF_MEMORY = 1,\n" ++
+        "    if (r == GOSS_NODE_REASON_NONE) return;\n";
+    const tails = try collectEnumTails(a, header, "GOSS_NODE_REASON_");
+    try std.testing.expectEqual(@as(usize, 2), tails.items.len);
+    try std.testing.expectEqualStrings("NONE", tails.items[0]);
+    try std.testing.expectEqualStrings("OUT_OF_MEMORY", tails.items[1]);
 }

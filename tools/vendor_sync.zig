@@ -259,14 +259,14 @@ const Sync = struct {
         }
 
         const dest = try std.fmt.allocPrint(s.arena, ".vendor/{s}", .{pin.name});
-        Io.Dir.cwd().deleteTree(s.io, dest) catch {};
+        Io.Dir.cwd().deleteTree(s.io, dest) catch {}; // failure ignored: clearing a tree that is not there is the outcome this wanted, and a real failure surfaces on the createDirPath below
         try Io.Dir.cwd().createDirPath(s.io, dest);
         try s.run(try tarArgv(s.arena, pin, archive_path, dest));
 
         const license_path = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dest, pin.license_file });
         if (!s.fileDigestMatches(license_path, pin.license_sha256)) {
             s.fail("{s}: license file digest mismatch; upstream changed its license text", .{name});
-            Io.Dir.cwd().deleteTree(s.io, dest) catch {};
+            Io.Dir.cwd().deleteTree(s.io, dest) catch {}; // failure ignored: the license mismatch above already failed the sync; the half-extracted tree is refused again next run
             return;
         }
 

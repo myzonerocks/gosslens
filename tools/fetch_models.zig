@@ -85,7 +85,7 @@ const Fetch = struct {
         }
         if (!f.digestMatches(path, model.sha256)) {
             f.fail("{s}: digest mismatch after download", .{model.name});
-            Io.Dir.cwd().deleteFile(f.io, path) catch {};
+            Io.Dir.cwd().deleteFile(f.io, path) catch {}; // failure ignored: the digest mismatch above is already fatal; a stale file is rejected the same way next run
         } else {
             std.debug.print("fetch-models: {s} synced\n", .{model.name});
         }
