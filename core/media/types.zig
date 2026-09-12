@@ -221,3 +221,46 @@ test "an identity orientation is the default" {
     try t.expect(!(Orientation{ .quarter_turns = 1 }).isIdentity());
     try t.expect(!(Orientation{ .mirrored = true }).isIdentity());
 }
+
+/// The colour metadata mapped onto the engine's own conversion vocabulary. The
+/// media layer carries primaries, transfer, matrix, range, siting and bit depth,
+/// and the frame path's maths takes a standard and a range: without this bridge
+/// the richer set is decoration, and a bt2020 frame converts as bt709 because
+/// nothing carried the difference across.
+pub const MatrixStandard = enum { bt601, bt709, bt2020 };
+
+/// The standard the conversion matrix is built from. Derived from the matrix
+/// coefficients, which is what the conversion is, rather than from the primaries,
+/// which describe the display and can differ: a display-p3 frame is very often
+/// bt709 matrixed, and reading the primaries instead converts it wrong.
+pub fn matrixStandard(c: ColorInfo) MatrixStandard {
+    return switch (c.matrix) {
+        .bt601 => .bt601,
+        .bt709 => .bt709,
+        .bt2020_ncl => .bt2020,
+        // Identity means the samples are already RGB, so no chroma mixing applies;
+        // bt709 is the closest map and the caller should not be converting at all.
+        .identity => .bt709,
+    };
+}
+
+pub fn isFullRange(c: ColorInfo) bool {
+    return c.range == .full;
+}
+
+const tt = std.testing;
+
+test "the conversion follows the matrix coefficients, not the primaries" {
+    // A display-p3 frame carrying bt709 coefficients converts as bt709. Reading
+    // the primaries would pick the wrong matrix and tint every frame.
+    try tt.expectEqual(MatrixStandard.bt709, matrixStandard(.{ .primaries = .display_p3, .matrix = .bt709 }));
+    try tt.expectEqual(MatrixStandard.bt2020, matrixStandard(.{ .primaries = .bt2020, .matrix = .bt2020_ncl }));
+    try tt.expectEqual(MatrixStandard.bt601, matrixStandard(.{ .primaries = .bt601, .matrix = .bt601 }));
+    // Identity carries no chroma mixing; nothing should be converting it.
+    try tt.expectEqual(MatrixStandard.bt709, matrixStandard(.{ .matrix = .identity }));
+}
+
+test "range crosses the bridge as itself" {
+    try tt.expect(!isFullRange(.{}));
+    try tt.expect(isFullRange(.{ .range = .full }));
+}

@@ -8,6 +8,7 @@ pub const container = @import("container.zig");
 pub const sync = @import("sync.zig");
 pub const capabilities = @import("capabilities.zig");
 pub const demux = @import("demux.zig");
+pub const color_reference = @import("color_reference.zig");
 
 pub const VideoCodec = types.VideoCodec;
 pub const AudioCodec = types.AudioCodec;
@@ -39,6 +40,12 @@ pub const Demuxer = demux.Demuxer;
 pub const DemuxState = demux.State;
 pub const SeekMode = demux.SeekMode;
 pub const FrameCache = demux.FrameCache;
+
+pub const MatrixStandard = types.MatrixStandard;
+pub const matrixStandard = types.matrixStandard;
+pub const isFullRange = types.isFullRange;
+pub const yuvToRgb8 = color_reference.yuvToRgb8;
+pub const maxChannelDelta = color_reference.maxChannelDelta;
 
 pub const Backend = capabilities.Backend;
 pub const Request = capabilities.Request;
