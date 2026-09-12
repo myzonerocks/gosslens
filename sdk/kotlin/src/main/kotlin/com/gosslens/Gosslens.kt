@@ -35,6 +35,23 @@ data class MediaCapabilities(
     val zeroCopy: Boolean,
 )
 
+/** One thing an agent draws back into the frame. */
+data class Annotation(
+    val id: Int,
+    val kind: Int,
+    val space: Int = 0,
+    val rect: FloatArray = floatArrayOf(0f, 0f, 0f, 0f),
+    val trackId: Int = 0,
+    val colour: Int = -1,
+    val z: Int = 0,
+    val opacity: Float = 1f,
+    val lifetimeKind: Int = 0,
+    val lifetimeValue: Long = 0,
+    val onLost: Int = 0,
+    val value: Float = 0f,
+    val text: String = "",
+)
+
 /** What the brain sees and what it costs. */
 data class EgressConfig(
     val targetLongEdge: Int = 0,
@@ -169,6 +186,10 @@ object Gosslens {
     internal external fun nativePerceptionSnapshot(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
     internal external fun nativePerceptionJson(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
     internal external fun nativePollEvents(session: Long, out: ByteBuffer, capacity: Int, dropped: ByteBuffer): Int
+    internal external fun nativeAnnotate(session: Long, desc: ByteBuffer, text: ByteBuffer?, textLen: Int): Int
+    internal external fun nativeAnnotationRemove(session: Long, id: Int): Int
+    internal external fun nativeAnnotationClear(session: Long): Int
+    internal external fun nativeAnnotationCount(session: Long, out: ByteBuffer): Int
     internal external fun nativeEgressConfigure(session: Long, config: ByteBuffer): Int
     internal external fun nativeEgressRequest(session: Long): Int
     internal external fun nativeEgressDecide(session: Long, out: ByteBuffer): Int
@@ -931,6 +952,40 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * takes no coroutines dependency, because forcing one on every Android
      * consumer to offer a Flow is a cost they did not ask for.
      */
+    /**
+     * Adds or updates one annotation. The same id replaces rather than
+     * duplicating, so moving one box every frame leaks no entry per frame.
+     */
+    fun annotate(a: Annotation): Boolean {
+        val buf = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
+        buf.putInt(0, a.id)
+        buf.putInt(4, a.kind)
+        buf.putInt(8, a.space)
+        for (i in 0 until 4) buf.putFloat(12 + i * 4, a.rect.getOrElse(i) { 0f })
+        buf.putInt(28, a.trackId)
+        buf.putInt(32, a.colour)
+        buf.putInt(36, a.z)
+        buf.putFloat(40, a.opacity)
+        buf.putInt(44, a.lifetimeKind)
+        buf.putLong(48, a.lifetimeValue)
+        buf.putInt(56, a.onLost)
+        buf.putFloat(60, a.value)
+        val bytes = a.text.toByteArray(Charsets.UTF_8)
+        val textBuf = if (bytes.isEmpty()) null else ByteBuffer.allocateDirect(bytes.size).put(bytes).also { it.rewind() }
+        return Gosslens.nativeAnnotate(handle, buf, textBuf, bytes.size) == 0
+    }
+
+    fun annotationRemove(id: Int): Boolean = Gosslens.nativeAnnotationRemove(handle, id) == 0
+
+    fun annotationClear(): Boolean = Gosslens.nativeAnnotationClear(handle) == 0
+
+    /** Live count, and how many adds the bound turned away. */
+    fun annotationCount(): Pair<Int, Long> {
+        val buf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val n = Gosslens.nativeAnnotationCount(handle, buf)
+        return Pair(if (n < 0) 0 else n, buf.getLong(0))
+    }
+
     /** Installs the egress policy; false when the configuration is out of range. */
     fun egressConfigure(config: EgressConfig): Boolean {
         // Six u32, one u64, one u32, one u32, one f32, one i64 with alignment.

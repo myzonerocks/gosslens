@@ -1223,6 +1223,37 @@ export fn Java_com_gosslens_Gosslens_nativePerceptionSnapshot(env: *JniEnv, cls:
 
 /// Events into a direct buffer as their raw structs, returning the count, with the
 /// drop count written into the first eight bytes of a second buffer.
+export fn Java_com_gosslens_Gosslens_nativeAnnotate(env: *JniEnv, cls: jobject, session: i64, desc: jobject, text: jobject, text_len: i32) i32 {
+    _ = cls;
+    const desc_bytes = getDirectBufferAddress(env, desc) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var a: abi.AnnotationDesc = undefined;
+    @memcpy(std.mem.asBytes(&a), desc_bytes[0..@sizeOf(abi.AnnotationDesc)]);
+    const text_bytes = if (text_len > 0) getDirectBufferAddress(env, text) else null;
+    return @intFromEnum(abi.goss_session_annotate(sessionFromHandle(session), &a, text_bytes, @intCast(@max(text_len, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeAnnotationRemove(env: *JniEnv, cls: jobject, session: i64, id: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_annotation_remove(sessionFromHandle(session), @bitCast(id)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeAnnotationClear(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_annotation_clear(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeAnnotationCount(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;
+    var count: u32 = 0;
+    var refused: u64 = 0;
+    if (abi.goss_session_annotation_count(sessionFromHandle(session), &count, &refused) != .ok) return -1;
+    @memcpy(out_bytes[0..8], std.mem.asBytes(&refused));
+    return @intCast(count);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeEgressConfigure(env: *JniEnv, cls: jobject, session: i64, config: jobject) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, config) orelse return @intFromEnum(abi.Status.invalid_argument);

@@ -236,6 +236,10 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_egress_configure` | `egressConfigure(config)`, what the brain sees and what it costs: the target edge, format, quality, the rate and byte ceilings, the source, and when a frame is worth sending | all SDKs |
 | `goss_session_egress_request` | `egressRequest()`, the host asking for one frame whatever the change score says | all SDKs |
 | `goss_session_egress_decide` | `egressDecide()`, whether this frame is worth sending and why, with the change score and the running sent and held counts, so a gateway can explain itself rather than guess. The budget is checked before any trigger, because a budget a trigger can talk past is not a budget | all SDKs |
+| `goss_session_annotate` | `annotate(annotation, text)`, one thing an agent draws back into the frame: a box, label, point, arrow, path, highlight, mask overlay, image or meter, anchored in screen or pixel space, in the world, to a track, or to a named face region. The same id replaces rather than duplicating, and every annotation carries its own lifetime | all SDKs |
+| `goss_session_annotation_remove` | `annotationRemove(id)` | all SDKs |
+| `goss_session_annotation_clear` | `annotationClear()` | all SDKs |
+| `goss_session_annotation_count` | `annotationCount()`, how many are live and how many adds the bound turned away, which is what tells an agent its overlay is losing annotations rather than drawing them somewhere it cannot see | all SDKs |
 
 ### Events and degradation
 

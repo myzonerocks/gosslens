@@ -20,6 +20,22 @@ export interface GossMediaCapabilities {
   zeroCopy: boolean;
 }
 
+/// One thing an agent draws back into the frame.
+export interface GossAnnotation {
+  id: number;
+  kind: number;
+  space?: number;
+  rect?: [number, number, number, number];
+  trackId?: number;
+  colour?: [number, number, number, number];
+  z?: number;
+  opacity?: number;
+  lifetimeKind?: number;
+  lifetimeValue?: number;
+  onLost?: number;
+  value?: number;
+}
+
 /// What the brain sees and what it costs.
 export interface GossEgressConfig {
   targetLongEdge?: number;
@@ -3154,6 +3170,63 @@ export class GossSession {
       }
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+  }
+
+  /// Adds or updates one annotation. The same id replaces rather than
+  /// duplicating, so moving one box every frame leaks no entry per frame.
+  annotate(a: GossAnnotation, text = ""): boolean {
+    const bytes = 64;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    const encoded = new TextEncoder().encode(text);
+    const textPtr = encoded.length === 0 ? 0 : (this.mod.ccall("goss_alloc", "number", ["number"], [encoded.length]) as number);
+    try {
+      const u32 = (off: number, v: number) => { this.mod.HEAPU32[(ptr + off) >> 2] = v; };
+      const f32 = (off: number, v: number) => { this.mod.HEAPF32[(ptr + off) >> 2] = v; };
+      u32(0, a.id);
+      u32(4, a.kind);
+      u32(8, a.space ?? 0);
+      for (let i = 0; i < 4; i += 1) f32(12 + i * 4, a.rect?.[i] ?? 0);
+      u32(28, a.trackId ?? 0);
+      this.mod.HEAPU8[ptr + 32] = a.colour?.[0] ?? 255;
+      this.mod.HEAPU8[ptr + 33] = a.colour?.[1] ?? 255;
+      this.mod.HEAPU8[ptr + 34] = a.colour?.[2] ?? 255;
+      this.mod.HEAPU8[ptr + 35] = a.colour?.[3] ?? 255;
+      this.mod.HEAP32[(ptr + 36) >> 2] = a.z ?? 0;
+      f32(40, a.opacity ?? 1);
+      u32(44, a.lifetimeKind ?? 0);
+      u32(48, a.lifetimeValue ?? 0);
+      u32(52, 0);
+      u32(56, a.onLost ?? 0);
+      f32(60, a.value ?? 0);
+      if (textPtr !== 0) this.mod.HEAPU8.set(encoded, textPtr);
+      return this.mod.ccall("goss_session_annotate", "number", ["number", "number", "number", "number"], [this.handle, ptr, textPtr, encoded.length]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+      if (textPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [textPtr, encoded.length]);
+    }
+  }
+
+  annotationRemove(id: number): boolean {
+    return this.mod.ccall("goss_session_annotation_remove", "number", ["number", "number"], [this.handle, id]) === GOSS_OK;
+  }
+
+  annotationClear(): boolean {
+    return this.mod.ccall("goss_session_annotation_clear", "number", ["number"], [this.handle]) === GOSS_OK;
+  }
+
+  /// Live count and how many adds the bound turned away.
+  annotationCount(): { live: number; refused: number } {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const refusedPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_annotation_count", "number", ["number", "number", "number"], [this.handle, countPtr, refusedPtr]) !== GOSS_OK) {
+        return { live: 0, refused: 0 };
+      }
+      return { live: this.mod.HEAPU32[countPtr >> 2], refused: this.mod.HEAPU32[refusedPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [refusedPtr, 8]);
     }
   }
 

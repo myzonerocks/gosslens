@@ -8,6 +8,7 @@ pub const json = @import("json.zig");
 pub const events = @import("events.zig");
 pub const replay = @import("replay.zig");
 pub const egress = @import("egress.zig");
+pub const actions = @import("actions.zig");
 
 pub const schema_version = snapshot.schema_version;
 pub const Tag = snapshot.Tag;
@@ -34,6 +35,12 @@ pub const changeScore = egress.changeScore;
 pub const redactRect = egress.redactRect;
 pub const RedactMode = egress.RedactMode;
 pub const Rect = egress.Rect;
+
+pub const Annotation = actions.Annotation;
+pub const AnnotationKind = actions.Kind;
+pub const AnchorSpace = actions.AnchorSpace;
+pub const OnLost = actions.OnLost;
+pub const AnnotationStore = actions.Store;
 
 test {
     @import("std").testing.refAllDecls(@This());

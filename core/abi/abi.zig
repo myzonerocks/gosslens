@@ -29,6 +29,7 @@ const perception = perception_mod.snapshot;
 const perception_json = perception_mod.json;
 const perception_events = perception_mod.events;
 const perception_egress = perception_mod.egress;
+const perception_actions = perception_mod.actions;
 
 /// Events a session holds before a drainer must catch up. Bounded so a consumer
 /// that stops draining cannot grow the engine; overflow is counted and reported.
@@ -307,6 +308,10 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_egress_configure(goss_session *session, const goss_egress_config *config)",
     "goss_status goss_session_egress_request(goss_session *session)",
     "goss_status goss_session_egress_decide(goss_session *session, goss_egress_decision *out_decision)",
+    "goss_status goss_session_annotate(goss_session *session, const goss_annotation *annotation, const uint8_t *text, size_t text_len)",
+    "goss_status goss_session_annotation_remove(goss_session *session, uint32_t id)",
+    "goss_status goss_session_annotation_clear(goss_session *session)",
+    "goss_status goss_session_annotation_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused)",
     "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
     "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
     "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
@@ -451,6 +456,26 @@ pub const EgressDecision = extern struct {
     since_last_us: i64,
     sent_total: u64,
     held_total: u64,
+};
+
+/// One thing an agent draws back into the frame. Addressed by id so an agent
+/// updates one without rebuilding the set, and carrying its own lifetime, because
+/// the failure mode of an imperative overlay is annotations nobody removed.
+pub const AnnotationDesc = extern struct {
+    id: u32,
+    kind: u32,
+    space: u32,
+    rect: [4]f32,
+    track_id: u32,
+    colour: [4]u8,
+    z: i32,
+    opacity: f32,
+    /// 0 explicit, 1 frames, 2 duration, 3 track. lifetime_value carries the
+    /// frame count or the microseconds.
+    lifetime_kind: u32,
+    lifetime_value: i64,
+    on_lost: u32,
+    value: f32,
 };
 
 pub const Status = enum(c_int) {
@@ -1342,6 +1367,10 @@ pub const Session = struct {
     /// costs no allocation per frame.
     egress: ?perception_egress.Policy = null,
     egress_previous: []u8 = &.{},
+    /// What an agent has drawn back into the frame. Bounded, because an agent
+    /// that adds and never removes must not grow the engine, and a refused add is
+    /// a better failure than a slow leak nobody attributes.
+    annotations: perception_actions.Store(64, 4096) = .{},
     script_inited: bool = false,
     /// Script handlers that threw, counted so a faulting script is visible.
     script_faults: u32 = 0,
@@ -8471,6 +8500,81 @@ fn sampleLumaGrid(s: *Session, out: []u8, side: usize) bool {
         out[i] = @intFromFloat(std.math.clamp(luma, 0, 1) * 255.0);
     }
     return true;
+}
+
+/// Adds or updates one annotation. The same id replaces rather than duplicating,
+/// which is what lets an agent move one box every frame without leaking an entry
+/// per frame.
+pub export fn goss_session_annotate(session: ?*Session, annotation: ?*const AnnotationDesc, text: ?[*]const u8, text_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const d = annotation orelse return .invalid_argument;
+    const label: []const u8 = if (text) |p| p[0..text_len] else "";
+    const kind: perception_actions.Kind = @enumFromInt(d.kind);
+    const space: perception_actions.AnchorSpace = switch (d.space) {
+        0 => .screen,
+        1 => .pixels,
+        2 => .world,
+        3 => .track,
+        4 => .face_region,
+        else => return .invalid_argument,
+    };
+    const on_lost: perception_actions.OnLost = switch (d.on_lost) {
+        0 => .remove,
+        1 => .hold,
+        2 => .fade,
+        else => return .invalid_argument,
+    };
+    const lifetime: perception_actions.Lifetime = switch (d.lifetime_kind) {
+        0 => .explicit,
+        1 => .{ .frames = @intCast(@max(d.lifetime_value, 0)) },
+        2 => .{ .duration_us = d.lifetime_value },
+        3 => .track,
+        else => return .invalid_argument,
+    };
+    const now_us = if (s.current) |cur| cur.desc.timestamp_us else 0;
+    s.annotations.put(.{
+        .id = d.id,
+        .kind = kind,
+        .space = space,
+        .rect = d.rect,
+        .track_id = d.track_id,
+        .colour = d.colour,
+        .z = d.z,
+        .opacity = d.opacity,
+        .lifetime = lifetime,
+        .on_lost = on_lost,
+        .text = label,
+        .value = d.value,
+    }, s.frames_rendered, now_us) catch |err| return switch (err) {
+        error.Full => .pool_exhausted,
+        error.TextTooLong => .invalid_argument,
+        error.Invalid => .invalid_argument,
+        error.OutOfMemory => .out_of_memory,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_annotation_remove(session: ?*Session, id: u32) Status {
+    const s = session orelse return .invalid_argument;
+    return if (s.annotations.remove(id)) .ok else .invalid_argument;
+}
+
+pub export fn goss_session_annotation_clear(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.annotations.clear();
+    return .ok;
+}
+
+/// How many are live, and how many adds the bound turned away. The refused count
+/// is what tells an agent its overlay is losing annotations rather than drawing
+/// them somewhere it cannot see.
+pub export fn goss_session_annotation_count(session: ?*Session, out_count: ?*u32, out_refused: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    const refused_out = out_refused orelse return .invalid_argument;
+    count_out.* = @intCast(s.annotations.count());
+    refused_out.* = s.annotations.refused;
+    return .ok;
 }
 
 /// Installs the egress policy. A configuration outside its own ranges is refused

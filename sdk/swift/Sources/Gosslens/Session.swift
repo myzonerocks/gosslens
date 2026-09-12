@@ -412,6 +412,40 @@ public final class GossSession: @unchecked Sendable {
         return (raw.prefix(Int(count)).map(GossEvent.init), dropped)
     }
 
+    // MARK: - Annotations
+
+    /// Adds or updates one annotation. The same id replaces rather than
+    /// duplicating, so moving one box every frame leaks no entry per frame.
+    public func annotate(_ annotation: GossAnnotation, text: String = "") throws {
+        var raw = annotation.raw
+        let bytes = Array(text.utf8)
+        if bytes.isEmpty {
+            try checked(goss_session_annotate(handle, &raw, nil, 0))
+        } else {
+            try bytes.withUnsafeBufferPointer { buffer in
+                try checked(goss_session_annotate(handle, &raw, buffer.baseAddress, buffer.count))
+            }
+        }
+    }
+
+    public func annotationRemove(_ id: UInt32) throws {
+        try checked(goss_session_annotation_remove(handle, id))
+    }
+
+    public func annotationClear() throws {
+        try checked(goss_session_annotation_clear(handle))
+    }
+
+    /// Live count and how many adds the bound turned away, which is what tells a
+    /// caller its overlay is losing annotations rather than drawing them out of
+    /// sight.
+    public func annotationCount() throws -> (live: UInt32, refused: UInt64) {
+        var live: UInt32 = 0
+        var refused: UInt64 = 0
+        try checked(goss_session_annotation_count(handle, &live, &refused))
+        return (live, refused)
+    }
+
     // MARK: - Egress
 
     /// Installs the egress policy: what the brain sees and what it costs. Throws

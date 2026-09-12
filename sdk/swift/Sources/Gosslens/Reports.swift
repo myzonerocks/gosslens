@@ -298,3 +298,35 @@ public struct GossEgressDecision: Sendable {
         heldTotal = raw.held_total
     }
 }
+
+/// One thing an agent draws back into the frame. Carries its own lifetime, because
+/// the failure mode of an imperative overlay is annotations nobody removed.
+public struct GossAnnotation: Sendable {
+    public var id: UInt32
+    public var kind: UInt32
+    public var space: UInt32 = 0
+    public var rect: (Float, Float, Float, Float) = (0, 0, 0, 0)
+    public var trackId: UInt32 = 0
+    public var colour: (UInt8, UInt8, UInt8, UInt8) = (255, 255, 255, 255)
+    public var z: Int32 = 0
+    public var opacity: Float = 1
+    public var lifetimeKind: UInt32 = 0
+    public var lifetimeValue: Int64 = 0
+    public var onLost: UInt32 = 0
+    public var value: Float = 0
+
+    public init(id: UInt32, kind: UInt32) {
+        self.id = id
+        self.kind = kind
+    }
+
+    var raw: goss_annotation {
+        goss_annotation(
+            id: id, kind: kind, space: space,
+            rect: (rect.0, rect.1, rect.2, rect.3),
+            track_id: trackId, colour: (colour.0, colour.1, colour.2, colour.3),
+            z: z, opacity: opacity, lifetime_kind: lifetimeKind,
+            lifetime_value: lifetimeValue, on_lost: onLost, value: value
+        )
+    }
+}

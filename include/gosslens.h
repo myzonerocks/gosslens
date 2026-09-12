@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 132u
+#define GOSS_ABI_MINOR 136u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -1244,6 +1244,55 @@ goss_status goss_session_egress_request(goss_session *session);
  * measured on a luma grid, so a still room costs a grid comparison rather than an
  * encode. GOSS_AGAIN when there are no pixels to score. */
 goss_status goss_session_egress_decide(goss_session *session, goss_egress_decision *out_decision);
+
+/* What an agent draws back into the frame. */
+typedef enum goss_annotation_kind {
+    GOSS_ANNOTATION_BOX = 1, GOSS_ANNOTATION_LABEL = 2, GOSS_ANNOTATION_POINT = 3,
+    GOSS_ANNOTATION_ARROW = 4, GOSS_ANNOTATION_PATH = 5, GOSS_ANNOTATION_HIGHLIGHT = 6,
+    GOSS_ANNOTATION_MASK_OVERLAY = 7, GOSS_ANNOTATION_IMAGE = 8, GOSS_ANNOTATION_METER = 9,
+} goss_annotation_kind;
+
+/* What an annotation is positioned against. A box in screen space and a box bound
+ * to a face are one annotation with different anchors. */
+typedef enum goss_anchor_space {
+    GOSS_ANCHOR_SCREEN = 0, GOSS_ANCHOR_PIXELS = 1, GOSS_ANCHOR_WORLD = 2,
+    GOSS_ANCHOR_TRACK = 3, GOSS_ANCHOR_FACE_REGION = 4,
+} goss_anchor_space;
+
+/* What happens when the thing an annotation follows goes away. Stated rather than
+ * assumed: a label that outlives its face is the commonest overlay bug. */
+typedef enum goss_on_lost { GOSS_ON_LOST_REMOVE = 0, GOSS_ON_LOST_HOLD = 1, GOSS_ON_LOST_FADE = 2 } goss_on_lost;
+
+typedef enum goss_lifetime_kind {
+    GOSS_LIFETIME_EXPLICIT = 0, GOSS_LIFETIME_FRAMES = 1,
+    GOSS_LIFETIME_DURATION = 2, GOSS_LIFETIME_TRACK = 3,
+} goss_lifetime_kind;
+
+typedef struct goss_annotation {
+    uint32_t id;
+    uint32_t kind;
+    uint32_t space;
+    float rect[4];
+    uint32_t track_id;
+    uint8_t colour[4];
+    int32_t z;
+    float opacity;
+    uint32_t lifetime_kind;
+    int64_t lifetime_value;  /* frame count or microseconds */
+    uint32_t on_lost;
+    float value;
+} goss_annotation;
+
+/* Graph thread. Adds or updates one annotation; the same id replaces rather than
+ * duplicating, so an agent moves one box every frame without leaking an entry per
+ * frame. GOSS_ERROR_POOL_EXHAUSTED when the bounded set is full. */
+goss_status goss_session_annotate(goss_session *session, const goss_annotation *annotation, const uint8_t *text, size_t text_len);
+goss_status goss_session_annotation_remove(goss_session *session, uint32_t id);
+goss_status goss_session_annotation_clear(goss_session *session);
+
+/* Any thread. How many are live, and how many adds the bound turned away, which is
+ * what tells an agent its overlay is losing annotations. */
+goss_status goss_session_annotation_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused);
 
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,
