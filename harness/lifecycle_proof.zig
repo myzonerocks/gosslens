@@ -393,10 +393,7 @@ pub fn proveHeadlessLifecycle(io: std.Io) !bool {
     return true;
 }
 
-test "the full engine lifecycle leaks nothing across two rounds" {
-    // The io belongs to the test, not to the leak-checked allocator, so nothing
-    // the io layer holds can read as an engine leak.
-    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    try std.testing.expect(try proveHeadlessLifecycle(threaded.io()));
-}
+// No test block here, for the reason build.zig already gives about the real
+// inference stack: a zig test binary speaks the build-runner protocol over its
+// own stdout, and TFLite logs straight to that stdout the moment a real model
+// loads. gosslens-leak-scenario is this proof's artifact, run by the leak lane.

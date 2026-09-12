@@ -990,7 +990,10 @@ pub fn build(b: *std.Build) void {
         const real_leak_exe = b.addExecutable(.{ .name = "gosslens-leak-scenario", .root_module = real_leak_module });
         if (asan_runtime_dir) |dir| linkAsanThroughStub(b, real_leak_exe, target, optimize, dir);
         leak_scenario_step.dependOn(&b.addInstallArtifact(real_leak_exe, .{}).step);
-        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = leak_lifecycle_module })).step);
+        // No test artifact on the lifecycle module: it drives the real inference
+        // stack, and a zig test binary's stdout is the build-runner protocol that
+        // TFLite's own logging corrupts. The executable above is the proof, run
+        // under the platform leak checker and the sanitizer by the leak lane.
     } else {
         tracking_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
     }

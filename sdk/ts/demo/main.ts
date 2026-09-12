@@ -207,6 +207,11 @@ function drawOverlay(reply: TrackingReply, frameWidth: number, frameHeight: numb
   }
 }
 
+// Module scope on purpose: the lens tick loop lives in startTracking and the
+// first pointerdown that stands the worklet up lives in run(), so a declaration
+// inside either one leaves the other writing or reading a name it cannot see.
+let audioOutput: GossAudioOutput | null = null;
+
 async function startTracking(preview: GossPreviewSession): Promise<void> {
   const link = await TrackerLink.create();
   const scratch = document.createElement("canvas");
@@ -299,7 +304,6 @@ async function startTracking(preview: GossPreviewSession): Promise<void> {
   // tracking result's signals, the same rhythm the iOS demo drives -
   // paused (a frozen still-photo test) means the prover owns ticking.
   let lastLensTick = performance.now();
-  let audioOutput: GossAudioOutput | null = null;
   const lensTick = () => {
     requestAnimationFrame(lensTick);
     const now = performance.now();
