@@ -1051,6 +1051,40 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_wasi },
             },
         });
+        // The pose and hand inference cores the host and android workers run,
+        // built for wasi so the web module drives the same code rather than its
+        // own copy of each pipeline.
+        const graph_wasi_cores = b.createModule(.{
+            .root_source_file = b.path("core/graph/graph.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+        });
+        const pose_core_wasi = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/pose_core.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+            .imports = &.{
+                .{ .name = "bundle", .module = cores_wasi.bundle },
+                .{ .name = "runtime", .module = runtime_wasi },
+                .{ .name = "detector", .module = cores_wasi.detector },
+                .{ .name = "sampler", .module = cores_wasi.sampler },
+                .{ .name = "pose", .module = cores_wasi.pose },
+                .{ .name = "graph", .module = graph_wasi_cores },
+            },
+        });
+        const hand_core_wasi = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/hand_core.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+            .imports = &.{
+                .{ .name = "bundle", .module = cores_wasi.bundle },
+                .{ .name = "runtime", .module = runtime_wasi },
+                .{ .name = "detector", .module = cores_wasi.detector },
+                .{ .name = "sampler", .module = cores_wasi.sampler },
+                .{ .name = "hand", .module = cores_wasi.hand },
+                .{ .name = "graph", .module = graph_wasi_cores },
+            },
+        });
         const exports_wasi = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/wasm_exports.zig"),
             .target = wasi_target,
@@ -1065,6 +1099,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "pose", .module = cores_wasi.pose },
                 .{ .name = "hand", .module = cores_wasi.hand },
                 .{ .name = "segmentation_core", .module = segmentation_core_wasi },
+                .{ .name = "pose_core", .module = pose_core_wasi },
+                .{ .name = "hand_core", .module = hand_core_wasi },
             },
         });
         exports_wasi.linkLibrary(buildTfliteLib(b, wasi_target, wasi_optimize, flatc_exe.?, null, null));

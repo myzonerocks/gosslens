@@ -16477,6 +16477,101 @@ fn proveLensTargetsRelease(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+
+/// Proves the texture pool is doing the work, not merely existing. Two lenses
+/// needing different capability targets run in turn; the pool must hand out
+/// slots, reach a peak, and end with none live, which is what sharing a target
+/// between capabilities that never meet looks like from outside.
+fn provePoolServesScratchTargets(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    // An occluder lens and a hair-matte lens want a scratch target each, and
+    // never at the same time, so one pooled target serves both.
+    const bundles = [_][]const u8{ ".lens-packages/head-occluder", ".lens-packages/hair-matte" };
+    var peak: u32 = 0;
+    for (bundles) |bundle| {
+        if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) {
+            std.debug.print("conformance: FAIL pool proof could not activate {s}\n", .{bundle});
+            return false;
+        }
+        var frame: usize = 0;
+        while (frame < 6) : (frame += 1) {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @as(i64, @intCast(frame + 1)) * 33_333,
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var report: abi.EngineReport = undefined;
+        if (abi.goss_engine_read_report(engine, &report) != .ok) return error.ReportFailed;
+        if (report.texture_pool_peak > peak) peak = report.texture_pool_peak;
+        // Every frame gives its slots back, so between frames nothing is live.
+        if (report.texture_pool_live != 0) {
+            std.debug.print("conformance: FAIL {d} pool slots stayed live between frames on {s}\n", .{ report.texture_pool_live, bundle });
+            return false;
+        }
+    }
+
+    if (peak == 0) {
+        std.debug.print("conformance: FAIL the texture pool never handed out a slot, so it is still not carrying the scratch targets\n", .{});
+        return false;
+    }
+    var report: abi.EngineReport = undefined;
+    if (abi.goss_engine_read_report(engine, &report) != .ok) return error.ReportFailed;
+    if (report.texture_pool_exhausted != 0) {
+        std.debug.print("conformance: FAIL the pool was exhausted {d} times at capacity {d}\n", .{ report.texture_pool_exhausted, report.texture_pool_capacity });
+        return false;
+    }
+    // A live and peak count of zero reads the same whether the pool holds one
+    // description or none, so the bin count is what says it is carrying them.
+    if (report.texture_pool_bins == 0) {
+        std.debug.print("conformance: FAIL the pool handed out slots but holds no bin, so the report cannot be read\n", .{});
+        return false;
+    }
+    if (report.texture_pool_bins_refused != 0) {
+        std.debug.print("conformance: FAIL {d} descriptions were turned away at the bin cap, so a pooled size is being derived per frame\n", .{report.texture_pool_bins_refused});
+        return false;
+    }
+
+    // The capture readback comes from the staging pool, so one capture makes a
+    // staging bin appear and hold its slot past the call.
+    var cap_needed: usize = 0;
+    var cap_w: u32 = 0;
+    var cap_h: u32 = 0;
+    var probe: [1]u8 = undefined;
+    const cap_cfg: abi.CaptureConfig = .{ .width = 0, .height = 0, .supersample = 0, .format = 0, .quality = 0 };
+    _ = abi.goss_engine_capture_still(engine, session, &cap_cfg, &probe, 0, &cap_needed, &cap_w, &cap_h);
+    if (cap_needed != 0) {
+        const encoded = try gpa.alloc(u8, cap_needed);
+        defer gpa.free(encoded);
+        var encoded_len: usize = 0;
+        if (abi.goss_engine_capture_still(engine, session, &cap_cfg, encoded.ptr, encoded.len, &encoded_len, &cap_w, &cap_h) != .ok) return error.CaptureFailed;
+        if (abi.goss_engine_read_report(engine, &report) != .ok) return error.ReportFailed;
+        if (report.staging_pool_bins == 0 or report.staging_pool_live == 0) {
+            std.debug.print("conformance: FAIL the capture readback is not coming from the staging pool: {d} bins, {d} live\n", .{ report.staging_pool_bins, report.staging_pool_live });
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF both pools carry what they own: texture peak {d} of {d} over {d} bins, none live between frames, never exhausted, none refused, and the capture readback holds a staging slot\n", .{ peak, report.texture_pool_capacity, report.texture_pool_bins });
+    return true;
+}
+
 /// Wraps an allocator to track bytes in use, so the per-frame gate watches the
 /// heap footprint settle rather than the wall clock. The loader and tracking
 /// threads allocate concurrently with the render thread, so the counters are
@@ -22604,5 +22699,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("degradation actuates");
     if (!try proveLensTargetsRelease(gpa, engine)) return 1;
     watchHold("lens targets release");
+    if (!try provePoolServesScratchTargets(gpa, engine)) return 1;
+    watchHold("pool serves scratch targets");
     return 0;
 }
