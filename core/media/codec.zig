@@ -105,7 +105,9 @@ pub const EncoderConfig = struct {
     }
 };
 
-/// What a decoder found, filled from a demuxed stream rather than requested.
+/// What a decoder found, filled from a demuxed stream rather than requested. The
+/// demuxer that fills it is demux.zig; until that existed this said so with nothing
+/// behind it.
 pub const DecoderConfig = struct {
     video: types.EncodedVideoDesc,
     audio: ?types.EncodedAudioDesc = null,

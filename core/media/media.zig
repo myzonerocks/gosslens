@@ -7,6 +7,7 @@ pub const codec = @import("codec.zig");
 pub const container = @import("container.zig");
 pub const sync = @import("sync.zig");
 pub const capabilities = @import("capabilities.zig");
+pub const demux = @import("demux.zig");
 
 pub const VideoCodec = types.VideoCodec;
 pub const AudioCodec = types.AudioCodec;
@@ -33,6 +34,11 @@ pub const Muxer = container.Muxer;
 pub const MuxState = container.MuxState;
 
 pub const Clock = sync.Clock;
+
+pub const Demuxer = demux.Demuxer;
+pub const DemuxState = demux.State;
+pub const SeekMode = demux.SeekMode;
+pub const FrameCache = demux.FrameCache;
 
 pub const Backend = capabilities.Backend;
 pub const Request = capabilities.Request;

@@ -1,6 +1,7 @@
-//! Mux and demux contracts: the track and sample model, the header, the index,
-//! and the fragment boundary. The adapter had no container model, so a pause, an
+//! The mux contract: the track and sample model, the header, the index, and the
+//! fragment boundary. The adapter had no container model, so a pause, an
 //! interruption and a multi-clip recording had nothing to be recorded against.
+//! Demuxing is demux.zig; this file claimed both and carried only one.
 
 const std = @import("std");
 const types = @import("types.zig");
