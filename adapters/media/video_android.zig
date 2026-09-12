@@ -22,6 +22,10 @@ pub const Decoder = struct {
     handle: *anyopaque,
     width: u32,
     height: u32,
+    duration_us: i64 = 0,
+    last_pts_us: i64 = 0,
+    last_width: u32 = 0,
+    last_height: u32 = 0,
 
     const State = struct {
         extractor: *c.AMediaExtractor,
@@ -198,6 +202,18 @@ pub const Decoder = struct {
             state.stride_y = @intCast(stride);
             state.stride_uv = if (state.kind == .i420) @intCast(@divTrunc(stride, 2)) else @intCast(stride);
         }
+    }
+
+    /// AMediaExtractor seeks to the sync sample at or before the target, which is
+    /// the same keyframe granularity the Apple reader's time range gives.
+    pub fn seek(self: *Decoder, target_us: i64) bool {
+        if (target_us < 0) return false;
+        if (self.duration_us > 0 and target_us > self.duration_us) return false;
+        const st: *State = @ptrCast(@alignCast(self.handle));
+        if (c.AMediaExtractor_seekTo(st.extractor, target_us, c.AMEDIAEXTRACTOR_SEEK_PREVIOUS_SYNC) != c.AMEDIA_OK) return false;
+        _ = c.AMediaCodec_flush(st.codec);
+        self.last_pts_us = target_us;
+        return true;
     }
 
     pub fn reset(self: *Decoder) bool {

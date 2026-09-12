@@ -9,8 +9,10 @@ const std = @import("std");
 pub const supported = true;
 
 extern fn goss_video_open(path: [*]const u8, path_len: usize, out_width: *u32, out_height: *u32) ?*anyopaque;
-extern fn goss_video_read(handle: *anyopaque, out_bgra: [*]u8, capacity: usize, out_width: ?*u32, out_height: ?*u32) i32;
+extern fn goss_video_read(handle: *anyopaque, out_bgra: [*]u8, capacity: usize, out_width: ?*u32, out_height: ?*u32, out_pts_us: ?*i64) i32;
 extern fn goss_video_reset(handle: *anyopaque) i32;
+extern fn goss_video_seek(handle: *anyopaque, target_us: i64) i32;
+extern fn goss_video_duration(handle: *anyopaque) i64;
 extern fn goss_video_close(handle: *anyopaque) void;
 
 /// The outcome of pulling one frame: a frame landed, the stream ended
@@ -24,6 +26,15 @@ pub const Decoder = struct {
     handle: *anyopaque,
     width: u32,
     height: u32,
+    /// The stream's length, zero where the container declares none.
+    duration_us: i64 = 0,
+    /// The presentation time of the frame the last read produced, and the
+    /// dimensions it actually carried. The shim reported all three and this file
+    /// threw them away, so a mid-stream geometry change was invisible and no
+    /// caller could know when a frame belonged.
+    last_pts_us: i64 = 0,
+    last_width: u32 = 0,
+    last_height: u32 = 0,
 
     pub fn open(path: []const u8) ?Decoder {
         var width: u32 = 0;
@@ -33,13 +44,32 @@ pub const Decoder = struct {
             goss_video_close(handle);
             return null;
         }
-        return .{ .handle = handle, .width = width, .height = height };
+        return .{
+            .handle = handle,
+            .width = width,
+            .height = height,
+            .duration_us = goss_video_duration(handle),
+            .last_width = width,
+            .last_height = height,
+        };
     }
 
     /// Pulls the next frame into out_bgra, which must hold width*height*4
-    /// bytes. At end of stream the buffer is left untouched.
+    /// bytes. At end of stream the buffer is left untouched. The frame's own
+    /// presentation time and dimensions land on the decoder.
     pub fn read(self: *Decoder, out_bgra: []u8) Read {
-        return switch (goss_video_read(self.handle, out_bgra.ptr, out_bgra.len, null, null)) {
+        var w: u32 = 0;
+        var h: u32 = 0;
+        var pts: i64 = -1;
+        const status = goss_video_read(self.handle, out_bgra.ptr, out_bgra.len, &w, &h, &pts);
+        if (status == 0) {
+            if (w != 0 and h != 0) {
+                self.last_width = w;
+                self.last_height = h;
+            }
+            if (pts >= 0) self.last_pts_us = pts;
+        }
+        return switch (status) {
             0 => .frame,
             1 => .end,
             else => .failed,
@@ -48,7 +78,16 @@ pub const Decoder = struct {
 
     /// Rewinds to the first frame so playback can loop.
     pub fn reset(self: *Decoder) bool {
+        self.last_pts_us = 0;
         return goss_video_reset(self.handle) == 0;
+    }
+
+    /// Moves to the keyframe at or before a time. Refused rather than clamped
+    /// past the end, because a clamped seek returns the wrong frame silently.
+    pub fn seek(self: *Decoder, target_us: i64) bool {
+        if (goss_video_seek(self.handle, target_us) != 0) return false;
+        self.last_pts_us = target_us;
+        return true;
     }
 
     pub fn close(self: *Decoder) void {
