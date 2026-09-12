@@ -1,4 +1,4 @@
-abi 0.152
+abi 0.159
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -352,3 +352,10 @@ fn goss_status goss_session_memory_save(goss_session *session, uint8_t *out, siz
 fn goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len)
 fn goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs)
 fn goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs)
+fn goss_status goss_engine_screen_count(goss_engine *engine, uint32_t *out_count)
+fn goss_status goss_engine_screen_at(goss_engine *engine, uint32_t index, goss_screen_surface *out_surface)
+fn goss_status goss_engine_screen_title(goss_engine *engine, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_open_screen(goss_session *session, uint64_t surface_id, float scale, uint32_t *out_screen)
+fn goss_status goss_session_close_screen(goss_session *session, uint32_t screen)
+fn goss_status goss_session_step_screen(goss_session *session, uint32_t screen, const uint8_t *name, size_t name_len)
+fn goss_status goss_session_screen_point(goss_session *session, uint32_t screen, float x, float y, float *out_logical, float *out_pixel, float *out_desktop)
