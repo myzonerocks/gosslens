@@ -6495,7 +6495,7 @@ pub export fn goss_session_report_interruption(session: ?*Session, kind: c_int) 
         else => return .invalid_argument,
     };
     if (e.recording == null) return .invalid_argument;
-    e.recording_clock.note(which, e.recording_last_timestamp);
+    e.recording_clock.note(which, e.recording_capture_last_us);
     e.recording_interruptions += 1;
     if (which == .pause) e.recording_clips += 1;
     return .ok;
