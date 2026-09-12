@@ -3,6 +3,9 @@
 //! silence instead of failing.
 const std = @import("std");
 
+/// Whether a real runtime stands behind this module on this target.
+pub const supported = false;
+
 pub const Mixer = struct {
     handle: *anyopaque,
     channels: u32,

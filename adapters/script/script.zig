@@ -4,6 +4,9 @@
 //! lens.signals.<name> and writes lens.params.<name>; no I/O, clock, or RNG.
 const std = @import("std");
 
+/// Whether a real runtime stands behind this module on this target.
+pub const supported = true;
+
 const Handle = opaque {};
 extern fn goss_script_new(source: [*]const u8, source_len: usize, fuel_per_tick: c_long) ?*Handle;
 extern fn goss_script_free(s: ?*Handle) void;
