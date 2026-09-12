@@ -437,6 +437,7 @@ pub fn build(b: *std.Build) void {
         lens_package_reference_step.dependOn(&run.step);
     }
 
+    const media_core_tests = b.addTest(.{ .root_module = mediaCoreModule(b, target, optimize) });
     const quiet_tests = b.addTest(.{ .root_module = quietModule(b, target, optimize) });
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const api_check_tests = b.addTest(.{ .root_module = api_check_module });
@@ -502,6 +503,7 @@ pub fn build(b: *std.Build) void {
     const lens_runtime_tests = b.addTest(.{ .root_module = lens_runtime_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
+    test_step.dependOn(&b.addRunArtifact(media_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(quiet_tests).step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
@@ -2244,6 +2246,19 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         module.addCSourceFile(.{ .file = b.path(b.fmt("{s}/{s}", .{ root, file })), .flags = &flags });
     }
     return b.addLibrary(.{ .name = "quickjs", .linkage = .static, .root_module = module });
+}
+
+/// The media contracts the core owns: codec, container, packet, clock and the
+/// backend registry. Pure, no vendor and no platform, so it compiles for every
+/// target and an adapter implements it rather than defining it.
+fn mediaCoreModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-media-core-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/media/media.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 }
 
 /// The stderr silencer the two deliberate-failure tests use. See
