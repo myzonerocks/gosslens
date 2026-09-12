@@ -783,20 +783,9 @@ const Gate = struct {
         }
     }
 
-    // W9 mechanical check: a vendor call whose return encodes failure, ignored
-    // with no reason. Discarding one is allowed when the line says why.
-    // A module swapped per target is only a seam if every substitute answers
-    // what the tree asks of it. The wasm build broke on four names the real
-    // adapter exported and its synchronous twin did not, so the asking side is
-    // what decides: a name used through the module, absent from a substitute.
-    // A core module nothing imports is a module nobody can use, whatever its tests
-    // say: the spatial rail sat that way with a passing suite of its own. Scoped to
-    // `core/`, because a program root and a seam substitute are both reached by
-    // something other than an import and neither is a mistake.
-    // Shape three of the deferral list, mechanical: a verb the scope declares and
-    // no op checks is a permission that gates nothing, which is the same lie as a
-    // tool with no engine behind it. Four of seven were like that when the audit
-    // started.
+    // Shape three of the deferral list: a verb the scope declares and no op checks
+    // is a permission that gates nothing, the same lie as a tool with no engine
+    // behind it. Four of seven were like that when the audit started.
     fn checkVerbCoverage(g: *Gate) !void {
         const scope_src = Io.Dir.cwd().readFileAlloc(g.io, "core/perception/scope.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
         const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
@@ -891,6 +880,10 @@ const Gate = struct {
         }
     }
 
+    // A core module nothing imports is one nobody can use, whatever its tests say:
+    // the spatial rail sat that way with a passing suite. Scoped to `core/`, since a
+    // program root and a seam substitute are reached by something other than an
+    // import and neither is a mistake.
     fn checkOrphanModules(g: *Gate) !void {
         const build_zig = Io.Dir.cwd().readFileAlloc(g.io, "build.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
 
@@ -935,6 +928,9 @@ const Gate = struct {
         }
     }
 
+    // A module swapped per target is only a seam if every substitute answers what
+    // the tree asks of it: the wasm build broke on four names the real adapter
+    // exported and its synchronous twin did not. The asking side decides.
     fn checkSeamParity(g: *Gate) !void {
         const paths = try g.trackedPaths();
         for (seam_families) |seam| {
@@ -963,6 +959,8 @@ const Gate = struct {
         }
     }
 
+    // W9 mechanical check: a vendor call whose return encodes failure, ignored
+    // with no reason. Discarding one is allowed when the line says why.
     fn checkIgnoredVendorResults(g: *Gate, paths: []const []const u8) !void {
         for (paths) |path| {
             if (!std.mem.endsWith(u8, path, ".zig")) continue;

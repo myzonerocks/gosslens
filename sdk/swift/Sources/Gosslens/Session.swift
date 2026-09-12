@@ -599,9 +599,6 @@ public final class GossSession: @unchecked Sendable {
 
     // MARK: - Scope
 
-    /// Narrows what this session answers. A session opens fully permissive; a
-    /// read out of scope is dropped from the record rather than failing, and a
-    /// verb out of scope is refused.
     /// What a scope may carry. Reading is covered by the snapshot sections; these
     /// are the things that change something or reach a resource.
     public enum Verb: UInt32, CaseIterable {
@@ -626,8 +623,9 @@ public final class GossSession: @unchecked Sendable {
         verbs.reduce(0) { $0 | $1.bit }
     }
 
-    /// Narrows this session. It only ever narrows: anything running inside the
-    /// session can call this, so widening means a new session.
+    /// Narrows this session, and only ever narrows: anything running inside it can
+    /// call this, so widening means a new session. A read out of scope is dropped
+    /// from the record; a verb out of scope throws `.outOfScope`.
     public func setScope(sections: UInt32, verbs: UInt32) throws {
         try checked(goss_session_set_scope(handle, sections, verbs))
     }

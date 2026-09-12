@@ -4411,10 +4411,6 @@ fn normalizeVector(v: []f32) void {
 }
 
 
-/// Screens through the real ABI. Where permission is granted this captures for
-/// real; where it is not, zero surfaces is the answer and the proof says so,
-/// because permission is the host's to give. The coordinate arithmetic is
-/// asserted either way: a point in the wrong place is wrong on every host.
 /// Scope through the real ABI: every verb gates the ops it names, a refusal says
 /// it is a permission rather than an absence, and a narrowed session cannot widen
 /// itself, which is what makes the whole mechanism more than advice.
@@ -4749,6 +4745,10 @@ fn proveSpatialRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Screens through the real ABI. Where permission is granted this captures for
+/// real; where it is not, zero surfaces is the answer and the proof says so,
+/// because permission is the host's to give. The coordinate arithmetic is
+/// asserted either way: a point in the wrong place is wrong on every host.
 fn proveScreenSource(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     _ = gpa;
     var count: u32 = 0;

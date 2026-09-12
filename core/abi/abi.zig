@@ -8665,7 +8665,8 @@ pub export fn goss_engine_decode_png(
 ) Status {
     const data = bytes orelse return .invalid_argument;
     const len_out = out_len orelse return .invalid_argument;
-    const gpa = std.heap.smp_allocator;
+    const gpa = abiAllocator();
+    // unsupported: the engine decodes png, and these bytes are not one.
     const decoded = png.decodeRgba(gpa, data[0..len]) catch return .unsupported;
     defer decoded.deinit(gpa);
     len_out.* = decoded.pixels.len;
