@@ -8062,15 +8062,15 @@ fn noteNode(s: *Session, graph_index: graph.NodeIndex, state: NodeState, reason:
     };
 }
 
-/// The reason an allocation failure maps to, used by the parameter stores whose
-/// only way to fail is running out of memory.
-/// A joint the physics backend refused. The node still draws, so without this
-/// a chained hair or tail that silently failed to hang reads as a lens bug the
-/// host has no way to see.
+/// A joint the physics backend refused. The node still draws, so without this a
+/// chained hair or tail that silently failed to hang reads as a lens bug the host
+/// has no way to see.
 fn noteConstraint(s: *Session, graph_index: graph.NodeIndex, result: anyerror!void) void {
     result catch noteNode(s, graph_index, .degraded, .constraint_failed);
 }
 
+/// The reason an allocation failure maps to, used by the parameter stores whose
+/// only way to fail is running out of memory.
 fn noteOom(s: *Session, graph_index: graph.NodeIndex) void {
     noteNode(s, graph_index, .degraded, .out_of_memory);
 }
