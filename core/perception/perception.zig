@@ -6,6 +6,7 @@
 pub const snapshot = @import("snapshot.zig");
 pub const json = @import("json.zig");
 pub const events = @import("events.zig");
+pub const replay = @import("replay.zig");
 
 pub const schema_version = snapshot.schema_version;
 pub const Tag = snapshot.Tag;
@@ -17,6 +18,12 @@ pub const Section = snapshot.Section;
 pub const Event = events.Event;
 pub const EventKind = events.Kind;
 pub const EventRing = events.Ring;
+
+pub const ReplayLog = replay.Log;
+pub const ReplayEntry = replay.Entry;
+pub const ReplayKind = replay.Kind;
+pub const replayDiverges = replay.diverges;
+pub const hashFrame = replay.hashFrame;
 
 test {
     @import("std").testing.refAllDecls(@This());

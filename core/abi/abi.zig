@@ -6586,7 +6586,12 @@ pub export fn goss_engine_recording_read_report(engine: ?*Engine, out_report: ?*
 /// the frames still in flight first.
 pub export fn goss_engine_recording_stop(engine: ?*Engine) Status {
     const e = engine orelse return .invalid_argument;
-    if (e.recording == null) return .invalid_argument;
+    if (e.recording == null) {
+        // Two very different situations answered one status, which cost a run to
+        // tell apart: nothing was recording, or the finalize failed.
+        std.log.info("gosslens: recording_stop with no recording open", .{});
+        return .invalid_argument;
+    }
     if (e.recording_session) |rs| emit(rs, .recording_stopped, e.recording_clips, 0, 0);
     return if (finishRecording(e)) .ok else .invalid_argument;
 }
