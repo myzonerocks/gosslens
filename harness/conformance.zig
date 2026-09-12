@@ -8162,9 +8162,9 @@ fn writeDiffusionLens(spec: DiffusionLensSpec) !void {
     const target_node = if (spec.target_mesh)
         "{\"id\":\"canvas\",\"type\":\"mesh.face\",\"inputs\":{\"frame\":\"camera\"},\"params\":{}}"
     else if (spec.target_material)
-        "{\"id\":\"canvas\",\"type\":\"shader.pass\",\"inputs\":{\"frame\":\"camera\"},\"params\":{},\"material\":{\"output\":3,\"nodes\":[{\"kind\":\"uv\"},{\"kind\":\"texture\",\"name\":\"generated\"},{\"kind\":\"sample\",\"inputs\":[1,0]},{\"kind\":\"output\",\"inputs\":[2]}]}}"
+        "{\"id\":\"canvas\",\"type\":\"shader.pass\",\"optional\":true,\"inputs\":{\"frame\":\"camera\"},\"params\":{},\"material\":{\"output\":3,\"nodes\":[{\"kind\":\"uv\"},{\"kind\":\"texture\",\"name\":\"generated\"},{\"kind\":\"sample\",\"inputs\":[1,0]},{\"kind\":\"output\",\"inputs\":[2]}]}}"
     else
-        try std.fmt.allocPrint(page, "{{\"id\":\"canvas\",\"type\":\"sprite.2d\",\"inputs\":{{\"frame\":\"camera\"}},\"params\":{{}}, \"sprite\":{{\"x\":0.0,\"y\":0.0,\"w\":1.0,\"h\":1.0{s}}}}}", .{mask_field});
+        try std.fmt.allocPrint(page, "{{\"id\":\"canvas\",\"type\":\"sprite.2d\",\"optional\":true,\"inputs\":{{\"frame\":\"camera\"}},\"params\":{{}}, \"sprite\":{{\"x\":0.0,\"y\":0.0,\"w\":1.0,\"h\":1.0{s}}}}}", .{mask_field});
     defer if (!literal_target) page.free(target_node);
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],

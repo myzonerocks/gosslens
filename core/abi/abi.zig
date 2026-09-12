@@ -11459,17 +11459,10 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         // A degrade whatever the lens declared, the same call as the worker
         // budget: no profile is this build's situation, not a defect in the lens,
         // and a headless build has none at all.
-        for (passes) |pass| {
-            if (pass.material) continue;
-            noteNode(session, pass.graph_index, .degraded, .capability_unavailable);
-        }
+        for (passes) |pass| noteNode(session, pass.graph_index, .degraded, .capability_unavailable);
         return;
     };
     for (passes) |pass| {
-        // A pass with an inline material graph has no compiled binary in the
-        // bundle: its program is built from the graph at splice time, so a missing
-        // file is the normal case and not a missing asset.
-        if (pass.material) continue;
         var bin_buf: [512]u8 = undefined;
         const bin_name = std.fmt.bufPrint(&bin_buf, "{s}.{s}.bin", .{ pass.shader_stem, tag }) catch {
             noteResourceFailure(session, pass.graph_index, pass.optional, .asset_too_large);
