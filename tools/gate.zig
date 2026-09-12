@@ -793,6 +793,104 @@ const Gate = struct {
     // say: the spatial rail sat that way with a passing suite of its own. Scoped to
     // `core/`, because a program root and a seam substitute are both reached by
     // something other than an import and neither is a mistake.
+    // Shape three of the deferral list, mechanical: a verb the scope declares and
+    // no op checks is a permission that gates nothing, which is the same lie as a
+    // tool with no engine behind it. Four of seven were like that when the audit
+    // started.
+    fn checkVerbCoverage(g: *Gate) !void {
+        const scope_src = Io.Dir.cwd().readFileAlloc(g.io, "core/perception/scope.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+        const abi_src = Io.Dir.cwd().readFileAlloc(g.io, "core/abi/abi.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
+
+        const start = std.mem.indexOf(u8, scope_src, "pub const Verb = enum(u5) {") orelse return;
+        const end = std.mem.indexOfPos(u8, scope_src, start, "\n};") orelse return;
+        var lines = std.mem.splitScalar(u8, scope_src[start..end], '\n');
+        _ = lines.next();
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t");
+            if (line.len == 0 or std.mem.startsWith(u8, line, "//") or std.mem.startsWith(u8, line, "///")) continue;
+            if (!std.mem.endsWith(u8, line, ",")) continue;
+            const name = line[0 .. line.len - 1];
+            if (name.len == 0 or std.mem.indexOfScalar(u8, name, ' ') != null) continue;
+            var needle_buf: [128]u8 = undefined;
+            const needle = std.fmt.bufPrint(&needle_buf, "allowsVerb(.{s})", .{name}) catch continue;
+            if (std.mem.indexOf(u8, abi_src, needle) != null) continue;
+            try g.flag("verb-gates-nothing: scope declares '{s}' and no op checks it; check it where it belongs or drop it, because a permission nothing enforces protects nothing", .{name});
+        }
+    }
+
+    // Shape four, mechanical: a refusal that hides a path somebody could have
+    // built. Every unsupported answer names its limit, either by sitting behind a
+    // platform or capability condition or by saying so on the line, which is the
+    // same shape the ignored-result and swallowed-failure rules already use.
+    fn checkUnexplainedRefusals(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            if (!std.mem.endsWith(u8, path, ".zig")) continue;
+            if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+            if (std.mem.startsWith(u8, path, "tools/")) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            var lines = std.mem.splitScalar(u8, content, '\n');
+            var number: usize = 0;
+            var prior: [4][]const u8 = @splat("");
+            while (lines.next()) |line| {
+                number += 1;
+                defer {
+                    prior[3] = prior[2];
+                    prior[2] = prior[1];
+                    prior[1] = prior[0];
+                    prior[0] = line;
+                }
+                if (std.mem.indexOf(u8, line, "return .unsupported") == null) continue;
+                if (std.mem.indexOf(u8, line, "unsupported:") != null) continue;
+                // A file whose whole purpose is to refuse says so at the top.
+                if (std.mem.indexOf(u8, content, "//! ") != null and std.mem.indexOf(u8, content[0..@min(content.len, 400)], "refuse") != null) continue;
+                var explained = false;
+                for (prior) |earlier| {
+                    for ([_][]const u8{ "comptime", "supported", "is_web", "builtin.os", "builtin.target", "builtin.abi", "have_", "null)", "orelse" }) |token| {
+                        if (std.mem.indexOf(u8, earlier, token) != null) explained = true;
+                    }
+                }
+                for ([_][]const u8{ "comptime", "supported", "is_web", "builtin.os" }) |token| {
+                    if (std.mem.indexOf(u8, line, token) != null) explained = true;
+                }
+                if (explained) continue;
+                try g.flag("unexplained-refusal: '{s}':{d} answers unsupported with no limit named; put it behind the capability check that makes it true, or say `// unsupported: <reason>` on the line", .{ path, number });
+            }
+        }
+    }
+
+    // Shape five, mechanical: a sentence that explains an absence. The loophole
+    // vocabulary is allowed only where the paragraph names one of the four things
+    // that may ever wait on the owner, which is a closed list.
+    fn checkDeferralProse(g: *Gate, paths: []const []const u8) !void {
+        const phrases = [_][]const u8{
+            "deliberately not a tool",  "not a tool here",    "cannot be built",
+            "will be built",            "in a later wave",    "in a future wave",
+            "the next piece",           "left to the next",   "not yet wired",
+            "not yet implemented",      "not yet supported",
+        };
+        const allowed = [_][]const u8{
+            "physical device", "physical hardware", "physical iPhone", "physical Android",
+            "billing",         "credential",        "signing identity", "owner",
+            "device lab",      "hardware the lab",
+        };
+        for (paths) |path| {
+            if (!isMarkdownDoc(path)) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            var paragraphs = std.mem.splitSequence(u8, content, "\n\n");
+            while (paragraphs.next()) |paragraph| {
+                for (phrases) |phrase| {
+                    if (std.mem.indexOf(u8, paragraph, phrase) == null) continue;
+                    var excused = false;
+                    for (allowed) |word| {
+                        if (std.mem.indexOf(u8, paragraph, word) != null) excused = true;
+                    }
+                    if (excused) continue;
+                    try g.flag("deferral-prose: '{s}' says \"{s}\" without naming anything that may wait on the owner; build it, or name the money, credential, hardware or preference it waits on", .{ path, phrase });
+                }
+            }
+        }
+    }
+
     fn checkOrphanModules(g: *Gate) !void {
         const build_zig = Io.Dir.cwd().readFileAlloc(g.io, "build.zig", g.arena, .limited(max_file_scan_bytes)) catch return;
 
@@ -1278,6 +1376,9 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkIgnoredVendorResults(paths);
         try g.checkSeamParity();
         try g.checkOrphanModules();
+        try g.checkVerbCoverage();
+        try g.checkUnexplainedRefusals(paths);
+        try g.checkDeferralProse(paths);
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
@@ -1293,6 +1394,9 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkIgnoredVendorResults(paths);
         try g.checkSeamParity();
         try g.checkOrphanModules();
+        try g.checkVerbCoverage();
+        try g.checkUnexplainedRefusals(paths);
+        try g.checkDeferralProse(paths);
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});
