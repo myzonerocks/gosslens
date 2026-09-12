@@ -437,6 +437,7 @@ pub fn build(b: *std.Build) void {
         lens_package_reference_step.dependOn(&run.step);
     }
 
+    const quiet_tests = b.addTest(.{ .root_module = quietModule(b, target, optimize) });
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const api_check_tests = b.addTest(.{ .root_module = api_check_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
@@ -501,6 +502,7 @@ pub fn build(b: *std.Build) void {
     const lens_runtime_tests = b.addTest(.{ .root_module = lens_runtime_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
+    test_step.dependOn(&b.addRunArtifact(quiet_tests).step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
     test_step.dependOn(&b.addRunArtifact(detector_tests).step);
@@ -2244,6 +2246,20 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     return b.addLibrary(.{ .name = "quickjs", .linkage = .static, .root_module = module });
 }
 
+/// The stderr silencer the two deliberate-failure tests use. See
+/// core/diag/quiet.zig for why a log on stderr fails a test step. Memoized per
+/// target and mode: two modules over one file collide in a shared graph, which
+/// the abi module's own test hit the moment both its importers made their own.
+fn quietModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-quiet-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/diag/quiet.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
 fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, real: bool) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path(if (real) "adapters/script/script.zig" else "adapters/script/script_stub.zig"),
@@ -2251,6 +2267,7 @@ fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .optimize = optimize,
     });
     if (real) {
+        module.addImport("quiet", quietModule(b, target, optimize));
         module.link_libc = true;
         module.addIncludePath(b.path(".vendor/quickjs-ng"));
         addCTargetSysroot(b, module, target);
@@ -2384,6 +2401,7 @@ fn mediaVideoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
     });
+    if (apple) module.addImport("quiet", quietModule(b, target, optimize));
     if (android) {
         module.addImport("image", image_module.?);
         if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot, androidTriple(target.result.cpu.arch));
@@ -4027,9 +4045,6 @@ fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
 
 const asan_runtime_name = "libclang_rt.asan_osx_dynamic.dylib";
 
-/// Where the platform sanitizer runtime lives. xcrun knows where clang is and
-/// the runtime sits beside it; a toolchain may carry several version
-/// directories for one clang, so take whichever actually holds the dylib.
 /// Typechecks the Swift SDK against the simulator sdk, no linking and no vendor
 /// archives. Null where Xcode is absent, so a linux runner skips it rather than
 /// failing on a toolchain it was never going to have.
@@ -4065,6 +4080,9 @@ fn kotlinCompileCommand(b: *std.Build) ?*std.Build.Step.Run {
     return cmd;
 }
 
+/// Where the platform sanitizer runtime lives. xcrun knows where clang is and
+/// the runtime sits beside it; a toolchain may carry several version
+/// directories for one clang, so take whichever actually holds the dylib.
 fn detectAsanRuntimeDir(b: *std.Build) ?[]const u8 {
     if (@import("builtin").os.tag != .macos) return null;
     var code: u8 = undefined;
@@ -4248,10 +4266,6 @@ fn listReferenceLenses(b: *std.Build) [][]const u8 {
     return lenses.items;
 }
 
-// The pinned toolchain is the only toolchain: .zigversion is the single place
-// the version is written, and a mismatching compiler fails closed here. The
-// shadow lane (weekly build against Zig master) is the one sanctioned bypass,
-// via GOSS_ALLOW_ZIG_MISMATCH=1.
 /// The mode a shipped slice is built in: the one -Doptimize named, else ReleaseFast, so a
 /// library that leaves the checkout is never a debug build unless one was asked for.
 fn shipOptimize(b: *std.Build, optimize: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
@@ -5644,11 +5658,25 @@ fn addCxxDir(b: *std.Build, module: *std.Build.Module, dir: []const u8, flags: [
     }
 }
 
+// .zigversion is the single place the version is written and a mismatching
+// version fails closed here. It is a VERSION check: a different build of the
+// same version, a distribution's own rebuild say, answers the same string and
+// passes, so the note below says which compiler actually ran.
 fn enforcePinnedZig(b: *std.Build) void {
     const raw = rootDir(b).handle.readFileAlloc(b.graph.io, ".zigversion", b.allocator, .limited(128)) catch |err|
         std.process.fatal("gosslens: cannot read .zigversion: {t}", .{err});
     const pinned = std.mem.trim(u8, raw, " \t\r\n");
-    if (std.mem.eql(u8, pinned, builtin.zig_version_string)) return;
+    if (std.mem.eql(u8, pinned, builtin.zig_version_string)) {
+        // Two builds of one version are not the same compiler, and the
+        // difference has shown up in build-runner behaviour, so a build that did
+        // not come from tools/toolchain-sync or a nix shell says so once.
+        const local = b.pathFromRoot(".local/zig");
+        const exe = b.graph.zig_exe;
+        if (std.mem.indexOf(u8, exe, local) == null and std.mem.indexOf(u8, exe, "/nix/store/") == null) {
+            std.debug.print("gosslens: building with {s}, not the toolchain tools/toolchain-sync installs\n", .{exe});
+        }
+        return;
+    }
     if (b.graph.environ_map.get("GOSS_ALLOW_ZIG_MISMATCH") != null) {
         std.debug.print("gosslens: shadow lane: building with Zig {s} against pin {s}\n", .{ builtin.zig_version_string, pinned });
         return;

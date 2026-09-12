@@ -1,7 +1,8 @@
 #!/bin/sh
 # Installs the pinned Zig toolchain to a project-local prefix and wires the
 # repo hooks. The pin lives in .zigversion and nowhere else; build.zig fails
-# closed on any mismatch, so a build with the wrong compiler is impossible.
+# closed on a version mismatch and names the compiler when it is not this one,
+# which a distribution's own rebuild of the same version otherwise passes as.
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

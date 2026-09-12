@@ -126,9 +126,11 @@ test "a script reads a signal and writes a param, deterministically" {
 }
 
 test "a runaway script is stopped by fuel, not a hang" {
-    // Deliberate: the fuel interrupt drains to stderr, so this runs only under
-    // GOSS_PROBES (the ci sets it) and stays out of the everyday test output.
+    // The fuel interrupt drains to stderr, which fails the build step whatever
+    // the assertions say, so the log is silenced and the error is the proof.
     if (std.c.getenv("GOSS_PROBES") == null) return error.SkipZigTest;
+    var quiet = @import("quiet").Quiet.start();
+    defer quiet.restore();
     const src = "function update(lens) { while (true) {} }";
     var s = try Script.create(src, 50_000);
     defer s.destroy();
