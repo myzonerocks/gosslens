@@ -367,14 +367,13 @@ public final class GossSession: @unchecked Sendable {
 
     // MARK: - Perception
 
-    /// One versioned record of what the engine currently sees. Every section
-    /// carries its own tag, version and byte length, so a consumer built against
-    /// an older schema steps over what it does not know. Sized in one retry
-    /// rather than guessed at.
     /// Every section this build writes, asked of the engine rather than assumed: a
     /// hand-written mask excluded the embedding section the day it was added.
     public static var selectAll: UInt32 { goss_perception_select_all() }
 
+    /// One versioned record of what the engine currently sees. Every section
+    /// carries its own tag, version and byte length, so a consumer built against
+    /// an older schema steps over what it does not know. Sized in one retry.
     public func perceptionSnapshot(select: UInt32 = GossSession.selectAll) throws -> [UInt8] {
         var needed = 0
         var probe: [UInt8] = []

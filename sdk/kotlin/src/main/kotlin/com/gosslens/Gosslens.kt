@@ -989,12 +989,9 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     fun closeClip(clip: Int): Boolean = Gosslens.nativeCloseClip(handle, clip) == 0
 
     /**
-     * One versioned record of what the engine currently sees, into the caller's
-     * buffer. Returns the bytes written, or the size needed when the buffer is
-     * short, so a caller sizes once. Negative on a real failure.
+     * Every section this build writes, asked of the engine rather than written by
+     * hand: a hand-written mask excluded the embedding section the day it landed.
      */
-    /// Every section this build writes, asked of the engine rather than written by
-    /// hand: a hand-written mask excluded the embedding section the day it landed.
     fun selectAll(): Int = Gosslens.nativePerceptionSelectAll()
 
     /**
@@ -1144,6 +1141,10 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         )
     }
 
+    /**
+     * One versioned record of what the engine currently sees, into the caller's
+     * buffer. The bytes written, or the size needed when the buffer is short.
+     */
     fun perceptionSnapshot(select: Int, out: ByteBuffer): Int =
         Gosslens.nativePerceptionSnapshot(handle, select, out, out.capacity())
 

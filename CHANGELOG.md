@@ -25,7 +25,10 @@ A release moves that section under its tag with the date, and the release notes 
 - The ONNX engine runs modern vision: around ninety operators added, including attention's einsum,
   the reductions, the gather and scatter families, the detector's TopK and non-max suppression, the
   int8 path with per-channel scales, and If, Loop and Scan under a hard depth and iteration bound.
-  Nine published models run through it, fetched by digest and never committed.
+  Nine published models are held to it, fetched by digest and never committed: four run a
+  frame through the graph, a classifier and a detector and a depth net among them, and the
+  five past a lens bundle's asset cap are held to loading, planning and naming no operator
+  this build lacks.
 
 - Inference allocates nothing after load. Constants fold, dead nodes go, batch normalization folds
   into the convolution before it, and one measuring run at load sizes the single buffer every later

@@ -97,9 +97,6 @@ pub const Walk = struct {
     }
 };
 
-/// Writes the operators a model needs that this engine does not implement, one
-/// per line, and answers how many bytes the full answer takes. A caller with a
-/// short buffer learns the size rather than a truncated list it cannot trust.
 /// Every node a graph runs, the bodies included. The frame buffer's bookkeeping
 /// is sized from this rather than from the top level, because a graph whose work
 /// sits inside a loop has a handful of nodes and thousands of allocations.
@@ -110,6 +107,9 @@ pub fn nodeCount(nodes: []const Node) usize {
     return n;
 }
 
+/// Writes the operators a model needs that this engine does not implement, one
+/// per line, and answers how many bytes the full answer takes. A caller with a
+/// short buffer learns the size rather than a truncated list it cannot trust.
 pub fn missingOps(nodes: []const Node, out: []u8) usize {
     var written: usize = 0;
     var needed: usize = 0;

@@ -3230,15 +3230,15 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
-  /// One versioned record of what the engine currently sees. Every section
-  /// carries its own tag, version and byte length, so a consumer built against an
-  /// older schema steps over what it does not know. Sized in one retry.
   /// Every section this build writes, asked of the engine rather than assumed: a
   /// hand-written mask excluded the embedding section the day it was added.
   selectAll(): number {
     return this.mod.ccall("goss_perception_select_all", "number", [], []) as number;
   }
 
+  /// One versioned record of what the engine currently sees. Every section
+  /// carries its own tag, version and byte length, so a consumer built against an
+  /// older schema steps over what it does not know. Sized in one retry.
   perceptionSnapshot(select = this.selectAll()): Uint8Array | null {
     const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
     try {
