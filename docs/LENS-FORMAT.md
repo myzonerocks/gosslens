@@ -83,6 +83,15 @@ closed set the parser accepts: ramp a parameter, set a parameter, play a sound,
 activate content, and so on. Triggers are how a lens moves without carrying code:
 the engine evaluates the expression each frame and applies the action.
 
+The signals a lens can read include what the frame says, which is how a lens
+reacts to a sign rather than to a face:
+
+| Signal | Reads |
+|---|---|
+| `text.present` | whether the frame says anything at all |
+| `text.matches('exit')` | whether the reading contains a phrase, lowered on both sides so the case a sign is painted in does not matter |
+| `text.changed` | whether what the frame says differs from last tick, so a lens acts on a change rather than on every frame of the same sign |
+
 ## Coordinates and determinism
 
 Screen-space values are normalized `0..1` with the origin at the top-left. World
