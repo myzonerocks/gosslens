@@ -1,0 +1,11 @@
+.{
+    .name = "opus",
+    .repo = "https://github.com/xiph/opus",
+    .version = "v1.5.2",
+    .commit = "v1.5.2",
+    .archive_url = "https://github.com/xiph/opus/archive/refs/tags/v1.5.2.tar.gz",
+    .archive_sha256 = "9480e329e989f70d69886ded470c7f8cfe6c0667cc4196d4837ac9e668fb7404",
+    .license = "BSD-3-Clause",
+    .license_file = "COPYING",
+    .license_sha256 = "01e1167d54a096d123cf6dfbbeb19587278845c6481d2d66d545669846079551",
+}

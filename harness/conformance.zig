@@ -12545,6 +12545,91 @@ fn paintSweepFrame(rgba: []u8, w: u32, h: u32, i: u32, n: u32) void {
     }
 }
 
+/// A clip drives the graph with no camera. This is what "video" in the North Star
+/// meant and did not do: before the clip source existed the engine opened the file
+/// itself, drew it as a sprite at an authored rect, and clocked it off a camera
+/// frame, so nothing rendered without a camera at all.
+fn proveClipDrivesTheGraph(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const path = "/tmp/goss-clip-source.mp4";
+    defer std.Io.Dir.cwd().deleteFile(harness_io, path) catch {}; // failure ignored: a leftover fixture the next run overwrites
+    if (!try encodeVideoFixture(gpa, engine, path)) {
+        std.debug.print("conformance: FAIL the clip proof could not encode its fixture\n", .{});
+        return false;
+    }
+
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    const activated = abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len);
+    if (activated != .ok) {
+        std.debug.print("conformance: FAIL the clip proof could not activate shader-tint: {t}\n", .{activated});
+        return false;
+    }
+
+    var clip: u32 = 0;
+    const opened = abi.goss_session_open_clip(session, path.ptr, path.len, &clip);
+    if (opened != .ok) {
+        std.debug.print("conformance: FAIL a clip did not open as a source: {t}\n", .{opened});
+        return false;
+    }
+    defer _ = abi.goss_session_close_clip(session, clip);
+
+    var info: abi.ClipInfo = undefined;
+    if (abi.goss_session_clip_info(session, clip, &info) != .ok) return false;
+    if (info.width == 0 or info.height == 0 or info.duration_us <= 0) {
+        std.debug.print("conformance: FAIL a clip reported {d}x{d} over {d}us\n", .{ info.width, info.height, info.duration_us });
+        return false;
+    }
+
+    // No camera frame is ever submitted: every frame the graph draws comes from
+    // the clip, which is the whole claim.
+    var drawn: u32 = 0;
+    var last_position: i64 = -1;
+    var advanced = false;
+    while (drawn < 12) : (drawn += 1) {
+        const submitted = abi.goss_session_clip_submit_frame(session, clip, 0);
+        if (submitted == .again) break;
+        if (submitted != .ok) {
+            std.debug.print("conformance: FAIL a clip frame did not submit: {t}\n", .{submitted});
+            return false;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (abi.goss_session_clip_info(session, clip, &info) != .ok) return false;
+        if (info.position_us > last_position) advanced = true;
+        last_position = info.position_us;
+    }
+    if (drawn < 8) {
+        std.debug.print("conformance: FAIL only {d} clip frames drove the graph\n", .{drawn});
+        return false;
+    }
+    if (!advanced) {
+        std.debug.print("conformance: FAIL the clip position never moved, so the frames carried no time\n", .{});
+        return false;
+    }
+
+    // A seek moves the position and reopens an ended stream, and a seek past the
+    // end is refused rather than clamped, which is what lets a scrubber trust it.
+    const midpoint = @divTrunc(info.duration_us, 2);
+    if (abi.goss_session_clip_seek(session, clip, midpoint) != .ok) {
+        std.debug.print("conformance: FAIL a clip would not seek to its own midpoint\n", .{});
+        return false;
+    }
+    if (abi.goss_session_clip_seek(session, clip, info.duration_us * 4) == .ok) {
+        std.debug.print("conformance: FAIL a seek past the end was accepted, so it was clamped\n", .{});
+        return false;
+    }
+    if (abi.goss_session_clip_submit_frame(session, clip, 0) != .ok) {
+        std.debug.print("conformance: FAIL no frame came out after a seek\n", .{});
+        return false;
+    }
+    _ = abi.goss_engine_render_frame(engine, session);
+    c.glfwPollEvents();
+
+    std.debug.print("conformance: PROOF a clip drives the graph with no camera: {d} frames at {d}x{d} over {d}us, the position advances, a seek lands and a seek past the end is refused rather than clamped\n", .{ drawn, info.width, info.height, info.duration_us });
+    return true;
+}
+
 /// A recording that pauses and resumes is one continuous file, not one with a hole
 /// the length of the pause. The report is what lets a host see it: the duration
 /// excludes the paused span, the clip count follows the pause, and a declared
@@ -22987,6 +23072,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("optional node declares best effort");
     if (!try provePauseLeavesNoGap(gpa, engine)) return 1;
     watchHold("pause leaves no gap");
+    if (!try proveClipDrivesTheGraph(gpa, engine)) return 1;
+    watchHold("clip drives the graph");
     watchHold("pool serves scratch targets");
     return 0;
 }

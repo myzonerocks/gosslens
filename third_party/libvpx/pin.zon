@@ -1,0 +1,12 @@
+.{
+    .name = "libvpx",
+    .repo = "https://github.com/webmproject/libvpx",
+    .version = "v1.15.0",
+    .commit = "v1.15.0",
+    .archive_url = "https://github.com/webmproject/libvpx/archive/refs/tags/v1.15.0.tar.gz",
+    .archive_sha256 = "e935eded7d81631a538bfae703fd1e293aad1c7fd3407ba00440c95105d2011e",
+    .license = "BSD-3-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "8267348d5af1262c11d1a08de2f5afc77457755f1ac658627dd9acf71011d615",
+    .opt_in = true,
+}

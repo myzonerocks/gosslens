@@ -1,0 +1,12 @@
+.{
+    .name = "aom",
+    .repo = "https://aomedia.googlesource.com/aom",
+    .version = "3.12.0",
+    .commit = "v3.12.0",
+    .archive_url = "https://storage.googleapis.com/aom-releases/libaom-3.12.0.tar.gz",
+    .archive_sha256 = "d89daa160a0ea1409c4193be5b17c9591024c4f5a0e545dcb9d197535c66836e",
+    .license = "BSD-2-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "4764a286d8b2faeaf42f4418e7d7a28d58fc8fd4d00a3d0a7f44b0a4099de7f2",
+    .opt_in = true,
+}

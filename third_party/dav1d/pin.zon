@@ -1,0 +1,12 @@
+.{
+    .name = "dav1d",
+    .repo = "https://code.videolan.org/videolan/dav1d",
+    .version = "1.5.1",
+    .commit = "1.5.1",
+    .archive_url = "https://code.videolan.org/videolan/dav1d/-/archive/1.5.1/dav1d-1.5.1.tar.gz",
+    .archive_sha256 = "fa635e2bdb25147b1384007c83e15de44c589582bb3b9a53fc1579cb9d74b695",
+    .license = "BSD-2-Clause",
+    .license_file = "COPYING",
+    .license_sha256 = "b327887de263238deaa80c34cdd2ff3e0ba1d35db585ce14a37ce3e74ee389e9",
+    .opt_in = true,
+}
