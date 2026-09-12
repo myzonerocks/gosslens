@@ -56,7 +56,8 @@ A release moves that section under its tag with the date, and the release notes 
   against it without reading the engine, and a baseline gate holds the layout still.
 
 - A changelog, covering every release from the first, and the release notes are the section it
-  cuts, so a reader of the release and a reader of `main` see the same words.
+  cuts, so a reader of the release and a reader of `main` see the same words. The gate refuses a
+  change that reaches a user without a line under Unreleased.
 
 ## v0.12.0-alpha.3 (2026-09-09)
 

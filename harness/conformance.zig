@@ -4411,11 +4411,10 @@ fn normalizeVector(v: []f32) void {
 }
 
 
-/// Screens through the real ABI. On a host that has granted permission this
-/// captures for real; on one that has not, zero surfaces is the answer and the
-/// proof says so rather than failing, because permission is the host's to give.
-/// The coordinate arithmetic is asserted either way: it is arithmetic, not
-/// capture, and a point that lands in the wrong place is wrong on every host.
+/// Screens through the real ABI. Where permission is granted this captures for
+/// real; where it is not, zero surfaces is the answer and the proof says so,
+/// because permission is the host's to give. The coordinate arithmetic is
+/// asserted either way: a point in the wrong place is wrong on every host.
 fn proveScreenSource(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     _ = gpa;
     var count: u32 = 0;

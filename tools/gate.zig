@@ -361,6 +361,24 @@ const Gate = struct {
         try g.flagOverlongCommentBlock(current_path, run_len, run_first);
     }
 
+    /// A change that reaches a user says so under Unreleased. The release notes
+    /// are that section, so a change with no line there ships without one.
+    fn checkChangelog(g: *Gate, range: []const u8) !void {
+        const out = try g.git(&.{ "git", "diff", "--diff-filter=ACMR", "--name-only", range }, &.{0});
+        var shipped: ?[]const u8 = null;
+        var logged = false;
+        var it = std.mem.splitScalar(u8, out, '\n');
+        while (it.next()) |raw| {
+            const path = std.mem.trim(u8, raw, " \t\r");
+            if (path.len == 0) continue;
+            if (std.mem.eql(u8, path, changelog_path)) logged = true;
+            if (shipped == null and shipsToUsers(path)) shipped = path;
+        }
+        if (shipped) |first| {
+            if (!logged) try g.flag("changelog: '{s}' changes what ships without a line under Unreleased in {s}", .{ first, changelog_path });
+        }
+    }
+
     fn flagOverlongCommentBlock(g: *Gate, path: []const u8, run_len: usize, first_line: []const u8) !void {
         if (run_len <= max_comment_block_lines) return;
         try g.flag("comment-hygiene: '{s}' adds a {d}-line comment block starting '{s}'; say it in {d} lines or fewer", .{ path, run_len, first_line, max_comment_block_lines });
@@ -1064,6 +1082,7 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         };
         try g.checkCommentHygiene(&.{range});
+        try g.checkChangelog(range);
     } else if (std.mem.eql(u8, mode, "--pr-body")) {
         const file = args.next() orelse {
             std.debug.print("gate: --pr-body needs a file argument\n", .{});
@@ -1125,6 +1144,33 @@ fn dropsFailureSilently(line: []const u8) bool {
 
 /// W9: the line discards a vendor call's result with no reason, and that result
 /// is one that can encode failure.
+const changelog_path = "CHANGELOG.md";
+
+/// Which paths reach a user of the engine. The harness, the tools and the private
+/// documents do not: a gate that asked for a changelog line on its own source
+/// would ask on every change to itself.
+const shipped_roots = [_][]const u8{ "core/", "adapters/", "include/", "sdk/", "third_party/models.lock" };
+
+fn shipsToUsers(path: []const u8) bool {
+    for (shipped_roots) |root| {
+        if (std.mem.startsWith(u8, path, root)) return true;
+    }
+    return false;
+}
+
+test "only the paths that reach a user ask for a changelog line" {
+    try std.testing.expect(shipsToUsers("core/perception/snapshot.zig"));
+    try std.testing.expect(shipsToUsers("adapters/screen/screen_capture.zig"));
+    try std.testing.expect(shipsToUsers("include/gosslens.h"));
+    try std.testing.expect(shipsToUsers("sdk/ts/src/index.ts"));
+    try std.testing.expect(shipsToUsers("third_party/models.lock"));
+    // The harness, the tools and the documents change without shipping anything.
+    try std.testing.expect(!shipsToUsers("harness/conformance.zig"));
+    try std.testing.expect(!shipsToUsers("tools/gate.zig"));
+    try std.testing.expect(!shipsToUsers("docs/API.md"));
+    try std.testing.expect(!shipsToUsers("build.zig"));
+}
+
 fn ignoresVendorResult(line: []const u8) bool {
     if (isCommentLine(line)) return false;
     const trimmed = std.mem.trimStart(u8, line, " \t");
