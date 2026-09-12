@@ -1744,18 +1744,35 @@ pub const Renderer = struct {
         handle: c.bgfx_texture_handle_t = .{ .idx = invalid_handle },
         width: u16 = 0,
         height: u16 = 0,
+        /// False when the handle came from somewhere that owns it, such as a
+        /// hardware-buffer import the renderer keeps: teardown must not destroy
+        /// a texture it does not own.
+        owns_handle: bool = true,
+
+        /// Holds a handle another owner vends for this frame. The previous owned
+        /// handle goes first, so adopting does not leak the one it replaces.
+        pub fn adopt(self: *PersistentTexture, handle: c.bgfx_texture_handle_t, width: u16, height: u16) void {
+            if (self.owns_handle and self.handle.idx != invalid_handle and self.handle.idx != handle.idx) {
+                c.bgfx_destroy_texture(self.handle);
+            }
+            self.handle = handle;
+            self.width = width;
+            self.height = height;
+            self.owns_handle = false;
+        }
 
         /// A fresh handle every frame never survives long enough to
         /// clear bgfx's own override-timing contract (0 means not yet
         /// created from the main thread). Reusing the same handle,
         /// recreated only on a real size change, fixes that.
         pub fn rebind(self: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) c.bgfx_texture_handle_t {
-            if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
-                if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+            if (self.handle.idx == invalid_handle or self.width != width or self.height != height or !self.owns_handle) {
+                if (self.owns_handle and self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
                 const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
                 self.handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
                 self.width = width;
                 self.height = height;
+                self.owns_handle = true;
             }
             if (self.handle.idx == invalid_handle) return self.handle;
             _ = c.bgfx_override_internal_texture_ptr(self.handle, native_ptr, 0); // result ignored: returns the previous pointer, not a status
@@ -1763,7 +1780,7 @@ pub const Renderer = struct {
         }
 
         pub fn deinit(self: *PersistentTexture) void {
-            if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+            if (self.owns_handle and self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
             self.* = .{};
         }
 
@@ -1870,6 +1887,14 @@ pub const Renderer = struct {
 
     /// True only once Vulkan actually initialized, not just on Android -
     /// false on the GLES fallback.
+    /// The backend bgfx actually brought up, which is not always the one asked
+    /// for: a requested WebGPU can fall back to auto-select, and android takes
+    /// GL when the vulkan probe finds no ycbcr import. Numbered as bgfx does.
+    pub fn activeBackend(r: *const Renderer) u32 {
+        _ = r;
+        return @intCast(c.bgfx_get_renderer_type());
+    }
+
     pub fn isAndroidVulkan(r: *const Renderer) bool {
         return is_android and r.zero_copy != null;
     }
@@ -2130,6 +2155,34 @@ pub const Renderer = struct {
         framebuffer: c.bgfx_frame_buffer_handle_t,
         texture: c.bgfx_texture_handle_t,
     };
+
+    /// Set on every packed payload, so a zero payload means no resource rather
+    /// than a resource whose handles all happen to be zero. bgfx numbers handles
+    /// from zero, so without this a pooled target holding framebuffer 0 and
+    /// texture 0 reads as an empty slot and the next acquire leaks it.
+    pub const payload_present: u64 = 1 << 32;
+
+    /// A target as one integer and back, so a resource pool can carry it in a
+    /// slot payload without knowing what a target is made of.
+    pub fn packTarget(target: OffscreenTarget) u64 {
+        return payload_present | (@as(u64, target.framebuffer.idx) << 16) | target.texture.idx;
+    }
+
+    pub fn unpackTarget(stored: u64) OffscreenTarget {
+        return .{
+            .framebuffer = .{ .idx = @intCast((stored >> 16) & 0xffff) },
+            .texture = .{ .idx = @intCast(stored & 0xffff) },
+        };
+    }
+
+    /// The same for a single texture, a readback staging surface say.
+    pub fn packTexture(texture: TextureHandle) u64 {
+        return payload_present | texture.idx;
+    }
+
+    pub fn unpackTexture(stored: u64) TextureHandle {
+        return .{ .idx = @intCast(stored & 0xffff) };
+    }
 
     pub fn createOffscreenTarget(width: u16, height: u16) !OffscreenTarget {
         const framebuffer = c.bgfx_create_frame_buffer(width, height, c.BGFX_TEXTURE_FORMAT_RGBA8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP);

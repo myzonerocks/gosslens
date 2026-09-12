@@ -50,6 +50,20 @@ pub const PreviewFrame = union(enum) {
     },
 };
 
+/// The vendor-heap counters the real renderer keeps. No bgfx here, so nothing
+/// allocates on it and every figure is zero.
+pub fn goss_bgfx_live_bytes() usize {
+    return 0;
+}
+
+pub fn goss_bgfx_alloc_calls() usize {
+    return 0;
+}
+
+pub fn goss_bgfx_alloc_bytes() usize {
+    return 0;
+}
+
 pub const Renderer = struct {
     default_mask_texture: TextureHandle = .{},
     zero_mask_texture: TextureHandle = .{},
@@ -85,6 +99,13 @@ pub const Renderer = struct {
 
     pub const PersistentTexture = struct {
         handle: TextureHandle = .{},
+
+        /// Holds a handle another owner vends. Nothing to own here.
+        pub fn adopt(self: *PersistentTexture, handle: TextureHandle, width: u16, height: u16) void {
+            _ = width;
+            _ = height;
+            self.handle = handle;
+        }
 
         pub fn rebind(self: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) TextureHandle {
             _ = self;
@@ -134,6 +155,11 @@ pub const Renderer = struct {
     pub fn nativeDevice(r: *Renderer) ?*anyopaque {
         _ = r;
         return null;
+    }
+
+    pub fn activeBackend(r: *const Renderer) u32 {
+        _ = r;
+        return 0;
     }
 
     pub fn isAndroidVulkan(r: *const Renderer) bool {
@@ -1346,6 +1372,27 @@ pub const Renderer = struct {
     }
 
     pub const OffscreenTarget = struct { texture: TextureHandle = .{} };
+
+    /// Set on every packed payload, so a zero payload means no resource rather
+    /// than handle zero. Matches the real renderer's contract.
+    pub const payload_present: u64 = 1 << 32;
+
+    /// A target as one integer and back; this renderer's target is its texture.
+    pub fn packTarget(target: OffscreenTarget) u64 {
+        return payload_present | target.texture.idx;
+    }
+
+    pub fn unpackTarget(stored: u64) OffscreenTarget {
+        return .{ .texture = .{ .idx = @intCast(stored & 0xffff) } };
+    }
+
+    pub fn packTexture(texture: TextureHandle) u64 {
+        return payload_present | texture.idx;
+    }
+
+    pub fn unpackTexture(stored: u64) TextureHandle {
+        return .{ .idx = @intCast(stored & 0xffff) };
+    }
 
     pub const Tile = struct {
         u0: f32,
