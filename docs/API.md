@@ -173,6 +173,16 @@ file must move together.
 | `goss_session_text_count` | out count, out refused | How many readings the frame holds and how many the bound turned away. |
 | `goss_session_text_at` | index, out entry | One reading: quad, confidence, origin, script, direction, track id, line, paragraph. |
 | `goss_session_text_string` | index, out buffer | The reading itself; GOSS_AGAIN with the size when the buffer is short. |
+| `goss_session_memory_open` | dim, max entries | Opens the memory plane at a fixed embedding width under a caller-set bound. |
+| `goss_session_memory_close` | session | Releases the memory plane. |
+| `goss_session_memory_remember` | id, embedding | Remembers one embedding; the same id replaces rather than duplicating. |
+| `goss_session_memory_forget` | id | Forgets one embedding. |
+| `goss_session_memory_search` | query, k | The nearest remembered embeddings, fewer than k on a smaller memory. |
+| `goss_session_memory_stats` | out count, out bytes | What the memory holds and what it costs. |
+| `goss_session_memory_save` | out buffer | Writes the memory so a cold start is instant; GOSS_AGAIN with the size. |
+| `goss_session_memory_load` | bytes | Reads a memory back, refusing a file from another version or a truncated one. |
+| `goss_session_set_scope` | sections, verbs | Narrows what the session answers; a read out of scope is dropped, a verb out of scope refused. |
+| `goss_session_scope` | out sections, out verbs | The scope in force. |
 | `goss_engine_read_report` | `engineReport()`, what the engine is doing now rather than what it was asked for: the render backend it actually brought up, whether the zero-copy image import came up, the bounded texture and staging pools with their live counts, peaks, exhaustion counts, the distinct descriptions each holds and the descriptions turned away at the bin cap, the bytes held on the heap no managed allocator sees, and the vendor-heap allocation calls and bytes of the frame just drawn | all SDKs |
 | `goss_session_read_report` | `sessionReport()`, this session's counters: frames submitted and rendered, the degradation rung and how many times it moved, how much analysis each modality actually ran, how many lens nodes are not ready, and how many script handlers or ticks threw | all SDKs |
 | `goss_session_node_report_count` | `nodeReportCount()`, how many nodes of the active lens are not doing what the manifest asked, beside how many diagnostics could not be recorded at all; a zero count with a non-zero lost count means the lens degraded in ways the session could not write down | all SDKs |

@@ -3223,6 +3223,119 @@ export class GossSession {
     }
   }
 
+  /// Narrows what this session answers. A session opens fully permissive; a read
+  /// out of scope is dropped from the record rather than failing, and a verb out
+  /// of scope is refused.
+  setScope(sections: number, verbs: number): boolean {
+    return this.mod.ccall("goss_session_set_scope", "number", ["number", "number", "number"], [this.handle, sections, verbs]) === GOSS_OK;
+  }
+
+  scope(): { sections: number; verbs: number } {
+    const sectionsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const verbsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      if (this.mod.ccall("goss_session_scope", "number", ["number", "number", "number"], [this.handle, sectionsPtr, verbsPtr]) !== GOSS_OK) return { sections: 0, verbs: 0 };
+      return { sections: this.mod.HEAPU32[sectionsPtr >> 2], verbs: this.mod.HEAPU32[verbsPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [sectionsPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [verbsPtr, 4]);
+    }
+  }
+
+  /// Opens the memory plane. Nothing is remembered until this is called, and
+  /// the bound is yours, so the memory you were promised is the memory you get.
+  memoryOpen(dim: number, maxEntries = 4096): boolean {
+    return this.mod.ccall("goss_session_memory_open", "number", ["number", "number", "number"], [this.handle, dim, maxEntries]) === GOSS_OK;
+  }
+
+  memoryClose(): boolean {
+    return this.mod.ccall("goss_session_memory_close", "number", ["number"], [this.handle]) === GOSS_OK;
+  }
+
+  /// Remembers one embedding; the same id replaces rather than duplicating.
+  remember(id: number, embedding: Float32Array): boolean {
+    const bytes = embedding.length * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      this.mod.HEAPF32.set(embedding, ptr >> 2);
+      return this.mod.ccall("goss_session_memory_remember", "number", ["number", "number", "number", "number"], [this.handle, id, ptr, embedding.length]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
+  forget(id: number): boolean {
+    return this.mod.ccall("goss_session_memory_forget", "number", ["number", "number"], [this.handle, id]) === GOSS_OK;
+  }
+
+  /// The nearest remembered embeddings, fewer than k on a smaller memory rather
+  /// than padded with nothing.
+  memorySearch(query: Float32Array, k = 8): { id: number; score: number }[] {
+    const queryBytes = query.length * 4;
+    const queryPtr = this.mod.ccall("goss_alloc", "number", ["number"], [queryBytes]) as number;
+    const idsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [k * 8]) as number;
+    const scoresPtr = this.mod.ccall("goss_alloc", "number", ["number"], [k * 4]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    try {
+      this.mod.HEAPF32.set(query, queryPtr >> 2);
+      if (this.mod.ccall("goss_session_memory_search", "number", ["number", "number", "number", "number", "number", "number", "number"], [this.handle, queryPtr, query.length, k, idsPtr, scoresPtr, countPtr]) !== GOSS_OK) return [];
+      const count = this.mod.HEAPU32[countPtr >> 2];
+      const out: { id: number; score: number }[] = [];
+      for (let i = 0; i < count; i += 1) {
+        // The low word of the id is the whole value at any count this engine
+        // reaches, and reading it avoids a BigInt in the hot read.
+        out.push({ id: this.mod.HEAPU32[(idsPtr + i * 8) >> 2], score: this.mod.HEAPF32[(scoresPtr + i * 4) >> 2] });
+      }
+      return out;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [queryPtr, queryBytes]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [idsPtr, k * 8]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [scoresPtr, k * 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+    }
+  }
+
+  memoryStats(): { count: number; bytes: number } {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const bytesPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_memory_stats", "number", ["number", "number", "number"], [this.handle, countPtr, bytesPtr]) !== GOSS_OK) return { count: 0, bytes: 0 };
+      return { count: this.mod.HEAPU32[countPtr >> 2], bytes: this.mod.HEAPU32[bytesPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [bytesPtr, 8]);
+    }
+  }
+
+  /// The whole memory as bytes, so a cold start is instant.
+  memorySave(): Uint8Array {
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.ccall("goss_session_memory_save", "number", ["number", "number", "number", "number"], [this.handle, 0, 0, lenPtr]);
+      const needed = this.mod.HEAPU32[lenPtr >> 2];
+      if (needed === 0) return new Uint8Array(0);
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      try {
+        if (this.mod.ccall("goss_session_memory_save", "number", ["number", "number", "number", "number"], [this.handle, ptr, needed, lenPtr]) !== GOSS_OK) return new Uint8Array(0);
+        return new Uint8Array(this.mod.HEAPU8.subarray(ptr, ptr + needed));
+      } finally {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, needed]);
+      }
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+    }
+  }
+
+  memoryLoad(bytes: Uint8Array): boolean {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    try {
+      this.mod.HEAPU8.set(bytes, ptr);
+      return this.mod.ccall("goss_session_memory_load", "number", ["number", "number", "number"], [this.handle, ptr, bytes.length]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    }
+  }
+
   /// Turns on the text rail. A detector alone finds where the text is, which
   /// is what a redaction or a rectified crop needs; pass a recogniser and its
   /// dictionary to get strings back.

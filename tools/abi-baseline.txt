@@ -1,4 +1,4 @@
-abi 0.142
+abi 0.152
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -342,3 +342,13 @@ fn goss_status goss_session_disable_text(goss_session *session)
 fn goss_status goss_session_text_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused)
 fn goss_status goss_session_text_at(goss_session *session, uint32_t index, goss_text_entry *out_entry)
 fn goss_status goss_session_text_string(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_memory_open(goss_session *session, uint32_t dim, uint32_t max_entries)
+fn goss_status goss_session_memory_close(goss_session *session)
+fn goss_status goss_session_memory_remember(goss_session *session, uint64_t id, const float *embedding, uint32_t dim)
+fn goss_status goss_session_memory_forget(goss_session *session, uint64_t id)
+fn goss_status goss_session_memory_search(goss_session *session, const float *query, uint32_t dim, uint32_t k, uint64_t *out_ids, float *out_scores, uint32_t *out_count)
+fn goss_status goss_session_memory_stats(goss_session *session, uint32_t *out_count, uint64_t *out_bytes)
+fn goss_status goss_session_memory_save(goss_session *session, uint8_t *out, size_t capacity, size_t *out_len)
+fn goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len)
+fn goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs)
+fn goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs)

@@ -224,3 +224,11 @@ test "height is measured against the floor, and free area against what is on it"
     const roomless = [_]Plane{planeAt(2, .table, 0.75, 1.2, 0.8)};
     try testing.expect(floorOf(&roomless) == null);
 }
+
+pub const anchors = @import("anchors.zig");
+pub const Anchor = anchors.Anchor;
+pub const AnchorStore = anchors.Store;
+
+test {
+    std.testing.refAllDecls(@This());
+}

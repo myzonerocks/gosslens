@@ -220,6 +220,26 @@ object Gosslens {
     internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
     internal external fun nativeMlOpSupport(model: ByteBuffer, modelLen: Int, out: ByteBuffer, capacity: Int): Int
 
+    internal external fun nativeSetScope(session: Long, sections: Int, verbs: Int): Int
+
+    internal external fun nativeScope(session: Long): Long
+
+    internal external fun nativeMemoryOpen(session: Long, dim: Int, maxEntries: Int): Int
+
+    internal external fun nativeMemoryClose(session: Long): Int
+
+    internal external fun nativeMemoryRemember(session: Long, id: Long, embedding: ByteBuffer, dim: Int): Int
+
+    internal external fun nativeMemoryForget(session: Long, id: Long): Int
+
+    internal external fun nativeMemorySearch(session: Long, query: ByteBuffer, dim: Int, k: Int, out: ByteBuffer): Int
+
+    internal external fun nativeMemoryStats(session: Long): Long
+
+    internal external fun nativeMemorySave(session: Long, out: ByteBuffer, capacity: Int): Int
+
+    internal external fun nativeMemoryLoad(session: Long, bytes: ByteBuffer, len: Int): Int
+
     internal external fun nativeEnableText(session: Long, detector: ByteBuffer, detectorLen: Int, recognizer: ByteBuffer?, recognizerLen: Int, dictionary: ByteBuffer?, dictionaryLen: Int, detectSide: Int): Int
 
     internal external fun nativeDisableText(session: Long): Int
@@ -2731,3 +2751,6 @@ data class GossReading(
     val line: Int,
     val paragraph: Int,
 )
+
+/// One remembered embedding and how near it was.
+data class GossMemoryMatch(val id: Long, val score: Float)

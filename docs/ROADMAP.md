@@ -1,6 +1,6 @@
 # Roadmap
 
-Gosslens is a camera and AR engine. New capabilities are built on the
+Gosslens is real-time visual plumbing. New capabilities are built on the
 pieces that already exist: the tracking module's model path, the lens
 format's node and trigger system, and the bgfx render graph, rather than
 as separate machinery.

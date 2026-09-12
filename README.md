@@ -2,8 +2,9 @@
 
 # Gosslens
 
-**A camera and AR engine that runs real-time beauty, tracking and AR effects on
-device, and lets any app or model draw into the live camera view.**
+**Real-time visual plumbing for agents: one core behind a frozen C ABI that
+connects any model to live cameras, video, clips and screens, and lets it draw
+and act back into the frame.**
 
 [![gates](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml/badge.svg)](https://github.com/myzonerocks/gosslens/actions/workflows/gates.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.md)

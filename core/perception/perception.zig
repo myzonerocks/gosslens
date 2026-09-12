@@ -5,6 +5,8 @@
 
 pub const snapshot = @import("snapshot.zig");
 pub const json = @import("json.zig");
+pub const schema = @import("schema.zig");
+pub const scope = @import("scope.zig");
 pub const events = @import("events.zig");
 pub const replay = @import("replay.zig");
 pub const egress = @import("egress.zig");

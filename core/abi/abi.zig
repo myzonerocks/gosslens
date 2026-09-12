@@ -18,6 +18,7 @@ const segmentation = @import("segmentation");
 const ml_infer = @import("ml_infer");
 const text_core = @import("text");
 const text_infer = @import("text_infer");
+const memory_plane = @import("memory");
 const diffusion = @import("diffusion");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
@@ -354,6 +355,16 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_text_count(goss_session *session, uint32_t *out_count, uint64_t *out_refused)",
     "goss_status goss_session_text_at(goss_session *session, uint32_t index, goss_text_entry *out_entry)",
     "goss_status goss_session_text_string(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_memory_open(goss_session *session, uint32_t dim, uint32_t max_entries)",
+    "goss_status goss_session_memory_close(goss_session *session)",
+    "goss_status goss_session_memory_remember(goss_session *session, uint64_t id, const float *embedding, uint32_t dim)",
+    "goss_status goss_session_memory_forget(goss_session *session, uint64_t id)",
+    "goss_status goss_session_memory_search(goss_session *session, const float *query, uint32_t dim, uint32_t k, uint64_t *out_ids, float *out_scores, uint32_t *out_count)",
+    "goss_status goss_session_memory_stats(goss_session *session, uint32_t *out_count, uint64_t *out_bytes)",
+    "goss_status goss_session_memory_save(goss_session *session, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len)",
+    "goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs)",
+    "goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -818,6 +829,11 @@ const max_geofence_name: usize = 48;
 /// output buffer, not a copy in every snapshot.
 const max_embedding_dim = 1024;
 
+/// The most results one memory query returns, and how wide it searches. The
+/// width is the recall dial the index's own proof measures.
+const max_memory_results: usize = 64;
+const memory_search_width: usize = 64;
+
 const max_model_digests: usize = 16;
 
 /// A geofence a lens references by name, so a lens fires `geo.in_region('name')`
@@ -1008,6 +1024,11 @@ pub const Session = struct {
     /// What the frame says, and the pipeline that read it. The store is bounded
     /// and copies its text, so an entry outlives the frame that produced it.
     text_pipeline: ?*text_infer.Pipeline = null,
+    /// What this session remembers. Null until a host opens it: nothing is kept
+    /// unless a caller asked for it to be.
+    memory_index: ?*memory_plane.Index = null,
+    /// What this session will answer. Fully permissive until a host narrows it.
+    scope: perception_mod.scope.Scope = .all,
     text_store: TextStore = .{},
     /// The whole reading lowered once per tick, so a text.matches trigger is
     /// case-insensitive without lowering per trigger.
@@ -5396,6 +5417,7 @@ pub fn destroySession(session: *Session) void {
     if (session.engine.recording_session == session) _ = finishRecording(session.engine);
     teardownScript(session);
     disableText(session);
+    closeMemory(session);
     // Every clip a host opened, closed here whether or not the host closed it: a
     // decoder and its reused decode buffer are the session's to release.
     for (session.clips.items) |*slot| {
@@ -8439,7 +8461,9 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
     const s = session orelse return .invalid_argument;
     const len_out = out_len orelse return .invalid_argument;
     const buffer: []u8 = if (out) |p| p[0..capacity] else &.{};
-    const want: perception.Select = @bitCast(select);
+    // Narrowed rather than refused: an agent asking for everything gets what it
+    // is entitled to instead of an error it cannot act on.
+    const want: perception.Select = s.scope.narrow(@bitCast(select));
 
     const now_us = if (s.current) |cur| cur.desc.timestamp_us else 0;
     var w = perception.Writer.init(buffer, now_us);
@@ -10145,6 +10169,141 @@ pub export fn goss_session_text_string(session: ?*Session, index: u32, out: ?[*]
     len_out.* = source.len;
     if (source.len > capacity) return .again;
     if (out) |p| @memcpy(p[0..source.len], source);
+    return .ok;
+}
+
+/// Opens the memory plane at a fixed embedding width. Nothing is remembered
+/// until a caller says so, and the bound is the caller's, so the memory it was
+/// promised is the memory it gets.
+/// Narrows what this session will answer. It opens fully permissive, because
+/// this engine had callers before scopes existed and a default that silently
+/// denied them would break working code rather than protect anything. A host
+/// that wants a narrow scope says so, once, and every read and action after it
+/// answers to this.
+pub export fn goss_session_set_scope(session: ?*Session, sections: u32, verbs: u32) Status {
+    const s = session orelse return .invalid_argument;
+    s.scope = .{ .sections = sections, .verbs = verbs };
+    return .ok;
+}
+
+pub export fn goss_session_scope(session: ?*Session, out_sections: ?*u32, out_verbs: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (out_sections) |p| p.* = s.scope.sections;
+    if (out_verbs) |p| p.* = s.scope.verbs;
+    return .ok;
+}
+
+pub export fn goss_session_memory_open(session: ?*Session, dim: u32, max_entries: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (dim == 0 or dim > 4096) return .invalid_argument;
+    closeMemory(s);
+    const gpa = s.engine.gpa;
+    const index = gpa.create(memory_plane.Index) catch return .out_of_memory;
+    index.* = memory_plane.Index.init(gpa, dim, .{
+        .max_elements = if (max_entries == 0) 4096 else max_entries,
+    }) catch {
+        gpa.destroy(index);
+        return .out_of_memory;
+    };
+    s.memory_index = index;
+    return .ok;
+}
+
+pub export fn goss_session_memory_close(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    closeMemory(s);
+    return .ok;
+}
+
+fn closeMemory(s: *Session) void {
+    if (s.memory_index) |index| {
+        index.deinit();
+        s.engine.gpa.destroy(index);
+        s.memory_index = null;
+    }
+}
+
+/// Remembers one embedding under an id. The same id replaces rather than
+/// duplicating, so a keyframe corrected on a later frame does not leave the
+/// earlier one to be found instead.
+pub export fn goss_session_memory_remember(session: ?*Session, id: u64, embedding: ?[*]const f32, dim: u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.remember)) return .unsupported;
+    const index = s.memory_index orelse return .again;
+    const values = embedding orelse return .invalid_argument;
+    if (dim != index.dim) return .invalid_argument;
+    index.insert(id, values[0..dim]) catch |err| return switch (err) {
+        error.Full => .pool_exhausted,
+        error.DimensionMismatch => .invalid_argument,
+        else => .out_of_memory,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_memory_forget(session: ?*Session, id: u64) Status {
+    const s = session orelse return .invalid_argument;
+    const index = s.memory_index orelse return .again;
+    index.remove(id) catch return .invalid_argument;
+    return .ok;
+}
+
+/// The nearest remembered embeddings. Answers how many landed, which on a
+/// memory smaller than k is fewer rather than padded with nothing.
+pub export fn goss_session_memory_search(session: ?*Session, query: ?[*]const f32, dim: u32, k: u32, out_ids: ?[*]u64, out_scores: ?[*]f32, out_count: ?*u32) Status {
+    const s = session orelse return .invalid_argument;
+    if (!s.scope.allowsVerb(.search_memory)) return .unsupported;
+    const index = s.memory_index orelse return .again;
+    const q = query orelse return .invalid_argument;
+    const ids = out_ids orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    if (dim != index.dim or k == 0) return .invalid_argument;
+
+    var matches: [max_memory_results]memory_plane.Match = undefined;
+    const want = @min(k, matches.len);
+    const n = index.search(q[0..dim], matches[0..want], memory_search_width) catch return .invalid_argument;
+    for (0..n) |i| {
+        ids[i] = matches[i].id;
+        if (out_scores) |scores| scores[i] = matches[i].score;
+    }
+    count_out.* = @intCast(n);
+    return .ok;
+}
+
+pub export fn goss_session_memory_stats(session: ?*Session, out_count: ?*u32, out_bytes: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    const index = s.memory_index orelse return .again;
+    if (out_count) |p| p.* = @intCast(index.count());
+    if (out_bytes) |p| p.* = index.byteSize();
+    return .ok;
+}
+
+/// Writes the whole memory so a cold start is instant. A short buffer reports
+/// the size it needed rather than a truncated file that would load as something
+/// else.
+pub export fn goss_session_memory_save(session: ?*Session, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const index = s.memory_index orelse return .again;
+    const len_out = out_len orelse return .invalid_argument;
+    var buffer: []u8 = &.{};
+    if (out) |p| buffer = p[0..capacity];
+    const needed = memory_plane.hnsw.save(index, buffer);
+    len_out.* = needed;
+    if (needed > capacity) return .again;
+    return .ok;
+}
+
+pub export fn goss_session_memory_load(session: ?*Session, bytes: ?[*]const u8, len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const data = bytes orelse return .invalid_argument;
+    if (len == 0) return .invalid_argument;
+    const gpa = s.engine.gpa;
+    const index = gpa.create(memory_plane.Index) catch return .out_of_memory;
+    index.* = memory_plane.hnsw.load(gpa, data[0..len]) catch {
+        gpa.destroy(index);
+        return .invalid_argument;
+    };
+    closeMemory(s);
+    s.memory_index = index;
     return .ok;
 }
 

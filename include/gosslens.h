@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 142u
+#define GOSS_ABI_MINOR 152u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -889,6 +889,26 @@ goss_status goss_session_text_count(goss_session *session, uint32_t *out_count, 
 goss_status goss_session_text_at(goss_session *session, uint32_t index, goss_text_entry *out_entry);
 /* GOSS_AGAIN with out_len set means the buffer was too short. */
 goss_status goss_session_text_string(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* The memory plane. Nothing is remembered until a host opens it, and the bound
+   is the host's, so the memory it was promised is the memory it gets. */
+goss_status goss_session_memory_open(goss_session *session, uint32_t dim, uint32_t max_entries);
+goss_status goss_session_memory_close(goss_session *session);
+/* The same id replaces rather than duplicating. */
+goss_status goss_session_memory_remember(goss_session *session, uint64_t id, const float *embedding, uint32_t dim);
+goss_status goss_session_memory_forget(goss_session *session, uint64_t id);
+goss_status goss_session_memory_search(goss_session *session, const float *query, uint32_t dim, uint32_t k, uint64_t *out_ids, float *out_scores, uint32_t *out_count);
+goss_status goss_session_memory_stats(goss_session *session, uint32_t *out_count, uint64_t *out_bytes);
+/* GOSS_AGAIN with out_len set means the buffer was too short. */
+goss_status goss_session_memory_save(goss_session *session, uint8_t *out, size_t capacity, size_t *out_len);
+goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len);
+
+/* Narrows what this session will answer. Sections are the snapshot bits, verbs
+   the things that change something. A session opens fully permissive; a read out
+   of scope is dropped from the record rather than failing the call, and a verb
+   out of scope returns GOSS_UNSUPPORTED. */
+goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs);
+goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs);
 
 goss_status goss_engine_read_report(goss_engine *engine, goss_engine_report *out_report);
 

@@ -6,7 +6,7 @@ SDK for any host with a C FFI, and the JNI bridge the Kotlin path rides. The
 core owns portable engine behavior. Platform code owns only what the platform
 has to own.
 
-It is a full camera and AR engine: camera manipulation, face/hand/body
+It is the whole rail, not a tracker: camera manipulation, face/hand/body
 understanding, segmentation, world anchoring, physics-driven and scripted
 lens content, beauty and makeup, capture and recording, a deterministic audio
 mixer, and multi-source compositing, all behind that one ABI. Capability

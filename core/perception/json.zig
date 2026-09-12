@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const snapshot = @import("snapshot.zig");
+const schema = @import("schema.zig");
 
 pub const Error = snapshot.Error;
 
@@ -71,15 +72,18 @@ fn writeSection(w: *Out, section: snapshot.Section) void {
     w.num(section.version);
     switch (section.tag) {
         .frame => {
-            w.field("width", readU32(section.payload, 0));
-            w.field("height", readU32(section.payload, 4));
-            w.field("pixel_format", readU32(section.payload, 8));
-            w.field("color_standard", readU32(section.payload, 12));
-            w.field("color_range", readU32(section.payload, 16));
+            // Read through the declared schema rather than from numbers typed
+            // here, so the writer and this projector cannot drift apart.
+            const layout = schema.sectionFor(.frame).?;
+            w.field("width", readU32(section.payload, layout.offsetOf("width").?));
+            w.field("height", readU32(section.payload, layout.offsetOf("height").?));
+            w.field("pixel_format", readU32(section.payload, layout.offsetOf("pixel_format").?));
+            w.field("color_standard", readU32(section.payload, layout.offsetOf("color_standard").?));
+            w.field("color_range", readU32(section.payload, layout.offsetOf("color_range").?));
             w.raw(",\"timestamp_us\":");
-            w.inum(readI64(section.payload, 24));
+            w.inum(readI64(section.payload, layout.offsetOf("timestamp_us").?));
             w.raw(",\"frames_submitted\":");
-            w.unum(readU64(section.payload, 32));
+            w.unum(readU64(section.payload, layout.offsetOf("frames_submitted").?));
         },
         .faces, .bodies, .hands => {
             w.field("count", readU32(section.payload, 0));
@@ -109,10 +113,11 @@ fn writeSection(w: *Out, section: snapshot.Section) void {
             w.raw("]");
         },
         .audio => {
+            const layout = schema.sectionFor(.audio).?;
             w.raw(",\"level\":");
-            w.fnum(readF32(section.payload, 0));
-            w.field("beat", readU32(section.payload, 4));
-            w.field("engine_fed", readU32(section.payload, 8));
+            w.fnum(readF32(section.payload, layout.offsetOf("level").?));
+            w.field("beat", readU32(section.payload, layout.offsetOf("beat").?));
+            w.field("engine_fed", readU32(section.payload, layout.offsetOf("engine_fed").?));
         },
         .embedding => {
             // The vector itself stays in the binary record: a JSON projection
@@ -122,11 +127,12 @@ fn writeSection(w: *Out, section: snapshot.Section) void {
             w.field("source", readU32(section.payload, 4));
         },
         .engine => {
-            w.field("degrade_level", readU32(section.payload, 0));
-            w.field("degrade_transitions", readU32(section.payload, 4));
+            const layout = schema.sectionFor(.engine).?;
+            w.field("degrade_level", readU32(section.payload, layout.offsetOf("degrade_level").?));
+            w.field("degrade_transitions", readU32(section.payload, layout.offsetOf("degrade_transitions").?));
             w.raw(",\"frames_rendered\":");
-            w.unum(readU64(section.payload, 8));
-            w.field("script_faults", readU32(section.payload, 16));
+            w.unum(readU64(section.payload, layout.offsetOf("frames_rendered").?));
+            w.field("script_faults", readU32(section.payload, layout.offsetOf("script_faults").?));
         },
         else => {
             // A section this build cannot name is reported as itself rather than
@@ -141,9 +147,9 @@ fn writeSection(w: *Out, section: snapshot.Section) void {
     w.raw("}");
 }
 
-/// Eight quad floats, then confidence, origin, script, direction, track id,
-/// line, paragraph and the string's length: the fixed part of one reading.
-const text_entry_header: usize = 8 * 4 + 4 + 6 * 4 + 4;
+/// The fixed part of one reading, taken from the declared schema rather than
+/// counted by hand here.
+const text_entry_header: usize = schema.sectionFor(.text).?.repeatSize();
 
 fn tagName(tag: snapshot.Tag) []const u8 {
     return switch (tag) {

@@ -80,6 +80,31 @@ pub fn build(b: *std.Build) void {
         b.step("model-probe", "Load a real model and print what it needs, costs and keeps").dependOn(&run_probe.step);
     }
 
+    {
+        // The snapshot schema gate, in the ABI gate's shape: a field cannot be
+        // reordered or dropped inside a major without a diff somebody reads.
+        const schema_dump = b.addExecutable(.{
+            .name = "schema_dump",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/schema_dump.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        schema_dump.root_module.addImport("perception", perceptionModule(b, target, optimize));
+
+        const check = b.addRunArtifact(schema_dump);
+        check.setCwd(b.path("."));
+        check.addArgs(&.{ "--check", "tools/snapshot-baseline.txt" });
+        b.step("schema-check", "Check the snapshot schema against its baseline").dependOn(&check.step);
+        ci_step.dependOn(&check.step);
+
+        const update = b.addRunArtifact(schema_dump);
+        update.setCwd(b.path("."));
+        update.addArgs(&.{ "--update", "tools/snapshot-baseline.txt" });
+        b.step("schema-update", "Rewrite the snapshot schema baseline").dependOn(&update.step);
+    }
+
     const sdk_check_step = b.step("sdk-check", "Typecheck every SDK where its toolchain exists");
     if (swiftTypecheckCommand(b)) |cmd| {
         sdk_check_step.dependOn(&cmd.step);
@@ -328,6 +353,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
     abi_module.addImport("perception", perceptionModule(b, target, optimize));
     abi_module.addImport("text", textModule(b, target, optimize));
+    abi_module.addImport("memory", memoryModule(b, target, optimize));
     abi_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
     abi_module.addImport("photo", photoModule(b, target, optimize, null));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -469,6 +495,12 @@ pub fn build(b: *std.Build) void {
     const screen_core_tests = b.addTest(.{ .root_module = screenModule(b, target, optimize) });
     const memory_core_tests = b.addTest(.{ .root_module = memoryModule(b, target, optimize) });
     const spatial_core_tests = b.addTest(.{ .root_module = spatialModule(b, target, optimize) });
+    // The determinism gate: the same input stream must produce the same records.
+    const determinism_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("harness/determinism.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
 
     // The media harness: the checks that belong to the contracts rather than to a
     // rendered frame, so they need no window and no gpu. What needs a real
@@ -556,6 +588,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(screen_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(memory_core_tests).step);
     test_step.dependOn(&b.addRunArtifact(spatial_core_tests).step);
+    test_step.dependOn(&b.addRunArtifact(determinism_tests).step);
     test_step.dependOn(&b.addRunArtifact(quiet_tests).step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
@@ -976,6 +1009,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
         abi_tracking_module.addImport("perception", perceptionModule(b, target, optimize));
         abi_tracking_module.addImport("text", textModule(b, target, optimize));
+        abi_tracking_module.addImport("memory", memoryModule(b, target, optimize));
         abi_tracking_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -1255,6 +1289,7 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("media", mediaCoreModule(b, wasm_target, opt_small, math_wasm));
         abi_wasm.addImport("perception", perceptionModule(b, wasm_target, opt_small));
         abi_wasm.addImport("text", textModule(b, wasm_target, opt_small));
+        abi_wasm.addImport("memory", memoryModule(b, wasm_target, opt_small));
         abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("photo", photoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, opt_small));
@@ -1485,6 +1520,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
         abi_conformance_module.addImport("perception", perceptionModule(b, target, optimize));
         abi_conformance_module.addImport("text", textModule(b, target, optimize));
+        abi_conformance_module.addImport("memory", memoryModule(b, target, optimize));
         abi_conformance_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -2235,8 +2271,12 @@ fn barcodeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     return b.createModule(.{ .root_source_file = b.path("core/media/barcode.zig"), .target = target, .optimize = optimize });
 }
 
+/// Memoized, because the memory plane seals through these primitives too and two
+/// modules over one file collide the moment a compile pulls in both.
 fn medialibModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("core/media/library.zig"), .target = target, .optimize = optimize });
+    const key = b.fmt("goss-medialib-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{ .root_source_file = b.path("core/media/library.zig"), .target = target, .optimize = optimize });
 }
 
 fn qrModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -2346,11 +2386,15 @@ fn spatialModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 fn memoryModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const key = b.fmt("goss-memory-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
     if (b.modules.get(key)) |existing| return existing;
-    return b.addModule(key, .{
+    const module = b.addModule(key, .{
         .root_source_file = b.path("core/memory/memory.zig"),
         .target = target,
         .optimize = optimize,
     });
+    // The vault primitives already exist in the media library; the memory plane
+    // seals through them rather than growing a second cipher.
+    module.addImport("library", medialibModule(b, target, optimize));
+    return module;
 }
 
 /// Screens as a source: the surface geometry, the coordinate mapping that puts

@@ -1,6 +1,6 @@
 # Gosslens - Kotlin SDK
 
-Kotlin SDK for [Gosslens](../../include/gosslens.h), a camera and AR engine
+Kotlin SDK for [Gosslens](../../include/gosslens.h), real-time visual plumbing
 behind one C ABI. It wraps the engine as `GossEngine`, `GossSession`, and `Gosslens`, the same
 names the [Swift](../swift/README.md) and [TypeScript](../ts/README.md) SDKs use.
 

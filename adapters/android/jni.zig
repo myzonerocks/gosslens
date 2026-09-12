@@ -6,6 +6,11 @@
 //! direct buffer address.
 
 const std = @import("std");
+
+/// The widest embedding and the most results one crossing carries. Both match
+/// the engine's own bounds, so a caller that fits there fits here.
+const max_jni_embedding: usize = 4096;
+const max_jni_results: usize = 64;
 const abi = @import("abi");
 
 const JniEnv = opaque {};
@@ -315,6 +320,106 @@ export fn Java_com_gosslens_Gosslens_nativeMlOpSupport(env: *JniEnv, cls: jobjec
     const status = abi.goss_ml_op_support(model_bytes, @intCast(model_len), out_bytes, @intCast(capacity), &written);
     if (status != .ok and status != .again) return -1;
     return @intCast(written);
+}
+
+/// The scope in force. Sections in the low word and verbs in the high, so one
+/// crossing reads both.
+export fn Java_com_gosslens_Gosslens_nativeSetScope(env: *JniEnv, cls: jobject, session: i64, sections: i32, verbs: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_set_scope(sessionFromHandle(session), @bitCast(sections), @bitCast(verbs)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeScope(env: *JniEnv, cls: jobject, session: i64) i64 {
+    _ = env;
+    _ = cls;
+    var sections: u32 = 0;
+    var verbs: u32 = 0;
+    if (abi.goss_session_scope(sessionFromHandle(session), &sections, &verbs) != .ok) return 0;
+    return @bitCast((@as(u64, verbs) << 32) | sections);
+}
+
+/// The memory plane. Embeddings and results cross in direct buffers, so a query
+/// is one crossing rather than one per result.
+export fn Java_com_gosslens_Gosslens_nativeMemoryOpen(env: *JniEnv, cls: jobject, session: i64, dim: i32, max_entries: i32) i32 {
+    _ = env;
+    _ = cls;
+    if (dim <= 0 or max_entries < 0) return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_memory_open(sessionFromHandle(session), @intCast(dim), @intCast(max_entries)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMemoryClose(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_memory_close(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMemoryRemember(env: *JniEnv, cls: jobject, session: i64, id: i64, embedding: jobject, dim: i32) i32 {
+    _ = cls;
+    if (dim <= 0) return @intFromEnum(abi.Status.invalid_argument);
+    const bytes = getDirectBufferAddress(env, embedding) orelse return @intFromEnum(abi.Status.invalid_argument);
+    // A direct buffer's address carries no alignment the type system can see, so
+    // the floats are copied to the stack rather than cast in place.
+    var values: [max_jni_embedding]f32 = undefined;
+    const n: usize = @intCast(@min(dim, @as(i32, @intCast(values.len))));
+    @memcpy(std.mem.sliceAsBytes(values[0..n]), bytes[0 .. n * @sizeOf(f32)]);
+    return @intFromEnum(abi.goss_session_memory_remember(sessionFromHandle(session), @bitCast(id), &values, @intCast(n)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMemoryForget(env: *JniEnv, cls: jobject, session: i64, id: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_memory_forget(sessionFromHandle(session), @bitCast(id)));
+}
+
+/// Ids and scores land in one buffer, eight bytes then four per result, so the
+/// whole answer is one crossing. Returns the count, or -1 on a refusal.
+export fn Java_com_gosslens_Gosslens_nativeMemorySearch(env: *JniEnv, cls: jobject, session: i64, query: jobject, dim: i32, k: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    if (dim <= 0 or k <= 0) return -1;
+    const query_bytes = getDirectBufferAddress(env, query) orelse return -1;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;
+    var values: [max_jni_embedding]f32 = undefined;
+    const n: usize = @intCast(@min(dim, @as(i32, @intCast(values.len))));
+    @memcpy(std.mem.sliceAsBytes(values[0..n]), query_bytes[0 .. n * @sizeOf(f32)]);
+
+    var ids: [max_jni_results]u64 = undefined;
+    var scores: [max_jni_results]f32 = undefined;
+    const want: u32 = @intCast(@min(k, @as(i32, @intCast(ids.len))));
+    var count: u32 = 0;
+    if (abi.goss_session_memory_search(sessionFromHandle(session), &values, @intCast(n), want, &ids, &scores, &count) != .ok) return -1;
+    for (0..count) |i| {
+        @memcpy(out_bytes[i * 12 ..][0..8], std.mem.asBytes(&ids[i]));
+        @memcpy(out_bytes[i * 12 + 8 ..][0..4], std.mem.asBytes(&scores[i]));
+    }
+    return @intCast(count);
+}
+
+/// Count in the low word and bytes in the high, so one crossing answers both.
+export fn Java_com_gosslens_Gosslens_nativeMemoryStats(env: *JniEnv, cls: jobject, session: i64) i64 {
+    _ = env;
+    _ = cls;
+    var count: u32 = 0;
+    var bytes: u64 = 0;
+    if (abi.goss_session_memory_stats(sessionFromHandle(session), &count, &bytes) != .ok) return 0;
+    return @bitCast((@as(u64, @intCast(@min(bytes, std.math.maxInt(u32)))) << 32) | count);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMemorySave(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, capacity: i32) i32 {
+    _ = cls;
+    if (capacity < 0) return -1;
+    const out_bytes = if (capacity == 0) null else getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_session_memory_save(sessionFromHandle(session), out_bytes, @intCast(capacity), &written);
+    if (status != .ok and status != .again) return -1;
+    return @intCast(written);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMemoryLoad(env: *JniEnv, cls: jobject, session: i64, bytes: jobject, len: i32) i32 {
+    _ = cls;
+    if (len <= 0) return @intFromEnum(abi.Status.invalid_argument);
+    const data = getDirectBufferAddress(env, bytes) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_memory_load(sessionFromHandle(session), data, @intCast(len)));
 }
 
 /// The text rail: the models arrive as direct buffers so nothing large is

@@ -412,6 +412,87 @@ public final class GossSession: @unchecked Sendable {
         return (raw.prefix(Int(count)).map(GossEvent.init), dropped)
     }
 
+    // MARK: - Scope
+
+    /// Narrows what this session answers. A session opens fully permissive; a
+    /// read out of scope is dropped from the record rather than failing, and a
+    /// verb out of scope is refused.
+    public func setScope(sections: UInt32, verbs: UInt32) throws {
+        try checked(goss_session_set_scope(handle, sections, verbs))
+    }
+
+    public func scope() throws -> (sections: UInt32, verbs: UInt32) {
+        var sections: UInt32 = 0
+        var verbs: UInt32 = 0
+        try checked(goss_session_scope(handle, &sections, &verbs))
+        return (sections, verbs)
+    }
+
+    // MARK: - Memory
+
+    /// Opens the memory plane. Nothing is remembered until this is called, and
+    /// the bound is yours, so the memory you were promised is the memory you get.
+    public func memoryOpen(dim: UInt32, maxEntries: UInt32 = 4096) throws {
+        try checked(goss_session_memory_open(handle, dim, maxEntries))
+    }
+
+    public func memoryClose() throws {
+        try checked(goss_session_memory_close(handle))
+    }
+
+    /// Remembers one embedding. The same id replaces rather than duplicating, so
+    /// a keyframe corrected later does not leave the earlier one to be found.
+    public func remember(id: UInt64, embedding: [Float]) throws {
+        try embedding.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_memory_remember(handle, id, buffer.baseAddress, UInt32(embedding.count)))
+        }
+    }
+
+    public func forget(id: UInt64) throws {
+        try checked(goss_session_memory_forget(handle, id))
+    }
+
+    /// The nearest remembered embeddings, fewest-first by distance. Fewer than k
+    /// on a memory smaller than k rather than padded with nothing.
+    public func memorySearch(_ query: [Float], k: UInt32 = 8) throws -> [(id: UInt64, score: Float)] {
+        var ids = [UInt64](repeating: 0, count: Int(k))
+        var scores = [Float](repeating: 0, count: Int(k))
+        var count: UInt32 = 0
+        try query.withUnsafeBufferPointer { q in
+            try ids.withUnsafeMutableBufferPointer { idBuf in
+                try scores.withUnsafeMutableBufferPointer { scoreBuf in
+                    try checked(goss_session_memory_search(handle, q.baseAddress, UInt32(query.count), k, idBuf.baseAddress, scoreBuf.baseAddress, &count))
+                }
+            }
+        }
+        return (0..<Int(count)).map { (id: ids[$0], score: scores[$0]) }
+    }
+
+    public func memoryStats() throws -> (count: UInt32, bytes: UInt64) {
+        var live: UInt32 = 0
+        var bytes: UInt64 = 0
+        try checked(goss_session_memory_stats(handle, &live, &bytes))
+        return (live, bytes)
+    }
+
+    /// The whole memory as bytes, so a cold start is instant.
+    public func memorySave() throws -> [UInt8] {
+        var needed = 0
+        _ = goss_session_memory_save(handle, nil, 0, &needed)
+        guard needed > 0 else { return [] }
+        var out = [UInt8](repeating: 0, count: needed)
+        try out.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_memory_save(handle, buffer.baseAddress, needed, &needed))
+        }
+        return out
+    }
+
+    public func memoryLoad(_ bytes: [UInt8]) throws {
+        try bytes.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_memory_load(handle, buffer.baseAddress, bytes.count))
+        }
+    }
+
     // MARK: - Text
 
     /// Turns on the text rail. A detector alone finds where the text is, which

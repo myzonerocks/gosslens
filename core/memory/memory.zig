@@ -6,6 +6,7 @@ pub const vector_index = @import("vector_index.zig");
 pub const hnsw = @import("hnsw.zig");
 pub const event_log = @import("event_log.zig");
 pub const keyframe = @import("keyframe.zig");
+pub const sealed = @import("sealed.zig");
 
 pub const Match = vector_index.Match;
 pub const Metric = vector_index.Metric;
