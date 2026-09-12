@@ -4729,11 +4729,11 @@ fn proveSpatialRail(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         std.debug.print("conformance: FAIL the session would not narrow its scope\n", .{});
         return false;
     }
-    if (abi.goss_session_floor_plane(session, &floor_id) != .unsupported) {
+    if (abi.goss_session_floor_plane(session, &floor_id) != .out_of_scope) {
         std.debug.print("conformance: FAIL a session with no world in scope named the floor anyway\n", .{});
         return false;
     }
-    if (abi.goss_session_align_shared(session, &theirs, landmark_count, &transform, &rms, &matched) != .unsupported) {
+    if (abi.goss_session_align_shared(session, &theirs, landmark_count, &transform, &rms, &matched) != .out_of_scope) {
         std.debug.print("conformance: FAIL a session with no world in scope aligned anyway\n", .{});
         return false;
     }
