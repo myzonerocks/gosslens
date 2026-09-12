@@ -22,7 +22,11 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
-const max_file_scan_bytes: usize = 1 << 20;
+/// The most one file this reads. The ABI crossed a megabyte in this wave and two
+/// checks quietly stopped seeing it, which is a gate that reports green because it
+/// did not look. Generous enough for every source file here, and a file past it is
+/// reported rather than skipped.
+const max_file_scan_bytes: usize = 8 << 20;
 const max_staged_file_bytes: u64 = 4 << 20;
 
 // Trees whose contents must never be committed. Anything staged under these
@@ -448,7 +452,10 @@ const Gate = struct {
         for (paths) |path| {
             if (!isMarkdownDoc(path)) continue;
             const stat = Io.Dir.cwd().statFile(g.io, path, .{}) catch continue;
-            if (stat.size > max_file_scan_bytes) continue;
+            if (stat.size > max_file_scan_bytes) {
+                try g.flag("unscanned: '{s}' is {d} bytes, past what this gate reads, so nothing checked it; split it or raise the bound deliberately", .{ path, stat.size });
+                continue;
+            }
             const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
             const ctx = try std.fmt.allocPrint(g.arena, "'{s}'", .{path});
             try g.checkClauseDashes(content, ctx);

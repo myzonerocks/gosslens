@@ -383,6 +383,9 @@ object Gosslens {
     internal external fun nativeHitTest(session: Long, screenX: Float, screenY: Float, outBuffer: ByteBuffer): Int
     internal external fun nativeSubmitWorldMesh(session: Long, verticesBuffer: ByteBuffer, vertexCount: Int, indicesBuffer: ByteBuffer, indexCount: Int): Int
     internal external fun nativeRaycastWorldMesh(session: Long, originBuffer: ByteBuffer, directionBuffer: ByteBuffer, pointBuffer: ByteBuffer, distanceBuffer: ByteBuffer): Int
+    internal external fun nativeScopeVerbName(verb: Int, outBuffer: ByteBuffer, capacity: Int, lenBuffer: ByteBuffer): Int
+
+    internal external fun nativeDecodePng(inBuffer: ByteBuffer, inLen: Int, outBuffer: ByteBuffer?, capacity: Int, metaBuffer: ByteBuffer): Int
     internal external fun nativePathAcrossWorld(session: Long, startBuffer: ByteBuffer, goalBuffer: ByteBuffer, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
     internal external fun nativePlaneKind(session: Long, planeId: Long, outBuffer: ByteBuffer): Int
     internal external fun nativeFloorPlane(session: Long, outBuffer: ByteBuffer): Int
@@ -560,6 +563,11 @@ object Gosslens {
     const val GESTURE_ILOVEYOU = 7
     const val LENS_SIGNALS_BYTES = 232
     const val STATUS_AGAIN = 7
+
+    /** The session's scope does not carry the verb an op needs. A host can grant
+     * this one; STATUS_UNSUPPORTED means no amount of asking will help. */
+    const val STATUS_OUT_OF_SCOPE = 9
+    const val STATUS_UNSUPPORTED = 6
 
     fun abiVersion(): Int = nativeAbiVersion()
 
@@ -2571,6 +2579,47 @@ class GossSession private constructor(
         val distBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
         if (Gosslens.nativeRaycastWorldMesh(handle, oBuf, dBuf, pBuf, distBuf) != 0) return null
         return WorldMeshHit(floatArrayOf(pBuf.getFloat(0), pBuf.getFloat(4), pBuf.getFloat(8)), distBuf.getFloat(0))
+    }
+
+    /** What a scope may carry. Reading is covered by the snapshot sections; these
+     * are the things that change something or reach a resource. */
+    enum class Verb {
+        ANNOTATE, EGRESS, RECORD, REMEMBER, SEARCH_MEMORY, OPEN_CLIP, CAPTURE_SCREEN,
+        SUBMIT_FRAME, SUBMIT_WORLD, SUBMIT_AUDIO, AUDIO_OUT, SEAL_MEMORY,
+        ACTIVATE_LENS, LOAD_MODEL, ENABLE_TRACKING, RETOUCH;
+
+        val bit: Int get() = 1 shl ordinal
+
+        /** The engine's own name for it, so a refusal reads as words. */
+        fun engineName(): String {
+            val out = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder())
+            val len = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+            if (Gosslens.nativeScopeVerbName(ordinal, out, out.capacity(), len) != 0) return ""
+            val n = minOf(len.getLong(0).toInt(), out.capacity())
+            val bytes = ByteArray(n)
+            out.position(0)
+            out.get(bytes)
+            return String(bytes)
+        }
+    }
+
+    /** A decoded PNG: packed RGBA8 with its size, through the decoder the engine
+     * already carries. Null when the bytes are not a png it can read. */
+    data class DecodedImage(val rgba: ByteArray, val width: Int, val height: Int)
+
+    fun decodePng(bytes: ByteArray): DecodedImage? {
+        val input = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
+        input.put(bytes)
+        val meta = ByteBuffer.allocateDirect(12).order(ByteOrder.nativeOrder())
+        Gosslens.nativeDecodePng(input, bytes.size, null, 0, meta)
+        val needed = meta.getInt(8)
+        if (needed <= 0) return null
+        val out = ByteBuffer.allocateDirect(needed).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeDecodePng(input, bytes.size, out, needed, meta) != 0) return null
+        val rgba = ByteArray(needed)
+        out.position(0)
+        out.get(rgba)
+        return DecodedImage(rgba, meta.getInt(0), meta.getInt(4))
     }
 
     /** A walkable route over the submitted world mesh, so an agent walks content

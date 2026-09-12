@@ -19,7 +19,60 @@ pub const Verb = enum(u5) {
     search_memory,
     open_clip,
     capture_screen,
+    /// Everything below is appended, never reordered: a host storing a verb mask
+    /// keeps its meaning across versions.
+    /// Feed the engine pixels, from a camera, a clip, a screen or a decoded file.
+    submit_frame,
+    /// Feed it the room and where the device is in it: planes, anchors, a mesh,
+    /// depth, orientation, location, the camera's own intrinsics.
+    submit_world,
+    submit_audio,
+    /// Mixed audio leaving the engine, which is the ear's equivalent of egress.
+    audio_out,
+    /// Write the memory index out as sealed bytes, or read one back in. The
+    /// bytes outlive the process, which is what makes this its own permission.
+    seal_memory,
+    /// Run author content: a lens, its parameters, its triggers, its script.
+    activate_lens,
+    /// Load a caller-supplied model, which is arbitrary compute over the frame.
+    load_model,
+    /// Turn the trackers on: faces, hands, bodies, segmentation.
+    enable_tracking,
+    /// Change how the person looks: smoothing, whitening, reshaping, makeup.
+    retouch,
 };
+
+/// Reading a code or a fingerprint is deliberately not a verb. Every scan op is a
+/// pure function over pixels or samples the caller already holds, so a permission
+/// there would gate nothing, and a verb that gates nothing is the defect this list
+/// was audited to remove.
+
+/// Every verb's name, for a host showing a person what an agent asked for and an
+/// agent told which permission it is missing. A bitmask is not an explanation.
+pub fn verbName(verb: Verb) []const u8 {
+    return switch (verb) {
+        .annotate => "annotate",
+        .egress => "egress",
+        .record => "record",
+        .remember => "remember",
+        .search_memory => "search_memory",
+        .open_clip => "open_clip",
+        .capture_screen => "capture_screen",
+        .submit_frame => "submit_frame",
+        .submit_world => "submit_world",
+        .submit_audio => "submit_audio",
+        .audio_out => "audio_out",
+        .seal_memory => "seal_memory",
+        .activate_lens => "activate_lens",
+        .load_model => "load_model",
+        .enable_tracking => "enable_tracking",
+        .retouch => "retouch",
+    };
+}
+
+/// How many verbs this build knows, so a caller can walk them by index rather
+/// than hard-coding a count that goes stale.
+pub const verb_count: u32 = @typeInfo(Verb).@"enum".fields.len;
 
 /// A scope, small enough to pass by value and to cross the ABI as two words.
 pub const Scope = packed struct(u64) {
@@ -51,6 +104,13 @@ pub const Scope = packed struct(u64) {
     pub fn narrow(s: Scope, select: snapshot.Select) snapshot.Select {
         const asked: u32 = @bitCast(select);
         return @bitCast(asked & s.sections);
+    }
+
+    /// Narrowed by another scope, never widened. A session hands its scope to
+    /// whatever runs inside it, and anything that could grant itself a verb back
+    /// would make the whole mechanism advisory; widening means a new session.
+    pub fn narrowedTo(s: Scope, asked: Scope) Scope {
+        return .{ .sections = s.sections & asked.sections, .verbs = s.verbs & asked.verbs };
     }
 
     pub fn withSection(s: Scope, tag: snapshot.Tag, allowed: bool) Scope {

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 169u
+#define GOSS_ABI_MINOR 172u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -75,6 +75,10 @@ typedef enum goss_status {
      * what it asked. The rest of the lens draws; the node reports say which node
      * and why, so the host decides whether that is acceptable. */
     GOSS_LENS_NODE_FAILED = 8,
+    /* The session's scope does not carry the verb this op needs. Distinct from
+     * GOSS_UNSUPPORTED on purpose: a host can grant this one, and no amount of
+     * asking changes the other. */
+    GOSS_OUT_OF_SCOPE = 9,
 } goss_status;
 
 typedef struct goss_engine goss_engine;
@@ -513,6 +517,12 @@ goss_status goss_session_submit_world(goss_session *session, const goss_world_st
  * three per triangle. The engine copies it, and a ray meets it through
  * goss_session_raycast_world_mesh. An empty submission clears the stored mesh. */
 goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count);
+
+/* Decodes a PNG to tightly packed RGBA8. A caller holding an encoded image and no
+ * decoder of its own is the ordinary case in a server or a tool, and the engine
+ * already carries the decoder for its own assets. GOSS_AGAIN with the size in
+ * out_len when the buffer is short, so a caller sizes once. */
+goss_status goss_engine_decode_png(const uint8_t *bytes, size_t len, uint8_t *out_rgba, size_t capacity, uint32_t *out_width, uint32_t *out_height, size_t *out_len);
 
 /* A walkable path across the submitted world mesh, from start to goal, written as
  * out_count xyz triples. GOSS_AGAIN when no mesh is submitted, when no route
@@ -974,12 +984,46 @@ goss_status goss_session_memory_stats(goss_session *session, uint32_t *out_count
 goss_status goss_session_memory_save(goss_session *session, uint8_t *out, size_t capacity, size_t *out_len);
 goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len);
 
+/* The verbs a scope carries, one bit each. Reading is covered by the snapshot
+ * sections; these are the things that change something or reach a resource.
+ * Appended to, never reordered, so a stored mask keeps its meaning. */
+typedef enum goss_verb {
+    GOSS_VERB_ANNOTATE = 0,         /* draw back into the frame */
+    GOSS_VERB_EGRESS = 1,           /* a frame out of the engine */
+    GOSS_VERB_RECORD = 2,
+    GOSS_VERB_REMEMBER = 3,         /* write the memory plane */
+    GOSS_VERB_SEARCH_MEMORY = 4,
+    GOSS_VERB_OPEN_CLIP = 5,
+    GOSS_VERB_CAPTURE_SCREEN = 6,
+    GOSS_VERB_SUBMIT_FRAME = 7,     /* feed pixels in */
+    GOSS_VERB_SUBMIT_WORLD = 8,     /* planes, anchors, mesh, depth, pose, location */
+    GOSS_VERB_SUBMIT_AUDIO = 9,
+    GOSS_VERB_AUDIO_OUT = 10,       /* mixed audio out, the ear's egress */
+    GOSS_VERB_SEAL_MEMORY = 11,     /* the index as bytes that outlive the process */
+    GOSS_VERB_ACTIVATE_LENS = 12,   /* run author content */
+    GOSS_VERB_LOAD_MODEL = 13,      /* arbitrary compute over the frame */
+    GOSS_VERB_ENABLE_TRACKING = 14,
+    GOSS_VERB_RETOUCH = 15          /* change how the person looks */
+} goss_verb;
+
+/* Reading a code or a fingerprint is deliberately not a verb: every scan op is a
+ * pure function over pixels or samples the caller already holds, so a permission
+ * there would gate nothing. */
+
 /* Narrows what this session will answer. Sections are the snapshot bits, verbs
-   the things that change something. A session opens fully permissive; a read out
-   of scope is dropped from the record rather than failing the call, and a verb
-   out of scope returns GOSS_UNSUPPORTED. */
+   the goss_verb bits. A session opens fully permissive and this only ever
+   narrows: anything running inside the session can call it, so a scope that
+   could widen itself would be advisory. Widening means a new session. A read out
+   of scope is dropped from the record rather than failing the call; a verb out of
+   scope returns GOSS_OUT_OF_SCOPE, which a host can grant, as against
+   GOSS_UNSUPPORTED, which it cannot. */
 goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs);
 goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs);
+
+/* The name of one verb, for a refusal an agent can act on and a permission prompt
+ * a person can read. GOSS_AGAIN with the size when the buffer is short. */
+goss_status goss_scope_verb_name(uint32_t verb, uint8_t *out, size_t capacity, size_t *out_len);
+uint32_t goss_scope_verb_count(void);
 
 /* One thing that can be captured. The scale factor is the field a caller must not
    ignore: a point sent back without it lands at half its intended place on a

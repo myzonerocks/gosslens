@@ -1,8 +1,9 @@
 # The MCP server
 
 An MCP server over the engine's C ABI. It exposes the session as tools a model
-can call: open a source, read what the engine sees, read what the frame says,
-search the memory plane, and draw back into the frame.
+can call: feed it a frame or a room, read what the engine sees, read what the
+frame says, search the memory plane, ask where a thing fits, and draw back into
+the frame.
 
 One static binary speaking JSON-RPC on stdin and stdout. It implements the
 protocol directly rather than through an SDK, so there is no runtime to install
@@ -28,6 +29,14 @@ Point a client at the binary:
 | tool | what it is for |
 | --- | --- |
 | `open_clip` | Opens a video file as a source. The graph cannot tell a clip from a camera, so everything below works on it. |
+| `submit_image` | Submits a PNG as the session's frame, so everything that reads a frame has one. This is how a model with no camera reaches the engine. |
+| `submit_world` | Submits the room: planes with their pose, extents and kind, and anchors with their pose. |
+| `submit_world_mesh` | Submits scanned geometry as xyz triples and triangle indices. |
+| `floor_plane` | Which submitted surface the session would call the floor: the lowest one a thing can rest on. |
+| `place_on` | Where a footprint fits, best surface first, each answer carrying how much of that surface stays free. |
+| `measure_between` | Point to point in metres with the uncertainty each end's accuracy implies, and a plain answer when nobody vouched. |
+| `path_across_world` | A walkable route over the submitted mesh, so content moves across scanned ground rather than through it. |
+| `align_shared` | The transform from another device's origin into this one, over the landmarks both recognise. |
 | `open_screen` | Opens a display or a window as a source. Where permission has not been granted it says no surface is available rather than failing. |
 | `screen_point` | Where a normalized point lands on the captured surface: logical points, backing pixels, and the desktop. |
 | `read_perception` | What the engine sees, as one record: the frame, the faces, hands and bodies, what it says, and the engine's own state. |
@@ -44,13 +53,12 @@ Point a client at the binary:
 
 Nothing here sends a frame anywhere. Every tool runs on this device, against the
 same C ABI the Swift, Kotlin and TypeScript SDKs use, and a session's
-[scope](API.md) governs what it will answer: a read out of scope is dropped from
-the record, and a verb out of scope is refused.
-
-The spatial questions are not tools here, deliberately. They answer over the
-planes, anchors and mesh a host submits, and this server stands up its own
-session that no host feeds, so every one of them would answer "nothing submitted"
-forever. They reach a model through an SDK inside an app that has a world.
+[scope](API.md) governs what it will answer. A read out of scope is dropped from
+the record. A verb out of scope answers `out_of_scope`, which names a permission a
+host can grant, rather than `unsupported`, which names a capability no amount of
+asking will produce: an agent reading the first knows to ask, and reading the
+second knows to stop. Seventeen verbs cover the acting surface, each one checked at
+every op it gates, each one nameable, and a session's scope only ever narrows.
 
 The engine and its session are made on the first call that needs them, so a
 client that only lists tools brings up no renderer. A tool whose precondition is

@@ -4415,6 +4415,127 @@ fn normalizeVector(v: []f32) void {
 /// real; where it is not, zero surfaces is the answer and the proof says so,
 /// because permission is the host's to give. The coordinate arithmetic is
 /// asserted either way: a point in the wrong place is wrong on every host.
+/// Scope through the real ABI: every verb gates the ops it names, a refusal says
+/// it is a permission rather than an absence, and a narrowed session cannot widen
+/// itself, which is what makes the whole mechanism more than advice.
+fn proveScope(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const identity16: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    // Every verb this build knows can be named. A bitmask nobody can read is not a
+    // permission an agent can ask for.
+    const verb_count = abi.goss_scope_verb_count();
+    if (verb_count != 16) {
+        std.debug.print("conformance: FAIL the build knows {d} verbs\n", .{verb_count});
+        return false;
+    }
+    for (0..verb_count) |i| {
+        var name: [64]u8 = undefined;
+        var len: usize = 0;
+        if (abi.goss_scope_verb_name(@intCast(i), &name, name.len, &len) != .ok or len == 0) {
+            std.debug.print("conformance: FAIL verb {d} has no name\n", .{i});
+            return false;
+        }
+    }
+    if (abi.goss_scope_verb_name(verb_count, null, 0, null) == .ok) {
+        std.debug.print("conformance: FAIL a verb past the end was named anyway\n", .{});
+        return false;
+    }
+
+    // Each verb withheld, and the op it gates refused for the right reason.
+    const cases = [_]struct { verb: u32, name: []const u8 }{
+        .{ .verb = 2, .name = "record" },
+        .{ .verb = 7, .name = "submit_frame" },
+        .{ .verb = 8, .name = "submit_world" },
+        .{ .verb = 9, .name = "submit_audio" },
+        .{ .verb = 3, .name = "remember" },
+        .{ .verb = 0, .name = "annotate" },
+        .{ .verb = 12, .name = "activate_lens" },
+        .{ .verb = 14, .name = "enable_tracking" },
+    };
+    for (cases) |case| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        // Everything except the one verb under test.
+        const mask: u32 = ~(@as(u32, 1) << @intCast(case.verb));
+        if (abi.goss_session_set_scope(session, std.math.maxInt(u32), mask) != .ok) {
+            std.debug.print("conformance: FAIL narrowing away {s} was refused\n", .{case.name});
+            return false;
+        }
+        const status = switch (case.verb) {
+            2 => abi.goss_engine_recording_start(engine, session, "zig-out/scope-record.mp4", "zig-out/scope-record.mp4".len, null),
+            7 => blk: {
+                const desc: abi.FrameDesc = .{ .width = 2, .height = 2, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
+                const rgba = [_]u8{255} ** 16;
+                break :blk abi.goss_session_submit_frame_rgba_copy(session, &desc, &rgba, 8);
+            },
+            8 => blk: {
+                const state: abi.WorldState = .{ .tracking_state = 2, .world_from_camera = identity16, .projection = identity16, .timestamp_us = 1 };
+                break :blk abi.goss_session_submit_world(session, &state, null, 0, null, 0, null);
+            },
+            9 => blk: {
+                const samples = [_]f32{ 0, 0, 0, 0 };
+                break :blk abi.goss_session_submit_audio(session, &samples, 4, 48000, 1, 1);
+            },
+            3 => abi.goss_session_memory_open(session, 4, 16),
+            0 => blk: {
+                var desc = std.mem.zeroes(abi.AnnotationDesc);
+                desc.id = 1;
+                break :blk abi.goss_session_annotate(session, &desc, null, 0);
+            },
+            12 => abi.goss_session_activate_lens_from_directory(session, "zig-out/onnx-zoo-lens", "zig-out/onnx-zoo-lens".len),
+            14 => abi.goss_session_enable_face_tracking(session, null, 0),
+            else => unreachable,
+        };
+        if (status != .out_of_scope) {
+            std.debug.print("conformance: FAIL {s} withheld and the op answered {t} rather than out of scope\n", .{ case.name, status });
+            return false;
+        }
+    }
+
+    // Granted, the same op is not refused for a permission. A frame with the verb
+    // in scope lands.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        const desc: abi.FrameDesc = .{ .width = 2, .height = 2, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 1 };
+        const rgba = [_]u8{255} ** 16;
+        const status = abi.goss_session_submit_frame_rgba_copy(session, &desc, &rgba, 8);
+        if (status == .out_of_scope) {
+            std.debug.print("conformance: FAIL a permissive session refused a frame as out of scope\n", .{});
+            return false;
+        }
+    }
+
+    // The one that makes it real: a narrowed session cannot grant itself anything
+    // back. Anything running inside it can call set_scope, so a scope that widened
+    // would be advice rather than a boundary.
+    {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        _ = abi.goss_session_set_scope(session, 0, 0);
+        _ = abi.goss_session_set_scope(session, std.math.maxInt(u32), std.math.maxInt(u32));
+        var sections: u32 = 0;
+        var verbs: u32 = 0;
+        if (abi.goss_session_scope(session, &sections, &verbs) != .ok) {
+            std.debug.print("conformance: FAIL the scope would not read back\n", .{});
+            return false;
+        }
+        if (sections != 0 or verbs != 0) {
+            std.debug.print("conformance: FAIL a narrowed session widened itself back to {x}/{x}\n", .{ sections, verbs });
+            return false;
+        }
+        var desc = std.mem.zeroes(abi.AnnotationDesc);
+        desc.id = 1;
+        if (abi.goss_session_annotate(session, &desc, null, 0) != .out_of_scope) {
+            std.debug.print("conformance: FAIL a session that tried to widen itself could draw\n", .{});
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF scope through the real ABI: {d} verbs each named, eight of them withheld one at a time and every gated op answering out of scope rather than unsupported, and a narrowed session that cannot widen itself back\n", .{verb_count});
+    return true;
+}
+
 /// The spatial rail through the real ABI: a room submitted as planes answers which
 /// surface is the floor, where a thing fits and how much of that surface it leaves,
 /// what a measurement's uncertainty is, and what two devices agree on.
@@ -23720,6 +23841,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("screen source");
     if (!try proveSpatialRail(gpa, engine)) return 1;
     watchHold("spatial rail");
+    if (!try proveScope(gpa, engine)) return 1;
+    watchHold("scope");
     if (!try proveMemoryPlane(gpa, engine)) return 1;
     watchHold("memory plane");
     if (!try proveModelZoo(gpa, engine)) return 1;

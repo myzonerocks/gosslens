@@ -181,8 +181,39 @@ file must move together.
 | `goss_session_memory_stats` | out count, out bytes | What the memory holds and what it costs. |
 | `goss_session_memory_save` | out buffer | Writes the memory so a cold start is instant; GOSS_AGAIN with the size. |
 | `goss_session_memory_load` | bytes | Reads a memory back, refusing a file from another version or a truncated one. |
-| `goss_session_set_scope` | sections, verbs | Narrows what the session answers; a read out of scope is dropped, a verb out of scope refused. |
+| `goss_session_set_scope` | sections, verbs | Narrows what the session answers and does. It only ever narrows: anything inside the session can call it, so widening means a new session. |
 | `goss_session_scope` | out sections, out verbs | The scope in force. |
+| `goss_scope_verb_name` | verb, out buffer | The engine's own name for a verb, so a refusal reads as a sentence and a permission prompt reads as words. |
+| `goss_scope_verb_count` | none | How many verbs this build knows, for a caller walking them by index. |
+
+A read out of scope is dropped from the record rather than failing the call. A verb
+out of scope returns `GOSS_OUT_OF_SCOPE`, which is deliberately not
+`GOSS_UNSUPPORTED`: the first a host can grant, and no amount of asking changes the
+second. Every verb below is checked at every op it covers.
+
+| verb | what it gates |
+| --- | --- |
+| `annotate` | drawing back into the frame, and removing what was drawn |
+| `egress` | a frame leaving the engine: a still, the UI, a guided view |
+| `record` | starting, pausing and resuming a recording |
+| `remember` | opening the memory plane and writing or forgetting an entry |
+| `search_memory` | reading the memory plane back |
+| `seal_memory` | the index as sealed bytes, which outlive the process |
+| `open_clip` | opening a clip, seeking it, stepping it |
+| `capture_screen` | opening a display or a window as a source |
+| `submit_frame` | feeding pixels in, from any source including a named one |
+| `submit_world` | planes, anchors, a mesh, depth, orientation, location, intrinsics |
+| `submit_audio` | feeding audio in |
+| `audio_out` | mixed audio leaving, which is the ear's equivalent of egress |
+| `activate_lens` | running author content |
+| `load_model` | loading a caller's model, which is arbitrary compute over the frame |
+| `enable_tracking` | turning the face, hand and body trackers on |
+| `retouch` | changing how the person looks |
+
+Reading a code or a fingerprint is deliberately not a verb: every scan op is a pure
+function over pixels or samples the caller already holds, so a permission there
+would gate nothing, and the audit that produced this table exists to remove exactly
+that.
 | `goss_engine_screen_count` | out count | What this process may capture; zero where permission has not been granted. |
 | `goss_engine_screen_at` | index, out surface | One surface: its logical geometry, desktop origin and scale factor. |
 | `goss_engine_screen_title` | index, out buffer | The surface title; GOSS_AGAIN with the size when the buffer is short. |
@@ -233,6 +264,7 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_hit_test` | `hitTest(session, screenX, screenY)` raycasts a normalized screen point onto the tracked ground plane, returning the world hit position or null until tracking is live and the ray meets the plane | Swift `Session.hitTest`, Kotlin `hitTest`, TS `hitTest` |
 | `goss_session_submit_world_mesh` | `submitWorldMesh(vertices, indices)` submits the device's pre-scanned world mesh (scene reconstruction, a VPS scan) in world space as xyz triples and per-triangle indices; empty clears it | all SDKs |
 | `goss_session_raycast_world_mesh` | `raycastWorldMesh(origin, direction) -> (point, distance)?` casts a world-space ray against the submitted mesh, returning the nearest surface hit or null when no mesh is submitted or the ray misses, so a tap-to-place lens anchors content on scanned geometry | all SDKs |
+| `goss_engine_decode_png` | `decodePng(bytes) -> (rgba, width, height)?` decodes a PNG to packed RGBA8 through the decoder the engine already carries, for a caller holding an encoded image and no decoder of its own | all SDKs |
 | `goss_session_path_across_world` | `pathAcrossWorld(start, goal) -> [point]?` a walkable route over the submitted world mesh, null when no mesh is submitted or no route exists, so an agent walks content across real scanned ground | all SDKs |
 | `goss_session_plane_kind` | `planeKind(planeId) -> (kind, bearing)?` a submitted plane as a named kind rather than the platform's own number, and whether a thing can rest on it | all SDKs |
 | `goss_session_floor_plane` | `floorPlaneId() -> id?` the lowest bearing surface the session has been shown, null when it has been shown none | all SDKs |

@@ -13,6 +13,14 @@ const Live = struct {
     io: std.Io,
     engine: ?*abi.Engine = null,
     session: ?*abi.Session = null,
+    /// Rising, because a frame and a world both carry one and a timestamp that
+    /// never moves reads as the same submission twice.
+    stamp_us: i64 = 0,
+
+    fn nextTimestamp(live: *Live) i64 {
+        live.stamp_us += 33_333;
+        return live.stamp_us;
+    }
 
     fn engineOrNull(live: *Live) ?*abi.Engine {
         if (live.engine) |e| return e;
@@ -132,6 +140,14 @@ fn runTool(live: *Live, arena: std.mem.Allocator, name: []const u8, arguments: ?
     if (std.mem.eql(u8, name, "screen_point")) return screenPoint(live, arguments, w);
     if (std.mem.eql(u8, name, "open_clip")) return openClip(live, arguments, w);
     if (std.mem.eql(u8, name, "annotate")) return annotate(arena, live, arguments, w);
+    if (std.mem.eql(u8, name, "submit_image")) return submitImage(arena, live, arguments, w);
+    if (std.mem.eql(u8, name, "submit_world")) return submitWorld(live, arguments, w);
+    if (std.mem.eql(u8, name, "submit_world_mesh")) return submitWorldMesh(arena, live, arguments, w);
+    if (std.mem.eql(u8, name, "floor_plane")) return floorPlane(live, w);
+    if (std.mem.eql(u8, name, "place_on")) return placeOn(live, arguments, w);
+    if (std.mem.eql(u8, name, "measure_between")) return measureBetween(arena, live, arguments, w);
+    if (std.mem.eql(u8, name, "path_across_world")) return pathAcrossWorld(arena, live, arguments, w);
+    if (std.mem.eql(u8, name, "align_shared")) return alignShared(live, arguments, w);
     try w.print("{s} is declared and not wired", .{name});
     return true;
 }
@@ -399,6 +415,353 @@ fn annotate(arena: std.mem.Allocator, live: *Live, arguments: ?std.json.Value, w
     try w.print("annotation {d} placed for {d} frames", .{ desc.id, desc.lifetime_value });
     return false;
 }
+
+/// A PNG as the session's frame. Without this the server had a session nothing
+/// had ever fed, so every tool that reads a frame answered that it had none: the
+/// protocol is the input path, the same way a clip arrives as a path.
+fn submitImage(arena: std.mem.Allocator, live: *Live, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
+    const s = live.sessionOrNull() orelse {
+        try w.writeAll("no session on this host");
+        return true;
+    };
+    const path = stringArg(arguments, "path") orelse {
+        try w.writeAll("submit_image needs a path");
+        return true;
+    };
+    const bytes = std.Io.Dir.cwd().readFileAlloc(live.io, path, arena, .limited(256 << 20)) catch {
+        try w.print("cannot read {s}", .{path});
+        return true;
+    };
+    // Decoded through the engine rather than here: the decoder it carries for its
+    // own assets is the one every caller should reach, and a second copy of a
+    // module in one compile is a collision this repo has a rule about.
+    var width: u32 = 0;
+    var height: u32 = 0;
+    var needed: usize = 0;
+    _ = abi.goss_engine_decode_png(bytes.ptr, bytes.len, null, 0, &width, &height, &needed);
+    if (needed == 0) {
+        try w.print("{s} is not a png the engine can read; it decodes png, so a jpeg has to be converted first", .{path});
+        return true;
+    }
+    const rgba = try arena.alloc(u8, needed);
+    if (abi.goss_engine_decode_png(bytes.ptr, bytes.len, rgba.ptr, rgba.len, &width, &height, &needed) != .ok) {
+        try w.print("{s} would not decode", .{path});
+        return true;
+    }
+    var desc = std.mem.zeroes(abi.FrameDesc);
+    desc.width = width;
+    desc.height = height;
+    // 4 is rgba8, which is what the decoder writes. The header names them.
+    desc.pixel_format = 4;
+    desc.color_range = 1;
+    desc.timestamp_us = live.nextTimestamp();
+    const status = abi.goss_session_submit_frame_rgba_copy(s, &desc, rgba.ptr, width * 4);
+    if (status != .ok) {
+        try w.print("the frame was refused: {t}", .{status});
+        return true;
+    }
+    try w.print("submitted {d}x{d} from {s}", .{ width, height, path });
+    return false;
+}
+
+/// The room: planes and anchors, which is what every spatial answer is computed
+/// over. A caller with no platform world session submits what it knows.
+fn submitWorld(live: *Live, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
+    const s = live.sessionOrNull() orelse {
+        try w.writeAll("no session on this host");
+        return true;
+    };
+    var planes: [32]abi.WorldPlane = undefined;
+    var plane_count: usize = 0;
+    if (arrayArg(arguments, "planes")) |items| {
+        for (items) |item| {
+            if (plane_count >= planes.len) break;
+            if (item != .object) continue;
+            const fields = item.object;
+            var pose = identity16;
+            pose[12] = numberFrom(fields.get("x")) orelse 0;
+            pose[13] = numberFrom(fields.get("y")) orelse 0;
+            pose[14] = numberFrom(fields.get("z")) orelse 0;
+            planes[plane_count] = .{
+                .id = @intFromFloat(@max(0, numberFrom(fields.get("id")) orelse 0)),
+                .pose = pose,
+                .extent_x = numberFrom(fields.get("extent_x")) orelse 1,
+                .extent_z = numberFrom(fields.get("extent_z")) orelse 1,
+                .classification = @intFromFloat(@max(0, numberFrom(fields.get("kind")) orelse 0)),
+            };
+            plane_count += 1;
+        }
+    }
+    var anchors: [32]abi.WorldAnchor = undefined;
+    var anchor_count: usize = 0;
+    if (arrayArg(arguments, "anchors")) |items| {
+        for (items) |item| {
+            if (anchor_count >= anchors.len) break;
+            if (item != .object) continue;
+            const fields = item.object;
+            var pose = identity16;
+            pose[12] = numberFrom(fields.get("x")) orelse 0;
+            pose[13] = numberFrom(fields.get("y")) orelse 0;
+            pose[14] = numberFrom(fields.get("z")) orelse 0;
+            anchors[anchor_count] = .{
+                .id = @intFromFloat(@max(0, numberFrom(fields.get("id")) orelse 0)),
+                .pose = pose,
+            };
+            anchor_count += 1;
+        }
+    }
+    if (plane_count == 0 and anchor_count == 0) {
+        try w.writeAll("submit_world needs planes, anchors, or both");
+        return true;
+    }
+    const state: abi.WorldState = .{
+        .tracking_state = 2,
+        .world_from_camera = identity16,
+        .projection = identity16,
+        .timestamp_us = live.nextTimestamp(),
+    };
+    const status = abi.goss_session_submit_world(
+        s,
+        &state,
+        if (plane_count == 0) null else &planes,
+        plane_count,
+        if (anchor_count == 0) null else &anchors,
+        anchor_count,
+        null,
+    );
+    if (status != .ok) {
+        try w.print("the room was refused: {t}", .{status});
+        return true;
+    }
+    try w.print("submitted {d} planes and {d} anchors", .{ plane_count, anchor_count });
+    return false;
+}
+
+fn submitWorldMesh(arena: std.mem.Allocator, live: *Live, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
+    const s = live.sessionOrNull() orelse {
+        try w.writeAll("no session on this host");
+        return true;
+    };
+    const vertices = try floatsArg(arena, arguments, "vertices") orelse {
+        try w.writeAll("submit_world_mesh needs vertices");
+        return true;
+    };
+    const index_floats = try floatsArg(arena, arguments, "indices") orelse {
+        try w.writeAll("submit_world_mesh needs indices");
+        return true;
+    };
+    if (vertices.len % 3 != 0 or index_floats.len % 3 != 0) {
+        try w.writeAll("vertices come in threes and indices in triangles");
+        return true;
+    }
+    const indices = try arena.alloc(u32, index_floats.len);
+    for (index_floats, 0..) |v, i| indices[i] = @intFromFloat(@max(0, v));
+    const status = abi.goss_session_submit_world_mesh(s, vertices.ptr, vertices.len / 3, indices.ptr, indices.len);
+    if (status != .ok) {
+        try w.print("the mesh was refused: {t}", .{status});
+        return true;
+    }
+    try w.print("submitted {d} vertices and {d} triangles", .{ vertices.len / 3, indices.len / 3 });
+    return false;
+}
+
+fn floorPlane(live: *Live, w: *std.Io.Writer) !bool {
+    const s = live.sessionOrNull() orelse {
+        try w.writeAll("no session on this host");
+        return true;
+    };
+    var id: u64 = 0;
+    if (abi.goss_session_floor_plane(s, &id) != .ok) {
+        try w.writeAll("no surface a thing can rest on has been submitted yet");
+        return true;
+    }
+    var kind: u32 = 0;
+    var bearing: u32 = 0;
+    _ = abi.goss_session_plane_kind(s, id, &kind, &bearing);
+    try w.print("plane {d} is the floor, kind {d}", .{ id, kind });
+    return false;
+}
+
+fn placeOn(live: *Live, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
+    const s = live.sessionOrNull() orelse {
+        try w.writeAll("no session on this host");
+        return true;
+    };
+    var item: abi.Footprint = .{
+        .width = floatArg(arguments, "width") orelse 0,
+        .depth = floatArg(arguments, "depth") orelse 0,
+        .height = floatArg(arguments, "height") orelse 0,
+    };
+    if (!(item.width > 0) or !(item.depth > 0)) {
+        try w.writeAll("place_on needs a width and a depth in metres");
+        return true;
+    }
+    var occupants: [32]abi.Occupant = undefined;
+    var occupant_count: usize = 0;
+    if (arrayArg(arguments, "occupants")) |items| {
+        for (items) |entry| {
+            if (occupant_count >= occupants.len) break;
+            if (entry != .object) continue;
+            const fields = entry.object;
+            occupants[occupant_count] = .{
+                .plane_id = @intFromFloat(@max(0, numberFrom(fields.get("plane_id")) orelse 0)),
+                .x = numberFrom(fields.get("x")) orelse 0,
+                .z = numberFrom(fields.get("z")) orelse 0,
+                .width = numberFrom(fields.get("width")) orelse 0,
+                .depth = numberFrom(fields.get("depth")) orelse 0,
+            };
+            occupant_count += 1;
+        }
+    }
+    var out: [16]abi.Placement = undefined;
+    var found: usize = 0;
+    const status = abi.goss_session_place_on(
+        s,
+        &item,
+        if (occupant_count == 0) null else &occupants,
+        occupant_count,
+        &out,
+        out.len,
+        &found,
+    );
+    if (status != .ok and status != .again) {
+        try w.print("the placement query was refused: {t}", .{status});
+        return true;
+    }
+    if (found == 0) {
+        try w.writeAll("nothing submitted can hold it");
+        return false;
+    }
+    for (out[0..@min(found, out.len)], 0..) |p, i| {
+        if (i != 0) try w.writeAll("\n");
+        try w.print("plane {d} at {d:.2},{d:.2},{d:.2}, {d:.3} of it still free", .{
+            p.plane_id, p.position[0], p.position[1], p.position[2], p.free_fraction,
+        });
+    }
+    return false;
+}
+
+fn measureBetween(arena: std.mem.Allocator, live: *Live, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
+    const s = live.sessionOrNull() orelse {
+        try w.writeAll("no session on this host");
+        return true;
+    };
+    const from = try floatsArg(arena, arguments, "from") orelse null;
+    const to = try floatsArg(arena, arguments, "to") orelse null;
+    if (from == null or to == null or from.?.len < 3 or to.?.len < 3) {
+        try w.writeAll("measure_between needs two points of three numbers each");
+        return true;
+    }
+    var metres: f32 = 0;
+    var sigma: f32 = 0;
+    var known: u32 = 0;
+    const status = abi.goss_session_measure_between(
+        s,
+        from.?.ptr,
+        floatArg(arguments, "from_accuracy_m") orelse 0,
+        to.?.ptr,
+        floatArg(arguments, "to_accuracy_m") orelse 0,
+        &metres,
+        &sigma,
+        &known,
+    );
+    if (status != .ok) {
+        try w.print("the measurement was refused: {t}", .{status});
+        return true;
+    }
+    if (known == 0) {
+        try w.print("{d:.4} metres, and nobody vouched for an accuracy, so the doubt is unbounded", .{metres});
+        return false;
+    }
+    try w.print("{d:.4} metres, give or take {d:.4}", .{ metres, sigma });
+    return false;
+}
+
+fn pathAcrossWorld(arena: std.mem.Allocator, live: *Live, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
+    const s = live.sessionOrNull() orelse {
+        try w.writeAll("no session on this host");
+        return true;
+    };
+    const start = try floatsArg(arena, arguments, "start") orelse null;
+    const goal = try floatsArg(arena, arguments, "goal") orelse null;
+    if (start == null or goal == null or start.?.len < 3 or goal.?.len < 3) {
+        try w.writeAll("path_across_world needs a start and a goal of three numbers each");
+        return true;
+    }
+    var points: [256 * 3]f32 = undefined;
+    var count: usize = 0;
+    // The op takes the two points as arrays of three, which is what it reads.
+    const from: *const [3]f32 = start.?[0..3];
+    const to: *const [3]f32 = goal.?[0..3];
+    const status = abi.goss_session_path_across_world(s, from, to, &points, 256, &count);
+    if (status != .ok) {
+        try w.writeAll("no route: either no mesh has been submitted, or the ground does not connect those two points");
+        return true;
+    }
+    for (0..@min(count, 256)) |i| {
+        if (i != 0) try w.writeAll(" -> ");
+        try w.print("{d:.2},{d:.2},{d:.2}", .{ points[i * 3], points[i * 3 + 1], points[i * 3 + 2] });
+    }
+    return false;
+}
+
+fn alignShared(live: *Live, arguments: ?std.json.Value, w: *std.Io.Writer) !bool {
+    const s = live.sessionOrNull() orelse {
+        try w.writeAll("no session on this host");
+        return true;
+    };
+    var theirs: [64]abi.SharedLandmark = undefined;
+    var count: usize = 0;
+    if (arrayArg(arguments, "landmarks")) |items| {
+        for (items) |entry| {
+            if (count >= theirs.len) break;
+            if (entry != .object) continue;
+            const fields = entry.object;
+            theirs[count] = .{
+                .id = @intFromFloat(@max(0, numberFrom(fields.get("id")) orelse 0)),
+                .x = numberFrom(fields.get("x")) orelse 0,
+                .y = numberFrom(fields.get("y")) orelse 0,
+                .z = numberFrom(fields.get("z")) orelse 0,
+                .confidence = numberFrom(fields.get("confidence")) orelse 1,
+            };
+            count += 1;
+        }
+    }
+    if (count == 0) {
+        try w.writeAll("align_shared needs the other device's landmarks");
+        return true;
+    }
+    var transform: [16]f32 = undefined;
+    var rms: f32 = 0;
+    var matched: u32 = 0;
+    if (abi.goss_session_align_shared(s, &theirs, count, &transform, &rms, &matched) != .ok) {
+        try w.print("no alignment: {d} of the {d} landmarks were recognised here, and three is the minimum that fixes a rigid transform", .{ matched, count });
+        return true;
+    }
+    try w.print("aligned over {d} landmarks at {d:.5}m of residual; the other origin sits at {d:.3},{d:.3},{d:.3} in this one", .{
+        matched, rms, transform[12], transform[13], transform[14],
+    });
+    return false;
+}
+
+/// A JSON array argument, for the tools that take a list of objects.
+fn arrayArg(arguments: ?std.json.Value, key: []const u8) ?[]std.json.Value {
+    const object = objectArgs(arguments) orelse return null;
+    const v = object.get(key) orelse return null;
+    return if (v == .array) v.array.items else null;
+}
+
+/// One number out of a JSON field, whichever way it was written.
+fn numberFrom(value: ?std.json.Value) ?f32 {
+    const v = value orelse return null;
+    return switch (v) {
+        .float => @floatCast(v.float),
+        .integer => @floatFromInt(v.integer),
+        else => null,
+    };
+}
+
+const identity16: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
 fn stringArg(arguments: ?std.json.Value, key: []const u8) ?[]const u8 {
     const object = objectArgs(arguments) orelse return null;

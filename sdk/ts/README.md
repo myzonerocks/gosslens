@@ -511,7 +511,7 @@ const alignment = session.alignShared(theirLandmarks);
 const route = session.pathAcrossWorld(here, there);
 
 // And what this session will answer at all.
-session.setScope(0xffffffff, 0);
+session.setScope(0xffffffff, gossVerbMask([GossVerb.Annotate, GossVerb.SubmitFrame]));
 ```
 
 A read out of scope is dropped from the record rather than failing the call; a

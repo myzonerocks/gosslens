@@ -7,6 +7,35 @@
 // rotation) straight to the engine.
 
 export const GOSS_OK = 0;
+/// The session's scope does not carry the verb an op needs. A host can grant this
+/// one; GOSS_UNSUPPORTED it cannot.
+export const GOSS_OUT_OF_SCOPE = 9;
+
+/// What a scope may carry. Reading is covered by the snapshot sections; these are
+/// the things that change something or reach a resource.
+export const enum GossVerb {
+  Annotate = 0,
+  Egress = 1,
+  Record = 2,
+  Remember = 3,
+  SearchMemory = 4,
+  OpenClip = 5,
+  CaptureScreen = 6,
+  SubmitFrame = 7,
+  SubmitWorld = 8,
+  SubmitAudio = 9,
+  AudioOut = 10,
+  SealMemory = 11,
+  ActivateLens = 12,
+  LoadModel = 13,
+  EnableTracking = 14,
+  Retouch = 15,
+}
+
+/// The mask for a set of verbs, which is what setScope takes.
+export function gossVerbMask(verbs: GossVerb[]): number {
+  return verbs.reduce((mask, verb) => mask | (1 << verb), 0);
+}
 export const GOSS_AGAIN = 7;
 
 /// What this build's media backend declares it encodes.
@@ -1684,6 +1713,37 @@ export class GossSession {
   /// Casts a world-space ray against the submitted world mesh, returning the
   /// nearest surface hit `{ point, distance }`, or null when no mesh is
   /// submitted or the ray misses. A tap-to-place lens anchors content there.
+  /// Decodes a PNG to packed RGBA8 through the decoder the engine already carries,
+  /// for a caller holding an encoded image and none of its own.
+  decodePng(bytes: Uint8Array): { rgba: Uint8Array; width: number; height: number } | null {
+    const inPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    const wPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const hPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    let outPtr = 0;
+    let needed = 0;
+    try {
+      this.mod.HEAPU8.set(bytes, inPtr);
+      const args = ["number", "number", "number", "number", "number", "number", "number"];
+      this.mod.ccall("goss_engine_decode_png", "number", args, [inPtr, bytes.length, 0, 0, wPtr, hPtr, lenPtr]);
+      needed = this.mod.HEAPU32[lenPtr >> 2]!;
+      if (needed === 0) return null;
+      outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      if (this.mod.ccall("goss_engine_decode_png", "number", args, [inPtr, bytes.length, outPtr, needed, wPtr, hPtr, lenPtr]) !== GOSS_OK) return null;
+      return {
+        rgba: this.mod.HEAPU8.slice(outPtr, outPtr + needed),
+        width: this.mod.HEAPU32[wPtr >> 2]!,
+        height: this.mod.HEAPU32[hPtr >> 2]!,
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [inPtr, bytes.length]);
+      if (outPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, needed]);
+      for (const [ptr, size] of [[wPtr, 4], [hPtr, 4], [lenPtr, 8]] as const) {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, size]);
+      }
+    }
+  }
+
   /// A walkable route over the submitted world mesh, so an agent walks content
   /// across real scanned ground. Null when no mesh is submitted or no route exists.
   pathAcrossWorld(start: [number, number, number], goal: [number, number, number]): [number, number, number][] | null {

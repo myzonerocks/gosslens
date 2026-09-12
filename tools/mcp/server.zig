@@ -89,6 +89,62 @@ const tools = [_]Tool{
         ,
     },
     .{
+        .name = "submit_image",
+        .description = "Submit a PNG as the session's frame, so everything that reads a frame has one. A model with no camera reaches the engine this way.",
+        .schema =
+        \\{"type":"object","properties":{"path":{"type":"string","description":"Path to a PNG file."}},"required":["path"]}
+        ,
+    },
+    .{
+        .name = "submit_world",
+        .description = "Submit the room: planes with their pose, extents and kind, and anchors with their pose. Everything spatial answers over what this leaves.",
+        .schema =
+        \\{"type":"object","properties":{"planes":{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"extent_x":{"type":"number"},"extent_z":{"type":"number"},"kind":{"type":"integer","description":"0 unknown, 1 floor, 2 wall, 3 ceiling, 4 table, 5 seat, 6 door, 7 window, 8 screen."}}}},"anchors":{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}}}}}}
+        ,
+    },
+    .{
+        .name = "submit_world_mesh",
+        .description = "Submit scanned geometry as xyz triples and triangle indices, which is what a route across the ground is computed over.",
+        .schema =
+        \\{"type":"object","properties":{"vertices":{"type":"array","items":{"type":"number"}},"indices":{"type":"array","items":{"type":"integer"}}},"required":["vertices","indices"]}
+        ,
+    },
+    .{
+        .name = "floor_plane",
+        .description = "Which submitted surface the session would call the floor: the lowest one a thing can rest on.",
+        .schema =
+        \\{"type":"object","properties":{}}
+        ,
+    },
+    .{
+        .name = "place_on",
+        .description = "Where a footprint fits, best surface first: the bearing plane with the most room left afterwards, each answer carrying how much of that surface stays free.",
+        .schema =
+        \\{"type":"object","properties":{"width":{"type":"number"},"depth":{"type":"number"},"height":{"type":"number"},"occupants":{"type":"array","items":{"type":"object","properties":{"plane_id":{"type":"integer"},"x":{"type":"number"},"z":{"type":"number"},"width":{"type":"number"},"depth":{"type":"number"}}}}},"required":["width","depth"]}
+        ,
+    },
+    .{
+        .name = "measure_between",
+        .description = "Point to point in metres with the uncertainty each end's accuracy implies. Says when nobody vouched for the number, rather than reporting zero doubt.",
+        .schema =
+        \\{"type":"object","properties":{"from":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"to":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"from_accuracy_m":{"type":"number"},"to_accuracy_m":{"type":"number"}},"required":["from","to"]}
+        ,
+    },
+    .{
+        .name = "path_across_world",
+        .description = "A walkable route over the submitted mesh, so content is moved across scanned ground rather than through it.",
+        .schema =
+        \\{"type":"object","properties":{"start":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3},"goal":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}},"required":["start","goal"]}
+        ,
+    },
+    .{
+        .name = "align_shared",
+        .description = "The transform from another device's origin into this one, solved over the landmarks both recognise. Refuses under three matches, which cannot fix a rigid transform.",
+        .schema =
+        \\{"type":"object","properties":{"landmarks":{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"confidence":{"type":"number"}}}}},"required":["landmarks"]}
+        ,
+    },
+    .{
         .name = "model_support",
         .description = "Which operators a model needs that this build does not implement, so a failure is a precise list rather than the word unsupported.",
         .schema =

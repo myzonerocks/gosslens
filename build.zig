@@ -375,11 +375,13 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     const stub_ml_tensor_host = mlTensorModule(b, target, optimize);
     {
-        const host_ml_infer = mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_host);
+        // The onnx rail, not a refusal: this library carries no vendored C++ and
+        // the onnx engine needs none, so a model still runs and the text rail with it.
+        const host_ml_infer = mlInferOnnxModule(b, target, optimize, math_module, stub_ml_tensor_host, tracking_cores.sampler);
         abi_module.addImport("ml_infer", host_ml_infer);
         abi_module.addImport("text_infer", textInferModule(b, target, optimize, host_ml_infer));
     }
-    abi_module.addImport("diffusion", diffusionStubModule(b, target, optimize, math_module, stub_ml_tensor_host));
+    abi_module.addImport("diffusion", diffusionOnnxModule(b, target, optimize, math_module, stub_ml_tensor_host, tracking_cores.sampler));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
     abi_module.addImport("face106", face106_module);
 
@@ -1701,11 +1703,11 @@ pub fn build(b: *std.Build) void {
             abi_conformance_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
             const stub_ml_tensor_conf = mlTensorModule(b, target, optimize);
             {
-                const conf_stub_ml_infer = mlInferStubModule(b, target, optimize, math_module, stub_ml_tensor_conf);
+                const conf_stub_ml_infer = mlInferOnnxModule(b, target, optimize, math_module, stub_ml_tensor_conf, sampler_module);
                 abi_conformance_module.addImport("ml_infer", conf_stub_ml_infer);
                 abi_conformance_module.addImport("text_infer", textInferModule(b, target, optimize, conf_stub_ml_infer));
             }
-            abi_conformance_module.addImport("diffusion", diffusionStubModule(b, target, optimize, math_module, stub_ml_tensor_conf));
+            abi_conformance_module.addImport("diffusion", diffusionOnnxModule(b, target, optimize, math_module, stub_ml_tensor_conf, sampler_module));
             abi_conformance_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
         }
         const conformance_module = b.createModule(.{
@@ -2181,11 +2183,11 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
         abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
         const stub_ml_tensor_android = mlTensorModule(b, android_target, optimize);
         {
-            const android_stub_ml_infer = mlInferStubModule(b, android_target, optimize, math_android, stub_ml_tensor_android);
+            const android_stub_ml_infer = mlInferOnnxModule(b, android_target, optimize, math_android, stub_ml_tensor_android, tracking_cores_android.sampler);
             abi_android.addImport("ml_infer", android_stub_ml_infer);
             abi_android.addImport("text_infer", textInferModule(b, android_target, optimize, android_stub_ml_infer));
         }
-        abi_android.addImport("diffusion", diffusionStubModule(b, android_target, optimize, math_android, stub_ml_tensor_android));
+        abi_android.addImport("diffusion", diffusionOnnxModule(b, android_target, optimize, math_android, stub_ml_tensor_android, tracking_cores_android.sampler));
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
     const have_cgltf_android = blk: {
@@ -3075,6 +3077,14 @@ fn diffusionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     });
 }
 
+/// The diffusion rail over the onnx-only chain, for a target with no vendored
+/// TFLite tree. The restyle nets that matter are ONNX, and the engine that runs
+/// them is pure Zig, so a refusal here would be a choice rather than a limit.
+fn diffusionOnnxModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module, sampler_mod: *std.Build.Module) *std.Build.Module {
+    const chain = syncMlChain(b, target, optimize, sampler_mod);
+    return diffusionModule(b, target, optimize, chain.engine, chain.sample, sampler_mod, math_mod, ml_tensor_mod, false);
+}
+
 fn diffusionStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("adapters/tracking/diffusion_stub.zig"),
@@ -3087,22 +3097,47 @@ fn diffusionStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     });
 }
 
-/// The synchronous byo-ml rail for targets with no threads (the web): the
-/// real inference core over the pure-Zig ONNX engine, with the TFLite
-/// backend stubbed so a .tflite model degrades to an inert node instead of
-/// dragging the C++ runtime into a build that cannot host it.
+/// The real inference core over the pure-Zig ONNX engine with the TFLite backend
+/// stubbed, so a .tflite model degrades to an inert node rather than dragging the
+/// C++ runtime into a build that cannot host it, or has not vendored it.
 const SyncMlChain = struct { engine: *std.Build.Module, sample: *std.Build.Module };
 
-/// The onnx-only engine chain both synchronous web rails (ml_infer_sync and
-/// diffusion_sync) share on a wasm target.
+/// The onnx-only engine chain: the web rails ride it because they have no
+/// threads, and every build without the vendored TFLite tree rides it because
+/// refusing a model the engine can run is worse than running it.
 fn syncMlChain(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sampler_mod: *std.Build.Module) SyncMlChain {
-    const runtime_stub = b.createModule(.{
+    // Memoized, because two rails share this chain on the same target now and two
+    // modules over one file in one compile is the collision the module rule names.
+    const triple = target.result.zigTriple(b.allocator) catch "t";
+    const engine_key = b.fmt("goss-onnx-engine-{s}-{s}", .{ triple, @tagName(optimize) });
+    const sample_key = b.fmt("goss-onnx-sample-{s}-{s}", .{ triple, @tagName(optimize) });
+    if (b.modules.get(engine_key)) |engine| {
+        return .{ .engine = engine, .sample = b.modules.get(sample_key).? };
+    }
+    const runtime_stub = b.addModule(b.fmt("goss-onnx-runtime-stub-{s}-{s}", .{ triple, @tagName(optimize) }), .{
         .root_source_file = b.path("adapters/tracking/runtime_stub.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const engine = mlEngineModule(b, target, optimize, runtime_stub);
-    return .{ .engine = engine, .sample = mlSampleModule(b, target, optimize, sampler_mod, engine) };
+    const engine = b.addModule(engine_key, .{
+        .root_source_file = b.path("adapters/tracking/ml_engine.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "runtime", .module = runtime_stub },
+            .{ .name = "onnx", .module = onnxModule(b, target, optimize) },
+        },
+    });
+    const sample = b.addModule(sample_key, .{
+        .root_source_file = b.path("adapters/tracking/ml_sample.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_engine", .module = engine },
+        },
+    });
+    return .{ .engine = engine, .sample = sample };
 }
 
 fn mlInferSyncModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module, sampler_mod: *std.Build.Module, chain: SyncMlChain) *std.Build.Module {
@@ -3126,6 +3161,35 @@ fn mlInferSyncModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
         .imports = &.{
             .{ .name = "math", .module = math_mod },
             .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+            .{ .name = "ml_infer_core", .module = core },
+        },
+    });
+}
+
+/// The threaded byo-ml rail over the onnx-only chain, for a target that has
+/// threads and no vendored TFLite tree. Everything an ONNX model needs is here;
+/// only a .tflite model degrades.
+fn mlInferOnnxModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_mod: *std.Build.Module, ml_tensor_mod: *std.Build.Module, sampler_mod: *std.Build.Module) *std.Build.Module {
+    const chain = syncMlChain(b, target, optimize, sampler_mod);
+    const core = b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_infer_core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ml_engine", .module = chain.engine },
+            .{ .name = "ml_sample", .module = chain.sample },
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "ml_tensor", .module = ml_tensor_mod },
+        },
+    });
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/ml_infer.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_mod },
+            .{ .name = "math", .module = math_mod },
             .{ .name = "ml_tensor", .module = ml_tensor_mod },
             .{ .name = "ml_infer_core", .module = core },
         },
@@ -5023,8 +5087,8 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, tracking_cores_ios.hand, tracking_cores_ios.pose, math_ios));
         abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
         const stub_ml_tensor_ios = mlTensorModule(b, ios_target, optimize);
-        abi_ios.addImport("ml_infer", mlInferStubModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios));
-        abi_ios.addImport("diffusion", diffusionStubModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios));
+        abi_ios.addImport("ml_infer", mlInferOnnxModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios, tracking_cores_ios.sampler));
+        abi_ios.addImport("diffusion", diffusionOnnxModule(b, ios_target, optimize, math_ios, stub_ml_tensor_ios, tracking_cores_ios.sampler));
         abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
     const have_cgltf_ios = blk: {

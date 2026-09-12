@@ -73,11 +73,13 @@ moment a section is added, and it did.
 
 ## Scope
 
-A host narrows what a session will answer, once, with two words: the sections a
-caller may read and the verbs it may act with. A read out of scope is **dropped
-from the record**, not refused, so a consumer asking for everything receives what
-it is entitled to rather than an error it cannot act on. A verb out of scope is
-refused outright.
+A host narrows what a session will answer with two words: the sections a caller may
+read and the verbs it may act with. It only ever narrows, because anything running
+inside the session can ask, so widening means a new session. A read out of scope is
+**dropped from the record**, not refused, so a consumer asking for everything
+receives what it is entitled to rather than an error it cannot act on. A verb out of
+scope answers `out_of_scope`, which names a permission a host can grant, rather than
+`unsupported`, which names a capability no asking will produce.
 
 A section this build does not know has no bit, so a newer engine's section cannot
 be granted by an older engine that has never heard of it.

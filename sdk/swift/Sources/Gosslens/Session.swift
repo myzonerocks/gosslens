@@ -256,6 +256,19 @@ public final class GossSession: @unchecked Sendable {
         return ok ? (point, distance) : nil
     }
 
+    /// Decodes a PNG to packed RGBA8 through the decoder the engine already carries,
+    /// for a caller holding an encoded image and none of its own.
+    public static func decodePng(_ bytes: [UInt8]) -> (rgba: [UInt8], width: UInt32, height: UInt32)? {
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+        var needed = 0
+        _ = goss_engine_decode_png(bytes, bytes.count, nil, 0, &width, &height, &needed)
+        guard needed > 0 else { return nil }
+        var rgba = [UInt8](repeating: 0, count: needed)
+        guard goss_engine_decode_png(bytes, bytes.count, &rgba, rgba.count, &width, &height, &needed) == GOSS_OK else { return nil }
+        return (rgba, width, height)
+    }
+
     /// A walkable route over the submitted world mesh, so an agent walks content
     /// across real scanned ground. Nil when no mesh is submitted or no route exists.
     public func pathAcrossWorld(start: SIMD3<Float>, goal: SIMD3<Float>) -> [SIMD3<Float>]? {
@@ -589,6 +602,32 @@ public final class GossSession: @unchecked Sendable {
     /// Narrows what this session answers. A session opens fully permissive; a
     /// read out of scope is dropped from the record rather than failing, and a
     /// verb out of scope is refused.
+    /// What a scope may carry. Reading is covered by the snapshot sections; these
+    /// are the things that change something or reach a resource.
+    public enum Verb: UInt32, CaseIterable {
+        case annotate = 0, egress, record, remember, searchMemory, openClip, captureScreen
+        case submitFrame, submitWorld, submitAudio, audioOut, sealMemory
+        case activateLens, loadModel, enableTracking, retouch
+
+        /// The engine's own name for it, so a refusal reads as a sentence and a
+        /// permission prompt reads as words rather than a bitmask.
+        public var name: String {
+            var buffer = [UInt8](repeating: 0, count: 64)
+            var needed = 0
+            guard goss_scope_verb_name(rawValue, &buffer, buffer.count, &needed) == GOSS_OK else { return "" }
+            return String(decoding: buffer[0..<min(needed, buffer.count)], as: UTF8.self)
+        }
+
+        public var bit: UInt32 { 1 << rawValue }
+    }
+
+    /// The mask for a set of verbs, which is what setScope takes.
+    public static func verbMask(_ verbs: [Verb]) -> UInt32 {
+        verbs.reduce(0) { $0 | $1.bit }
+    }
+
+    /// Narrows this session. It only ever narrows: anything running inside the
+    /// session can call this, so widening means a new session.
     public func setScope(sections: UInt32, verbs: UInt32) throws {
         try checked(goss_session_set_scope(handle, sections, verbs))
     }

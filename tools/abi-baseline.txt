@@ -1,4 +1,4 @@
-abi 0.169
+abi 0.172
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -163,6 +163,7 @@ fn goss_status goss_engine_recording_read_report(goss_engine *engine, goss_recor
 fn goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us)
 fn goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light)
 fn goss_status goss_session_submit_world_mesh(goss_session *session, const float *vertices, size_t vertex_count, const uint32_t *indices, size_t index_count)
+fn goss_status goss_engine_decode_png(const uint8_t *bytes, size_t len, uint8_t *out_rgba, size_t capacity, uint32_t *out_width, uint32_t *out_height, size_t *out_len)
 fn goss_status goss_session_plane_kind(goss_session *session, uint64_t plane_id, uint32_t *out_kind, uint32_t *out_bearing)
 fn goss_status goss_session_floor_plane(goss_session *session, uint64_t *out_plane_id)
 fn goss_status goss_session_place_on(goss_session *session, const goss_footprint *item, const goss_occupant *occupants, size_t occupant_count, goss_placement *out, size_t capacity, size_t *out_count)
@@ -358,6 +359,8 @@ fn goss_status goss_session_memory_stats(goss_session *session, uint32_t *out_co
 fn goss_status goss_session_memory_save(goss_session *session, uint8_t *out, size_t capacity, size_t *out_len)
 fn goss_status goss_session_memory_load(goss_session *session, const uint8_t *bytes, size_t len)
 fn goss_status goss_session_set_scope(goss_session *session, uint32_t sections, uint32_t verbs)
+fn goss_status goss_scope_verb_name(uint32_t verb, uint8_t *out, size_t capacity, size_t *out_len)
+fn uint32_t goss_scope_verb_count(void)
 fn goss_status goss_session_scope(goss_session *session, uint32_t *out_sections, uint32_t *out_verbs)
 fn goss_status goss_engine_screen_count(goss_engine *engine, uint32_t *out_count)
 fn goss_status goss_engine_screen_at(goss_engine *engine, uint32_t index, goss_screen_surface *out_surface)

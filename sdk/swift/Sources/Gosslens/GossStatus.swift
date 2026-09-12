@@ -14,6 +14,9 @@ public enum GossStatus: Error {
     /// do what it asked. Thrown only where a caller asked for all-or-nothing;
     /// activateLens answers it as a Bool instead, since the lens is drawing.
     case lensNodeFailed
+    /// The session's scope does not carry the verb this op needs. A host can grant
+    /// it; `unsupported` means no amount of asking will help.
+    case outOfScope
 
     init?(_ raw: goss_status) {
         switch raw {
@@ -26,7 +29,11 @@ public enum GossStatus: Error {
         case GOSS_ERROR_UNSUPPORTED: self = .unsupported
         case GOSS_AGAIN: self = .again
         case GOSS_LENS_NODE_FAILED: self = .lensNodeFailed
-        default: self = .invalidArgument
+        case GOSS_OUT_OF_SCOPE: self = .outOfScope
+        // A status this wrapper does not know reads as unsupported rather than as
+        // a bad argument: the caller passed nothing wrong, and the honest answer is
+        // that this build does not explain itself.
+        default: self = .unsupported
         }
     }
 }

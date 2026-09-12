@@ -233,8 +233,10 @@ What an agent needs sits on the same seams, not beside them.
   the uncertainty its inputs carried, and the transform between two devices'
   origins solved from landmarks rather than a pose neither could read.
 - **Scope** (`core/perception/scope.zig`) is two words: the sections a caller may
-  read and the verbs it may act with. A read out of scope is dropped from the
-  record; a verb out of scope is refused.
+  read and the sixteen verbs it may act with, each verb checked at every op it
+  gates. A read out of scope is dropped from the record; a verb out of scope answers
+  `out_of_scope`, a permission a host can grant, never `unsupported`. It only ever
+  narrows, so widening means a new session.
 - **The MCP server** (`tools/mcp/`) is one static binary over the same C ABI,
   speaking JSON-RPC on stdio, so the whole rail is tools a model can call. The
   engine and its session come up on the first call that needs one, and

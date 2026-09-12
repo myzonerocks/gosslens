@@ -76,9 +76,17 @@ A release moves that section under its tag with the date, and the release notes 
   between two devices' origins is. Anchors survive a session with their purpose and label, and
   never with a confidence nothing has re-earned.
 
-- Scope: a host narrows what a session answers with two words, the sections a caller may read and
-  the verbs it may act with. A read out of scope is dropped from the record; a verb out of scope is
-  refused.
+- Scope is a boundary rather than advice. Seventeen verbs cover the acting surface, each checked at
+  every op it gates and each one nameable, so a refusal reads as a sentence instead of a bitmask. A
+  verb out of scope answers `out_of_scope`, which a host can grant, never `unsupported`, which it
+  cannot. A session's scope only ever narrows: anything running inside it can ask, so widening means
+  a new session. A read out of scope is still dropped from the record rather than failing the call.
+
+- The model rail no longer needs vendored C++ to answer. A build without the TFLite tree runs every
+  ONNX model through the pure-Zig engine and only degrades a `.tflite` node, on the host, on Android
+  and on iOS, which is what the web build already did.
+
+- A PNG decodes through the engine, for a caller holding an encoded image and no decoder of its own.
 
 - The perception format is written down (`docs/PERCEPTION-FORMAT.md`) so a consumer implements
   against it without reading the engine, and a baseline gate holds the layout still.

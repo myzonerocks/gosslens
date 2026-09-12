@@ -531,7 +531,7 @@ val alignment = session.alignShared(theirLandmarks)
 val route = session.pathAcrossWorld(here, there)
 
 // And what this session will answer at all.
-session.setScope(-1, 0)
+session.setScope(-1, GossSession.Verb.ANNOTATE.bit or GossSession.Verb.SUBMIT_FRAME.bit)
 ```
 
 A read out of scope is dropped from the record rather than failing the call; a

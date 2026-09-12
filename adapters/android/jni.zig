@@ -1749,6 +1749,31 @@ export fn Java_com_gosslens_Gosslens_nativeRaycastWorldMesh(env: *JniEnv, cls: j
     return @intFromEnum(abi.goss_session_raycast_world_mesh(sessionFromHandle(session), origin, direction, point, distance));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeScopeVerbName(env: *JniEnv, cls: jobject, verb: i32, out_buffer: jobject, capacity: i32, len_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const len_bytes = getDirectBufferAddress(env, len_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: [*]u8 = @ptrCast(out_bytes);
+    const len: *usize = @ptrCast(@alignCast(len_bytes));
+    return @intFromEnum(abi.goss_scope_verb_name(@intCast(@max(verb, 0)), out, @intCast(@max(capacity, 0)), len));
+}
+
+/// in_buffer holds the encoded png, out_buffer takes the rgba, and meta_buffer the
+/// width, the height and the bytes the decode needs, which is the size even when
+/// out_buffer is short or absent.
+export fn Java_com_gosslens_Gosslens_nativeDecodePng(env: *JniEnv, cls: jobject, in_buffer: jobject, in_len: i32, out_buffer: jobject, capacity: i32, meta_buffer: jobject) i32 {
+    _ = cls;
+    const in_bytes = getDirectBufferAddress(env, in_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const meta_bytes = getDirectBufferAddress(env, meta_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const input: [*]const u8 = @ptrCast(in_bytes);
+    const meta: [*]u32 = @ptrCast(@alignCast(meta_bytes));
+    const out: ?[*]u8 = if (getDirectBufferAddress(env, out_buffer)) |o| @ptrCast(o) else null;
+    var needed: usize = 0;
+    const status = abi.goss_engine_decode_png(input, @intCast(@max(in_len, 0)), out, @intCast(@max(capacity, 0)), &meta[0], &meta[1], &needed);
+    meta[2] = @intCast(@min(needed, std.math.maxInt(u32)));
+    return @intFromEnum(status);
+}
+
 /// out_buffer takes the path as xyz triples and count_buffer the number of points,
 /// which is the count even when the buffer was short.
 export fn Java_com_gosslens_Gosslens_nativePathAcrossWorld(env: *JniEnv, cls: jobject, session: i64, start_buffer: jobject, goal_buffer: jobject, out_buffer: jobject, capacity: i32, count_buffer: jobject) i32 {
