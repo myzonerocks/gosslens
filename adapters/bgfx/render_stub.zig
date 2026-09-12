@@ -99,6 +99,9 @@ pub const Renderer = struct {
 
     pub const PersistentTexture = struct {
         handle: TextureHandle = .{},
+        /// Mirrors the real renderer's field so a caller setting it compiles for
+        /// every target. This renderer owns nothing either way.
+        owns_handle: bool = true,
 
         /// Holds a handle another owner vends. Nothing to own here.
         pub fn adopt(self: *PersistentTexture, handle: TextureHandle, width: u16, height: u16) void {

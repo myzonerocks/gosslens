@@ -161,6 +161,9 @@ const LensNode = struct {
     /// The lens declared this node best-effort, so a resource it cannot draw
     /// without degrades it rather than failing the whole activation.
     optional: bool = false,
+    /// .shader_pass only: the node carries an inline material graph, compiled at
+    /// splice time rather than loaded from the bundle.
+    material: bool = false,
     /// .model_gltf only: the node anchors to the tracked face.
     face_anchor: bool = false,
     /// .model_gltf face anchor only: which tracked face to bind to, an index
@@ -311,6 +314,9 @@ pub const ShaderPassNode = struct {
     mask_channel: ?u8 = null,
     /// The lens declared this pass best-effort.
     optional: bool = false,
+    /// The pass carries an inline material graph, so it has no compiled binary in
+    /// the bundle by design and a missing one is not a missing asset.
+    material: bool = false,
 };
 
 /// One lut.pass node ready for the caller to load and draw - which
@@ -970,7 +976,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .shader_pass) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.asset_stem.?, .mask_channel = node.mask_channel, .optional = node.optional });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.asset_stem.?, .mask_channel = node.mask_channel, .optional = node.optional, .material = node.material });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -2074,6 +2080,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
             .optional = node.optional,
+            .material = node_type == .shader_pass and node.material != null,
             .face_anchor = node_type == .model_gltf and node.face_anchor,
             .face_index = node.face_index,
             .retarget = node_type == .model_gltf and node.retarget,

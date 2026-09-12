@@ -4054,6 +4054,12 @@ fn swiftTypecheckCommand(b: *std.Build) ?*std.Build.Step.Run {
     const sdk_out = b.runAllowFail(&.{ "xcrun", "--sdk", "iphonesimulator", "--show-sdk-path" }, &code, .ignore) catch return null;
     const sdk = std.mem.trim(u8, sdk_out, " \r\n\t");
     if (sdk.len == 0) return null;
+    // The sdk path resolving is not the compiler being runnable: a nix shell can
+    // answer the first and not have swiftc on its path, and a gate that reds for
+    // that is the false gate this project keeps removing.
+    var swift_code: u8 = undefined;
+    _ = b.runAllowFail(&.{ "xcrun", "swiftc", "--version" }, &swift_code, .ignore) catch return null;
+    if (swift_code != 0) return null;
     const cmd = b.addSystemCommand(&.{
         "/bin/sh", "-c",
         b.fmt("xcrun swiftc -typecheck -swift-version 6 -sdk {s} -target arm64-apple-ios17.0-simulator -I sdk/swift/Sources/CGosslens/include sdk/swift/Sources/Gosslens/*.swift", .{sdk}),
@@ -4071,7 +4077,12 @@ fn kotlinCompileCommand(b: *std.Build) ?*std.Build.Step.Run {
     var code: u8 = undefined;
     _ = b.runAllowFail(&.{
         "/bin/sh", "-c",
-        "test -x sdk/kotlin/gradlew && { test -n \"$ANDROID_HOME\" || test -n \"$ANDROID_SDK_ROOT\" || test -d \"$HOME/Library/Android/sdk\"; }",
+        // The wrapper, an android sdk, and a gradle distribution already on the
+        // machine. Without the last one the first run downloads gradle inside the
+        // gate suite, which turns a source check into a network check.
+        "test -x sdk/kotlin/gradlew" ++
+            " && { test -n \"$ANDROID_HOME\" || test -n \"$ANDROID_SDK_ROOT\" || test -d \"$HOME/Library/Android/sdk\"; }" ++
+            " && test -d \"$HOME/.gradle/wrapper/dists\"",
     }, &code, .ignore) catch return null;
     if (code != 0) return null;
     const cmd = b.addSystemCommand(&.{ "./gradlew", "--quiet", "compileDebugKotlin" });

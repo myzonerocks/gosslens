@@ -261,6 +261,17 @@ pub fn main(init: std.process.Init) !u8 {
     const jni = try c.read("adapters/android/jni.zig");
     const ts = try c.readTree("sdk/ts/src", &.{".ts"});
 
+    // Every op has an implementation, not merely a declaration. The list, the
+    // header and all four wrappers can agree on a name nothing implements: one
+    // did, and it only surfaced as an android compile error, because no host
+    // build compiles the JNI that calls it.
+    for (header_ops.items) |op| {
+        const exported = try std.fmt.allocPrint(arena, "pub export fn {s}(", .{op});
+        if (std.mem.indexOf(u8, abi_source, exported) == null) {
+            try c.flag("{s} is declared everywhere and implemented nowhere: no `pub export fn` in core/abi/abi.zig", .{op});
+        }
+    }
+
     for (header_ops.items) |op| {
         if (excepted(&no_wrapper_anywhere, op)) continue;
         if (!namesOp(swift, op)) try c.flag("{s} has no Swift wrapper under sdk/swift/Sources", .{op});

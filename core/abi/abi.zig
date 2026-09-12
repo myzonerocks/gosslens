@@ -7072,6 +7072,38 @@ pub export fn goss_session_submit_source_frame(session: ?*Session, name: ?[*]con
     return .ok;
 }
 
+/// A named source's frame as a platform hardware buffer, the zero-copy ingress the
+/// camera already had: without it a second camera or a screen reaches the
+/// compositor only through a full RGBA copy. The renderer owns the imported
+/// handle, so the source borrows it rather than destroying it.
+pub export fn goss_session_submit_source_hardware_buffer(session: ?*Session, name: ?[*]const u8, name_len: usize, desc: ?*const FrameDesc, hardware_buffer: ?*anyopaque) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const buffer = hardware_buffer orelse return .invalid_argument;
+    if (!validDims(d.width, d.height)) return .invalid_argument;
+    if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+
+    const standard: math.color.Standard = switch (d.color_standard) {
+        0 => .bt601,
+        2 => .bt2020,
+        else => .bt709,
+    };
+    const range: math.color.Range = if (d.color_range == 1) .full else .video;
+    const texture = r.submitHardwareBuffer(buffer, d.width, d.height, math.color.yuvToRgb(standard, range)) catch {
+        return .unsupported;
+    };
+    // Borrowed: the renderer's zero-copy import owns this handle and frees it on
+    // the next import, so the source must not destroy it.
+    s.source_tex[idx].owns_handle = false;
+    s.source_tex[idx].adopt(texture, @intCast(d.width), @intCast(d.height));
+    s.source_dims[idx] = .{ @intCast(d.width), @intCast(d.height) };
+    s.source_has_frame[idx] = true;
+    return .ok;
+}
+
 /// Grows a scratch slice to at least `need` bytes, reusing it otherwise; null
 /// only if a grow ever fails, in which case the caller skips the frame.
 fn growScratch(gpa: std.mem.Allocator, buf: *[]u8, need: usize) ?[]u8 {
@@ -11427,10 +11459,17 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         // A degrade whatever the lens declared, the same call as the worker
         // budget: no profile is this build's situation, not a defect in the lens,
         // and a headless build has none at all.
-        for (passes) |pass| noteNode(session, pass.graph_index, .degraded, .capability_unavailable);
+        for (passes) |pass| {
+            if (pass.material) continue;
+            noteNode(session, pass.graph_index, .degraded, .capability_unavailable);
+        }
         return;
     };
     for (passes) |pass| {
+        // A pass with an inline material graph has no compiled binary in the
+        // bundle: its program is built from the graph at splice time, so a missing
+        // file is the normal case and not a missing asset.
+        if (pass.material) continue;
         var bin_buf: [512]u8 = undefined;
         const bin_name = std.fmt.bufPrint(&bin_buf, "{s}.{s}.bin", .{ pass.shader_stem, tag }) catch {
             noteResourceFailure(session, pass.graph_index, pass.optional, .asset_too_large);

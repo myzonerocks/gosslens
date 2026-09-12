@@ -294,15 +294,22 @@ export fn Java_com_gosslens_Gosslens_nativeWriteReconstruction(env: *JniEnv, cls
 export fn Java_com_gosslens_Gosslens_nativeEngineReport(env: *JniEnv, cls: jobject, engine: i64, out_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    const out: *align(1) abi.EngineReport = @ptrCast(out_bytes);
-    return @intFromEnum(abi.goss_engine_read_report(engineFromHandle(engine), out));
+    // Filled on the stack at the struct's own alignment, then copied out as bytes.
+    // A direct ByteBuffer's address carries no alignment the type system can see,
+    // and casting to an aligned pointer is a claim rather than a fact.
+    var report: abi.EngineReport = undefined;
+    const status = abi.goss_engine_read_report(engineFromHandle(engine), &report);
+    if (status == .ok) @memcpy(out_bytes[0..@sizeOf(abi.EngineReport)], std.mem.asBytes(&report));
+    return @intFromEnum(status);
 }
 
 export fn Java_com_gosslens_Gosslens_nativeSessionReport(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    const out: *align(1) abi.SessionReport = @ptrCast(out_bytes);
-    return @intFromEnum(abi.goss_session_read_report(sessionFromHandle(session), out));
+    var report: abi.SessionReport = undefined;
+    const status = abi.goss_session_read_report(sessionFromHandle(session), &report);
+    if (status == .ok) @memcpy(out_bytes[0..@sizeOf(abi.SessionReport)], std.mem.asBytes(&report));
+    return @intFromEnum(status);
 }
 
 /// The node diagnostics, flattened into one direct buffer so Kotlin reads the
