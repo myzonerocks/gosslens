@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 112u
+#define GOSS_ABI_MINOR 115u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -389,9 +389,9 @@ typedef struct goss_world_light {
  * bytes. */
 /* What a lens node is doing, as against what its manifest asked for. */
 typedef enum goss_node_state {
-    GOSS_NODE_READY = 0,     /* the author got what they wrote */
-    GOSS_NODE_DEGRADED = 1,  /* the node draws, without something it named */
-    GOSS_NODE_FAILED = 2,    /* the node draws nothing */
+    GOSS_NODE_STATE_READY = 0,     /* the author got what they wrote */
+    GOSS_NODE_STATE_DEGRADED = 1,  /* the node draws, without something it named */
+    GOSS_NODE_STATE_FAILED = 2,    /* the node draws nothing */
 } goss_node_state;
 
 /* Why a node is not ready. A host can retry a missing asset and can only
@@ -407,7 +407,47 @@ typedef enum goss_node_reason {
     GOSS_NODE_REASON_MODEL_REJECTED = 7,
     GOSS_NODE_REASON_MODEL_UNSUPPORTED = 8,
     GOSS_NODE_REASON_CAPABILITY_UNAVAILABLE = 9,
+    GOSS_NODE_REASON_CONSTRAINT_FAILED = 10, /* physics refused a body or joint */
 } goss_node_reason;
+
+/* What the engine is doing now, as against what it was asked for. Every field
+ * is measured rather than configured, so a host metering an agent or chasing a
+ * budget reads one struct instead of guessing. */
+typedef struct goss_engine_report {
+    uint32_t renderer_backend;         /* the backend bgfx brought up, bgfx's own numbering */
+    uint32_t zero_copy_import;         /* 1 when the android ycbcr import came up */
+    uint32_t texture_pool_capacity;
+    uint32_t texture_pool_live;
+    uint32_t texture_pool_peak;
+    uint32_t texture_pool_exhausted;   /* requests that found nothing free */
+    uint32_t staging_pool_capacity;
+    uint32_t staging_pool_live;
+    uint32_t staging_pool_peak;
+    uint32_t staging_pool_exhausted;
+    uint32_t texture_pool_bins;         /* distinct descriptions held; 0 means nothing pooled */
+    uint32_t texture_pool_bins_refused; /* descriptions turned away at the bin cap */
+    uint32_t staging_pool_bins;
+    uint64_t bgfx_live_bytes;          /* held on the heap no managed allocator sees */
+    uint64_t bgfx_alloc_calls_last_frame;
+    uint64_t bgfx_bytes_last_frame;
+} goss_engine_report;
+
+/* Per-session counters: what this session was asked to do, and how much of it
+ * it actually did. */
+typedef struct goss_session_report {
+    uint64_t frames_submitted;
+    uint64_t frames_rendered;
+    uint32_t degrade_level;       /* goss_degrade_level */
+    uint32_t degrade_transitions; /* a number that keeps climbing is flapping */
+    uint64_t face_analysis;
+    uint64_t hand_analysis;
+    uint64_t pose_analysis;
+    uint64_t segmentation_analysis;
+    uint64_t ml_analysis;
+    uint32_t nodes_degraded;
+    uint32_t node_reports_lost;
+    uint32_t script_faults;       /* handlers and ticks that threw; a lens still draws */
+} goss_session_report;
 
 /* One node's diagnostic. node_index is the node's index in the session graph,
  * and the key goss_session_node_report_id resolves to a manifest id. */
@@ -773,6 +813,22 @@ goss_status goss_session_read_reconstruction(goss_session *session, float *out, 
  * a moment captured on one client opens on another. count is gaussians, not
  * floats. */
 goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count);
+
+/* Graph thread. A named source's frame as a platform hardware buffer, the
+ * zero-copy ingress the camera already had: without it a second camera or a
+ * screen reaches the compositor only through a full RGBA copy. NV12 only; any
+ * status but GOSS_OK means fall back to submit_source_frame_rgba_copy. */
+goss_status goss_session_submit_source_hardware_buffer(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, void *hardware_buffer);
+
+/* Graph thread. What the engine is doing now: the backend it actually brought
+ * up, the bounded pools with their peaks and exhaustion counts, and the heap
+ * traffic of the frame just drawn. */
+goss_status goss_engine_read_report(goss_engine *engine, goss_engine_report *out_report);
+
+/* Graph thread. This session's counters: frames in and out, the rung and how
+ * often it moved, the analysis each modality actually ran, and the lens nodes
+ * that are not ready. */
+goss_status goss_session_read_report(goss_session *session, goss_session_report *out_report);
 
 /* Graph thread. How many nodes of the active lens are not doing what the
  * manifest asked, and how many diagnostics could not be recorded at all. A zero
