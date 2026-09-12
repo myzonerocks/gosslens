@@ -149,7 +149,7 @@ public final class GossSession: @unchecked Sendable {
     /// here, the call a frame loop wants.
     @discardableResult
     public func reportFrame(frameTimeUs: UInt32) -> GossDegradeLevel {
-        reportFrame(frameTimeUs: frameTimeUs, thermal: Session.platformThermal)
+        reportFrame(frameTimeUs: frameTimeUs, thermal: GossSession.platformThermal)
     }
 
     // MARK: - Face tracking

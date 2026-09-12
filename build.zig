@@ -57,9 +57,22 @@ pub fn build(b: *std.Build) void {
     const api_check_step = b.step("api-check", "Check the C ABI, abi_functions, docs/API.md and the SDK wrappers against each other");
     api_check_step.dependOn(&run_api_check.step);
 
+
     // The authoritative gate suite runs locally: hosted runners are not
     // funded, so green here is the merge bar. One command, every gate.
     const ci_step = b.step("ci", "Run every gate locally: tests, source gate, abi, vendor check, provenance");
+
+    // The SDKs compile. Three of them did not, each for a different reason, and
+    // nothing in any gate would have said so: only running a compiler does.
+    const sdk_check_step = b.step("sdk-check", "Typecheck the Swift SDK and compile the Kotlin SDK where the toolchains exist");
+    if (swiftTypecheckCommand(b)) |cmd| {
+        sdk_check_step.dependOn(&cmd.step);
+        ci_step.dependOn(&cmd.step);
+    }
+    if (kotlinCompileCommand(b)) |cmd| {
+        sdk_check_step.dependOn(&cmd.step);
+        ci_step.dependOn(&cmd.step);
+    }
     {
         const ci_gate = b.addRunArtifact(gate_exe);
         ci_gate.setCwd(b.path("."));
@@ -4017,6 +4030,35 @@ const asan_runtime_name = "libclang_rt.asan_osx_dynamic.dylib";
 /// Where the platform sanitizer runtime lives. xcrun knows where clang is and
 /// the runtime sits beside it; a toolchain may carry several version
 /// directories for one clang, so take whichever actually holds the dylib.
+/// Typechecks the Swift SDK against the simulator sdk, no linking and no vendor
+/// archives. Null where Xcode is absent, so a linux runner skips it rather than
+/// failing on a toolchain it was never going to have.
+fn swiftTypecheckCommand(b: *std.Build) ?*std.Build.Step.Run {
+    if (@import("builtin").os.tag != .macos) return null;
+    var code: u8 = undefined;
+    const sdk_out = b.runAllowFail(&.{ "xcrun", "--sdk", "iphonesimulator", "--show-sdk-path" }, &code, .ignore) catch return null;
+    const sdk = std.mem.trim(u8, sdk_out, " \r\n\t");
+    if (sdk.len == 0) return null;
+    const cmd = b.addSystemCommand(&.{
+        "/bin/sh", "-c",
+        b.fmt("xcrun swiftc -typecheck -swift-version 6 -sdk {s} -target arm64-apple-ios17.0-simulator -I sdk/swift/Sources/CGosslens/include sdk/swift/Sources/Gosslens/*.swift", .{sdk}),
+    });
+    cmd.setCwd(b.path("."));
+    cmd.setName("swiftc -typecheck (sdk/swift)");
+    return cmd;
+}
+
+/// Compiles the Kotlin SDK on the jvm. Null where the wrapper is missing.
+fn kotlinCompileCommand(b: *std.Build) ?*std.Build.Step.Run {
+    var code: u8 = undefined;
+    _ = b.runAllowFail(&.{ "/bin/sh", "-c", "test -x sdk/kotlin/gradlew" }, &code, .ignore) catch return null;
+    if (code != 0) return null;
+    const cmd = b.addSystemCommand(&.{ "./gradlew", "--quiet", "compileDebugKotlin" });
+    cmd.setCwd(b.path("sdk/kotlin"));
+    cmd.setName("gradlew compileDebugKotlin (sdk/kotlin)");
+    return cmd;
+}
+
 fn detectAsanRuntimeDir(b: *std.Build) ?[]const u8 {
     if (@import("builtin").os.tag != .macos) return null;
     var code: u8 = undefined;
