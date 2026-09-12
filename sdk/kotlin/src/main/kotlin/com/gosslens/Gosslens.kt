@@ -130,6 +130,7 @@ object Gosslens {
     internal external fun nativeCloseClip(session: Long, clip: Int): Int
     internal external fun nativeClipStep(session: Long, clip: Int, frames: Int): Int
     internal external fun nativeMediaCapabilities(engine: Long, out: ByteBuffer): Int
+    internal external fun nativePerceptionSnapshot(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
     internal external fun nativeRecordingPause(engine: Long): Int
     internal external fun nativeRecordingResume(engine: Long): Int
     internal external fun nativeReportInterruption(session: Long, kind: Int): Int
@@ -866,6 +867,14 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     }
 
     fun closeClip(clip: Int): Boolean = Gosslens.nativeCloseClip(handle, clip) == 0
+
+    /**
+     * One versioned record of what the engine currently sees, into the caller's
+     * buffer. Returns the bytes written, or the size needed when the buffer is
+     * short, so a caller sizes once. Negative on a real failure.
+     */
+    fun perceptionSnapshot(select: Int, out: ByteBuffer): Int =
+        Gosslens.nativePerceptionSnapshot(handle, select, out, out.capacity())
 
     /** Forward decodes; backward seeks and decodes. */
     fun clipStep(clip: Int, frames: Int): Boolean = Gosslens.nativeClipStep(handle, clip, frames) == 0

@@ -1210,6 +1210,17 @@ export fn Java_com_gosslens_Gosslens_nativeClipStep(env: *JniEnv, cls: jobject, 
     return @intFromEnum(abi.goss_session_clip_step(sessionFromHandle(session), @intCast(@max(clip, 0)), frames));
 }
 
+/// The perception record into a direct buffer, with the needed size answered when
+/// it does not fit, so a caller sizes once rather than guessing.
+export fn Java_com_gosslens_Gosslens_nativePerceptionSnapshot(env: *JniEnv, cls: jobject, session: i64, select: i32, out_buffer: jobject, capacity: i32) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;
+    var written: usize = 0;
+    const status = abi.goss_session_perception_snapshot(sessionFromHandle(session), @bitCast(select), out_bytes, @intCast(@max(capacity, 0)), &written);
+    if (status != .ok and status != .again) return -1;
+    return @intCast(@min(written, @as(usize, std.math.maxInt(i32))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeMediaCapabilities(env: *JniEnv, cls: jobject, engine: i64, out_buffer: jobject) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

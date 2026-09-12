@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 126u
+#define GOSS_ABI_MINOR 127u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -1096,6 +1096,30 @@ typedef struct goss_media_capabilities {
 
 /* Any thread. */
 goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capabilities *out_caps);
+
+/* Which sections a perception snapshot should carry, as bits. An agent polling
+ * every frame usually wants two of the twelve, and writing all of them to be
+ * ignored is the cost this avoids. */
+#define GOSS_PERCEPTION_FRAME (1u << 0)
+#define GOSS_PERCEPTION_FACES (1u << 1)
+#define GOSS_PERCEPTION_HANDS (1u << 2)
+#define GOSS_PERCEPTION_BODIES (1u << 3)
+#define GOSS_PERCEPTION_SEGMENTATION (1u << 4)
+#define GOSS_PERCEPTION_WORLD (1u << 5)
+#define GOSS_PERCEPTION_DEPTH (1u << 6)
+#define GOSS_PERCEPTION_SCENE (1u << 7)
+#define GOSS_PERCEPTION_TEXT (1u << 8)
+#define GOSS_PERCEPTION_AUDIO (1u << 9)
+#define GOSS_PERCEPTION_LENS (1u << 10)
+#define GOSS_PERCEPTION_ENGINE (1u << 11)
+#define GOSS_PERCEPTION_ALL 0xFFFu
+
+/* Any thread. One versioned record of what the engine currently sees, written
+ * into the caller's buffer. Every section carries its own tag, version and byte
+ * length, so a consumer built against an older schema steps over a section it does
+ * not know rather than failing. GOSS_AGAIN with out_len set to the size needed
+ * when the buffer is short, so a caller sizes once rather than guessing. */
+goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len);
 
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,

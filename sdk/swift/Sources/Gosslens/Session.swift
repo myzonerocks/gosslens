@@ -365,6 +365,26 @@ public final class GossSession: @unchecked Sendable {
         try checked(goss_session_clip_step(handle, clip, frames))
     }
 
+    // MARK: - Perception
+
+    /// One versioned record of what the engine currently sees. Every section
+    /// carries its own tag, version and byte length, so a consumer built against
+    /// an older schema steps over what it does not know. Sized in one retry
+    /// rather than guessed at.
+    public func perceptionSnapshot(select: UInt32 = 0xFFF) throws -> [UInt8] {
+        var needed = 0
+        var probe: [UInt8] = []
+        let first = goss_session_perception_snapshot(handle, select, nil, 0, &needed)
+        if first != GOSS_OK && first != GOSS_AGAIN { try checked(first) }
+        guard needed > 0 else { return [] }
+        probe = [UInt8](repeating: 0, count: needed)
+        var written = 0
+        try probe.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_perception_snapshot(handle, select, buffer.baseAddress, buffer.count, &written))
+        }
+        return Array(probe[0..<written])
+    }
+
     // MARK: - Beauty
 
     public func enableBeauty(resourceDir: String) throws {

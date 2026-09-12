@@ -24,6 +24,7 @@ const gif = @import("gif");
 const jpeg = @import("jpeg");
 const color = @import("color");
 pub const media = @import("media");
+const perception = @import("perception");
 const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
@@ -292,6 +293,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_close_clip(goss_session *session, uint32_t clip)",
     "goss_status goss_session_clip_step(goss_session *session, uint32_t clip, int32_t frames)",
     "goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capabilities *out_caps)",
+    "goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)",
     "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
     "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
     "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
@@ -8226,6 +8228,136 @@ pub export fn goss_session_clip_step(session: ?*Session, clip: u32, frames: i32)
 /// What this build's media backend declares it encodes. A host reads this instead
 /// of assuming from the platform, which is what made the two-boolean contract a
 /// problem in the first place.
+/// One versioned record of what the engine currently sees, written into the
+/// caller's buffer. Selecting sections matters: an agent polling every frame
+/// usually wants two of the twelve, and writing all of them to be ignored is the
+/// cost this avoids. A short buffer answers the size it needed rather than a
+/// partial record, so a caller sizes once.
+pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const buffer: []u8 = if (out) |p| p[0..capacity] else &.{};
+    const want: perception.Select = @bitCast(select);
+
+    const now_us = if (s.current) |cur| cur.desc.timestamp_us else 0;
+    var w = perception.Writer.init(buffer, now_us);
+
+    if (want.frame) {
+        w.beginSection(.frame, 1);
+        if (s.current) |cur| {
+            w.u32v(cur.desc.width);
+            w.u32v(cur.desc.height);
+            w.u32v(cur.desc.pixel_format);
+            w.u32v(cur.desc.color_standard);
+            w.u32v(cur.desc.color_range);
+            w.u32v(cur.desc.flags);
+            w.i64v(cur.desc.timestamp_us);
+            w.u64v(s.frames_submitted);
+        } else {
+            // No frame is a fact worth carrying: an agent reading zeros here knows
+            // the session has not been fed, rather than reading a stale one.
+            w.u32v(0);
+            w.u32v(0);
+            w.u32v(0);
+            w.u32v(0);
+            w.u32v(0);
+            w.u32v(0);
+            w.i64v(0);
+            w.u64v(s.frames_submitted);
+        }
+        w.endSection();
+    }
+
+    if (want.faces) {
+        w.beginSection(.faces, 1);
+        w.u32v(s.face_count);
+        for (s.face_results[0..@min(s.face_count, s.face_results.len)]) |result| {
+            w.f32v(result.presence);
+            w.u32v(result.landmark_count_out);
+            const n = @min(result.landmark_count_out, face.landmark_count);
+            w.u32v(n);
+            for (0..n) |i| {
+                w.f32v(result.landmarks[i * 3]);
+                w.f32v(result.landmarks[i * 3 + 1]);
+                w.f32v(result.landmarks[i * 3 + 2]);
+            }
+        }
+        w.endSection();
+    }
+
+    if (want.hands) {
+        w.beginSection(.hands, 1);
+        if (currentHands(s)) |hands| {
+            w.u32v(hands.hand_count);
+            for (0..@min(hands.hand_count, hands.hands.len)) |i| {
+                const h = hands.hands[i];
+                w.f32v(h.handedness);
+                w.u32v(h.gesture);
+                w.f32v(h.gesture_score);
+            }
+        } else {
+            w.u32v(0);
+        }
+        w.endSection();
+    }
+
+    if (want.bodies) {
+        w.beginSection(.bodies, 1);
+        w.u32v(s.body_count);
+        w.endSection();
+    }
+
+    if (want.audio) {
+        w.beginSection(.audio, 1);
+        w.f32v(s.audio.level);
+        w.u32v(if (s.audio.beat) 1 else 0);
+        w.u32v(if (s.audio_engine_fed) 1 else 0);
+        w.endSection();
+    }
+
+    if (want.lens) {
+        w.beginSection(.lens, 1);
+        if (s.active_lens) |*l| {
+            w.str(l.manifest.id);
+            w.u32v(@intCast(s.node_reports.items.len));
+            for (s.node_reports.items) |report| {
+                w.u32v(report.node_index);
+                w.u32v(report.state);
+                w.u32v(report.reason);
+            }
+        } else {
+            w.str("");
+            w.u32v(0);
+        }
+        w.endSection();
+    }
+
+    if (want.engine) {
+        w.beginSection(.engine, 1);
+        w.u32v(@intFromEnum(s.controller.level));
+        w.u32v(s.degrade_transitions);
+        w.u64v(s.frames_rendered);
+        w.u32v(s.script_faults);
+        w.endSection();
+    }
+
+    // Text, segmentation, world, depth and scene are declared in the format from
+    // day one and land in the waves that own them. Writing them empty now is what
+    // keeps the format from breaking when they fill.
+    if (want.text) {
+        w.beginSection(.text, 1);
+        w.u32v(0);
+        w.endSection();
+    }
+
+    const total = w.finish() catch {
+        len_out.* = w.needed;
+        return .again;
+    };
+    len_out.* = total;
+    return .ok;
+}
+
 pub export fn goss_engine_media_capabilities(engine: ?*Engine, out_caps: ?*MediaCapabilities) Status {
     _ = engine orelse return .invalid_argument;
     const out = out_caps orelse return .invalid_argument;

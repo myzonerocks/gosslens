@@ -230,6 +230,7 @@ the capability is present on all three platforms; only the mechanism differs.
 | `goss_session_close_clip` | `closeClip(clip)` | native SDKs |
 | `goss_session_clip_step` | `clipStep(clip, frames)`, moves by whole frames and leaves the clip on the one it lands on. Forward decodes; backward seeks and decodes, because a forward-only decoder cannot step back any other way | native SDKs |
 | `goss_engine_media_capabilities` | `mediaCapabilities()`, what this build's media backend declares it encodes as bit sets over the codec and container enums, so a host asks rather than assuming from the platform | all SDKs |
+| `goss_session_perception_snapshot` | `perceptionSnapshot(select)`, one versioned record of what the engine currently sees: the frame, faces, hands, bodies, audio, the active lens with its node states, and the engine's own counters, each section tagged with its own version and byte length so a consumer built against an older schema steps over what it does not know. `GOSS_AGAIN` with the needed size when the buffer is short | all SDKs |
 
 ### Events and degradation
 

@@ -306,6 +306,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("color", colorModule(b, target, optimize));
     abi_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
     abi_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
+    abi_module.addImport("perception", perceptionModule(b, target, optimize));
     abi_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
     abi_module.addImport("photo", photoModule(b, target, optimize, null));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -940,6 +941,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("color", colorModule(b, target, optimize));
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
         abi_tracking_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
+        abi_tracking_module.addImport("perception", perceptionModule(b, target, optimize));
         abi_tracking_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -1217,6 +1219,7 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("color", colorModule(b, wasm_target, opt_small));
         abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, opt_small, math_wasm));
         abi_wasm.addImport("media", mediaCoreModule(b, wasm_target, opt_small, math_wasm));
+        abi_wasm.addImport("perception", perceptionModule(b, wasm_target, opt_small));
         abi_wasm.addImport("media_video", mediaVideoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("photo", photoModule(b, wasm_target, opt_small, null));
         abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, opt_small));
@@ -1441,6 +1444,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("color", conformance_color_module);
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize, math_module));
         abi_conformance_module.addImport("media", mediaCoreModule(b, target, optimize, math_module));
+        abi_conformance_module.addImport("perception", perceptionModule(b, target, optimize));
         abi_conformance_module.addImport("media_video", mediaVideoModule(b, target, optimize, null));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize, null));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -1874,6 +1878,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("color", colorModule(b, android_target, optimize));
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize, math_android));
     abi_android.addImport("media", mediaCoreModule(b, android_target, optimize, math_android));
+    abi_android.addImport("perception", perceptionModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
     abi_android.addImport("sfx", sfxModule(b, android_target, optimize));
@@ -2273,6 +2278,18 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
 /// The media contracts the core owns: codec, container, packet, clock and the
 /// backend registry. Pure, no vendor and no platform, so it compiles for every
 /// target and an adapter implements it rather than defining it.
+/// The perception record's format: versioned, self-describing, and pure, so a
+/// consumer can be written against it without a renderer.
+fn perceptionModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-perception-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    return b.addModule(key, .{
+        .root_source_file = b.path("core/perception/snapshot.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
 fn mediaCoreModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math: *std.Build.Module) *std.Build.Module {
     const key = b.fmt("goss-media-core-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
     if (b.modules.get(key)) |existing| return existing;
@@ -2490,6 +2507,7 @@ fn recordingModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     // Every recording backend declares its capability through the core contract
     // rather than exporting its own codec enum as the vocabulary.
     module.addImport("media", mediaCoreModule(b, target, optimize, math));
+    module.addImport("perception", perceptionModule(b, target, optimize));
     if (android) {
         // Translation-only sysroot includes: link_libc here would mix
         // zig's bundled bionic headers with the sysroot's and conflict;
@@ -4510,6 +4528,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("color", colorModule(b, ios_target, optimize));
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize, math_ios));
     abi_ios.addImport("media", mediaCoreModule(b, ios_target, optimize, math_ios));
+    abi_ios.addImport("perception", perceptionModule(b, ios_target, optimize));
     abi_ios.addImport("media_video", mediaVideoModule(b, ios_target, optimize, null));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize, null));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
@@ -5170,6 +5189,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("color", colorModule(b, em_target, opt_small));
     abi_em.addImport("media_recording", recordingModule(b, em_target, opt_small, math_em));
     abi_em.addImport("media", mediaCoreModule(b, em_target, opt_small, math_em));
+    abi_em.addImport("perception", perceptionModule(b, em_target, opt_small));
     abi_em.addImport("media_video", mediaVideoModule(b, em_target, opt_small, null));
     abi_em.addImport("photo", photoModule(b, em_target, opt_small, null));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, opt_small));
