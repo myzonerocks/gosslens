@@ -19,7 +19,9 @@ public final class GossSession: @unchecked Sendable {
     /// on every call and at destroy, so it holds the engine strongly: ARC
     /// cannot deinit the engine while any session is still alive, which
     /// keeps goss_session_destroy ordered before goss_engine_destroy.
-    private let engine: GossEngine
+    /// Held strongly, and readable by the extensions: the engine report is an
+    /// engine-level call a session is the natural place to reach.
+    let engine: GossEngine
     private var destroyed = false
 
     // Grow-only scratch for the per-frame multi-face and multi-body
@@ -103,6 +105,16 @@ public final class GossSession: @unchecked Sendable {
     /// on Android); hardwareBuffer is the opaque platform handle. False means
     /// the buffer could not be imported, the signal to fall back to
     /// submitFrameCopy for this stream.
+    /// A named composite source's frame straight from a platform buffer. Apple
+    /// has no AHardwareBuffer, so this reports false there; the source path for
+    /// this platform is submitSourceFrame with a Metal texture.
+    public func submitSourceHardwareBuffer(name: String, desc: GossFrameDesc, hardwareBuffer: UnsafeMutableRawPointer) -> Bool {
+        var raw = desc.raw
+        return name.withCString { cName in
+            goss_session_submit_source_hardware_buffer(handle, UnsafeRawPointer(cName).assumingMemoryBound(to: UInt8.self), strlen(cName), &raw, hardwareBuffer) == GOSS_OK
+        }
+    }
+
     public func submitHardwareBuffer(desc: GossFrameDesc, hardwareBuffer: UnsafeMutableRawPointer) -> Bool {
         var raw = desc.raw
         return goss_session_submit_hardware_buffer(handle, &raw, hardwareBuffer) == GOSS_OK
@@ -117,6 +129,27 @@ public final class GossSession: @unchecked Sendable {
     public func reportFrame(frameTimeUs: UInt32, thermal: GossThermal) -> GossDegradeLevel {
         let raw = goss_session_report_frame(handle, frameTimeUs, goss_thermal(rawValue: thermal.rawValue))
         return GossDegradeLevel(rawValue: raw.rawValue) ?? .passthrough
+    }
+
+    /// The platform's current thermal pressure, mapped onto the engine's
+    /// four states. Read it once per frame and pass it to reportFrame: the
+    /// engine can measure a frame period on its own but has no way to reach
+    /// this.
+    public static var platformThermal: GossThermal {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: return .nominal
+        case .fair: return .fair
+        case .serious: return .serious
+        case .critical: return .critical
+        @unknown default: return .nominal
+        }
+    }
+
+    /// Reports one finished frame with the platform's thermal state read
+    /// here, the call a frame loop wants.
+    @discardableResult
+    public func reportFrame(frameTimeUs: UInt32) -> GossDegradeLevel {
+        reportFrame(frameTimeUs: frameTimeUs, thermal: GossSession.platformThermal)
     }
 
     // MARK: - Face tracking

@@ -256,6 +256,15 @@ the same core compiled to wasm. `sdk/c` packages the same header and a linkable
 No C++ type crosses it. No vendor type crosses it. No platform object crosses
 it except as an opaque platform handle described by the ABI contract.
 
+Two wasm builds exist and they are not interchangeable. The web SDK loads
+`gosslens_web`, an emscripten build carrying the real physics, script and audio
+adapters. The `wasm` step's `gosslens.wasm` is a `wasm32-freestanding` build
+that ships to nobody: it is a compile gate on `zig build ci`, proving the core
+links with no libc and no threads, which is what keeps an accidental dependence
+on either out of `core/`. Its physics, script and audio adapters are stubs
+because that target cannot carry them, and reading it as the web's capability
+set is a mistake.
+
 ABI changes are additive within a major version and are checked against every
 binding.
 

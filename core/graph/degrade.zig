@@ -26,6 +26,46 @@ pub const Level = enum(u8) {
     }
 };
 
+/// What each rung actually stops. A stride of N runs that analysis on one
+/// frame in N and reuses the last published result in between; zero stops it.
+/// The camera path is untouched at every rung, so the preview keeps drawing
+/// and a recording keeps every frame while the work stacked on top thins out.
+pub const Plan = struct {
+    face_stride: u8,
+    hand_stride: u8,
+    pose_stride: u8,
+    segmentation_stride: u8,
+    ml_stride: u8,
+    beauty: Beauty,
+    effects: Effects,
+
+    /// full runs the whole beauty chain, core keeps smoothing and tone and
+    /// drops makeup, lashes, reshape and retouch, off bypasses the bridge
+    /// without tearing it down so recovery is a flag rather than a re-init.
+    pub const Beauty = enum { full, core, off };
+    /// off skips the lens chain walk and draws the camera straight through.
+    pub const Effects = enum { full, off };
+
+    /// True when an analysis on this stride runs on the given frame.
+    pub fn runs(stride: u8, frame_index: u64) bool {
+        if (stride == 0) return false;
+        return frame_index % stride == 0;
+    }
+};
+
+/// The plan a rung carries. Strides lengthen before anything switches off, and
+/// the segmentation mask is the first whole capability to go because its
+/// degrade (a zero mask) is already a defined, tested behaviour.
+pub fn planFor(level: Level) Plan {
+    return switch (level) {
+        .full => .{ .face_stride = 1, .hand_stride = 1, .pose_stride = 1, .segmentation_stride = 1, .ml_stride = 1, .beauty = .full, .effects = .full },
+        .reduced_ml_cadence => .{ .face_stride = 2, .hand_stride = 2, .pose_stride = 2, .segmentation_stride = 2, .ml_stride = 2, .beauty = .full, .effects = .full },
+        .segmentation_off => .{ .face_stride = 2, .hand_stride = 2, .pose_stride = 2, .segmentation_stride = 0, .ml_stride = 3, .beauty = .full, .effects = .full },
+        .beauty_simplified => .{ .face_stride = 3, .hand_stride = 3, .pose_stride = 3, .segmentation_stride = 0, .ml_stride = 4, .beauty = .core, .effects = .full },
+        .passthrough => .{ .face_stride = 0, .hand_stride = 0, .pose_stride = 0, .segmentation_stride = 0, .ml_stride = 0, .beauty = .off, .effects = .off },
+    };
+}
+
 pub const ThermalState = enum(u8) { nominal, fair, serious, critical };
 
 pub const Inputs = struct {
@@ -33,6 +73,10 @@ pub const Inputs = struct {
     frame_time_us: u32,
     /// Fed by the SDK from the platform thermal API.
     thermal: ThermalState,
+    /// A bounded pool turned a frame-path request away. The frame drew without
+    /// that capability, so the level has to come down or it will keep doing so:
+    /// the pools are fixed, and the only thing that shrinks demand is a rung.
+    resource_pressure: bool = false,
 };
 
 pub const Config = struct {
@@ -83,9 +127,11 @@ pub const Controller = struct {
 
         const degrade_threshold = c.config.budget_us / 100 * c.config.degrade_pct;
         const recover_threshold = c.config.budget_us / 100 * c.config.recover_pct;
-        const over = inputs.frame_time_us > degrade_threshold or
+        const over = inputs.resource_pressure or
+            inputs.frame_time_us > degrade_threshold or
             (inputs.thermal == .serious and inputs.frame_time_us > recover_threshold);
-        const under = inputs.frame_time_us < recover_threshold and inputs.thermal == .nominal;
+        const under = !inputs.resource_pressure and
+            inputs.frame_time_us < recover_threshold and inputs.thermal == .nominal;
 
         if (over) {
             c.over_streak += 1;
@@ -201,4 +247,53 @@ test "the ladder walks all the way down and stops" {
     _ = stepMany(&c, slow, 100);
     try t.expectEqual(Level.passthrough, c.level);
     try t.expect(stepMany(&c, slow, 100) == null);
+}
+
+test "the plan thins analysis before it stops any of it" {
+    const full = planFor(.full);
+    try t.expectEqual(@as(u8, 1), full.face_stride);
+    try t.expectEqual(Plan.Beauty.full, full.beauty);
+    try t.expectEqual(Plan.Effects.full, full.effects);
+
+    const reduced = planFor(.reduced_ml_cadence);
+    try t.expect(reduced.face_stride > full.face_stride);
+    try t.expect(reduced.segmentation_stride > 0);
+
+    try t.expectEqual(@as(u8, 0), planFor(.segmentation_off).segmentation_stride);
+    try t.expectEqual(Plan.Beauty.core, planFor(.beauty_simplified).beauty);
+
+    const bottom = planFor(.passthrough);
+    try t.expectEqual(Plan.Beauty.off, bottom.beauty);
+    try t.expectEqual(Plan.Effects.off, bottom.effects);
+    try t.expectEqual(@as(u8, 0), bottom.face_stride);
+}
+
+test "a stride runs one frame in n and a zero stride never runs" {
+    try t.expect(Plan.runs(1, 0));
+    try t.expect(Plan.runs(1, 7));
+    try t.expect(Plan.runs(2, 0));
+    try t.expect(!Plan.runs(2, 1));
+    try t.expect(Plan.runs(2, 2));
+    try t.expect(!Plan.runs(0, 0));
+    try t.expect(!Plan.runs(0, 9));
+}
+
+test "pool exhaustion degrades a frame that is inside its budget" {
+    var c = Controller.init(.{ .budget_us = 16000, .degrade_dwell = 3 });
+    // Well inside budget and cool: without pressure this would be recovering.
+    for (0..2) |_| try t.expect(c.step(.{ .frame_time_us = 4000, .thermal = .nominal, .resource_pressure = true }) == null);
+    const moved = c.step(.{ .frame_time_us = 4000, .thermal = .nominal, .resource_pressure = true }) orelse return error.NoTransition;
+    try t.expectEqual(Level.full, moved.from);
+    try t.expectEqual(Level.reduced_ml_cadence, moved.to);
+}
+
+test "pressure blocks recovery even on comfortable frames" {
+    var c = Controller.init(.{ .budget_us = 16000, .recover_dwell = 2, .degrade_dwell = 1000 });
+    c.level = .segmentation_off;
+    for (0..8) |_| _ = c.step(.{ .frame_time_us = 1000, .thermal = .nominal, .resource_pressure = true });
+    try t.expectEqual(Level.segmentation_off, c.level);
+    // With the pressure gone the same frames earn the rung back.
+    _ = c.step(.{ .frame_time_us = 1000, .thermal = .nominal });
+    _ = c.step(.{ .frame_time_us = 1000, .thermal = .nominal });
+    try t.expectEqual(Level.reduced_ml_cadence, c.level);
 }

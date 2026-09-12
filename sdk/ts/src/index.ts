@@ -1092,6 +1092,42 @@ export class GossEngine {
     return sum;
   }
 
+
+
+  /// What the engine is doing now, as against what it was asked for. Every
+  /// field is measured. The u64 fields are read as their low word, which holds
+  /// the whole count at any rate this engine reaches.
+  engineReport(): GossEngineReport | null {
+    const bytes = 14 * 4 + 3 * 8;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      if (this.mod.ccall("goss_engine_read_report", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
+      // The low word of each u64 is the whole count at any size this engine
+      // reaches, and reading it avoids a BigInt in the hot read.
+      const w = (offset: number) => this.mod.HEAPU32[(ptr + offset) >> 2];
+      return {
+        rendererBackend: w(0),
+        zeroCopyImport: w(4) !== 0,
+        texturePoolCapacity: w(8),
+        texturePoolLive: w(12),
+        texturePoolPeak: w(16),
+        texturePoolExhausted: w(20),
+        stagingPoolCapacity: w(24),
+        stagingPoolLive: w(28),
+        stagingPoolPeak: w(32),
+        stagingPoolExhausted: w(36),
+        texturePoolBins: w(40),
+        texturePoolBinsRefused: w(44),
+        stagingPoolBins: w(48),
+        bgfxLiveBytes: w(56),
+        bgfxAllocCallsLastFrame: w(64),
+        bgfxBytesLastFrame: w(72),
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
   destroy(): void {
     this.mod.ccall("goss_engine_destroy", null, ["number"], [this.handle]);
     // The renderer is gone now, so bgfx no longer references the selector.
@@ -1147,6 +1183,72 @@ export interface GossCaptureUi {
 /// its own scratch allocations (frame descriptor, pixel buffer,
 /// landmarks) rather than one shared per-engine pool - matches every
 /// other SDK's own per-session confinement.
+/// What the engine is doing now, as against what it was asked for.
+export interface GossEngineReport {
+  rendererBackend: number;
+  zeroCopyImport: boolean;
+  texturePoolCapacity: number;
+  texturePoolLive: number;
+  texturePoolPeak: number;
+  texturePoolExhausted: number;
+  stagingPoolCapacity: number;
+  stagingPoolLive: number;
+  stagingPoolPeak: number;
+  stagingPoolExhausted: number;
+  texturePoolBins: number;
+  texturePoolBinsRefused: number;
+  stagingPoolBins: number;
+  bgfxLiveBytes: number;
+  bgfxAllocCallsLastFrame: number;
+  bgfxBytesLastFrame: number;
+}
+
+/// This session's counters: work asked for against work done.
+export interface GossSessionReport {
+  framesSubmitted: number;
+  framesRendered: number;
+  degradeLevel: GossDegradeLevel;
+  degradeTransitions: number;
+  faceAnalysis: number;
+  handAnalysis: number;
+  poseAnalysis: number;
+  segmentationAnalysis: number;
+  mlAnalysis: number;
+  nodesDegraded: number;
+  nodeReportsLost: number;
+  scriptFaults: number;
+}
+
+/// What a lens node is doing, as against what its manifest asked for.
+export enum GossNodeState {
+  Ready = 0,
+  Degraded = 1,
+  Failed = 2,
+}
+
+/// Why a node is not ready.
+export enum GossNodeReason {
+  None = 0,
+  OutOfMemory = 1,
+  AssetMissing = 2,
+  AssetMalformed = 3,
+  AssetTooLarge = 4,
+  ShaderMissing = 5,
+  ShaderLinkFailed = 6,
+  ModelRejected = 7,
+  ModelUnsupported = 8,
+  CapabilityUnavailable = 9,
+  ConstraintFailed = 10,
+}
+
+/// One lens node that is not doing what its manifest asked.
+export interface GossNodeReport {
+  id: string;
+  nodeIndex: number;
+  state: GossNodeState;
+  reason: GossNodeReason;
+}
+
 export class GossSession {
   private worldScratchPtr = 0;
   private worldScratchLen = 0;
@@ -1178,6 +1280,7 @@ export class GossSession {
   /// freed in destroy() - no per-call wasm heap churn.
   private scratchPtr = 0;
   private scratchCapacity = 0;
+  private lensChangeInFlight = false;
 
   private constructor(
     private readonly mod: EngineModule,
@@ -1257,16 +1360,46 @@ export class GossSession {
   /// A lens built entirely from beauty.* nodes (beauty-baseline, say)
   /// activates and runs for real regardless, since those go through
   /// applyWebBeautyChain's own embedded shaders, not a per-lens one.
-  activateLens(manifestJson: string): void {
+  /// Activates a lens, resolving false when it is live but a node the manifest did
+  /// not mark optional could not do what it asked; nodeReports says which and why.
+  /// On the WebGPU build this suspends and creates work that reaches Dawn, so not
+  /// awaiting left the module suspended and the next render reentered it.
+  async activateLens(manifestJson: string): Promise<boolean> {
     const bytes = new TextEncoder().encode(manifestJson);
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]);
     this.mod.HEAPU8.set(bytes, ptr);
-    this.mod.ccall("goss_session_activate_lens", "number", ["number", "number", "number"], [this.handle, ptr, bytes.length]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    this.lensChangeInFlight = true;
+    try {
+      const status = (await this.mod.ccall(
+        "goss_session_activate_lens",
+        "number",
+        ["number", "number", "number"],
+        [this.handle, ptr, bytes.length],
+        { async: true },
+      )) as number;
+      return status === GOSS_OK;
+    } finally {
+      this.lensChangeInFlight = false;
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+    }
   }
 
-  deactivateLens(): void {
-    this.mod.ccall("goss_session_deactivate_lens", null, ["number"], [this.handle]);
+  /// Deactivation destroys the same resources, so it suspends for the same
+  /// reason and is awaited for the same reason.
+  async deactivateLens(): Promise<void> {
+    this.lensChangeInFlight = true;
+    try {
+      await this.mod.ccall("goss_session_deactivate_lens", null, ["number"], [this.handle], { async: true });
+    } finally {
+      this.lensChangeInFlight = false;
+    }
+  }
+
+  /// True while an activation or deactivation is unwound. A render during that
+  /// window reenters a suspended module, which Asyncify cannot do, so a caller
+  /// driving its own frame loop skips the frame rather than calling in.
+  get isLensChangeInFlight(): boolean {
+    return this.lensChangeInFlight;
   }
 
   /// Advances the active lens's triggers/param ramps by dtUs, evaluating
@@ -2878,6 +3011,92 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
   }
 
+  /// This session's counters: frames in and out, the rung and how often it
+  /// moved, the analysis each modality ran, the nodes that are not ready.
+  sessionReport(): GossSessionReport | null {
+    const bytes = 2 * 8 + 2 * 4 + 5 * 8 + 3 * 4;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    try {
+      if (this.mod.ccall("goss_session_read_report", "number", ["number", "number"], [this.handle, ptr]) !== 0) return null;
+      // The low word of each u64 is the whole count at any rate this engine
+      // reaches, and reading it avoids a BigInt in the hot read.
+      const low = (offset: number) => this.mod.HEAPU32[(ptr + offset) >> 2];
+      return {
+        framesSubmitted: low(0),
+        framesRendered: low(8),
+        degradeLevel: low(16),
+        degradeTransitions: low(20),
+        faceAnalysis: low(24),
+        handAnalysis: low(32),
+        poseAnalysis: low(40),
+        segmentationAnalysis: low(48),
+        mlAnalysis: low(56),
+        nodesDegraded: low(64),
+        nodeReportsLost: low(68),
+        scriptFaults: low(72),
+      };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes]);
+    }
+  }
+
+  /// Every node of the active lens that is not doing what its manifest asked,
+  /// beside how many diagnostics could not be recorded at all. An empty list
+  /// with a non-zero lost count means the lens degraded in ways the session
+  /// could not write down, which is not the same as a lens that is fine.
+  nodeReports(): { reports: GossNodeReport[]; lost: number } {
+    const scratch = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    let count = 0;
+    let lost = 0;
+    try {
+      const status = this.mod.ccall(
+        "goss_session_node_report_count",
+        "number",
+        ["number", "number", "number"],
+        [this.handle, scratch, scratch + 4],
+      ) as number;
+      if (status !== 0) return { reports: [], lost: 0 };
+      count = this.mod.HEAPU32[scratch >> 2];
+      lost = this.mod.HEAPU32[(scratch + 4) >> 2];
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [scratch, 8]);
+    }
+
+    const reports: GossNodeReport[] = [];
+    // One report is three u32; the id buffer is sized for a manifest node id.
+    const record = this.mod.ccall("goss_alloc", "number", ["number"], [12]) as number;
+    const idBytes = 256;
+    const idPtr = this.mod.ccall("goss_alloc", "number", ["number"], [idBytes + 4]) as number;
+    try {
+      for (let at = 0; at < count; at += 1) {
+        if (this.mod.ccall("goss_session_node_report_at", "number", ["number", "number", "number"], [this.handle, at, record]) !== 0) break;
+        const nodeIndex = this.mod.HEAPU32[record >> 2];
+        const state = this.mod.HEAPU32[(record + 4) >> 2];
+        const reason = this.mod.HEAPU32[(record + 8) >> 2];
+        let id = "";
+        const lenPtr = idPtr + idBytes;
+        if (
+          this.mod.ccall(
+            "goss_session_node_report_id",
+            "number",
+            ["number", "number", "number", "number", "number"],
+            [this.handle, at, idPtr, idBytes, lenPtr],
+          ) === 0
+        ) {
+          const len = this.mod.HEAPU32[lenPtr >> 2];
+          if (len > 0 && len <= idBytes) {
+            id = new TextDecoder().decode(this.mod.HEAPU8.subarray(idPtr, idPtr + len));
+          }
+        }
+        reports.push({ id, nodeIndex, state: state as GossNodeState, reason: reason as GossNodeReason });
+      }
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [record, 12]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [idPtr, idBytes + 4]);
+    }
+    return { reports, lost };
+  }
+
   /// Submits a bare camera pose and projection, for a host driving a scan with
   /// no platform world session behind it: a selfie scan on the front camera,
   /// where the depth comes from a lens's own net rather than a sensor. Both
@@ -2952,7 +3171,10 @@ export class GossSession {
   /// Reports one finished frame: measured whole-pipeline time plus
   /// thermal pressure (nominal by default - no browser API surfaces
   /// device thermal state). Returns the degradation level in effect
-  /// for the next frame.
+  /// for the next frame. A page that never calls this still degrades:
+  /// the engine derives the frame period from the camera timestamps it
+  /// is handed. Calling it lets the page account for its own work
+  /// outside the engine as well.
   reportFrame(frameTimeUs: number, thermal: GossThermal = GossThermal.Nominal): GossDegradeLevel {
     return this.mod.ccall("goss_session_report_frame", "number", ["number", "number", "number"], [this.handle, frameTimeUs, thermal]);
   }
@@ -3066,12 +3288,20 @@ export class GossPreviewSession {
     this.session.setBlush(amount);
   }
 
-  activateLens(manifestJson: string): void {
-    this.session.activateLens(manifestJson);
+  /// Awaited, because activation suspends on the WebGPU build. A caller that
+  /// fires and forgets leaves the module unwound and the next render reenters
+  /// it.
+  activateLens(manifestJson: string): Promise<boolean> {
+    return this.session.activateLens(manifestJson);
   }
 
-  deactivateLens(): void {
-    this.session.deactivateLens();
+  deactivateLens(): Promise<void> {
+    return this.session.deactivateLens();
+  }
+
+  /// True while a lens change is unwound; a frame loop skips its render.
+  get isLensChangeInFlight(): boolean {
+    return this.session.isLensChangeInFlight;
   }
 
   tickLens(dtUs: number, signals: GossLensSignals = {}): void {

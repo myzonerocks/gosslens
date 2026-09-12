@@ -247,7 +247,7 @@ const Sync = struct {
         const archive_sha256 = if (override) |o| o.sha256 else pin.archive_sha256;
         const archive_ext = if (std.mem.endsWith(u8, url, ".tar.xz")) ".tar.xz" else ".tar.gz";
 
-        Io.Dir.cwd().createDirPath(s.io, ".vendor-archives") catch {};
+        Io.Dir.cwd().createDirPath(s.io, ".vendor-archives") catch {}; // failure ignored: the write below reports a path that truly cannot be made
         const archive_path = try std.fmt.allocPrint(s.arena, ".vendor-archives/{s}-{s}{s}", .{ pin.name, pin.commit, archive_ext });
         if (!s.fileDigestMatches(archive_path, archive_sha256)) {
             std.debug.print("vendor-sync: fetching {s}\n", .{url});
@@ -259,14 +259,14 @@ const Sync = struct {
         }
 
         const dest = try std.fmt.allocPrint(s.arena, ".vendor/{s}", .{pin.name});
-        Io.Dir.cwd().deleteTree(s.io, dest) catch {};
+        Io.Dir.cwd().deleteTree(s.io, dest) catch {}; // failure ignored: clearing a tree that is not there is the outcome this wanted, and a real failure surfaces on the createDirPath below
         try Io.Dir.cwd().createDirPath(s.io, dest);
         try s.run(try tarArgv(s.arena, pin, archive_path, dest));
 
         const license_path = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dest, pin.license_file });
         if (!s.fileDigestMatches(license_path, pin.license_sha256)) {
             s.fail("{s}: license file digest mismatch; upstream changed its license text", .{name});
-            Io.Dir.cwd().deleteTree(s.io, dest) catch {};
+            Io.Dir.cwd().deleteTree(s.io, dest) catch {}; // failure ignored: the license mismatch above already failed the sync; the half-extracted tree is refused again next run
             return;
         }
 

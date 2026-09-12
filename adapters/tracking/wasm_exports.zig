@@ -1,8 +1,7 @@
-//! The web tracking module's export surface. The browser has its own
-//! threading story: the SDK runs this whole module inside a Worker, so
-//! every call here executes the pipeline synchronously and returns. One
-//! instance per create call, frames in as RGBA straight from the camera
-//! canvas, the frozen result struct out.
+//! The web tracking module's export surface. The SDK runs this module inside a
+//! Worker, so every call here runs the pipeline synchronously and returns. One
+//! instance per create, frames in as RGBA off the camera canvas, the frozen
+//! result struct out.
 
 const std = @import("std");
 const bundle = @import("bundle");
@@ -14,6 +13,8 @@ const tracker = @import("tracker");
 const pose = @import("pose");
 const hand = @import("hand");
 const segmentation_core = @import("segmentation_core");
+const pose_core = @import("pose_core");
+const hand_core = @import("hand_core");
 
 const gpa = std.heap.wasm_allocator;
 
@@ -310,195 +311,8 @@ pub export fn goss_segmentation_read_class_mask(core: ?*segmentation_core.Core, 
     return status_ok;
 }
 
-// --- Pose ---
-// The pose pipeline, the face module's twin for a different bundle: a
-// pose detector then the landmark model, decoded to pose.Result. Stands
-// on its own instance; RGBA frames in, the pose result out.
-
-const pose_max_candidates = 8;
-const pose_presence_floor = 0.5;
-
-const PoseInstance = struct {
-    task_bytes: []u8,
-    detector_payload: bundle.Payload,
-    landmarks_payload: bundle.Payload,
-    detector_engine: runtime.Engine,
-    landmarks_engine: runtime.Engine,
-    detector_side: u32,
-    landmark_side: u32,
-    anchors: []detector.Anchor,
-    detector_tensor: []f32,
-    landmark_tensor: []f32,
-    lock: ?sampler.Region = null,
-    result: pose.Result = std.mem.zeroes(pose.Result),
-    has_result: bool = false,
-    serial: u64 = 0,
-};
-
-pub export fn goss_pose_result_size() usize {
-    return @sizeOf(pose.Result);
-}
-
-fn createPoseInstance(task_ptr: ?[*]const u8, task_len: usize) !*PoseInstance {
-    const task_source = task_ptr orelse return error.CreateFailed;
-    if (task_len == 0) return error.CreateFailed;
-
-    const instance = try gpa.create(PoseInstance);
-    errdefer gpa.destroy(instance);
-    const owned = try gpa.dupe(u8, task_source[0..task_len]);
-    errdefer gpa.free(owned);
-
-    const task = try bundle.Bundle.open(owned);
-    const detector_entry = try task.find("pose_detector.tflite");
-    const landmarks_entry = try task.find("pose_landmarks_detector.tflite");
-    const detector_payload = try task.payload(gpa, detector_entry);
-    errdefer detector_payload.deinit(gpa);
-    const landmarks_payload = try task.payload(gpa, landmarks_entry);
-    errdefer landmarks_payload.deinit(gpa);
-
-    var detector_engine = try runtime.Engine.init(detector_payload.bytes, 1);
-    errdefer detector_engine.deinit();
-    var landmarks_engine = try runtime.Engine.init(landmarks_payload.bytes, 1);
-    errdefer landmarks_engine.deinit();
-
-    const detector_side = engineInputSide(&detector_engine) orelse return error.CreateFailed;
-    const landmark_side = engineInputSide(&landmarks_engine) orelse return error.CreateFailed;
-    const total = anchorTotal(&detector_engine) orelse return error.CreateFailed;
-    const plan = detector.planForModel(detector_side, total) orelse return error.CreateFailed;
-
-    // Reinstate the native output-size contract the wasm path had dropped: a
-    // JS bundle whose landmark model is short must be refused here, not read
-    // out of bounds on the frame path where the decode assert compiles out.
-    if (floatCount(&landmarks_engine, 0, false) < pose.raw_landmark_count * pose.raw_values_per_landmark) return error.CreateFailed;
-    if (floatCount(&landmarks_engine, 1, false) < 1) return error.CreateFailed;
-
-    const anchors = try gpa.alloc(detector.Anchor, total);
-    errdefer gpa.free(anchors);
-    detector.generateAnchors(detector_side, plan, anchors);
-    const detector_tensor = try gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3);
-    errdefer gpa.free(detector_tensor);
-    const landmark_tensor = try gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3);
-    errdefer gpa.free(landmark_tensor);
-
-    instance.* = .{
-        .task_bytes = owned,
-        .detector_payload = detector_payload,
-        .landmarks_payload = landmarks_payload,
-        .detector_engine = detector_engine,
-        .landmarks_engine = landmarks_engine,
-        .detector_side = detector_side,
-        .landmark_side = landmark_side,
-        .anchors = anchors,
-        .detector_tensor = detector_tensor,
-        .landmark_tensor = landmark_tensor,
-    };
-    return instance;
-}
-
-pub export fn goss_pose_create(task_ptr: ?[*]const u8, task_len: usize) ?*PoseInstance {
-    return createPoseInstance(task_ptr, task_len) catch null;
-}
-
-pub export fn goss_pose_destroy(instance: ?*PoseInstance) void {
-    const p = instance orelse return;
-    p.detector_engine.deinit();
-    p.landmarks_engine.deinit();
-    gpa.free(p.landmark_tensor);
-    gpa.free(p.detector_tensor);
-    gpa.free(p.anchors);
-    p.landmarks_payload.deinit(gpa);
-    p.detector_payload.deinit(gpa);
-    gpa.free(p.task_bytes);
-    gpa.destroy(p);
-}
-
-fn poseEmpty(p: *PoseInstance, timestamp_us: i64) void {
-    p.serial += 1;
-    p.result = std.mem.zeroes(pose.Result);
-    p.result.frame_serial = p.serial;
-    p.result.timestamp_us = timestamp_us;
-    p.has_result = true;
-}
-
-pub export fn goss_pose_process(instance: ?*PoseInstance, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
-    const p = instance orelse return status_invalid;
-    const pixels = rgba orelse return status_invalid;
-    if (width == 0 or width > 65535 or height == 0 or height > 65535) return status_invalid;
-    const image: sampler.Frame = .{
-        .width = width,
-        .height = height,
-        .pixels = .{ .rgba8 = pixels[0 .. @as(usize, width) * height * 4] },
-    };
-
-    const crop = p.lock orelse detect: {
-        const square = sampler.frameSquare(width, height);
-        sampler.sampleRegion(image, square, .symmetric, p.detector_side, p.detector_tensor);
-        p.detector_engine.writeInput(0, std.mem.sliceAsBytes(p.detector_tensor)) catch return status_invalid;
-        p.detector_engine.invoke() catch return status_invalid;
-        const raw_boxes = p.detector_engine.outputFloats(0) catch return status_invalid;
-        const raw_scores = p.detector_engine.outputFloats(1) catch return status_invalid;
-        var candidates: [pose_max_candidates]detector.pose.Detection = undefined;
-        const found = detector.pose.decode(raw_boxes, raw_scores, p.anchors, @floatFromInt(p.detector_side), 0.5, &candidates);
-        if (found.len == 0) {
-            poseEmpty(p, timestamp_us);
-            return status_ok;
-        }
-        const region = pose.regionFromDetection(found[0], square);
-        p.lock = region;
-        break :detect region;
-    };
-
-    sampler.sampleRegion(image, crop, .unit, p.landmark_side, p.landmark_tensor);
-    p.landmarks_engine.writeInput(0, std.mem.sliceAsBytes(p.landmark_tensor)) catch return status_invalid;
-    p.landmarks_engine.invoke() catch return status_invalid;
-    const raw_landmarks = p.landmarks_engine.outputFloats(0) catch return status_invalid;
-    const presence = presenceScore((p.landmarks_engine.outputFloats(1) catch return status_invalid)[0]);
-    // Positive test so a NaN presence drops the lock rather than holding it.
-    if (!(presence >= pose_presence_floor)) {
-        p.lock = null;
-        poseEmpty(p, timestamp_us);
-        return status_ok;
-    }
-
-    var landmarks: [pose.raw_landmark_count]pose.Landmark = undefined;
-    var visibilities: [pose.raw_landmark_count]f32 = undefined;
-    var presences: [pose.raw_landmark_count]f32 = undefined;
-    pose.decodeLandmarks(raw_landmarks, crop, @floatFromInt(p.landmark_side), &landmarks, &visibilities, &presences);
-    p.lock = pose.regionFromLandmarks(&landmarks);
-
-    p.serial += 1;
-    p.result.frame_serial = p.serial;
-    p.result.timestamp_us = timestamp_us;
-    p.result.presence = presence;
-    p.result.landmark_count_out = pose.landmark_count;
-    for (0..pose.landmark_count) |at| {
-        p.result.landmarks[at * 3] = landmarks[at].x;
-        p.result.landmarks[at * 3 + 1] = landmarks[at].y;
-        p.result.landmarks[at * 3 + 2] = landmarks[at].z;
-        p.result.visibilities[at] = visibilities[at];
-        p.result.presences[at] = presences[at];
-    }
-    p.has_result = true;
-    return status_ok;
-}
-
-pub export fn goss_pose_result(instance: ?*PoseInstance, out: ?[*]u8) i32 {
-    const p = instance orelse return status_invalid;
-    const destination = out orelse return status_invalid;
-    if (!p.has_result) return status_again;
-    @memcpy(destination[0..@sizeOf(pose.Result)], std.mem.asBytes(&p.result));
-    return status_ok;
-}
-
-// A palm detector then the landmark model over up to two tracked hands,
-// with handedness, and gestures when the bundle nests the recognizer's
-// embedder/classifier pair. RGBA frames in, hand.Result out. The
-// synchronous twin of the hand worker.
-
-const hand_max_candidates = 8;
-const hand_presence_floor = 0.5;
-const hand_association_overlap = 0.5;
-
+/// A tensor's float count, the size contract the face path checks a bundle
+/// against before the frame path trusts it.
 fn floatCount(engine: *const runtime.Engine, index: i32, input: bool) usize {
     const tensor = if (input)
         runtime.c.TfLiteInterpreterGetInputTensor(engine.interpreter, index)
@@ -508,282 +322,79 @@ fn floatCount(engine: *const runtime.Engine, index: i32, input: bool) usize {
     return runtime.c.TfLiteTensorByteSize(t) / @sizeOf(f32);
 }
 
-const HandInstance = struct {
-    task_bytes: []u8,
-    landmarker_container: ?bundle.Payload,
-    gesture_container: ?bundle.Payload,
-    detector_payload: bundle.Payload,
-    landmarks_payload: bundle.Payload,
-    embedder_payload: ?bundle.Payload,
-    classifier_payload: ?bundle.Payload,
-    detector_engine: runtime.Engine,
-    landmarks_engine: runtime.Engine,
-    embedder_engine: ?runtime.Engine,
-    classifier_engine: ?runtime.Engine,
-    detector_side: u32,
-    landmark_side: u32,
-    anchors: []detector.Anchor,
-    detector_tensor: []f32,
-    landmark_tensor: []f32,
-    locks: [hand.max_hands]?sampler.Region = @splat(null),
-    result: hand.Result = std.mem.zeroes(hand.Result),
-    has_result: bool = false,
-    serial: u64 = 0,
-};
+// Pose and hands run the same cores the host and android workers run, driven
+// directly because this module is single-threaded. These blocks used to carry
+// their own copy of each pipeline, so a decode fixed on one tier stayed broken
+// on the other; one implementation now, so the web result is the native one.
+
+pub export fn goss_pose_result_size() usize {
+    return @sizeOf(pose.Result);
+}
+
+pub export fn goss_pose_create(task_ptr: ?[*]const u8, task_len: usize) ?*pose_core.Core {
+    const task = task_ptr orelse return null;
+    if (task_len == 0) return null;
+    return pose_core.Core.init(gpa, task[0..task_len], 1) catch null;
+}
+
+pub export fn goss_pose_destroy(core: ?*pose_core.Core) void {
+    const c = core orelse return;
+    c.deinit();
+}
+
+pub export fn goss_pose_process(core: ?*pose_core.Core, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
+    const c = core orelse return status_invalid;
+    const pixels = rgba orelse return status_invalid;
+    if (width == 0 or width > 65535 or height == 0 or height > 65535) return status_invalid;
+    c.compute(.{
+        .width = width,
+        .height = height,
+        .pixels = .{ .rgba8 = pixels[0 .. @as(usize, width) * height * 4] },
+    }, timestamp_us);
+    return status_ok;
+}
+
+pub export fn goss_pose_result(core: ?*pose_core.Core, out: ?[*]u8) i32 {
+    const c = core orelse return status_invalid;
+    const destination = out orelse return status_invalid;
+    var result: pose.Result = undefined;
+    if (!c.readResult(&result)) return status_again;
+    @memcpy(destination[0..@sizeOf(pose.Result)], std.mem.asBytes(&result));
+    return status_ok;
+}
 
 pub export fn goss_hand_result_size() usize {
     return @sizeOf(hand.Result);
 }
 
-fn createHandInstance(task_ptr: ?[*]const u8, task_len: usize) !*HandInstance {
-    const task_source = task_ptr orelse return error.CreateFailed;
-    if (task_len == 0) return error.CreateFailed;
-
-    const p = try gpa.create(HandInstance);
-    errdefer gpa.destroy(p);
-    const owned = try gpa.dupe(u8, task_source[0..task_len]);
-    errdefer gpa.free(owned);
-
-    const task = try bundle.Bundle.open(owned);
-    var landmarker_container: ?bundle.Payload = null;
-    errdefer if (landmarker_container) |payload| payload.deinit(gpa);
-    var gesture_container: ?bundle.Payload = null;
-    errdefer if (gesture_container) |payload| payload.deinit(gpa);
-
-    const landmarker = blk: {
-        if (task.find("hand_detector.tflite")) |_| break :blk task else |_| {}
-        const nested = try task.find("hand_landmarker.task");
-        landmarker_container = try task.payload(gpa, nested);
-        break :blk try bundle.Bundle.open(landmarker_container.?.bytes);
-    };
-
-    const detector_entry = try landmarker.find("hand_detector.tflite");
-    const landmarks_entry = try landmarker.find("hand_landmarks_detector.tflite");
-    const detector_payload = try landmarker.payload(gpa, detector_entry);
-    errdefer detector_payload.deinit(gpa);
-    const landmarks_payload = try landmarker.payload(gpa, landmarks_entry);
-    errdefer landmarks_payload.deinit(gpa);
-
-    var detector_engine = try runtime.Engine.init(detector_payload.bytes, 1);
-    errdefer detector_engine.deinit();
-    var landmarks_engine = try runtime.Engine.init(landmarks_payload.bytes, 1);
-    errdefer landmarks_engine.deinit();
-
-    const detector_side = engineInputSide(&detector_engine) orelse return error.CreateFailed;
-    const landmark_side = engineInputSide(&landmarks_engine) orelse return error.CreateFailed;
-    const total = anchorTotal(&detector_engine) orelse return error.CreateFailed;
-    const plan = detector.planForModel(detector_side, total) orelse return error.CreateFailed;
-    if (floatCount(&landmarks_engine, 0, false) != hand.landmark_count * 3) return error.CreateFailed;
-    // Presence, handedness, and the world landmark stream the frame path reads
-    // by index; refuse a model missing any of them rather than read OOB later.
-    if (floatCount(&landmarks_engine, 1, false) < 1) return error.CreateFailed;
-    if (floatCount(&landmarks_engine, 2, false) < 1) return error.CreateFailed;
-    if (floatCount(&landmarks_engine, 3, false) < hand.landmark_count * 3) return error.CreateFailed;
-
-    var embedder_payload: ?bundle.Payload = null;
-    errdefer if (embedder_payload) |payload| payload.deinit(gpa);
-    var classifier_payload: ?bundle.Payload = null;
-    errdefer if (classifier_payload) |payload| payload.deinit(gpa);
-    var embedder_engine: ?runtime.Engine = null;
-    errdefer if (embedder_engine) |*engine| engine.deinit();
-    var classifier_engine: ?runtime.Engine = null;
-    errdefer if (classifier_engine) |*engine| engine.deinit();
-
-    if (task.find("hand_gesture_recognizer.task")) |gesture_entry| {
-        gesture_container = try task.payload(gpa, gesture_entry);
-        const gesture = try bundle.Bundle.open(gesture_container.?.bytes);
-        const embedder_entry = try gesture.find("gesture_embedder.tflite");
-        const classifier_entry = try gesture.find("canned_gesture_classifier.tflite");
-        embedder_payload = try gesture.payload(gpa, embedder_entry);
-        classifier_payload = try gesture.payload(gpa, classifier_entry);
-        embedder_engine = try runtime.Engine.init(embedder_payload.?.bytes, 1);
-        classifier_engine = try runtime.Engine.init(classifier_payload.?.bytes, 1);
-    } else |_| {}
-
-    const anchors = try gpa.alloc(detector.Anchor, total);
-    errdefer gpa.free(anchors);
-    detector.generateAnchors(detector_side, plan, anchors);
-    const detector_tensor = try gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3);
-    errdefer gpa.free(detector_tensor);
-    const landmark_tensor = try gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3);
-    errdefer gpa.free(landmark_tensor);
-
-    p.* = .{
-        .task_bytes = owned,
-        .landmarker_container = landmarker_container,
-        .gesture_container = gesture_container,
-        .detector_payload = detector_payload,
-        .landmarks_payload = landmarks_payload,
-        .embedder_payload = embedder_payload,
-        .classifier_payload = classifier_payload,
-        .detector_engine = detector_engine,
-        .landmarks_engine = landmarks_engine,
-        .embedder_engine = embedder_engine,
-        .classifier_engine = classifier_engine,
-        .detector_side = detector_side,
-        .landmark_side = landmark_side,
-        .anchors = anchors,
-        .detector_tensor = detector_tensor,
-        .landmark_tensor = landmark_tensor,
-    };
-    return p;
+pub export fn goss_hand_create(task_ptr: ?[*]const u8, task_len: usize) ?*hand_core.Core {
+    const task = task_ptr orelse return null;
+    if (task_len == 0) return null;
+    return hand_core.init(gpa, task[0..task_len], 1) catch null;
 }
 
-pub export fn goss_hand_create(task_ptr: ?[*]const u8, task_len: usize) ?*HandInstance {
-    return createHandInstance(task_ptr, task_len) catch null;
+pub export fn goss_hand_destroy(core: ?*hand_core.Core) void {
+    const c = core orelse return;
+    hand_core.deinit(c);
 }
 
-pub export fn goss_hand_destroy(instance: ?*HandInstance) void {
-    const p = instance orelse return;
-    if (p.classifier_engine) |*e| e.deinit();
-    if (p.embedder_engine) |*e| e.deinit();
-    p.landmarks_engine.deinit();
-    p.detector_engine.deinit();
-    gpa.free(p.landmark_tensor);
-    gpa.free(p.detector_tensor);
-    gpa.free(p.anchors);
-    if (p.classifier_payload) |payload| payload.deinit(gpa);
-    if (p.embedder_payload) |payload| payload.deinit(gpa);
-    p.landmarks_payload.deinit(gpa);
-    p.detector_payload.deinit(gpa);
-    if (p.gesture_container) |payload| payload.deinit(gpa);
-    if (p.landmarker_container) |payload| payload.deinit(gpa);
-    gpa.free(p.task_bytes);
-    gpa.destroy(p);
-}
-
-fn handRegionOverlap(a: sampler.Region, b: sampler.Region) f32 {
-    const ax0 = a.center_x - a.side * 0.5;
-    const ay0 = a.center_y - a.side * 0.5;
-    const bx0 = b.center_x - b.side * 0.5;
-    const by0 = b.center_y - b.side * 0.5;
-    const x0 = @max(ax0, bx0);
-    const y0 = @max(ay0, by0);
-    const x1 = @min(ax0 + a.side, bx0 + b.side);
-    const y1 = @min(ay0 + a.side, by0 + b.side);
-    if (x1 <= x0 or y1 <= y0) return 0;
-    const shared = (x1 - x0) * (y1 - y0);
-    const total = a.side * a.side + b.side * b.side - shared;
-    if (total <= 0) return 0;
-    return shared / total;
-}
-
-fn handDetect(p: *HandInstance, image: sampler.Frame) void {
-    const square = sampler.frameSquare(image.width, image.height);
-    sampler.sampleRegion(image, square, .unit, p.detector_side, p.detector_tensor);
-    p.detector_engine.writeInput(0, std.mem.sliceAsBytes(p.detector_tensor)) catch return;
-    p.detector_engine.invoke() catch return;
-    const raw_boxes = p.detector_engine.outputFloats(0) catch return;
-    const raw_scores = p.detector_engine.outputFloats(1) catch return;
-    var candidates: [hand_max_candidates]detector.palm.Detection = undefined;
-    const found = detector.palm.decode(raw_boxes, raw_scores, p.anchors, @floatFromInt(p.detector_side), 0.5, &candidates);
-    for (found) |detection| {
-        const region = hand.regionFromDetection(detection, square);
-        var duplicate = false;
-        for (p.locks) |maybe_lock| {
-            const lock = maybe_lock orelse continue;
-            if (handRegionOverlap(region, lock) >= hand_association_overlap) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
-        for (&p.locks) |*slot| {
-            if (slot.* == null) {
-                slot.* = region;
-                break;
-            }
-        }
-    }
-}
-
-fn handGesture(p: *HandInstance, landmarks: *const [hand.landmark_count]hand.Landmark, handedness: f32, rotation: f32, width: u32, height: u32, slot: *hand.Hand) void {
-    if (p.embedder_engine == null or p.classifier_engine == null) return;
-    const embedder = &p.embedder_engine.?;
-    const classifier = &p.classifier_engine.?;
-    const raw_world = p.landmarks_engine.outputFloats(3) catch return;
-    var screen_input: [hand.landmark_count * 3]f32 = undefined;
-    hand.gestureLandmarkInput(landmarks, @floatFromInt(width), @floatFromInt(height), rotation, &screen_input);
-    var world_input: [hand.landmark_count * 3]f32 = undefined;
-    hand.gestureWorldInput(raw_world, rotation, &world_input);
-    var handedness_input = [1]f32{handedness};
-    embedder.writeInput(0, std.mem.sliceAsBytes(&screen_input)) catch return;
-    embedder.writeInput(1, std.mem.sliceAsBytes(&handedness_input)) catch return;
-    embedder.writeInput(2, std.mem.sliceAsBytes(&world_input)) catch return;
-    embedder.invoke() catch return;
-    const embedding = embedder.outputFloats(0) catch return;
-    classifier.writeInput(0, std.mem.sliceAsBytes(embedding)) catch return;
-    classifier.invoke() catch return;
-    const scores = classifier.outputFloats(0) catch return;
-    var best: usize = 0;
-    for (scores, 0..) |score, at| {
-        if (score > scores[best]) best = at;
-    }
-    slot.gesture = @intCast(best);
-    slot.gesture_score = presenceScore(scores[best]);
-}
-
-pub export fn goss_hand_process(instance: ?*HandInstance, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
-    const p = instance orelse return status_invalid;
+pub export fn goss_hand_process(core: ?*hand_core.Core, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
+    const c = core orelse return status_invalid;
     const pixels = rgba orelse return status_invalid;
     if (width == 0 or width > 65535 or height == 0 or height > 65535) return status_invalid;
-    const image: sampler.Frame = .{
+    hand_core.compute(c, .{
         .width = width,
         .height = height,
         .pixels = .{ .rgba8 = pixels[0 .. @as(usize, width) * height * 4] },
-    };
-
-    var free_slots: usize = 0;
-    for (p.locks) |maybe_lock| {
-        if (maybe_lock == null) free_slots += 1;
-    }
-    if (free_slots > 0) handDetect(p, image);
-
-    var result: hand.Result = std.mem.zeroes(hand.Result);
-    p.serial += 1;
-    result.frame_serial = p.serial;
-    result.timestamp_us = timestamp_us;
-
-    for (&p.locks) |*maybe_lock| {
-        const crop = maybe_lock.* orelse continue;
-        sampler.sampleRegion(image, crop, .unit, p.landmark_side, p.landmark_tensor);
-        p.landmarks_engine.writeInput(0, std.mem.sliceAsBytes(p.landmark_tensor)) catch continue;
-        p.landmarks_engine.invoke() catch continue;
-        const raw_landmarks = p.landmarks_engine.outputFloats(0) catch continue;
-        const presence = presenceScore((p.landmarks_engine.outputFloats(1) catch continue)[0]);
-        // Positive test so a NaN presence drops the lock rather than holding it.
-        if (!(presence >= hand_presence_floor)) {
-            maybe_lock.* = null;
-            continue;
-        }
-        const handedness = presenceScore((p.landmarks_engine.outputFloats(2) catch continue)[0]);
-        var landmarks: [hand.landmark_count]hand.Landmark = undefined;
-        hand.decodeLandmarks(raw_landmarks, crop, @floatFromInt(p.landmark_side), &landmarks);
-        maybe_lock.* = hand.regionFromLandmarks(&landmarks);
-
-        const slot = &result.hands[result.hand_count];
-        slot.presence = presence;
-        slot.handedness = handedness;
-        slot.gesture = 0;
-        slot.gesture_score = 0;
-        handGesture(p, &landmarks, handedness, crop.rotation, width, height, slot);
-        for (landmarks, 0..) |landmark, at| {
-            slot.landmarks[at * 3] = landmark.x;
-            slot.landmarks[at * 3 + 1] = landmark.y;
-            slot.landmarks[at * 3 + 2] = landmark.z;
-        }
-        result.hand_count += 1;
-    }
-
-    p.result = result;
-    p.has_result = true;
+    }, timestamp_us);
     return status_ok;
 }
 
-pub export fn goss_hand_result(instance: ?*HandInstance, out: ?[*]u8) i32 {
-    const p = instance orelse return status_invalid;
+pub export fn goss_hand_result(core: ?*hand_core.Core, out: ?[*]u8) i32 {
+    const c = core orelse return status_invalid;
     const destination = out orelse return status_invalid;
-    if (!p.has_result) return status_again;
-    @memcpy(destination[0..@sizeOf(hand.Result)], std.mem.asBytes(&p.result));
+    var result: hand.Result = undefined;
+    if (!hand_core.readResult(c, &result)) return status_again;
+    @memcpy(destination[0..@sizeOf(hand.Result)], std.mem.asBytes(&result));
     return status_ok;
 }

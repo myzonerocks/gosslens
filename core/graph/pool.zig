@@ -26,6 +26,14 @@ pub const SlotIndex = u16;
 
 pub const AcquireError = error{Exhausted};
 
+/// The most distinct descriptors one pool will ever hold. Today's callers ask
+/// for two sizes, so this is far above need; it exists because a caller that
+/// derived a size from a per-frame value would otherwise mint a bin, a slot
+/// array and a GPU resource every frame with nothing to stop it.
+pub const max_bins: usize = 32;
+
+pub const BinError = Allocator.Error || error{TooManyBins};
+
 /// The pool tracks slot states; the actual platform resources (GPU textures,
 /// staging buffers) are created by the caller when a slot is first used and
 /// destroyed when the pool reports them at deinit. `payload` carries the
@@ -33,6 +41,9 @@ pub const AcquireError = error{Exhausted};
 pub const Pool = struct {
     gpa: Allocator,
     bins: std.ArrayList(Bin) = .empty,
+    /// Descriptors turned away at the bin cap. Non-zero means a caller is
+    /// deriving a pooled size from something that changes.
+    bins_refused: u64 = 0,
 
     const Bin = struct {
         desc: ResourceDesc,
@@ -59,9 +70,13 @@ pub const Pool = struct {
     /// Edit-time: returns the bin for a descriptor, creating it with the
     /// given capacity on first sight. Linear over bins, which are few and
     /// created only while the graph is being built.
-    pub fn binFor(p: *Pool, desc: ResourceDesc, capacity: u16) Allocator.Error!BinIndex {
+    pub fn binFor(p: *Pool, desc: ResourceDesc, capacity: u16) BinError!BinIndex {
         for (p.bins.items, 0..) |bin, i| {
             if (bin.desc.eql(desc)) return @intCast(i);
+        }
+        if (p.bins.items.len >= max_bins) {
+            p.bins_refused +|= 1;
+            return error.TooManyBins;
         }
         const payloads = try p.gpa.alloc(u64, capacity);
         errdefer p.gpa.free(payloads);
@@ -198,4 +213,20 @@ test "payloads persist per slot across reuse" {
     const again = try p.acquire(bin);
     try t.expectEqual(s, again);
     try t.expectEqual(@as(u64, 0xfeed), p.payload(bin, again));
+}
+
+test "the bin cap refuses a new descriptor and counts the refusal" {
+    var p = Pool.init(std.testing.allocator);
+    defer p.deinit();
+    for (0..max_bins) |i| {
+        _ = try p.binFor(.{ .width = @intCast(i + 1) }, 2);
+    }
+    try std.testing.expectEqual(max_bins, p.binCount());
+    try std.testing.expectError(error.TooManyBins, p.binFor(.{ .width = 99999 }, 2));
+    try std.testing.expectEqual(@as(u64, 1), p.bins_refused);
+    // A descriptor the pool already holds still answers at the cap, so hitting
+    // it costs the new size only, never the sizes already in use.
+    const first = try p.binFor(.{ .width = 1 }, 2);
+    try std.testing.expectEqual(@as(BinIndex, 0), first);
+    try std.testing.expectEqual(max_bins, p.binCount());
 }

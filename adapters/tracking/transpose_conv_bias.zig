@@ -131,8 +131,8 @@ fn invoke(user_data: ?*anyopaque, context: ?*c.TfLiteOpaqueContext, node: ?*c.Tf
 /// care of that lifetime rather than leaving it to the caller.
 pub fn register(options: *c.TfLiteInterpreterOptions) *c.TfLiteOperator {
     const op = c.TfLiteOperatorCreate(c.kTfLiteBuiltinCustom, "Convolution2DTransposeBias", 1, null).?;
-    _ = c.TfLiteOperatorSetPrepareWithData(op, prepare);
-    _ = c.TfLiteOperatorSetInvokeWithData(op, invoke);
+    _ = c.TfLiteOperatorSetPrepareWithData(op, prepare); // result ignored: only fails on a null operator, which the caller just made
+    _ = c.TfLiteOperatorSetInvokeWithData(op, invoke); // result ignored: only fails on a null operator, which the caller just made
     c.TfLiteInterpreterOptionsAddOperator(options, op);
     return op;
 }

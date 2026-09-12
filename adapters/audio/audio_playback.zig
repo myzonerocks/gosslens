@@ -4,6 +4,9 @@
 //! play_sound trigger; the mixed PCM is pulled out to the platform by the SDK.
 const std = @import("std");
 
+/// Whether a real runtime stands behind this module on this target.
+pub const supported = true;
+
 const Handle = opaque {};
 extern fn goss_mixer_create(sample_rate: c_int, channels: c_int) ?*Handle;
 extern fn goss_mixer_destroy(m: ?*Handle) void;

@@ -663,7 +663,7 @@ test "packaging copies the bundle and writes compiled bytecode alongside each sh
     const bundle_path = tmpBundlePath(tmp, &path_buf);
     var out_buf: [64]u8 = undefined;
     const package_dir = std.fmt.bufPrint(&out_buf, "{s}-packaged", .{bundle_path}) catch unreachable;
-    defer std.Io.Dir.cwd().deleteTree(t.io, package_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(t.io, package_dir) catch {}; // failure ignored: a test leftover the next run overwrites anyway
 
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();

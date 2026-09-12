@@ -9,7 +9,67 @@ import java.nio.ByteOrder
 // The Kotlin face of the goss_ ABI. The native names mirror the C surface one
 // to one and carry no logic; GossSession and GossEngine below are the idiomatic
 // wrappers the app consumes.
+/** The engine's thermal states, the same four the other SDKs name. */
+enum class Thermal(val raw: Int) {
+    NOMINAL(0), FAIR(1), SERIOUS(2), CRITICAL(3);
+
+    companion object {
+        fun from(raw: Int): Thermal = entries.firstOrNull { it.raw == raw } ?: NOMINAL
+    }
+}
+
+/** The rungs of the degradation ladder, top to bottom. */
+enum class DegradeLevel(val raw: Int) {
+    FULL(0), REDUCED_ML_CADENCE(1), SEGMENTATION_OFF(2), BEAUTY_SIMPLIFIED(3), PASSTHROUGH(4);
+
+    companion object {
+        /** An unknown rung reads as passthrough: the conservative one to assume. */
+        fun from(raw: Int): DegradeLevel = entries.firstOrNull { it.raw == raw } ?: PASSTHROUGH
+    }
+}
+
+/**
+ * The pure helpers, off the Gosslens object on purpose: that one loads the native
+ * library in its initialiser, so anything reachable only through it is out of a
+ * plain jvm's reach. The unit suite tests these and could not touch them.
+ */
+object GossFlags {
+    const val FLAG_MIRROR = 1
+    const val ROTATION_SHIFT = 8
+
+    /** Quarter turns above the shift, with the mirror bit beside them. */
+    @JvmStatic
+    fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int {
+        val quarterTurns = ((rotationDegrees % 360) / 90) and 0x3
+        var flags = quarterTurns shl ROTATION_SHIFT
+        if (mirrored) flags = flags or FLAG_MIRROR
+        return flags
+    }
+
+    /**
+     * The device's thermal status mapped onto the engine's four states.
+     * Devices below API 29 report none, which reads as nominal.
+     */
+    @JvmStatic
+    fun platformThermal(context: android.content.Context): Thermal {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return Thermal.NOMINAL
+        val power = context.getSystemService(android.os.PowerManager::class.java) ?: return Thermal.NOMINAL
+        return when (power.currentThermalStatus) {
+            android.os.PowerManager.THERMAL_STATUS_NONE -> Thermal.NOMINAL
+            android.os.PowerManager.THERMAL_STATUS_LIGHT -> Thermal.FAIR
+            android.os.PowerManager.THERMAL_STATUS_MODERATE -> Thermal.FAIR
+            android.os.PowerManager.THERMAL_STATUS_SEVERE -> Thermal.SERIOUS
+            else -> Thermal.CRITICAL
+        }
+    }
+}
+
 object Gosslens {
+    /** Kept so a caller that already holds the engine does not have to learn a
+     * second entry point; the implementation lives on GossFlags. */
+    @JvmStatic
+    fun platformThermal(context: android.content.Context): Thermal = GossFlags.platformThermal(context)
+
     init {
         System.loadLibrary("gosslens")
     }
@@ -47,6 +107,10 @@ object Gosslens {
     internal external fun nativeChainReport(session: Long, outBuffer: ByteBuffer): Int
     internal external fun nativeReadReconstruction(session: Long, outBuffer: ByteBuffer, capacity: Int, countBuffer: ByteBuffer): Int
     internal external fun nativeWriteReconstruction(session: Long, buffer: ByteBuffer, count: Int): Int
+    internal external fun nativeEngineReport(engine: Long, out: ByteBuffer): Int
+    internal external fun nativeSessionReport(session: Long, out: ByteBuffer): Int
+    internal external fun nativeNodeReports(session: Long, out: ByteBuffer, capacityU32: Int): Int
+    internal external fun nativeNodeReportId(session: Long, index: Int, out: ByteBuffer, capacity: Int, outLen: ByteBuffer): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
     internal external fun nativeSessionDestroy(session: Long)
     internal external fun nativeSubmitFrameCopy(
@@ -216,6 +280,18 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+    internal external fun nativeSubmitSourceHardwareBuffer(
+        session: Long,
+        name: ByteBuffer,
+        nameLen: Int,
+        hardwareBuffer: android.hardware.HardwareBuffer,
+        width: Int,
+        height: Int,
+        flags: Int,
+        colorStandard: Int,
+        colorRange: Int,
+        timestampUs: Long,
+    ): Int
     internal external fun nativeDegradeLevel(session: Long): Int
     internal external fun nativeYuvToRgb(standard: Int, range: Int, outBuffer: ByteBuffer): Int
     internal external fun nativeSolveTwoBoneIk(inBuffer: ByteBuffer, upperLen: Float, lowerLen: Float, outBuffer: ByteBuffer): Int
@@ -248,8 +324,8 @@ object Gosslens {
     const val PIXEL_I420 = 2
     const val PIXEL_BGRA8 = 3
     const val PIXEL_RGBA8 = 4
-    const val FLAG_MIRROR = 1
-    const val ROTATION_SHIFT = 8
+    const val FLAG_MIRROR = GossFlags.FLAG_MIRROR
+    const val ROTATION_SHIFT = GossFlags.ROTATION_SHIFT
     const val FACE_LANDMARK_COUNT = 478
     const val FACE_BLENDSHAPE_COUNT = 52
     const val FACE_RESULT_BYTES = 5968
@@ -350,12 +426,7 @@ object Gosslens {
         return Pair(out.copyOfRange(0, 3), out.copyOfRange(3, 6))
     }
 
-    fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int {
-        val quarterTurns = ((rotationDegrees % 360) / 90) and 0x3
-        var flags = quarterTurns shl ROTATION_SHIFT
-        if (mirrored) flags = flags or FLAG_MIRROR
-        return flags
-    }
+    fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int = GossFlags.flagsFor(rotationDegrees, mirrored)
 }
 
 /** Pool capacities for the engine's texture and staging pools; the
@@ -842,6 +913,31 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     // not hand the native side an already-freed handle. Disarming the
     // Cleaner runs the same disposer once; below API 33 there is no
     // registration, so free the handle directly.
+    /**
+     * A named composite source's NV12 frame straight from a platform buffer, so
+     * a second camera or a screen never needs the RGBA copy.
+     */
+    fun submitSourceHardwareBuffer(
+        name: String,
+        buffer: android.hardware.HardwareBuffer,
+        width: Int,
+        height: Int,
+        rotationDegrees: Int = 0,
+        mirrored: Boolean = false,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
+        timestampUs: Long,
+    ): Boolean {
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        val buf = ByteBuffer.allocateDirect(bytes.size.coerceAtLeast(1)).order(ByteOrder.nativeOrder())
+        buf.put(bytes)
+        return Gosslens.nativeSubmitSourceHardwareBuffer(
+            handle, buf, bytes.size, buffer, width, height,
+            Gosslens.flagsFor(rotationDegrees, mirrored),
+            colorStandard, colorRange, timestampUs,
+        ) == 0
+    }
+
     override fun close() {
         if (closed) return
         closed = true
@@ -1103,10 +1199,18 @@ class GossSession private constructor(
         Gosslens.flagsFor(rotationDegrees, mirrored), timestampUs,
     ) == 0
 
-    fun reportFrame(frameTimeUs: Int, thermal: Int): Int =
-        Gosslens.nativeReportFrame(handle, frameTimeUs, thermal)
+    fun reportFrame(frameTimeUs: Int, thermal: Thermal): DegradeLevel =
+        DegradeLevel.from(Gosslens.nativeReportFrame(handle, frameTimeUs, thermal.raw))
 
-    fun degradeLevel(): Int = Gosslens.nativeDegradeLevel(handle)
+    /**
+     * Reports one finished frame with the device's thermal status read from
+     * the given context, the call a frame loop wants. This is the ladder's only
+     * clock; the engine has no way to reach the thermal API on its own.
+     */
+    fun reportFrame(frameTimeUs: Int, context: android.content.Context): DegradeLevel =
+        reportFrame(frameTimeUs, Gosslens.platformThermal(context))
+
+    fun degradeLevel(): DegradeLevel = DegradeLevel.from(Gosslens.nativeDegradeLevel(handle))
 
     fun enableFaceTracking(taskBundle: ByteBuffer, threads: Int): Boolean =
         Gosslens.nativeEnableFaceTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
@@ -1284,6 +1388,132 @@ class GossSession private constructor(
         val buf = ByteBuffer.allocateDirect(gaussians.size * 4).order(ByteOrder.nativeOrder())
         buf.asFloatBuffer().put(gaussians)
         return Gosslens.nativeWriteReconstruction(handle, buf, gaussians.size / 14) == 0
+    }
+
+    /** What the engine is doing now, as against what it was asked for. */
+    data class EngineReport(
+        val rendererBackend: Int,
+        val zeroCopyImport: Boolean,
+        val texturePoolCapacity: Int,
+        val texturePoolLive: Int,
+        val texturePoolPeak: Int,
+        val texturePoolExhausted: Int,
+        val stagingPoolCapacity: Int,
+        val stagingPoolLive: Int,
+        val stagingPoolPeak: Int,
+        val stagingPoolExhausted: Int,
+        val texturePoolBins: Int,
+        val texturePoolBinsRefused: Int,
+        val stagingPoolBins: Int,
+        val bgfxLiveBytes: Long,
+        val bgfxAllocCallsLastFrame: Long,
+        val bgfxBytesLastFrame: Long,
+    )
+
+    /** This session's counters: work asked for against work done. */
+    data class SessionReport(
+        val framesSubmitted: Long,
+        val framesRendered: Long,
+        val degradeLevel: DegradeLevel,
+        val degradeTransitions: Int,
+        val faceAnalysis: Long,
+        val handAnalysis: Long,
+        val poseAnalysis: Long,
+        val segmentationAnalysis: Long,
+        val mlAnalysis: Long,
+        val nodesDegraded: Int,
+        val nodeReportsLost: Int,
+        val scriptFaults: Int,
+    )
+
+    /** What a lens node is doing, as against what its manifest asked for. */
+    enum class NodeState { READY, DEGRADED, FAILED }
+
+    /** Why a node is not ready. */
+    enum class NodeReason {
+        NONE, OUT_OF_MEMORY, ASSET_MISSING, ASSET_MALFORMED, ASSET_TOO_LARGE,
+        SHADER_MISSING, SHADER_LINK_FAILED, MODEL_REJECTED, MODEL_UNSUPPORTED,
+        CAPABILITY_UNAVAILABLE,
+        CONSTRAINT_FAILED,
+    }
+
+    /** One lens node that is not doing what its manifest asked. */
+    data class NodeReport(val id: String, val nodeIndex: Int, val state: NodeState, val reason: NodeReason)
+
+    /** What the engine is doing now; every field is measured, not configured. */
+    fun engineReport(): EngineReport? {
+        // Thirteen u32, four padding bytes, then three u64: the struct's own layout.
+        val buf = ByteBuffer.allocateDirect(14 * 4 + 3 * 8).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeEngineReport(engine.handle, buf) != 0) return null
+        val w = buf.asIntBuffer()
+        val q = buf.duplicate().order(ByteOrder.nativeOrder()).position(14 * 4).let { (it as ByteBuffer).asLongBuffer() }
+        return EngineReport(
+            w.get(0), w.get(1) != 0,
+            w.get(2), w.get(3), w.get(4), w.get(5),
+            w.get(6), w.get(7), w.get(8), w.get(9),
+            w.get(10), w.get(11), w.get(12),
+            q.get(0), q.get(1), q.get(2),
+        )
+    }
+
+    /** This session's counters. */
+    fun sessionReport(): SessionReport? {
+        // Two u64, two u32, five u64, three u32, in declaration order.
+        val buf = ByteBuffer.allocateDirect(80).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeSessionReport(handle, buf) != 0) return null
+        val q = buf.asLongBuffer()
+        val w = buf.duplicate().order(ByteOrder.nativeOrder()).asIntBuffer()
+        return SessionReport(
+            q.get(0), q.get(1),
+            DegradeLevel.from(w.get(4)), w.get(5),
+            q.get(3), q.get(4), q.get(5), q.get(6), q.get(7),
+            w.get(16), w.get(17), w.get(18),
+        )
+    }
+
+    /**
+     * Every node of the active lens that is not ready, beside how many
+     * diagnostics could not be recorded. An empty list with a non-zero lost
+     * count is a lens that degraded unrecordably, not a lens that is fine.
+     */
+    fun nodeReports(): Pair<List<NodeReport>, Int> {
+        // Two header words plus three per node, read in one crossing.
+        val room = 2 + 3 * 64
+        val buf = ByteBuffer.allocateDirect(room * 4).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeNodeReports(handle, buf, room) != 0) return Pair(emptyList(), 0)
+        val words = buf.asIntBuffer()
+        val count = words.get(0)
+        val lost = words.get(1)
+        val kept = minOf(count, 64)
+        val idBuf = ByteBuffer.allocateDirect(256)
+        val lenBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        val out = ArrayList<NodeReport>(kept)
+        for (at in 0 until kept) {
+            val nodeIndex = words.get(2 + at * 3)
+            val state = words.get(3 + at * 3)
+            val reason = words.get(4 + at * 3)
+            var id = ""
+            idBuf.clear()
+            lenBuf.clear()
+            if (Gosslens.nativeNodeReportId(handle, at, idBuf, idBuf.capacity(), lenBuf) == 0) {
+                val len = lenBuf.asIntBuffer().get(0)
+                if (len in 1..idBuf.capacity()) {
+                    val bytes = ByteArray(len)
+                    idBuf.position(0)
+                    idBuf.get(bytes, 0, len)
+                    id = String(bytes, Charsets.UTF_8)
+                }
+            }
+            out.add(
+                NodeReport(
+                    id,
+                    nodeIndex,
+                    NodeState.entries.getOrElse(state) { NodeState.FAILED },
+                    NodeReason.entries.getOrElse(reason) { NodeReason.NONE },
+                ),
+            )
+        }
+        return Pair(out, lost)
     }
 
     data class ChainReport(val ready: Int, val total: Int, val beauty: Boolean)
@@ -1758,6 +1988,11 @@ class GossSession private constructor(
 
     /** Replaces any currently active lens with the one manifestJson
      * describes, splicing its nodes into the session graph. */
+    /**
+     * False when the lens did not activate, and also when it is live with a node
+     * the manifest did not mark optional that could not do what it asked;
+     * nodeReports distinguishes the two and says which node and why.
+     */
     fun activateLens(manifestJson: ByteArray): Boolean {
         val buffer = ByteBuffer.allocateDirect(manifestJson.size)
         buffer.put(manifestJson)

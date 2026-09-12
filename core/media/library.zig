@@ -14,6 +14,21 @@ pub const nonce_length = aead.nonce_length;
 /// Cosine similarity of two equal-length vectors, 0 when either is the zero
 /// vector. The archive's embeddings and the query are compared this way so the
 /// magnitude a model happens to emit never skews the ranking.
+/// Cosine of a against b when a's norm is already known, the shape a scan over
+/// many vectors wants: one pass over b accumulating its dot and its own square
+/// sum, and no repeated work on a.
+fn cosineWithNorm(a: []const f32, a_norm: f64, b: []const f32) f32 {
+    if (a_norm == 0) return 0;
+    var dot: f64 = 0;
+    var nb: f64 = 0;
+    for (a, b) |x, y| {
+        dot += @as(f64, x) * y;
+        nb += @as(f64, y) * y;
+    }
+    if (nb == 0) return 0;
+    return @floatCast(dot / (a_norm * @sqrt(nb)));
+}
+
 pub fn cosine(a: []const f32, b: []const f32) f32 {
     var dot: f64 = 0;
     var na: f64 = 0;
@@ -29,17 +44,22 @@ pub fn cosine(a: []const f32, b: []const f32) f32 {
 
 /// Ranks count vectors of length dim, packed contiguously in corpus, against
 /// query by descending cosine similarity into out_idx/out_score, ties keeping
-/// the lower index; returns how many were written (min of k and count). Exact
-/// linear scan: right on-device, an approximate index is the cloud's job at scale.
+/// the lower index; returns how many were written (min of k and count). An exact
+/// linear scan, so the result is what an approximate index is measured against.
+/// The query norm is computed once here: recomputing it per corpus vector turned
+/// a one-multiply inner loop into three.
 pub fn search(corpus: []const f32, count: usize, dim: usize, query: []const f32, out_idx: []u32, out_score: []f32) usize {
     const k = @min(out_idx.len, out_score.len);
     if (k == 0 or dim == 0 or query.len != dim) return 0;
+    var query_sq: f64 = 0;
+    for (query) |x| query_sq += @as(f64, x) * x;
+    const query_norm = @sqrt(query_sq);
     var kept: usize = 0;
     var i: usize = 0;
     while (i < count) : (i += 1) {
         const base = i * dim;
         if (base + dim > corpus.len) break;
-        const score = cosine(query, corpus[base .. base + dim]);
+        const score = cosineWithNorm(query, query_norm, corpus[base .. base + dim]);
         // Insert into the descending window; a strict comparison keeps the
         // earlier (lower) index ahead on a tie.
         if (kept < k) {
@@ -188,4 +208,23 @@ test "best-take prefers the sharp frame, then honors openness" {
     // With all weight on openness, the flat-but-open frame wins.
     const open_first = [_]f32{ 1, 0 };
     try t.expectEqual(@as(usize, 0), bestTake(&frames, 16, 2, 4, 4, &open_first, 1));
+}
+
+test "a scan with a precomputed query norm matches the plain cosine" {
+    const dim: usize = 4;
+    const corpus = [_]f32{
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 2.0, 0.0, 0.0,
+        0.5, 0.5, 0.5, 0.5,
+        0.0, 0.0, 0.0, 0.0,
+    };
+    const query = [_]f32{ 1.0, 1.0, 0.0, 0.0 };
+    var query_sq: f64 = 0;
+    for (query) |x| query_sq += @as(f64, x) * x;
+    const norm = @sqrt(query_sq);
+    var at: usize = 0;
+    while (at < 4) : (at += 1) {
+        const vector = corpus[at * dim ..][0..dim];
+        try t.expectApproxEqAbs(cosine(&query, vector), cosineWithNorm(&query, norm, vector), 1e-6);
+    }
 }

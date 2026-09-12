@@ -74,8 +74,8 @@ pub const Decoder = struct {
             if (std.mem.startsWith(u8, std.mem.span(mime), "video/")) {
                 var w: i32 = 0;
                 var h: i32 = 0;
-                _ = c.AMediaFormat_getInt32(fmt, c.AMEDIAFORMAT_KEY_WIDTH, &w);
-                _ = c.AMediaFormat_getInt32(fmt, c.AMEDIAFORMAT_KEY_HEIGHT, &h);
+                _ = c.AMediaFormat_getInt32(fmt, c.AMEDIAFORMAT_KEY_WIDTH, &w); // result ignored: false leaves w at 0, which the check below rejects
+                _ = c.AMediaFormat_getInt32(fmt, c.AMEDIAFORMAT_KEY_HEIGHT, &h); // result ignored: false leaves h at 0, which the check below rejects
                 if (w <= 0 or h <= 0) return error.OpenFailed;
                 width = @intCast(w);
                 height = @intCast(h);
@@ -177,18 +177,18 @@ pub const Decoder = struct {
         const buffer = c.AMediaCodec_getInputBuffer(state.codec, @intCast(index), &cap) orelse return;
         const sample = c.AMediaExtractor_readSampleData(state.extractor, buffer, cap);
         if (sample < 0) {
-            _ = c.AMediaCodec_queueInputBuffer(state.codec, @intCast(index), 0, 0, 0, c.AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+            _ = c.AMediaCodec_queueInputBuffer(state.codec, @intCast(index), 0, 0, 0, c.AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM); // result ignored: input_done is set either way and the drain ends on that
             state.input_done = true;
             return;
         }
         const pts = c.AMediaExtractor_getSampleTime(state.extractor);
-        _ = c.AMediaCodec_queueInputBuffer(state.codec, @intCast(index), 0, @intCast(sample), @intCast(@max(pts, 0)), 0);
-        _ = c.AMediaExtractor_advance(state.extractor);
+        _ = c.AMediaCodec_queueInputBuffer(state.codec, @intCast(index), 0, @intCast(sample), @intCast(@max(pts, 0)), 0); // result ignored: the extractor has not advanced, so the next pump retries this sample
+        _ = c.AMediaExtractor_advance(state.extractor); // result ignored: false means end of stream, which input_done already tracks
     }
 
     fn readOutputGeometry(state: *State, fmt: *c.AMediaFormat) void {
         var color: i32 = color_yuv420_semiplanar;
-        _ = c.AMediaFormat_getInt32(fmt, c.AMEDIAFORMAT_KEY_COLOR_FORMAT, &color);
+        _ = c.AMediaFormat_getInt32(fmt, c.AMEDIAFORMAT_KEY_COLOR_FORMAT, &color); // result ignored: false leaves the semiplanar default, the common layout
         state.kind = switch (color) {
             color_yuv420_planar => .i420,
             else => .nv12,
@@ -203,7 +203,7 @@ pub const Decoder = struct {
     pub fn reset(self: *Decoder) bool {
         const state: *State = @ptrCast(@alignCast(self.handle));
         if (c.AMediaExtractor_seekTo(state.extractor, 0, c.AMEDIAEXTRACTOR_SEEK_PREVIOUS_SYNC) != c.AMEDIA_OK) return false;
-        _ = c.AMediaCodec_flush(state.codec);
+        _ = c.AMediaCodec_flush(state.codec); // result ignored: a flush that fails leaves the codec where the seek put it
         state.input_done = false;
         state.failed = false;
         return true;
@@ -211,9 +211,9 @@ pub const Decoder = struct {
 
     pub fn close(self: *Decoder) void {
         const state: *State = @ptrCast(@alignCast(self.handle));
-        _ = c.AMediaCodec_stop(state.codec);
-        _ = c.AMediaCodec_delete(state.codec);
-        _ = c.AMediaExtractor_delete(state.extractor);
+        _ = c.AMediaCodec_stop(state.codec); // result ignored: closing anyway, and delete below frees either way
+        _ = c.AMediaCodec_delete(state.codec); // result ignored: nothing to do about a failed delete at teardown
+        _ = c.AMediaExtractor_delete(state.extractor); // result ignored: nothing to do about a failed delete at teardown
         _ = std.os.linux.close(state.fd);
         std.heap.c_allocator.destroy(state);
     }

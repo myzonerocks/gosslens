@@ -1,4 +1,4 @@
-abi 0.109
+abi 0.115
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -104,6 +104,40 @@ type abi.CaptureGuidance size=24 align=4
   field view_count offset=12 size=4
   field splat_count offset=16 size=4
   field next_yaw offset=20 size=4
+type abi.NodeReport size=12 align=4
+  field node_index offset=0 size=4
+  field state offset=4 size=4
+  field reason offset=8 size=4
+type abi.EngineReport size=80 align=8
+  field renderer_backend offset=0 size=4
+  field zero_copy_import offset=4 size=4
+  field texture_pool_capacity offset=8 size=4
+  field texture_pool_live offset=12 size=4
+  field texture_pool_peak offset=16 size=4
+  field texture_pool_exhausted offset=20 size=4
+  field staging_pool_capacity offset=24 size=4
+  field staging_pool_live offset=28 size=4
+  field staging_pool_peak offset=32 size=4
+  field staging_pool_exhausted offset=36 size=4
+  field texture_pool_bins offset=40 size=4
+  field texture_pool_bins_refused offset=44 size=4
+  field staging_pool_bins offset=48 size=4
+  field bgfx_live_bytes offset=56 size=8
+  field bgfx_alloc_calls_last_frame offset=64 size=8
+  field bgfx_bytes_last_frame offset=72 size=8
+type abi.SessionReport size=80 align=8
+  field frames_submitted offset=0 size=8
+  field frames_rendered offset=8 size=8
+  field degrade_level offset=16 size=4
+  field degrade_transitions offset=20 size=4
+  field face_analysis offset=24 size=8
+  field hand_analysis offset=32 size=8
+  field pose_analysis offset=40 size=8
+  field segmentation_analysis offset=48 size=8
+  field ml_analysis offset=56 size=8
+  field nodes_degraded offset=64 size=4
+  field node_reports_lost offset=68 size=4
+  field script_faults offset=72 size=4
 fn uint32_t goss_abi_version(void)
 fn uint64_t goss_capabilities(void)
 fn void *goss_alloc(size_t size)
@@ -275,3 +309,9 @@ fn goss_status goss_engine_beat_map(goss_engine *engine, const float *samples, u
 fn goss_status goss_session_chain_report(goss_session *session, uint32_t *out_ready, uint32_t *out_total, uint32_t *out_beauty)
 fn goss_status goss_session_read_reconstruction(goss_session *session, float *out, uint32_t capacity, uint32_t *out_count)
 fn goss_status goss_session_write_reconstruction(goss_session *session, const float *gaussians, uint32_t count)
+fn goss_status goss_session_submit_source_hardware_buffer(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, void *hardware_buffer)
+fn goss_status goss_engine_read_report(goss_engine *engine, goss_engine_report *out_report)
+fn goss_status goss_session_read_report(goss_session *session, goss_session_report *out_report)
+fn goss_status goss_session_node_report_count(goss_session *session, uint32_t *out_count, uint32_t *out_lost)
+fn goss_status goss_session_node_report_at(goss_session *session, uint32_t index, goss_node_report *out_report)
+fn goss_status goss_session_node_report_id(goss_session *session, uint32_t index, uint8_t *out, size_t capacity, size_t *out_len)

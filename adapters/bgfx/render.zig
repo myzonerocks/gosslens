@@ -67,6 +67,24 @@ pub const InitOptions = struct {
 /// passes no callback of its own, so every production SDK gets it.
 extern fn goss_bgfx_callbacks() [*c]c.bgfx_callback_interface_t;
 
+/// The engine-owned counting allocator (adapters/bgfx/callbacks.c).
+/// Always installed, on every init path: without it every byte bgfx holds
+/// is invisible to the leak gates, which see the zig heap alone.
+extern fn goss_bgfx_allocator() [*c]c.bgfx_allocator_interface_t;
+
+/// Bytes bgfx holds right now, and allocation calls it has made. The
+/// vendor-heap proof diffs the first across a lifecycle, the per-frame
+/// gate diffs the second across a steady window.
+pub extern fn goss_bgfx_live_bytes() usize;
+pub extern fn goss_bgfx_alloc_calls() usize;
+pub extern fn goss_bgfx_alloc_bytes() usize;
+
+/// The per-site tally behind those counters: reset at the start of a
+/// measurement window, reported when a gate fails so the failure names the
+/// bgfx code doing the allocating instead of only a count.
+pub extern fn goss_bgfx_reset_sites() void;
+pub extern fn goss_bgfx_report_sites(limit: u32) void;
+
 pub const Nv12Textures = struct {
     y: c.bgfx_texture_handle_t,
     uv: c.bgfx_texture_handle_t,
@@ -144,7 +162,19 @@ pub const Renderer = struct {
     /// Reused CPU staging for dynamic-mesh uploads: positions padded to the
     /// shared vertex layout. Grown to the largest mesh then reused every
     /// frame, freed in deinit - the update path never allocates after warmup.
-    interleave_scratch: []f32 = &.{},
+    /// Per-frame upload staging, indexed by a dynamic vertex buffer's handle so
+    /// finding it is an array read, not a hash on the frame path. Bounded by the
+    /// most dynamic buffers ever live at once, freed whole at teardown.
+    upload_stages: []UploadStage = &.{},
+    /// The same staging for dynamic textures, indexed by texture handle.
+    texture_stages: []UploadStage = &.{},
+    /// Buffers a stage outgrew. bgfx may still hold a reference into one for
+    /// two more frames, so they are released only after bgfx has shut down.
+    retired_stages: std.ArrayList([]f32) = .empty,
+    /// Frames this renderer has presented. Upload staging rotates its slot on
+    /// this rather than per upload, which is what makes a slot outlive the two
+    /// frames bgfx may still read it over however many uploads a frame makes.
+    frame_counter: u64 = 0,
     /// Persistent CPU rings the camera-upload paths reference through
     /// bgfx_make_ref rather than a per-frame bgfx_alloc; each slot outlives
     /// the frames bgfx needs it, grown on a size change, freed in deinit.
@@ -250,7 +280,6 @@ pub const Renderer = struct {
     /// uploaded once, live landmark positions streamed per draw.
     face_mesh_index_buffer: c.bgfx_index_buffer_handle_t,
     face_mesh_uv_buffer: c.bgfx_vertex_buffer_handle_t,
-    face_mesh_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
     /// The face swap's per-vertex seam feather, one static stream uploaded once
     /// from face_mesh_topology.vertex_feather, 0 on the silhouette to 1 inside.
     face_mesh_feather_buffer: c.bgfx_vertex_buffer_handle_t,
@@ -258,11 +287,11 @@ pub const Renderer = struct {
     /// positions rebuilt from the tracked eye landmarks and streamed per draw.
     lash_index_buffer: c.bgfx_index_buffer_handle_t,
     lash_uv_buffer: c.bgfx_vertex_buffer_handle_t,
-    lash_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
-    /// The live tracked 111-point contour, stream 0 of a makeup draw -
-    /// dynamic (updated every frame submitMakeup runs), unlike every
-    /// other buffer here.
-    makeup_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
+    /// Stream 0 of every screen-space mesh draw: two floats a vertex, rebuilt
+    /// from this frame's landmarks. Keeping the layout lets each draw carve its
+    /// own transient buffer, so nothing allocates per frame and two faces in one
+    /// frame no longer overwrite each other the way one shared buffer did.
+    mesh_position_layout: c.bgfx_vertex_layout_t,
     /// Stream 1 of a makeup draw: makeup_mesh.canonical_uv scaled into
     /// each effect's own crop of the source image - static, computed
     /// once at init, never changes per-frame the way position does.
@@ -410,6 +439,7 @@ pub const Renderer = struct {
         bgfx_init.resolution.reset = if (options.vsync) c.BGFX_RESET_VSYNC else c.BGFX_RESET_NONE;
         bgfx_init.platformData.nwh = options.native_window_handle;
         bgfx_init.callback = options.callback orelse goss_bgfx_callbacks();
+        bgfx_init.allocator = goss_bgfx_allocator();
         // Calling bgfx_render_frame once on this thread before bgfx_init
         // is bgfx's own documented opt-in to single-threaded mode: this
         // thread becomes both the API thread and the render thread,
@@ -564,7 +594,6 @@ pub const Renderer = struct {
         c.bgfx_vertex_layout_end(&makeup_uv_layout);
 
         const makeup_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&makeup_mesh.triangle_indices, @sizeOf(@TypeOf(makeup_mesh.triangle_indices))), 0);
-        const makeup_position_buffer = c.bgfx_create_dynamic_vertex_buffer(makeup_mesh.canonical_uv.len / 2, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
         var lipstick_uv: [makeup_mesh.canonical_uv.len]f32 = undefined;
         makeup_mesh.makeupUv(makeup_mesh.lipstick_bounds, &lipstick_uv);
         const makeup_lipstick_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&lipstick_uv, @sizeOf(@TypeOf(lipstick_uv))), &makeup_uv_layout, 0);
@@ -574,7 +603,6 @@ pub const Renderer = struct {
 
         const face_mesh_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&face_mesh_topology.triangle_indices, @sizeOf(@TypeOf(face_mesh_topology.triangle_indices))), 0);
         const face_mesh_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&face_mesh_topology.vertex_uvs, @sizeOf(@TypeOf(face_mesh_topology.vertex_uvs))), &makeup_uv_layout, 0);
-        const face_mesh_position_buffer = c.bgfx_create_dynamic_vertex_buffer(face_mesh_topology.vertex_count, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
 
         var feather_layout: c.bgfx_vertex_layout_t = undefined;
         _ = c.bgfx_vertex_layout_begin(&feather_layout, c.BGFX_RENDERER_TYPE_NOOP);
@@ -589,7 +617,6 @@ pub const Renderer = struct {
 
         const lash_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&lash_mesh.triangle_indices, @sizeOf(@TypeOf(lash_mesh.triangle_indices))), 0);
         const lash_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&lash_mesh.vertex_uvs, @sizeOf(@TypeOf(lash_mesh.vertex_uvs))), &makeup_uv_layout, 0);
-        const lash_position_buffer = c.bgfx_create_dynamic_vertex_buffer(lash_mesh.vertex_count, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
 
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
@@ -701,12 +728,10 @@ pub const Renderer = struct {
             .makeup_index_buffer = makeup_index_buffer,
             .face_mesh_index_buffer = face_mesh_index_buffer,
             .face_mesh_uv_buffer = face_mesh_uv_buffer,
-            .face_mesh_position_buffer = face_mesh_position_buffer,
             .face_mesh_feather_buffer = face_mesh_feather_buffer,
             .lash_index_buffer = lash_index_buffer,
             .lash_uv_buffer = lash_uv_buffer,
-            .lash_position_buffer = lash_position_buffer,
-            .makeup_position_buffer = makeup_position_buffer,
+            .mesh_position_layout = makeup_position_layout,
             .makeup_lipstick_uv_buffer = makeup_lipstick_uv_buffer,
             .makeup_blush_uv_buffer = makeup_blush_uv_buffer,
             .tex_color = c.bgfx_create_uniform("s_texColor", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
@@ -1679,18 +1704,24 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.billboard_program);
         c.bgfx_destroy_program(r.splat_program);
         c.bgfx_destroy_index_buffer(r.makeup_index_buffer);
-        c.bgfx_destroy_dynamic_vertex_buffer(r.makeup_position_buffer);
         c.bgfx_destroy_vertex_buffer(r.makeup_lipstick_uv_buffer);
         c.bgfx_destroy_vertex_buffer(r.makeup_blush_uv_buffer);
         c.bgfx_destroy_index_buffer(r.face_mesh_index_buffer);
         c.bgfx_destroy_vertex_buffer(r.face_mesh_uv_buffer);
-        c.bgfx_destroy_dynamic_vertex_buffer(r.face_mesh_position_buffer);
         c.bgfx_destroy_vertex_buffer(r.face_mesh_feather_buffer);
         c.bgfx_destroy_index_buffer(r.lash_index_buffer);
         c.bgfx_destroy_vertex_buffer(r.lash_uv_buffer);
-        c.bgfx_destroy_dynamic_vertex_buffer(r.lash_position_buffer);
         c.bgfx_shutdown();
-        if (r.interleave_scratch.len != 0) r.gpa.free(r.interleave_scratch);
+        // Past shutdown no reference into staging can still be read, so every
+        // slot and every buffer a stage outgrew is released here and only here.
+        for (r.upload_stages) |*stage| stage.deinit(r.gpa);
+        if (r.upload_stages.len != 0) r.gpa.free(r.upload_stages);
+        r.upload_stages = &.{};
+        for (r.texture_stages) |*stage| stage.deinit(r.gpa);
+        if (r.texture_stages.len != 0) r.gpa.free(r.texture_stages);
+        r.texture_stages = &.{};
+        for (r.retired_stages.items) |buffer| r.gpa.free(buffer);
+        r.retired_stages.deinit(r.gpa);
         r.nv12_ring.deinit(r.gpa);
         r.rgba_ring.deinit(r.gpa);
         if (is_android) {
@@ -1713,26 +1744,43 @@ pub const Renderer = struct {
         handle: c.bgfx_texture_handle_t = .{ .idx = invalid_handle },
         width: u16 = 0,
         height: u16 = 0,
+        /// False when the handle came from somewhere that owns it, such as a
+        /// hardware-buffer import the renderer keeps: teardown must not destroy
+        /// a texture it does not own.
+        owns_handle: bool = true,
+
+        /// Holds a handle another owner vends for this frame. The previous owned
+        /// handle goes first, so adopting does not leak the one it replaces.
+        pub fn adopt(self: *PersistentTexture, handle: c.bgfx_texture_handle_t, width: u16, height: u16) void {
+            if (self.owns_handle and self.handle.idx != invalid_handle and self.handle.idx != handle.idx) {
+                c.bgfx_destroy_texture(self.handle);
+            }
+            self.handle = handle;
+            self.width = width;
+            self.height = height;
+            self.owns_handle = false;
+        }
 
         /// A fresh handle every frame never survives long enough to
         /// clear bgfx's own override-timing contract (0 means not yet
         /// created from the main thread). Reusing the same handle,
         /// recreated only on a real size change, fixes that.
         pub fn rebind(self: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) c.bgfx_texture_handle_t {
-            if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
-                if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+            if (self.handle.idx == invalid_handle or self.width != width or self.height != height or !self.owns_handle) {
+                if (self.owns_handle and self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
                 const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
                 self.handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
                 self.width = width;
                 self.height = height;
+                self.owns_handle = true;
             }
             if (self.handle.idx == invalid_handle) return self.handle;
-            _ = c.bgfx_override_internal_texture_ptr(self.handle, native_ptr, 0);
+            _ = c.bgfx_override_internal_texture_ptr(self.handle, native_ptr, 0); // result ignored: returns the previous pointer, not a status
             return self.handle;
         }
 
         pub fn deinit(self: *PersistentTexture) void {
-            if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+            if (self.owns_handle and self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
             self.* = .{};
         }
 
@@ -1740,7 +1788,7 @@ pub const Renderer = struct {
         /// resizing on a dimension change. Mirrors uploadRgba's axis flip so a
         /// composited source matches the camera path, but owns its own texture
         /// so a multi-source composite never clobbers the shared upload cache.
-        pub fn uploadCopy(self: *PersistentTexture, width: u16, height: u16, format: u32, data: [*]const u8, stride: u32) c.bgfx_texture_handle_t {
+        pub fn uploadCopy(self: *PersistentTexture, r: *Renderer, width: u16, height: u16, format: u32, data: [*]const u8, stride: u32) c.bgfx_texture_handle_t {
             if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
                 if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
                 const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
@@ -1750,11 +1798,15 @@ pub const Renderer = struct {
             }
             const bytes_wide = @as(u64, width) * height * 4;
             if (bytes_wide > std.math.maxInt(u32)) return self.handle;
-            const mem = c.bgfx_alloc(@intCast(bytes_wide)) orelse return self.handle;
-            const dst: [*]u8 = mem.*.data;
+            const bytes: usize = @intCast(bytes_wide);
+            // The rotate writes straight into this texture's own staging, so a
+            // composited source costs no allocation on either heap per frame.
+            const stage = r.textureStageFor(self.handle.idx) orelse return self.handle;
+            if (!stage.ensure(r, bytes)) return self.handle;
+            const slot = stage.next(r, bytes) orelse return self.handle;
             // Both axes reversed (a half turn) matches uploadRgba's flip.
-            image.argbRotate(data, stride, dst, @as(u32, width) * 4, width, height, .half) catch return self.handle;
-            c.bgfx_update_texture_2d(self.handle, 0, 0, 0, 0, width, height, mem, std.math.maxInt(u16));
+            image.argbRotate(data, stride, slot.ptr, @as(u32, width) * 4, width, height, .half) catch return self.handle;
+            c.bgfx_update_texture_2d(self.handle, 0, 0, 0, 0, width, height, UploadStage.ref(slot), std.math.maxInt(u16));
             return self.handle;
         }
     };
@@ -1835,6 +1887,14 @@ pub const Renderer = struct {
 
     /// True only once Vulkan actually initialized, not just on Android -
     /// false on the GLES fallback.
+    /// The backend bgfx actually brought up, which is not always the one asked
+    /// for: a requested WebGPU can fall back to auto-select, and android takes
+    /// GL when the vulkan probe finds no ycbcr import. Numbered as bgfx does.
+    pub fn activeBackend(r: *const Renderer) u32 {
+        _ = r;
+        return @intCast(c.bgfx_get_renderer_type());
+    }
+
     pub fn isAndroidVulkan(r: *const Renderer) bool {
         return is_android and r.zero_copy != null;
     }
@@ -1847,6 +1907,97 @@ pub const Renderer = struct {
     pub fn createStaticTexture(width: u16, height: u16, rgba: []const u8) TextureHandle {
         return c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_RGBA8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, c.bgfx_copy(rgba.ptr, @intCast(rgba.len)), 0);
     }
+
+    /// Staging for one per-frame upload. bgfx reads referenced memory for up to
+    /// two bgfx_frame calls after a submit, so three slots give that contract a
+    /// frame of slack and let the upload hand over a reference rather than ask
+    /// bgfx to allocate and copy on the frame path.
+    pub const UploadStage = struct {
+        pub const slots = 3;
+
+        /// Held as floats so a vertex slot needs no realignment, and read as
+        /// bytes where a texture upload wants them.
+        memory: []f32 = &.{},
+        floats_per_slot: usize = 0,
+        at: u8 = 0,
+        /// The frame this stage last handed a slot out on, and how far it has
+        /// bumped into it. One slot a frame, every upload bumping within it, so
+        /// a buffer written twice in a frame keeps both writes alive. The
+        /// sentinel matches no frame, so a fresh stage always claims one.
+        frame: u64 = no_frame,
+        used: usize = 0,
+
+        const no_frame = std.math.maxInt(u64);
+
+        fn floatsFor(bytes: usize) usize {
+            return (bytes + @sizeOf(f32) - 1) / @sizeOf(f32);
+        }
+
+        /// Grows so this frame's uploads for this buffer all fit one slot. The
+        /// outgrown buffer retires rather than frees, since bgfx may read it for
+        /// two more frames; sizes round to a power of two so a mesh creeping
+        /// upward retires a bounded amount.
+        pub fn ensure(stage: *UploadStage, r: *Renderer, bytes: usize) bool {
+            const carried = if (stage.frame == r.frame_counter) stage.used else 0;
+            const need = carried + floatsFor(bytes);
+            if (stage.floats_per_slot >= need) return true;
+            const want = std.math.ceilPowerOfTwo(usize, need) catch return false;
+            const grown = r.gpa.alloc(f32, want * slots) catch return false;
+            if (stage.memory.len != 0) {
+                r.retired_stages.append(r.gpa, stage.memory) catch {
+                    // Nowhere to record it: keep the buffer we have rather
+                    // than free memory bgfx may still be reading.
+                    r.gpa.free(grown);
+                    return false;
+                };
+            }
+            stage.memory = grown;
+            stage.floats_per_slot = want;
+            stage.at = 0;
+            // The frame was bumping into a slot that no longer exists, so it
+            // starts again at the top of the fresh one. The retired buffer
+            // keeps whatever bgfx still points at.
+            stage.frame = no_frame;
+            stage.used = 0;
+            return true;
+        }
+
+        /// Room for this upload inside the frame's slot, ready to fill. The
+        /// first upload of a frame claims the next slot; the rest bump along
+        /// it. Null when it does not fit, which only happens when ensure was
+        /// not called or failed.
+        pub fn nextFloats(stage: *UploadStage, r: *Renderer, floats: usize) ?[]f32 {
+            if (floats == 0) return null;
+            if (stage.frame != r.frame_counter) {
+                stage.frame = r.frame_counter;
+                stage.at = (stage.at + 1) % slots;
+                stage.used = 0;
+            }
+            if (stage.used + floats > stage.floats_per_slot) return null;
+            const base = @as(usize, stage.at) * stage.floats_per_slot + stage.used;
+            stage.used += floats;
+            return stage.memory[base .. base + floats];
+        }
+
+        /// Room for exactly this many bytes, for a texture upload.
+        pub fn next(stage: *UploadStage, r: *Renderer, bytes: usize) ?[]u8 {
+            const slot = stage.nextFloats(r, floatsFor(bytes)) orelse return null;
+            return std.mem.sliceAsBytes(slot)[0..bytes];
+        }
+
+        /// bgfx memory referencing a filled slot. No copy: the slot stays
+        /// untouched for the two frames bgfx may still read it.
+        pub fn ref(filled: []const u8) [*c]const c.bgfx_memory_t {
+            return c.bgfx_make_ref(filled.ptr, @intCast(filled.len));
+        }
+
+        /// Only ever called from Renderer.deinit, after bgfx_shutdown: no
+        /// reference into these bytes can outlive that call.
+        pub fn deinit(stage: *UploadStage, gpa: std.mem.Allocator) void {
+            if (stage.memory.len != 0) gpa.free(stage.memory);
+            stage.* = .{};
+        }
+    };
 
     /// Uploads a single-channel mask (a segmentation result, say) as a
     /// real GPU texture - the same immutable, copy-once shape as
@@ -1865,8 +2016,11 @@ pub const Renderer = struct {
         height: u16 = 0,
 
         /// Replaces the mask's pixels, recreating the texture only when the
-        /// size changes; bgfx copies the bytes, so the caller may reuse them.
-        pub fn upload(self: *DynamicMask, width: u16, height: u16, mask: []const u8) TextureHandle {
+        /// size changes. The bytes land in the renderer's staging for this
+        /// texture and go to bgfx by reference, so a mask uploaded every frame
+        /// allocates on neither heap; staging that could not grow falls back
+        /// to letting bgfx copy rather than dropping the frame.
+        pub fn upload(self: *DynamicMask, r: *Renderer, width: u16, height: u16, mask: []const u8) TextureHandle {
             if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
                 if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
                 const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
@@ -1874,10 +2028,19 @@ pub const Renderer = struct {
                 self.width = width;
                 self.height = height;
             }
-            c.bgfx_update_texture_2d(self.handle, 0, 0, 0, 0, width, height, c.bgfx_copy(mask.ptr, @intCast(mask.len)), std.math.maxInt(u16));
+            const memory = blk: {
+                const stage = r.textureStageFor(self.handle.idx) orelse break :blk c.bgfx_copy(mask.ptr, @intCast(mask.len));
+                if (!stage.ensure(r, mask.len)) break :blk c.bgfx_copy(mask.ptr, @intCast(mask.len));
+                const slot = stage.next(r, mask.len) orelse break :blk c.bgfx_copy(mask.ptr, @intCast(mask.len));
+                @memcpy(slot, mask);
+                break :blk UploadStage.ref(slot);
+            };
+            c.bgfx_update_texture_2d(self.handle, 0, 0, 0, 0, width, height, memory, std.math.maxInt(u16));
             return self.handle;
         }
 
+        /// The texture goes; its staging stays with the renderer, ready for
+        /// whichever texture bgfx next hands that handle index to.
         pub fn deinit(self: *DynamicMask) void {
             if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
             self.* = .{};
@@ -1898,8 +2061,15 @@ pub const Renderer = struct {
 
     /// Replaces a dynamic BGRA texture's pixels with a freshly decoded
     /// frame; bgfx copies the bytes, so the caller may reuse the buffer.
-    pub fn updateDynamicBgraTexture(handle: TextureHandle, width: u16, height: u16, bgra: []const u8) void {
-        c.bgfx_update_texture_2d(handle, 0, 0, 0, 0, width, height, c.bgfx_copy(bgra.ptr, @intCast(bgra.len)), std.math.maxInt(u16));
+    pub fn updateDynamicBgraTexture(r: *Renderer, handle: TextureHandle, width: u16, height: u16, bgra: []const u8) void {
+        const memory = blk: {
+            const stage = r.textureStageFor(handle.idx) orelse break :blk c.bgfx_copy(bgra.ptr, @intCast(bgra.len));
+            if (!stage.ensure(r, bgra.len)) break :blk c.bgfx_copy(bgra.ptr, @intCast(bgra.len));
+            const slot = stage.next(r, bgra.len) orelse break :blk c.bgfx_copy(bgra.ptr, @intCast(bgra.len));
+            @memcpy(slot, bgra);
+            break :blk UploadStage.ref(slot);
+        };
+        c.bgfx_update_texture_2d(handle, 0, 0, 0, 0, width, height, memory, std.math.maxInt(u16));
     }
 
     /// Full-screen quad geometry and the view's transform, shared by
@@ -1985,6 +2155,34 @@ pub const Renderer = struct {
         framebuffer: c.bgfx_frame_buffer_handle_t,
         texture: c.bgfx_texture_handle_t,
     };
+
+    /// Set on every packed payload, so a zero payload means no resource rather
+    /// than a resource whose handles all happen to be zero. bgfx numbers handles
+    /// from zero, so without this a pooled target holding framebuffer 0 and
+    /// texture 0 reads as an empty slot and the next acquire leaks it.
+    pub const payload_present: u64 = 1 << 32;
+
+    /// A target as one integer and back, so a resource pool can carry it in a
+    /// slot payload without knowing what a target is made of.
+    pub fn packTarget(target: OffscreenTarget) u64 {
+        return payload_present | (@as(u64, target.framebuffer.idx) << 16) | target.texture.idx;
+    }
+
+    pub fn unpackTarget(stored: u64) OffscreenTarget {
+        return .{
+            .framebuffer = .{ .idx = @intCast((stored >> 16) & 0xffff) },
+            .texture = .{ .idx = @intCast(stored & 0xffff) },
+        };
+    }
+
+    /// The same for a single texture, a readback staging surface say.
+    pub fn packTexture(texture: TextureHandle) u64 {
+        return payload_present | texture.idx;
+    }
+
+    pub fn unpackTexture(stored: u64) TextureHandle {
+        return .{ .idx = @intCast(stored & 0xffff) };
+    }
 
     pub fn createOffscreenTarget(width: u16, height: u16) !OffscreenTarget {
         const framebuffer = c.bgfx_create_frame_buffer(width, height, c.BGFX_TEXTURE_FORMAT_RGBA8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP);
@@ -2838,8 +3036,8 @@ pub const Renderer = struct {
     /// trick for reading the frame at exactly the screen position each
     /// triangle draws over).
     pub fn submitMakeup(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, makeup_texture: c.bgfx_texture_handle_t, uv_buffer: c.bgfx_vertex_buffer_handle_t, positions: *const [makeup_mesh.canonical_uv.len]f32, intensity: f32) void {
-        c.bgfx_update_dynamic_vertex_buffer(r.makeup_position_buffer, 0, c.bgfx_copy(positions, @sizeOf(@TypeOf(positions.*))));
-        c.bgfx_set_dynamic_vertex_buffer(0, r.makeup_position_buffer, 0, makeup_mesh.canonical_uv.len / 2);
+        const xy = r.transientPositions(makeup_mesh.canonical_uv.len / 2) orelse return;
+        @memcpy(xy, positions);
         c.bgfx_set_vertex_buffer(1, uv_buffer, 0, makeup_mesh.canonical_uv.len / 2);
         c.bgfx_set_index_buffer(r.makeup_index_buffer, 0, makeup_mesh.triangle_indices.len);
         c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
@@ -2855,6 +3053,19 @@ pub const Renderer = struct {
     /// its tracked landmark (frame pixels in, zero-to-one frame UV out),
     /// canonical texture coordinates, the same program and blend the
     /// makeup mesh uses.
+    /// Carves this draw's positions out of the transient arena bgfx allocates
+    /// once at init and binds them as stream 0. The arena is a bump pointer
+    /// reset each frame, so the upload allocates on neither heap. Null when it
+    /// is exhausted: the caller skips the draw rather than allocating.
+    fn transientPositions(r: *const Renderer, count: u32) ?[]f32 {
+        if (c.bgfx_get_avail_transient_vertex_buffer(count, &r.mesh_position_layout) < count) return null;
+        var tvb: c.bgfx_transient_vertex_buffer_t = undefined;
+        c.bgfx_alloc_transient_vertex_buffer(&tvb, count, &r.mesh_position_layout);
+        c.bgfx_set_transient_vertex_buffer(0, &tvb, 0, count);
+        const xy: [*]f32 = @ptrCast(@alignCast(tvb.data));
+        return xy[0 .. @as(usize, count) * 2];
+    }
+
     /// Tells a screen-space mesh which slice of the picture it is drawing into. Whole-frame draws
     /// send the identity rect, so the shader's arithmetic is unchanged when nothing is tiled.
     fn setMeshTile(r: *const Renderer) void {
@@ -2867,13 +3078,11 @@ pub const Renderer = struct {
 
     pub fn submitFaceMesh(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, mesh_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, intensity: f32) void {
         std.debug.assert(landmarks.len >= 468 * 3);
-        var positions: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+        const positions = r.transientPositions(face_mesh_topology.vertex_count) orelse return;
         for (face_mesh_topology.vertex_landmarks, 0..) |landmark, at| {
             positions[at * 2] = landmarks[@as(usize, landmark) * 3] / frame_width;
             positions[at * 2 + 1] = landmarks[@as(usize, landmark) * 3 + 1] / frame_height;
         }
-        c.bgfx_update_dynamic_vertex_buffer(r.face_mesh_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
-        c.bgfx_set_dynamic_vertex_buffer(0, r.face_mesh_position_buffer, 0, face_mesh_topology.vertex_count);
         c.bgfx_set_vertex_buffer(1, r.face_mesh_uv_buffer, 0, face_mesh_topology.vertex_count);
         c.bgfx_set_index_buffer(r.face_mesh_index_buffer, 0, face_mesh_topology.triangle_indices.len);
         c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
@@ -2890,13 +3099,11 @@ pub const Renderer = struct {
     /// at the screen position, and blends over the frame by opacity and mode.
     pub fn submitFaceMaterial(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, material_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, blend: f32) void {
         std.debug.assert(landmarks.len >= 468 * 3);
-        var positions: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+        const positions = r.transientPositions(face_mesh_topology.vertex_count) orelse return;
         for (face_mesh_topology.vertex_landmarks, 0..) |landmark, at| {
             positions[at * 2] = landmarks[@as(usize, landmark) * 3] / frame_width;
             positions[at * 2 + 1] = landmarks[@as(usize, landmark) * 3 + 1] / frame_height;
         }
-        c.bgfx_update_dynamic_vertex_buffer(r.face_mesh_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
-        c.bgfx_set_dynamic_vertex_buffer(0, r.face_mesh_position_buffer, 0, face_mesh_topology.vertex_count);
         c.bgfx_set_vertex_buffer(1, r.face_mesh_uv_buffer, 0, face_mesh_topology.vertex_count);
         c.bgfx_set_index_buffer(r.face_mesh_index_buffer, 0, face_mesh_topology.triangle_indices.len);
         c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
@@ -2915,10 +3122,8 @@ pub const Renderer = struct {
     /// seam feather, so the swap fades into the surrounding skin.
     pub fn submitFaceSwap(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, donor_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, opacity: f32, feather: f32) void {
         std.debug.assert(landmarks.len >= 468 * 3);
-        var positions: [face_mesh_topology.vertex_count * 2]f32 = undefined;
-        face_mesh_topology.projectPositions(landmarks, frame_width, frame_height, &positions);
-        c.bgfx_update_dynamic_vertex_buffer(r.face_mesh_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
-        c.bgfx_set_dynamic_vertex_buffer(0, r.face_mesh_position_buffer, 0, face_mesh_topology.vertex_count);
+        const xy = r.transientPositions(face_mesh_topology.vertex_count) orelse return;
+        face_mesh_topology.projectPositions(landmarks, frame_width, frame_height, xy[0 .. face_mesh_topology.vertex_count * 2]);
         c.bgfx_set_vertex_buffer(1, r.face_mesh_uv_buffer, 0, face_mesh_topology.vertex_count);
         c.bgfx_set_vertex_buffer(2, r.face_mesh_feather_buffer, 0, face_mesh_topology.vertex_count);
         c.bgfx_set_index_buffer(r.face_mesh_index_buffer, 0, face_mesh_topology.triangle_indices.len);
@@ -2938,10 +3143,8 @@ pub const Renderer = struct {
     /// frame the same self-blend the makeup mesh uses.
     pub fn submitLashMesh(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, color: [4]f32, length: f32, curl: f32) void {
         std.debug.assert(landmarks.len >= 468 * 3);
-        var positions: [lash_mesh.vertex_count * 2]f32 = undefined;
-        lash_mesh.buildPositions(landmarks, frame_width, frame_height, length, curl, &positions);
-        c.bgfx_update_dynamic_vertex_buffer(r.lash_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
-        c.bgfx_set_dynamic_vertex_buffer(0, r.lash_position_buffer, 0, lash_mesh.vertex_count);
+        const xy = r.transientPositions(lash_mesh.vertex_count) orelse return;
+        lash_mesh.buildPositions(landmarks, frame_width, frame_height, length, curl, xy[0 .. lash_mesh.vertex_count * 2]);
         c.bgfx_set_vertex_buffer(1, r.lash_uv_buffer, 0, lash_mesh.vertex_count);
         c.bgfx_set_index_buffer(r.lash_index_buffer, 0, lash_mesh.triangle_indices.len);
         c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
@@ -3073,24 +3276,55 @@ pub const Renderer = struct {
     pub fn updateLitModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32, normals: []const [3]f32) void {
         if (!mesh.dynamic or !mesh.lit) return;
         const count = @min(positions.len, mesh.vertex_count);
-        const interleaved = r.interleaveStage(count * 8) orelse return;
+        const interleaved = r.uploadFloats(mesh.dynamic_vertex_buffer, count * 8) orelse return;
         for (0..count) |i| {
             const n = if (i < normals.len) normals[i] else [3]f32{ 0.0, 0.0, 1.0 };
             interleaved[i * 8 ..][0..8].* = .{ positions[i][0], positions[i][1], positions[i][2], n[0], n[1], n[2], 0.0, 0.0 };
         }
-        c.bgfx_update_dynamic_vertex_buffer(mesh.dynamic_vertex_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+        commitFloats(mesh.dynamic_vertex_buffer, interleaved);
     }
 
-    /// The reused interleave staging sized for `floats`, grown on the first
-    /// larger mesh and reused thereafter. Null only if a grow ever fails, in
-    /// which case the caller skips this update rather than allocating.
-    fn interleaveStage(r: *Renderer, floats: usize) ?[]f32 {
-        if (floats > r.interleave_scratch.len) {
-            const grown = r.gpa.alloc(f32, floats) catch return null;
-            if (r.interleave_scratch.len != 0) r.gpa.free(r.interleave_scratch);
-            r.interleave_scratch = grown;
+    /// This buffer's own staging, grown to cover the handle index the first
+    /// time it uploads. Null when the table cannot grow, and the caller lets
+    /// bgfx copy instead.
+    fn stageIn(gpa: std.mem.Allocator, table: *[]UploadStage, idx: u16) ?*UploadStage {
+        if (idx == invalid_handle) return null;
+        if (idx >= table.len) {
+            const want = @as(usize, idx) + 1;
+            const grown = if (table.len == 0) gpa.alloc(UploadStage, want) catch return null else gpa.realloc(table.*, want) catch return null;
+            @memset(grown[table.len..], .{});
+            table.* = grown;
         }
-        return r.interleave_scratch[0..floats];
+        return &table.*[idx];
+    }
+
+    fn stageFor(r: *Renderer, idx: u16) ?*UploadStage {
+        return stageIn(r.gpa, &r.upload_stages, idx);
+    }
+
+    /// A dynamic texture's staging. It lives on the renderer rather than on
+    /// the texture so a texture destroyed while bgfx still holds a reference
+    /// into its last upload cannot pull the bytes out from under it.
+    pub fn textureStageFor(r: *Renderer, idx: u16) ?*UploadStage {
+        return stageIn(r.gpa, &r.texture_stages, idx);
+    }
+
+    /// The slice this frame's vertices are built into: the buffer's own staging
+    /// slot, so the build writes once and bgfx reads those bytes by reference.
+    /// Null when staging could not grow, and the caller keeps last frame's
+    /// geometry rather than allocating.
+    fn uploadFloats(r: *Renderer, handle: c.bgfx_dynamic_vertex_buffer_handle_t, floats: usize) ?[]f32 {
+        const stage = r.stageFor(handle.idx) orelse return null;
+        const bytes = floats * @sizeOf(f32);
+        if (!stage.ensure(r, bytes)) return null;
+        return stage.nextFloats(r, floats);
+    }
+
+    /// Hands the filled slot to bgfx by reference. No copy and no vendor-heap
+    /// allocation: the slot stays untouched for the two frames bgfx may still
+    /// read it.
+    fn commitFloats(handle: c.bgfx_dynamic_vertex_buffer_handle_t, filled: []const f32) void {
+        c.bgfx_update_dynamic_vertex_buffer(handle, 0, UploadStage.ref(std.mem.sliceAsBytes(filled)));
     }
 
     /// Re-uploads deformed positions into a dynamic model mesh, padding
@@ -3098,11 +3332,11 @@ pub const Renderer = struct {
     pub fn updateModelMesh(r: *Renderer, mesh: ModelMesh, positions: []const [3]f32) void {
         if (!mesh.dynamic or mesh.lit) return;
         const count = @min(positions.len, mesh.vertex_count);
-        const interleaved = r.interleaveStage(count * 5) orelse return;
+        const interleaved = r.uploadFloats(mesh.dynamic_vertex_buffer, count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
         }
-        c.bgfx_update_dynamic_vertex_buffer(mesh.dynamic_vertex_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+        commitFloats(mesh.dynamic_vertex_buffer, interleaved);
     }
 
     pub fn destroyModelMesh(mesh: ModelMesh) void {
@@ -3133,11 +3367,11 @@ pub const Renderer = struct {
     /// dynamic buffer, padding the texcoord to zero to match r.layout.
     pub fn updateSkinnedMesh(r: *Renderer, mesh: SkinnedMesh, positions: []const [3]f32) void {
         const count = @min(positions.len, mesh.vertex_count);
-        const interleaved = r.interleaveStage(count * 5) orelse return;
+        const interleaved = r.uploadFloats(mesh.position_buffer, count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i][0], positions[i][1], positions[i][2], 0.0, 0.0 };
         }
-        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+        commitFloats(mesh.position_buffer, interleaved);
     }
 
     /// A skinned mesh in the lit layout: a body-skinned mesh under a light
@@ -3153,12 +3387,12 @@ pub const Renderer = struct {
     /// padding the texcoord to zero to match lit_model_layout.
     pub fn updateLitSkinnedMesh(r: *Renderer, mesh: SkinnedMesh, positions: []const [3]f32, normals: []const [3]f32) void {
         const count = @min(positions.len, mesh.vertex_count);
-        const interleaved = r.interleaveStage(count * 8) orelse return;
+        const interleaved = r.uploadFloats(mesh.position_buffer, count * 8) orelse return;
         for (0..count) |i| {
             const n = if (i < normals.len) normals[i] else [3]f32{ 0.0, 0.0, 1.0 };
             interleaved[i * 8 ..][0..8].* = .{ positions[i][0], positions[i][1], positions[i][2], n[0], n[1], n[2], 0.0, 0.0 };
         }
-        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+        commitFloats(mesh.position_buffer, interleaved);
     }
 
     /// drawSkinnedMesh through the lit program: the same content camera, plus the
@@ -3221,11 +3455,11 @@ pub const Renderer = struct {
     /// into the cloth's dynamic buffer, padding the texcoord to zero.
     pub fn updateClothMesh(r: *Renderer, mesh: ClothMesh, positions: []const f32) void {
         const count = @min(positions.len / 3, mesh.vertex_count);
-        const interleaved = r.interleaveStage(count * 5) orelse return;
+        const interleaved = r.uploadFloats(mesh.position_buffer, count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
         }
-        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+        commitFloats(mesh.position_buffer, interleaved);
     }
 
     pub fn destroyClothMesh(mesh: ClothMesh) void {
@@ -3255,11 +3489,11 @@ pub const Renderer = struct {
 
     pub fn updateHairMesh(r: *Renderer, mesh: HairMesh, positions: []const f32) void {
         const count = @min(positions.len / 3, mesh.vertex_count);
-        const interleaved = r.interleaveStage(count * 5) orelse return;
+        const interleaved = r.uploadFloats(mesh.position_buffer, count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
         }
-        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+        commitFloats(mesh.position_buffer, interleaved);
     }
 
     pub fn destroyHairMesh(mesh: HairMesh) void {
@@ -3318,19 +3552,22 @@ pub const Renderer = struct {
 
     pub fn updateParticleMesh(r: *Renderer, mesh: ParticleMesh, positions: []const f32) void {
         const count = @min(positions.len / 3, mesh.vertex_count);
-        const interleaved = r.interleaveStage(count * 5) orelse return;
+        const interleaved = r.uploadFloats(mesh.position_buffer, count * 5) orelse return;
         for (0..count) |i| {
             interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
         }
-        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+        commitFloats(mesh.position_buffer, interleaved);
     }
 
     /// Uploads already-interleaved sprite vertices (position, corner index,
     /// life, seed, velocity xy per vertex - eight floats) straight into the
     /// mesh; the writeBillboards output.
-    pub fn updateParticleMeshFaded(mesh: ParticleMesh, faded: []const f32) void {
+    pub fn updateParticleMeshFaded(r: *Renderer, mesh: ParticleMesh, faded: []const f32) void {
         const count = @min(faded.len / 12, mesh.vertex_count);
-        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(faded.ptr, @intCast(count * 12 * @sizeOf(f32))));
+        const floats = count * 12;
+        const slot = r.uploadFloats(mesh.position_buffer, floats) orelse return;
+        @memcpy(slot, faded[0..floats]);
+        commitFloats(mesh.position_buffer, slot);
     }
 
     pub fn destroyParticleMesh(mesh: ParticleMesh) void {
@@ -3763,7 +4000,7 @@ pub const Renderer = struct {
     }
 
     pub fn frame(r: *Renderer) u32 {
-        _ = r;
+        r.frame_counter +%= 1;
         return c.bgfx_frame(0);
     }
 

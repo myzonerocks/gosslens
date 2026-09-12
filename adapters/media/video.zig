@@ -62,9 +62,11 @@ extern fn goss_media_boundary_probe(mode: u32) i32;
 // deliberate C++ throw (mode 1) behind the shim must both surface as
 // the failure status, never unwind into Zig; mode 2 throws nothing.
 test "a throw behind the media boundary surfaces as a status" {
-    // Deliberate: the caught exception logs to stderr, so this runs only under
-    // GOSS_PROBES (the ci sets it) and stays out of the everyday test output.
+    // The caught exception logs to stderr, which fails the build step whatever
+    // the assertions say, so the log is silenced and the status is the proof.
     if (std.c.getenv("GOSS_PROBES") == null) return error.SkipZigTest;
+    var quiet = @import("quiet").Quiet.start();
+    defer quiet.restore();
     try std.testing.expectEqual(@as(i32, -1), goss_media_boundary_probe(0));
     try std.testing.expectEqual(@as(i32, -1), goss_media_boundary_probe(1));
     try std.testing.expectEqual(@as(i32, 0), goss_media_boundary_probe(2));

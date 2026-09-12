@@ -16,6 +16,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // The sanitized lane. On, the native-heap scenario links the platform
+    // address sanitizer so it owns malloc from process start, redzoning and
+    // quarantining every block the vendored engines take. That is the half of
+    // the heap neither zig allocator nor the leak checker can see.
+    const asan = b.option(bool, "asan", "Link the platform address sanitizer into the native-heap scenario") orelse false;
+    const asan_runtime_dir: ?[]const u8 = if (!asan) null else b.option([]const u8, "asan-runtime", "Directory holding " ++ asan_runtime_name) orelse detectAsanRuntimeDir(b);
+
     const gate_module = b.createModule(.{
         .root_source_file = b.path("tools/gate.zig"),
         .target = target,
@@ -33,9 +40,39 @@ pub fn build(b: *std.Build) void {
     const gate_step = b.step("gate", "Run the source-tracked gate (-- --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-body <file>)");
     gate_step.dependOn(&run_gate.step);
 
+    // The public contract: the header, abi_functions, docs/API.md and the three
+    // SDK surfaces describe one operation set, and nothing checked that they
+    // agreed until this gate existed.
+    const api_check_module = b.createModule(.{
+        .root_source_file = b.path("tools/api_check.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const api_check_exe = b.addExecutable(.{
+        .name = "api-check",
+        .root_module = api_check_module,
+    });
+    const run_api_check = b.addRunArtifact(api_check_exe);
+    run_api_check.setCwd(b.path("."));
+    const api_check_step = b.step("api-check", "Check the C ABI, abi_functions, docs/API.md and the SDK wrappers against each other");
+    api_check_step.dependOn(&run_api_check.step);
+
+
     // The authoritative gate suite runs locally: hosted runners are not
     // funded, so green here is the merge bar. One command, every gate.
     const ci_step = b.step("ci", "Run every gate locally: tests, source gate, abi, vendor check, provenance");
+
+    // The SDKs compile. Three of them did not, each for a different reason, and
+    // nothing in any gate would have said so: only running a compiler does.
+    const sdk_check_step = b.step("sdk-check", "Typecheck the Swift SDK and compile the Kotlin SDK where the toolchains exist");
+    if (swiftTypecheckCommand(b)) |cmd| {
+        sdk_check_step.dependOn(&cmd.step);
+        ci_step.dependOn(&cmd.step);
+    }
+    if (kotlinCompileCommand(b)) |cmd| {
+        sdk_check_step.dependOn(&cmd.step);
+        ci_step.dependOn(&cmd.step);
+    }
     {
         const ci_gate = b.addRunArtifact(gate_exe);
         ci_gate.setCwd(b.path("."));
@@ -49,6 +86,9 @@ pub fn build(b: *std.Build) void {
         ci_diff.setCwd(b.path("."));
         ci_diff.addArgs(&.{ "--diff", "origin/main...HEAD" });
         ci_step.dependOn(&ci_diff.step);
+        const ci_api = b.addRunArtifact(api_check_exe);
+        ci_api.setCwd(b.path("."));
+        ci_step.dependOn(&ci_api.step);
     }
 
     const math_module = b.createModule(.{
@@ -397,7 +437,9 @@ pub fn build(b: *std.Build) void {
         lens_package_reference_step.dependOn(&run.step);
     }
 
+    const quiet_tests = b.addTest(.{ .root_module = quietModule(b, target, optimize) });
     const gate_tests = b.addTest(.{ .root_module = gate_module });
+    const api_check_tests = b.addTest(.{ .root_module = api_check_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
     const detector_tests = b.addTest(.{ .root_module = detector_module });
     const sampler_tests = b.addTest(.{ .root_module = sampler_module });
@@ -460,6 +502,7 @@ pub fn build(b: *std.Build) void {
     const lens_runtime_tests = b.addTest(.{ .root_module = lens_runtime_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
+    test_step.dependOn(&b.addRunArtifact(quiet_tests).step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
     test_step.dependOn(&b.addRunArtifact(detector_tests).step);
@@ -548,8 +591,13 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "lifecycle_proof", .module = lifecycle_proof_module }},
         }),
     });
-    const leak_scenario_step = b.step("leak-scenario", "Build the headless lifecycle scenario for the native-heap leak lane");
-    leak_scenario_step.dependOn(&b.addInstallArtifact(leak_scenario_exe, .{}).step);
+    _ = leak_scenario_exe;
+    // The binary the scheduled native-heap lane runs is built further down,
+    // against the REAL inference adapters rather than the stubs this module
+    // graph carries: a lane watching a binary with no vendored tflite, no
+    // beauty and no physics is watching a heap that is not linked in.
+    leak_scenario_step = b.step("leak-scenario", "Build the lifecycle scenario for the native-heap leak lane, against the real vendored adapters");
+    test_step.dependOn(&b.addRunArtifact(api_check_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
     test_step.dependOn(&b.addRunArtifact(vendor_sync_tests).step);
     test_step.dependOn(&b.addRunArtifact(fetch_models_tests).step);
@@ -930,36 +978,37 @@ pub fn build(b: *std.Build) void {
             },
         });
         if (host_asset) |am| tracking_module.addImport("image", am.image);
-        if (target.result.os.tag == .macos) {
-            tracking_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
-            tracking_module.linkFramework("AppKit", .{});
-            tracking_module.linkFramework("OpenGL", .{});
-            tracking_module.linkFramework("CoreVideo", .{});
-        } else {
-            // The beauty archive carries the image loader implementation
-            // where it links; elsewhere the harness compiles its own.
-            tracking_module.addCSourceFile(.{
-                .file = b.path("harness/stb_image_impl.c"),
-                .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
-            });
-        }
-        tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null, null));
-        tracking_module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
-        tracking_module.linkLibrary(buildAbseilLib(b, target, optimize, null));
-        tracking_module.linkLibrary(buildRuyLib(b, target, optimize, null));
-        tracking_module.linkLibrary(buildFarmhashLib(b, target, optimize, null));
-        tracking_module.linkLibrary(buildFlatbuffersLib(b, target, optimize, null));
-        tracking_module.linkLibrary(buildFft2dLib(b, target, optimize, null));
-        tracking_module.linkLibrary(buildCpuinfoLib(b, target, optimize, null));
-        tracking_module.linkLibrary(buildPthreadpoolLib(b, target, optimize, null));
-        // The image loader implementation arrives inside the beauty
-        // archive; the harness only includes the declarations.
-        tracking_module.addIncludePath(b.path(".vendor/gpupixel/third_party/stb/include/stb"));
-        attachC(b, tracking_module, "stb", "harness/stb_c.h");
+        addHostInferenceLibs(b, tracking_module, target, optimize, flatc_exe.?);
         const tracking_exe = b.addExecutable(.{ .name = "tracking_harness", .root_module = tracking_module });
         const run_tracking = b.addRunArtifact(tracking_exe);
         run_tracking.setCwd(b.path("."));
         tracking_step.dependOn(&run_tracking.step);
+
+        // The native-heap lane's binary, on the same real adapters: the lifecycle
+        // scenario over an abi that carries live tflite inference, segmentation,
+        // the ml rail, physics, the script runtime and the audio mixer, so the
+        // heaps the zig allocators cannot see are actually present to leak.
+        const leak_lifecycle_module = b.createModule(.{
+            .root_source_file = b.path("harness/lifecycle_proof.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "abi", .module = abi_tracking_module }},
+        });
+        const real_leak_module = b.createModule(.{
+            .root_source_file = b.path("harness/leak_scenario.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "lifecycle_proof", .module = leak_lifecycle_module }},
+        });
+        addHostInferenceLibs(b, real_leak_module, target, optimize, flatc_exe.?);
+        if (host_asset) |am| real_leak_module.addImport("image", am.image);
+        const real_leak_exe = b.addExecutable(.{ .name = "gosslens-leak-scenario", .root_module = real_leak_module });
+        if (asan_runtime_dir) |dir| linkAsanThroughStub(b, real_leak_exe, target, optimize, dir);
+        leak_scenario_step.dependOn(&b.addInstallArtifact(real_leak_exe, .{}).step);
+        // No test artifact on the lifecycle module: it drives the real inference
+        // stack, and a zig test binary's stdout is the build-runner protocol that
+        // TFLite's own logging corrupts. The executable above is the proof, run
+        // under the platform leak checker and the sanitizer by the leak lane.
     } else {
         tracking_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
     }
@@ -1020,6 +1069,40 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_wasi },
             },
         });
+        // The pose and hand inference cores the host and android workers run,
+        // built for wasi so the web module drives the same code rather than its
+        // own copy of each pipeline.
+        const graph_wasi_cores = b.createModule(.{
+            .root_source_file = b.path("core/graph/graph.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+        });
+        const pose_core_wasi = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/pose_core.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+            .imports = &.{
+                .{ .name = "bundle", .module = cores_wasi.bundle },
+                .{ .name = "runtime", .module = runtime_wasi },
+                .{ .name = "detector", .module = cores_wasi.detector },
+                .{ .name = "sampler", .module = cores_wasi.sampler },
+                .{ .name = "pose", .module = cores_wasi.pose },
+                .{ .name = "graph", .module = graph_wasi_cores },
+            },
+        });
+        const hand_core_wasi = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/hand_core.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+            .imports = &.{
+                .{ .name = "bundle", .module = cores_wasi.bundle },
+                .{ .name = "runtime", .module = runtime_wasi },
+                .{ .name = "detector", .module = cores_wasi.detector },
+                .{ .name = "sampler", .module = cores_wasi.sampler },
+                .{ .name = "hand", .module = cores_wasi.hand },
+                .{ .name = "graph", .module = graph_wasi_cores },
+            },
+        });
         const exports_wasi = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/wasm_exports.zig"),
             .target = wasi_target,
@@ -1034,6 +1117,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "pose", .module = cores_wasi.pose },
                 .{ .name = "hand", .module = cores_wasi.hand },
                 .{ .name = "segmentation_core", .module = segmentation_core_wasi },
+                .{ .name = "pose_core", .module = pose_core_wasi },
+                .{ .name = "hand_core", .module = hand_core_wasi },
             },
         });
         exports_wasi.linkLibrary(buildTfliteLib(b, wasi_target, wasi_optimize, flatc_exe.?, null, null));
@@ -2161,6 +2246,25 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     return b.addLibrary(.{ .name = "quickjs", .linkage = .static, .root_module = module });
 }
 
+/// The stderr silencer the two deliberate-failure tests use. See
+/// core/diag/quiet.zig for why a log on stderr fails a test step. Memoized per
+/// target and mode: two modules over one file collide in a shared graph, which
+/// the abi module's own test hit the moment both its importers made their own.
+fn quietModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const key = b.fmt("goss-quiet-{s}-{s}", .{ target.result.zigTriple(b.allocator) catch "t", @tagName(optimize) });
+    if (b.modules.get(key)) |existing| return existing;
+    const module = b.addModule(key, .{
+        .root_source_file = b.path("core/diag/quiet.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // dup, dup2 and open are libc. macOS links it whatever a module declares, so
+    // this compiled here and failed on the linux lane, which is the whole reason
+    // that lane exists.
+    module.link_libc = true;
+    return module;
+}
+
 fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, real: bool) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path(if (real) "adapters/script/script.zig" else "adapters/script/script_stub.zig"),
@@ -2168,6 +2272,7 @@ fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .optimize = optimize,
     });
     if (real) {
+        module.addImport("quiet", quietModule(b, target, optimize));
         module.link_libc = true;
         module.addIncludePath(b.path(".vendor/quickjs-ng"));
         addCTargetSysroot(b, module, target);
@@ -2301,6 +2406,7 @@ fn mediaVideoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .target = target,
         .optimize = optimize,
     });
+    if (apple) module.addImport("quiet", quietModule(b, target, optimize));
     if (android) {
         module.addImport("image", image_module.?);
         if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot, androidTriple(target.result.cpu.arch));
@@ -3929,6 +4035,9 @@ fn coremlSpecSources(b: *std.Build, protoc: *std.Build.Step.Compile, out: *std.A
 /// phase's own modules read this only during their own synchronous
 /// construction.
 var apple_sdk: ?[]const u8 = null;
+/// The native-heap lane's step, declared with the other steps and filled in
+/// where the real inference modules are in scope.
+var leak_scenario_step: *std.Build.Step = undefined;
 
 fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
     const sdk = apple_sdk orelse sysrootOf(b) orelse return;
@@ -3937,6 +4046,134 @@ fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }) });
     // Newer sdks split pieces of the ui frameworks into sub frameworks.
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "SubFrameworks" }) });
+}
+
+const asan_runtime_name = "libclang_rt.asan_osx_dynamic.dylib";
+
+/// Typechecks the Swift SDK against the simulator sdk, no linking and no vendor
+/// archives. Null where Xcode is absent, so a linux runner skips it rather than
+/// failing on a toolchain it was never going to have.
+fn swiftTypecheckCommand(b: *std.Build) ?*std.Build.Step.Run {
+    if (@import("builtin").os.tag != .macos) return null;
+    var code: u8 = undefined;
+    const sdk_out = b.runAllowFail(&.{ "xcrun", "--sdk", "iphonesimulator", "--show-sdk-path" }, &code, .ignore) catch return null;
+    const sdk = std.mem.trim(u8, sdk_out, " \r\n\t");
+    if (sdk.len == 0) return null;
+    // The sdk path resolving is not the compiler being runnable: a nix shell can
+    // answer the first and not have swiftc on its path, and a gate that reds for
+    // that is the false gate this project keeps removing.
+    var swift_code: u8 = undefined;
+    _ = b.runAllowFail(&.{ "xcrun", "swiftc", "--version" }, &swift_code, .ignore) catch return null;
+    if (swift_code != 0) return null;
+    const cmd = b.addSystemCommand(&.{
+        "/bin/sh", "-c",
+        b.fmt("xcrun swiftc -typecheck -swift-version 6 -sdk {s} -target arm64-apple-ios17.0-simulator -I sdk/swift/Sources/CGosslens/include sdk/swift/Sources/Gosslens/*.swift", .{sdk}),
+    });
+    cmd.setCwd(b.path("."));
+    cmd.setName("swiftc -typecheck (sdk/swift)");
+    return cmd;
+}
+
+/// Compiles the Kotlin SDK on the jvm. Null without the wrapper or without an
+/// Android SDK: the library is an android-library, so gradle cannot resolve its
+/// plugin there, and a gate that fails for a missing toolchain rather than a
+/// missing symbol is the false gate this wave spent its time removing.
+fn kotlinCompileCommand(b: *std.Build) ?*std.Build.Step.Run {
+    var code: u8 = undefined;
+    _ = b.runAllowFail(&.{
+        "/bin/sh", "-c",
+        // The wrapper, an android sdk, and a gradle distribution already on the
+        // machine. Without the last one the first run downloads gradle inside the
+        // gate suite, which turns a source check into a network check.
+        "test -x sdk/kotlin/gradlew" ++
+            " && { test -n \"$ANDROID_HOME\" || test -n \"$ANDROID_SDK_ROOT\" || test -d \"$HOME/Library/Android/sdk\"; }" ++
+            " && test -d \"$HOME/.gradle/wrapper/dists\"",
+    }, &code, .ignore) catch return null;
+    if (code != 0) return null;
+    const cmd = b.addSystemCommand(&.{ "./gradlew", "--quiet", "compileDebugKotlin" });
+    cmd.setCwd(b.path("sdk/kotlin"));
+    cmd.setName("gradlew compileDebugKotlin (sdk/kotlin)");
+    return cmd;
+}
+
+/// Where the platform sanitizer runtime lives. xcrun knows where clang is and
+/// the runtime sits beside it; a toolchain may carry several version
+/// directories for one clang, so take whichever actually holds the dylib.
+fn detectAsanRuntimeDir(b: *std.Build) ?[]const u8 {
+    if (@import("builtin").os.tag != .macos) return null;
+    var code: u8 = undefined;
+    const clang_out = b.runAllowFail(&.{ "xcrun", "--find", "clang" }, &code, .ignore) catch return null;
+    const clang = std.mem.trim(u8, clang_out, " \r\n\t");
+    if (clang.len == 0) return null;
+    const bin = std.fs.path.dirname(clang) orelse return null;
+    const usr = std.fs.path.dirname(bin) orelse return null;
+    const clang_root = b.pathJoin(&.{ usr, "lib", "clang" });
+    var find_code: u8 = undefined;
+    const found = b.runAllowFail(&.{
+        "/bin/sh", "-c",
+        b.fmt("ls -d {s}/*/lib/darwin/{s} 2>/dev/null | head -1", .{ clang_root, asan_runtime_name }),
+    }, &find_code, .ignore) catch return null;
+    const dylib = std.mem.trim(u8, found, " \r\n\t");
+    if (dylib.len == 0) return null;
+    return b.dupe(std.fs.path.dirname(dylib) orelse return null);
+}
+
+/// Makes a binary load the platform sanitizer runtime at launch. See
+/// harness/asan_stub.c for why this goes through a stub rather than linking the
+/// runtime directly.
+fn linkAsanThroughStub(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, runtime_dir: []const u8) void {
+    const stub_module = b.createModule(.{ .target = target, .optimize = optimize });
+    stub_module.link_libc = true;
+    stub_module.addCSourceFile(.{
+        .file = b.path("harness/asan_stub.c"),
+        .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+    });
+    const stub = b.addLibrary(.{
+        .name = "clang_rt.asan_osx_dynamic",
+        .linkage = .dynamic,
+        .root_module = stub_module,
+    });
+    // The stub answers to the real runtime's own install name, so dyld loads
+    // the real file through the rpath below rather than this placeholder.
+    stub.install_name = b.fmt("@rpath/{s}", .{asan_runtime_name});
+    exe.root_module.linkLibrary(stub);
+    exe.root_module.addRPath(.{ .cwd_relative = runtime_dir });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("harness/asan_preload.c"),
+        .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+    });
+}
+
+/// Every vendored archive a host binary needs to run real inference, beauty and
+/// the image loader. Two binaries need exactly this set, the tracking harness
+/// and the native-heap lane's scenario, so it is written once.
+fn addHostInferenceLibs(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, flatc: *std.Build.Step.Compile) void {
+    if (target.result.os.tag == .macos) {
+        module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
+        module.linkFramework("AppKit", .{});
+        module.linkFramework("OpenGL", .{});
+        module.linkFramework("CoreVideo", .{});
+    } else {
+        // The beauty archive carries the image loader implementation where it
+        // links; elsewhere the binary compiles its own.
+        module.addCSourceFile(.{
+            .file = b.path("harness/stb_image_impl.c"),
+            .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
+        });
+    }
+    module.linkLibrary(buildTfliteLib(b, target, optimize, flatc, null, null));
+    module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
+    module.linkLibrary(buildAbseilLib(b, target, optimize, null));
+    module.linkLibrary(buildRuyLib(b, target, optimize, null));
+    module.linkLibrary(buildFarmhashLib(b, target, optimize, null));
+    module.linkLibrary(buildFlatbuffersLib(b, target, optimize, null));
+    module.linkLibrary(buildFft2dLib(b, target, optimize, null));
+    module.linkLibrary(buildCpuinfoLib(b, target, optimize, null));
+    module.linkLibrary(buildPthreadpoolLib(b, target, optimize, null));
+    // The image loader implementation arrives inside the beauty archive; the
+    // binary only includes the declarations.
+    module.addIncludePath(b.path(".vendor/gpupixel/third_party/stb/include/stb"));
+    attachC(b, module, "stb", "harness/stb_c.h");
 }
 
 fn buildBgfxLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
@@ -3965,7 +4202,11 @@ fn buildBgfxLibFlags(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
         ".vendor/bgfx/3rdparty",
         ".vendor/bgfx/3rdparty/khronos",
     }) |dir| bgfx_module.addIncludePath(b.path(dir));
-    const base_flags = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-exceptions", "-fno-rtti", "-fno-sanitize=undefined", "-D__STDC_FORMAT_MACROS", "-Wno-date-time", "-DBIMG_CONFIG_PARSE_AVIF=0", "-DBIMG_CONFIG_PARSE_HEIF=0", "-DBIMG_CONFIG_PARSE_EXR=0", debug_flag };
+    // Two bgfx debug checks keep a hash set per draw and allocate a node for
+    // every uniform and sampler set, so a debug build allocates on the frame
+    // path where a release build does not and a debug measurement describes a
+    // different program. Off here; every other assert stays.
+    const base_flags = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-exceptions", "-fno-rtti", "-fno-sanitize=undefined", "-D__STDC_FORMAT_MACROS", "-Wno-date-time", "-DBIMG_CONFIG_PARSE_AVIF=0", "-DBIMG_CONFIG_PARSE_HEIF=0", "-DBIMG_CONFIG_PARSE_EXR=0", "-DBGFX_CONFIG_DEBUG_UNIFORM=0", "-DBGFX_CONFIG_DEBUG_OCCLUSION=0", debug_flag };
     const cxx_flags = std.mem.concat(b.allocator, []const u8, &.{ &base_flags, extra_flags }) catch @panic("oom");
     bgfx_module.addCSourceFile(.{ .file = b.path(".vendor/bx/src/amalgamated.cpp"), .flags = cxx_flags });
     for ([_][]const u8{ "image.cpp", "image_cubemap_filter.cpp", "image_decode.cpp", "image_encode.cpp" }) |file| {
@@ -4041,10 +4282,6 @@ fn listReferenceLenses(b: *std.Build) [][]const u8 {
     return lenses.items;
 }
 
-// The pinned toolchain is the only toolchain: .zigversion is the single place
-// the version is written, and a mismatching compiler fails closed here. The
-// shadow lane (weekly build against Zig master) is the one sanctioned bypass,
-// via GOSS_ALLOW_ZIG_MISMATCH=1.
 /// The mode a shipped slice is built in: the one -Doptimize named, else ReleaseFast, so a
 /// library that leaves the checkout is never a debug build unless one was asked for.
 fn shipOptimize(b: *std.Build, optimize: std.builtin.OptimizeMode) std.builtin.OptimizeMode {
@@ -5417,12 +5654,13 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
     return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize });
 }
 
-// The engine-owned bgfx diagnostics callbacks ride with every module that
-// compiles render.zig; plain C so va_list handling stays portable.
+// The engine-owned bgfx diagnostics callbacks and heap counter ride with
+// every module that compiles render.zig; plain C so va_list handling stays
+// portable, c11 for the atomics the counter needs.
 fn addBgfxCallbacks(b: *std.Build, module: *std.Build.Module) void {
     module.addCSourceFile(.{
         .file = b.path("adapters/bgfx/callbacks.c"),
-        .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+        .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
     });
 }
 
@@ -5436,11 +5674,25 @@ fn addCxxDir(b: *std.Build, module: *std.Build.Module, dir: []const u8, flags: [
     }
 }
 
+// .zigversion is the single place the version is written and a mismatching
+// version fails closed here. It is a VERSION check: a different build of the
+// same version, a distribution's own rebuild say, answers the same string and
+// passes, so the note below says which compiler actually ran.
 fn enforcePinnedZig(b: *std.Build) void {
     const raw = rootDir(b).handle.readFileAlloc(b.graph.io, ".zigversion", b.allocator, .limited(128)) catch |err|
         std.process.fatal("gosslens: cannot read .zigversion: {t}", .{err});
     const pinned = std.mem.trim(u8, raw, " \t\r\n");
-    if (std.mem.eql(u8, pinned, builtin.zig_version_string)) return;
+    if (std.mem.eql(u8, pinned, builtin.zig_version_string)) {
+        // Two builds of one version are not the same compiler, and the
+        // difference has shown up in build-runner behaviour, so a build that did
+        // not come from tools/toolchain-sync or a nix shell says so once.
+        const local = b.pathFromRoot(".local/zig");
+        const exe = b.graph.zig_exe;
+        if (std.mem.indexOf(u8, exe, local) == null and std.mem.indexOf(u8, exe, "/nix/store/") == null) {
+            std.debug.print("gosslens: building with {s}, not the toolchain tools/toolchain-sync installs\n", .{exe});
+        }
+        return;
+    }
     if (b.graph.environ_map.get("GOSS_ALLOW_ZIG_MISMATCH") != null) {
         std.debug.print("gosslens: shadow lane: building with Zig {s} against pin {s}\n", .{ builtin.zig_version_string, pinned });
         return;

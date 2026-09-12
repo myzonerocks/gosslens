@@ -541,7 +541,7 @@ pub const Converter = struct {
 
     pub fn deinit(converter: *Converter) void {
         const device = converter.ctx.device;
-        _ = c.vkDeviceWaitIdle(device);
+        _ = c.vkDeviceWaitIdle(device); // result ignored: tearing down, and a lost device is already gone
         for (&converter.import_cache) |*entry| entry.import.deinit(device);
         for (&converter.targets) |*target| target.deinit(device);
         for (converter.fences) |fence| c.vkDestroyFence(device, fence, null);
@@ -613,7 +613,7 @@ pub const Converter = struct {
 
     fn recreateTargets(converter: *Converter, width: u32, height: u32) Error!void {
         const device = converter.ctx.device;
-        _ = c.vkDeviceWaitIdle(device);
+        _ = c.vkDeviceWaitIdle(device); // result ignored: tearing down, and a lost device is already gone
         for (&converter.targets) |*target| {
             target.deinit(device);
             var image_info: c.VkImageCreateInfo = std.mem.zeroes(c.VkImageCreateInfo);

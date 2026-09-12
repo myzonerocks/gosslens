@@ -35,6 +35,10 @@ android {
 // lens adds the runtime itself, so one that never does carries none of it.
 dependencies {
     compileOnly("com.google.ar:core:1.56.0")
+    // The unit suite runs on the jvm and never loads the .so, so the values the
+    // C ABI freezes and the helpers that pack them fail on a laptop rather than
+    // on a device.
+    testImplementation("junit:junit:4.13.2")
 }
 
 // Publishes the AAR - the prebuilt .so already inside - to Maven Central through

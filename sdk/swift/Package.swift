@@ -63,6 +63,15 @@ let package = Package(
             path: "Sources/Gosslens",
             linkerSettings: engineLinkerSettings
         ),
+        // The unit suite covers what the wrapper itself decides: the values the
+        // C ABI freezes and the packing that carries them. It calls no engine
+        // function, so it needs the archives only to link, and it runs on the
+        // simulator slice `zig build ios-simulator` installs.
+        .testTarget(
+            name: "GosslensTests",
+            dependencies: ["Gosslens"],
+            path: "Tests/GosslensTests"
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

@@ -37,6 +37,83 @@ extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 extern fn goss_jolt_live_bytes() usize;
 extern fn goss_qjs_live_bytes() usize;
 extern fn goss_ma_live_bytes() usize;
+extern fn goss_bgfx_live_bytes() usize;
+extern fn goss_bgfx_alloc_calls() usize;
+extern fn goss_bgfx_alloc_bytes() usize;
+extern fn goss_bgfx_reset_sites() void;
+extern fn goss_bgfx_report_sites(limit: u32) void;
+extern fn goss_bgfx_site_count() usize;
+extern fn goss_bgfx_site_file(index: usize) ?[*:0]const u8;
+extern fn goss_bgfx_site_line(index: usize) u32;
+extern fn goss_bgfx_site_calls(index: usize) usize;
+extern fn goss_bgfx_sites_overflowed() usize;
+
+/// bgfx allocates a small fixed amount per frame that no flag or API removes.
+/// bgfx.cpp:61 is a 24-byte node per distinct texture binding set, the memo
+/// EncoderImpl::begin clears and refills every frame. bgfx.cpp:4723 is the
+/// 32-byte Memory header every upload needs, since no call takes raw bytes.
+
+/// Those two are the whole allowance. Anything else allocating on the frame path
+/// is ours, and the gate names it rather than absorbing it into a total.
+const BgfxFrameSite = struct { file: []const u8, line: u32, why: []const u8 };
+const bgfx_frame_sites = [_]BgfxFrameSite{
+    .{ .file = "bgfx.cpp", .line = 61, .why = "tinystl node for the per-frame bind-state memo" },
+    .{ .file = "bgfx.cpp", .line = 4723, .why = "the Memory header every bgfx upload entry point requires" },
+};
+
+/// Headroom over the heaviest reference lens, measured at 12 calls and 305
+/// bytes per frame. The byte ceiling is the one that matters: a reintroduced
+/// payload copy is hundreds of kilobytes a frame, so it fails by two orders of
+/// magnitude, while a lens with more distinct bind states does not.
+const bgfx_frame_call_ceiling: usize = 32;
+const bgfx_frame_byte_ceiling: usize = 4096;
+
+/// Checks the window's bgfx allocations against that allowance. Returns false
+/// and says which site after printing the tally.
+fn bgfxFrameAllocationsAllowed(scenario: []const u8, calls: usize, bytes: usize, frames: usize) bool {
+    if (goss_bgfx_sites_overflowed() != 0) {
+        std.debug.print("conformance: FAIL {s} allocated from more bgfx sites than the tally holds, so the window was not measured\n", .{scenario});
+        return false;
+    }
+    var unknown: usize = 0;
+    const site_count = goss_bgfx_site_count();
+    var at: usize = 0;
+    while (at < site_count) : (at += 1) {
+        if (goss_bgfx_site_calls(at) == 0) continue;
+        const raw = goss_bgfx_site_file(at) orelse {
+            std.debug.print("conformance: FAIL {s} has a bgfx allocation site with no source file\n", .{scenario});
+            return false;
+        };
+        const path = std.mem.span(raw);
+        const name = std.fs.path.basename(path);
+        const line = goss_bgfx_site_line(at);
+        var known = false;
+        for (bgfx_frame_sites) |allowed| {
+            if (std.mem.eql(u8, allowed.file, name) and allowed.line == line) known = true;
+        }
+        if (!known) {
+            std.debug.print("conformance: FAIL {s} allocates on the frame path from {s}:{d} ({d} calls), which is not one of bgfx's own two unavoidable sites\n", .{ scenario, name, line, goss_bgfx_site_calls(at) });
+            unknown += 1;
+        }
+    }
+    if (unknown != 0) {
+        goss_bgfx_report_sites(12);
+        return false;
+    }
+    const per_frame_calls = calls / frames;
+    const per_frame_bytes = bytes / frames;
+    if (per_frame_calls > bgfx_frame_call_ceiling) {
+        std.debug.print("conformance: FAIL {s} made {d} bgfx allocation calls per frame, over the {d} the vendor's own two sites need\n", .{ scenario, per_frame_calls, bgfx_frame_call_ceiling });
+        goss_bgfx_report_sites(12);
+        return false;
+    }
+    if (per_frame_bytes > bgfx_frame_byte_ceiling) {
+        std.debug.print("conformance: FAIL {s} churned {d} bgfx bytes per frame, over the {d} ceiling - a payload is being copied through bgfx instead of referenced\n", .{ scenario, per_frame_bytes, bgfx_frame_byte_ceiling });
+        goss_bgfx_report_sites(12);
+        return false;
+    }
+    return true;
+}
 
 const width: u32 = 400;
 const height: u32 = 300;
@@ -8085,9 +8162,9 @@ fn writeDiffusionLens(spec: DiffusionLensSpec) !void {
     const target_node = if (spec.target_mesh)
         "{\"id\":\"canvas\",\"type\":\"mesh.face\",\"inputs\":{\"frame\":\"camera\"},\"params\":{}}"
     else if (spec.target_material)
-        "{\"id\":\"canvas\",\"type\":\"shader.pass\",\"inputs\":{\"frame\":\"camera\"},\"params\":{},\"material\":{\"output\":3,\"nodes\":[{\"kind\":\"uv\"},{\"kind\":\"texture\",\"name\":\"generated\"},{\"kind\":\"sample\",\"inputs\":[1,0]},{\"kind\":\"output\",\"inputs\":[2]}]}}"
+        "{\"id\":\"canvas\",\"type\":\"shader.pass\",\"optional\":true,\"inputs\":{\"frame\":\"camera\"},\"params\":{},\"material\":{\"output\":3,\"nodes\":[{\"kind\":\"uv\"},{\"kind\":\"texture\",\"name\":\"generated\"},{\"kind\":\"sample\",\"inputs\":[1,0]},{\"kind\":\"output\",\"inputs\":[2]}]}}"
     else
-        try std.fmt.allocPrint(page, "{{\"id\":\"canvas\",\"type\":\"sprite.2d\",\"inputs\":{{\"frame\":\"camera\"}},\"params\":{{}}, \"sprite\":{{\"x\":0.0,\"y\":0.0,\"w\":1.0,\"h\":1.0{s}}}}}", .{mask_field});
+        try std.fmt.allocPrint(page, "{{\"id\":\"canvas\",\"type\":\"sprite.2d\",\"optional\":true,\"inputs\":{{\"frame\":\"camera\"}},\"params\":{{}}, \"sprite\":{{\"x\":0.0,\"y\":0.0,\"w\":1.0,\"h\":1.0{s}}}}}", .{mask_field});
     defer if (!literal_target) page.free(target_node);
     const manifest_json = try std.fmt.allocPrint(page,
         \\{{"glf":"1.0","id":"goss.reference.ml-diffusion","version":"1.0.0","display_name":"BYO Diffusion","engine_compat":">=0.5","capabilities":[],
@@ -16070,6 +16147,7 @@ fn proveNoLeaks(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *CountingA
     const jolt_base = goss_jolt_live_bytes();
     const qjs_base = goss_qjs_live_bytes();
     const ma_base = goss_ma_live_bytes();
+    const bgfx_base = goss_bgfx_live_bytes();
 
     try round.once(gpa, engine);
     settle(engine);
@@ -16082,8 +16160,9 @@ fn proveNoLeaks(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *CountingA
     const jolt_after = goss_jolt_live_bytes();
     const qjs_after = goss_qjs_live_bytes();
     const ma_after = goss_ma_live_bytes();
-    if (jolt_after > jolt_base or qjs_after > qjs_base or ma_after > ma_base) {
-        std.debug.print("conformance: FAIL a vendor heap grew across the full rendering lifecycle (jolt {d}->{d}, qjs {d}->{d}, miniaudio {d}->{d})\n", .{ jolt_base, jolt_after, qjs_base, qjs_after, ma_base, ma_after });
+    const bgfx_after = goss_bgfx_live_bytes();
+    if (jolt_after > jolt_base or qjs_after > qjs_base or ma_after > ma_base or bgfx_after > bgfx_base) {
+        std.debug.print("conformance: FAIL a vendor heap grew across the full rendering lifecycle (jolt {d}->{d}, qjs {d}->{d}, miniaudio {d}->{d}, bgfx {d}->{d})\n", .{ jolt_base, jolt_after, qjs_base, qjs_after, ma_base, ma_after, bgfx_base, bgfx_after });
         return false;
     }
 
@@ -16165,6 +16244,7 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
     const jolt_base = goss_jolt_live_bytes();
     const qjs_base = goss_qjs_live_bytes();
     const ma_base = goss_ma_live_bytes();
+    const bgfx_base = goss_bgfx_live_bytes();
 
     // Second round: the same work again, no lasting growth allowed.
     try round.all(gpa, engine);
@@ -16176,18 +16256,429 @@ fn proveSecondLifecycle(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *C
         return false;
     }
 
-    // The vendor heaps the Zig GPA cannot see: Jolt, QuickJS, and miniaudio
-    // each report live bytes, and a hair, runtime, or sound leaked past its
-    // owner shows as growth here where the GPA is blind.
+    // The vendor heaps the Zig GPA cannot see: Jolt, QuickJS, miniaudio and
+    // bgfx each report live bytes, and a hair, runtime, sound, texture or
+    // shader leaked past its owner shows as growth here where the GPA is
+    // blind.
     const jolt_after = goss_jolt_live_bytes();
     const qjs_after = goss_qjs_live_bytes();
     const ma_after = goss_ma_live_bytes();
-    if (jolt_after > jolt_base or qjs_after > qjs_base or ma_after > ma_base) {
-        std.debug.print("conformance: FAIL a vendor heap grew across a second lifecycle (jolt {d}->{d}, qjs {d}->{d}, miniaudio {d}->{d})\n", .{ jolt_base, jolt_after, qjs_base, qjs_after, ma_base, ma_after });
+    const bgfx_after = goss_bgfx_live_bytes();
+    if (jolt_after > jolt_base or qjs_after > qjs_base or ma_after > ma_base or bgfx_after > bgfx_base) {
+        std.debug.print("conformance: FAIL a vendor heap grew across a second lifecycle (jolt {d}->{d}, qjs {d}->{d}, miniaudio {d}->{d}, bgfx {d}->{d})\n", .{ jolt_base, jolt_after, qjs_base, qjs_after, ma_base, ma_after, bgfx_base, bgfx_after });
         return false;
     }
 
     std.debug.print("conformance: PROOF session, hair, script, sound, and recording survive a second create/use/destroy with no Zig or vendor-heap growth\n", .{});
+    return true;
+}
+
+
+/// Proves the ladder is wired to something, not just reported: the analysis
+/// counts follow the rung's strides, the chain stops drawing at the bottom rung
+/// so the picture falls back to the plain camera, and every rung still presents.
+/// A ladder that only named states would pass none of these.
+fn proveDegradationActuates(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 16_666, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return error.EnableFaceTrackingFailed;
+
+    const bundle = ".lens-packages/shader-tint";
+    if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) {
+        std.debug.print("conformance: FAIL degradation proof could not activate the tint lens\n", .{});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const run = struct {
+        /// Submits and renders `frames` frames, returning the face submits the
+        /// session counted over them.
+        fn frames(e: *abi.Engine, sess: *abi.Session, pl: anytype, hw: u32, count: u32, first_us: i64) u64 {
+            const before = sess.analysis_submits.face;
+            for (0..count) |i| {
+                const desc: abi.FrameDesc = .{
+                    .width = pl.width,
+                    .height = pl.height,
+                    .pixel_format = 0,
+                    .color_standard = 0,
+                    .color_range = 1,
+                    .flags = 0,
+                    .timestamp_us = first_us + @as(i64, @intCast(i)) * 33_333,
+                };
+                _ = abi.goss_session_track_frame(sess, &desc, pl.y.ptr, pl.width, pl.uv.ptr, hw * 2);
+                _ = abi.goss_session_submit_frame_copy(sess, &desc, pl.y.ptr, pl.width, pl.uv.ptr, hw * 2);
+                _ = abi.goss_engine_render_frame(e, sess);
+                c.glfwPollEvents();
+            }
+            return sess.analysis_submits.face - before;
+        }
+    };
+
+    // A nominal, comfortably-under-budget run holds the top rung, where every
+    // frame is analysed.
+    const full_frames: u32 = 24;
+    const full_face = run.frames(engine, session, planes, half_w, full_frames, 1_000);
+    if (abi.goss_session_degrade_level(session) != 0) {
+        std.debug.print("conformance: FAIL a comfortable run left the ladder at rung {d}\n", .{abi.goss_session_degrade_level(session)});
+        return false;
+    }
+    if (full_face != full_frames) {
+        std.debug.print("conformance: FAIL the top rung analysed {d} of {d} frames\n", .{ full_face, full_frames });
+        return false;
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-degrade-full");
+    _ = run.frames(engine, session, planes, half_w, 5, 2_000_000);
+
+    // A critical thermal report drops straight to the bottom rung by the
+    // controller's own rule, no dwell.
+    _ = abi.goss_session_report_frame(session, 8_000, 3);
+    if (abi.goss_session_degrade_level(session) != 4) {
+        std.debug.print("conformance: FAIL a critical thermal report left the ladder at rung {d}\n", .{abi.goss_session_degrade_level(session)});
+        return false;
+    }
+    // One render latches the new rung for the frames that follow.
+    _ = run.frames(engine, session, planes, half_w, 1, 3_000_000);
+    const bottom_face = run.frames(engine, session, planes, half_w, full_frames, 4_000_000);
+    if (bottom_face != 0) {
+        std.debug.print("conformance: FAIL the bottom rung still analysed {d} frames\n", .{bottom_face});
+        return false;
+    }
+    engine.renderer.?.requestScreenshot("zig-out/conformance-degrade-passthrough");
+    _ = run.frames(engine, session, planes, half_w, 5, 5_000_000);
+
+    // The same camera frame with no lens at all: what the bottom rung must
+    // look like, since its whole promise is that the picture keeps coming.
+    {
+        const plain = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(plain);
+        _ = run.frames(engine, plain, planes, half_w, 5, 6_000_000);
+        engine.renderer.?.requestScreenshot("zig-out/conformance-degrade-plain");
+        _ = run.frames(engine, plain, planes, half_w, 5, 7_000_000);
+    }
+
+    const full_png = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-degrade-full.tga", gpa, .limited(64 << 20));
+    defer gpa.free(full_png);
+    const bottom_png = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-degrade-passthrough.tga", gpa, .limited(64 << 20));
+    defer gpa.free(bottom_png);
+    const plain_png = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-degrade-plain.tga", gpa, .limited(64 << 20));
+    defer gpa.free(plain_png);
+
+    if (std.mem.eql(u8, full_png, bottom_png)) {
+        std.debug.print("conformance: FAIL the bottom rung drew the same picture as the top one, so the chain never stopped\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, bottom_png, plain_png)) {
+        std.debug.print("conformance: FAIL the bottom rung is not the plain camera picture\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the ladder actuates: the top rung analyses every frame, the bottom rung analyses none and draws the plain camera, and both present\n", .{});
+    return true;
+}
+
+
+/// Proves a lens's render targets go when the lens does. These used to be freed
+/// only with the session, so browsing lenses accumulated one full-size target
+/// per capability touched. The proof walks several lenses through one session and
+/// asserts one came up, so it is not vacuous, and none is left behind.
+fn proveLensTargetsRelease(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    // Lenses chosen so that between them they reach the trail echo, the head
+    // occluder, the coherent inpaint, the cutout sticker and the hair matte,
+    // which is every capability target a session can hold.
+    const bundles = [_][]const u8{
+        ".lens-packages/trail-echo",
+        ".lens-packages/head-occluder",
+        ".lens-packages/inpaint-coherent",
+        ".lens-packages/cutout-sticker",
+        ".lens-packages/hair-matte",
+    };
+
+    const live = struct {
+        fn count(s: *abi.Session) usize {
+            var n: usize = 0;
+            if (s.prev_frame_target != null) n += 1;
+            if (s.occluder_frame_target != null) n += 1;
+            if (s.splat_scene_target != null) n += 1;
+            if (s.cutout_sticker_target != null) n += 1;
+            if (s.cutout_source_target != null) n += 1;
+            if (s.inpaint_fresh_target != null) n += 1;
+            if (s.inpaint_prev_target != null) n += 1;
+            if (s.inpaint_coherent_target != null) n += 1;
+            if (s.hair_matte_target != null) n += 1;
+            return n;
+        }
+    };
+
+    var peak: usize = 0;
+    for (bundles) |bundle| {
+        if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) {
+            std.debug.print("conformance: FAIL target-release proof could not activate {s}\n", .{bundle});
+            return false;
+        }
+        var frame: usize = 0;
+        while (frame < 6) : (frame += 1) {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @as(i64, @intCast(frame + 1)) * 33_333,
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        const now = live.count(session);
+        if (now > peak) peak = now;
+        // The whole point: a lens swap releases the outgoing lens's targets, so
+        // the live count tracks the current lens rather than the sum of all of
+        // them. Five lenses that each want one or more would reach five or more
+        // if nothing were released.
+        if (now > 4) {
+            std.debug.print("conformance: FAIL {d} capability targets live after activating {s} alone\n", .{ now, bundle });
+            return false;
+        }
+    }
+
+    abi.goss_session_deactivate_lens(session);
+    settle(engine);
+    const left = live.count(session);
+    if (left != 0) {
+        std.debug.print("conformance: FAIL {d} capability targets outlived the lens that made them\n", .{left});
+        return false;
+    }
+    if (peak == 0) {
+        std.debug.print("conformance: FAIL no capability target ever came up, so this proof checked nothing\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a lens releases its render targets when it goes: {d} live at the busiest lens, none left after deactivate\n", .{peak});
+    return true;
+}
+
+
+/// Best effort is the lens's claim, not the engine's assumption: a node that loses
+/// a resource it cannot draw without fails the activation, unless the manifest
+/// marked it optional, in which case the lens is ready and the node degraded.
+/// Both halves, over one bundle with its shader binary hidden.
+fn proveOptionalNodeDeclaresBestEffort(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle = ".lens-packages/hair-matte";
+    const cwd = std.Io.Dir.cwd();
+    // Hide every compiled variant, so the pass has no program whatever backend
+    // this host brought up, and put them all back however this proof ends.
+    const variants = [_][]const u8{ "recolor.metal.bin", "recolor.essl.bin", "recolor.spv.bin", "recolor.dx11.bin" };
+    var hidden: [variants.len]bool = @splat(false);
+    defer for (variants, 0..) |name, i| {
+        if (!hidden[i]) continue;
+        const from = std.fmt.allocPrint(gpa, "{s}/shaders/{s}.hidden", .{ bundle, name }) catch continue;
+        defer gpa.free(from);
+        const to = std.fmt.allocPrint(gpa, "{s}/shaders/{s}", .{ bundle, name }) catch continue;
+        defer gpa.free(to);
+        cwd.rename(from, cwd, to, harness_io) catch {}; // failure ignored: a restore that did not happen shows up as the next run missing the binary
+    };
+    for (variants, 0..) |name, i| {
+        const from = try std.fmt.allocPrint(gpa, "{s}/shaders/{s}", .{ bundle, name });
+        defer gpa.free(from);
+        const to = try std.fmt.allocPrint(gpa, "{s}/shaders/{s}.hidden", .{ bundle, name });
+        defer gpa.free(to);
+        cwd.rename(from, cwd, to, harness_io) catch continue; // failure ignored: this host's bundle may not carry that backend's variant
+        hidden[i] = true;
+    }
+
+    const required = try activationOf(gpa, engine, bundle);
+    if (required.status != .lens_node_failed) {
+        std.debug.print("conformance: FAIL a required node with no shader activated {t}, not lens_node_failed\n", .{required.status});
+        return false;
+    }
+    if (required.first_state != @intFromEnum(abi.NodeState.failed) or required.first_reason != @intFromEnum(abi.NodeReason.shader_missing)) {
+        std.debug.print("conformance: FAIL the report said state {d} reason {d}, wanted failed and shader_missing\n", .{ required.first_state, required.first_reason });
+        return false;
+    }
+
+    // The same bundle with that node marked optional: the lens is ready and the
+    // node is degraded, which is the whole point of the flag.
+    const manifest_path = try std.fmt.allocPrint(gpa, "{s}/manifest.json", .{bundle});
+    defer gpa.free(manifest_path);
+    const original = try cwd.readFileAlloc(harness_io, manifest_path, gpa, .limited(1 << 20));
+    defer gpa.free(original);
+    const marked = try markFirstShaderPassOptional(gpa, original);
+    defer gpa.free(marked);
+    if (marked.len == original.len) {
+        std.debug.print("conformance: FAIL could not mark a shader.pass optional in {s}\n", .{manifest_path});
+        return false;
+    }
+    const optional = try activationOfManifest(gpa, engine, marked);
+    if (optional.status != .ok) {
+        std.debug.print("conformance: FAIL an optional node with no shader activated {t}, not ok\n", .{optional.status});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a node with no shader fails the activation and names shader_missing, and the same node marked optional activates ready instead\n", .{});
+    return true;
+}
+
+const ActivationResult = struct { status: abi.Status, first_state: u32 = 0, first_reason: u32 = 0 };
+
+/// Activates a bundle on a throwaway session and reads back the status beside
+/// the first node report, which is what the two halves above compare.
+fn activationOf(gpa: std.mem.Allocator, engine: *abi.Engine, bundle: []const u8) !ActivationResult {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    _ = gpa;
+    const status = abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len);
+    return firstReport(session, status);
+}
+
+/// The same for a manifest held in memory, so the optional half needs no second
+/// bundle on disk.
+fn activationOfManifest(gpa: std.mem.Allocator, engine: *abi.Engine, manifest: []const u8) !ActivationResult {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    _ = gpa;
+    const status = abi.goss_session_activate_lens(session, manifest.ptr, manifest.len);
+    return firstReport(session, status);
+}
+
+fn firstReport(session: *abi.Session, status: abi.Status) ActivationResult {
+    var count: u32 = 0;
+    var lost: u32 = 0;
+    if (abi.goss_session_node_report_count(session, &count, &lost) != .ok or count == 0) {
+        return .{ .status = status };
+    }
+    var report: abi.NodeReport = undefined;
+    if (abi.goss_session_node_report_at(session, 0, &report) != .ok) return .{ .status = status };
+    return .{ .status = status, .first_state = report.state, .first_reason = report.reason };
+}
+
+/// Inserts `"optional": true` into the first shader.pass node object of a
+/// manifest. Returns the original length unchanged when it finds none, which the
+/// caller treats as a failed proof rather than a passing one.
+fn markFirstShaderPassOptional(gpa: std.mem.Allocator, manifest: []const u8) ![]u8 {
+    const needle = "\"type\": \"shader.pass\"";
+    const at = std.mem.indexOf(u8, manifest, needle) orelse return gpa.dupe(u8, manifest);
+    const insert = ", \"optional\": true";
+    var out = try gpa.alloc(u8, manifest.len + insert.len);
+    const head = at + needle.len;
+    @memcpy(out[0..head], manifest[0..head]);
+    @memcpy(out[head..][0..insert.len], insert);
+    @memcpy(out[head + insert.len ..], manifest[head..]);
+    return out;
+}
+
+/// Proves the texture pool is doing the work, not merely existing. Two lenses
+/// needing different capability targets run in turn; the pool must hand out slots,
+/// reach a peak, and end with none live, which is what sharing a target between
+/// capabilities that never meet looks like from outside.
+fn provePoolServesScratchTargets(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    // An occluder lens and a hair-matte lens want a scratch target each, and
+    // never at the same time, so one pooled target serves both.
+    const bundles = [_][]const u8{ ".lens-packages/head-occluder", ".lens-packages/hair-matte" };
+    var peak: u32 = 0;
+    for (bundles) |bundle| {
+        if (abi.goss_session_activate_lens_from_directory(session, bundle.ptr, bundle.len) != .ok) {
+            std.debug.print("conformance: FAIL pool proof could not activate {s}\n", .{bundle});
+            return false;
+        }
+        var frame: usize = 0;
+        while (frame < 6) : (frame += 1) {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @as(i64, @intCast(frame + 1)) * 33_333,
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var report: abi.EngineReport = undefined;
+        if (abi.goss_engine_read_report(engine, &report) != .ok) return error.ReportFailed;
+        if (report.texture_pool_peak > peak) peak = report.texture_pool_peak;
+        // Every frame gives its slots back, so between frames nothing is live.
+        if (report.texture_pool_live != 0) {
+            std.debug.print("conformance: FAIL {d} pool slots stayed live between frames on {s}\n", .{ report.texture_pool_live, bundle });
+            return false;
+        }
+    }
+
+    if (peak == 0) {
+        std.debug.print("conformance: FAIL the texture pool never handed out a slot, so it is still not carrying the scratch targets\n", .{});
+        return false;
+    }
+    var report: abi.EngineReport = undefined;
+    if (abi.goss_engine_read_report(engine, &report) != .ok) return error.ReportFailed;
+    if (report.texture_pool_exhausted != 0) {
+        std.debug.print("conformance: FAIL the pool was exhausted {d} times at capacity {d}\n", .{ report.texture_pool_exhausted, report.texture_pool_capacity });
+        return false;
+    }
+    // A live and peak count of zero reads the same whether the pool holds one
+    // description or none, so the bin count is what says it is carrying them.
+    if (report.texture_pool_bins == 0) {
+        std.debug.print("conformance: FAIL the pool handed out slots but holds no bin, so the report cannot be read\n", .{});
+        return false;
+    }
+    if (report.texture_pool_bins_refused != 0) {
+        std.debug.print("conformance: FAIL {d} descriptions were turned away at the bin cap, so a pooled size is being derived per frame\n", .{report.texture_pool_bins_refused});
+        return false;
+    }
+
+    // The capture readback comes from the staging pool, so one capture makes a
+    // staging bin appear and hold its slot past the call.
+    var cap_needed: usize = 0;
+    var cap_w: u32 = 0;
+    var cap_h: u32 = 0;
+    var probe: [1]u8 = undefined;
+    const cap_cfg: abi.CaptureConfig = .{ .width = 0, .height = 0, .supersample = 0, .format = 0, .quality = 0 };
+    _ = abi.goss_engine_capture_still(engine, session, &cap_cfg, &probe, 0, &cap_needed, &cap_w, &cap_h);
+    if (cap_needed != 0) {
+        const encoded = try gpa.alloc(u8, cap_needed);
+        defer gpa.free(encoded);
+        var encoded_len: usize = 0;
+        if (abi.goss_engine_capture_still(engine, session, &cap_cfg, encoded.ptr, encoded.len, &encoded_len, &cap_w, &cap_h) != .ok) return error.CaptureFailed;
+        if (abi.goss_engine_read_report(engine, &report) != .ok) return error.ReportFailed;
+        if (report.staging_pool_bins == 0 or report.staging_pool_live == 0) {
+            std.debug.print("conformance: FAIL the capture readback is not coming from the staging pool: {d} bins, {d} live\n", .{ report.staging_pool_bins, report.staging_pool_live });
+            return false;
+        }
+    }
+
+    std.debug.print("conformance: PROOF both pools carry what they own: texture peak {d} of {d} over {d} bins, none live between frames, never exhausted, none refused, and the capture readback holds a staging slot\n", .{ peak, report.texture_pool_capacity, report.texture_pool_bins });
     return true;
 }
 
@@ -16314,7 +16805,18 @@ fn provePerFrameBudget(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *Co
     return true;
 }
 
-const AllocCallScenario = struct { name: []const u8, dir: []const u8, depth: bool };
+const AllocCallScenario = struct {
+    name: []const u8,
+    dir: []const u8,
+    depth: bool,
+    /// The analysis rails a scenario stands up. F11 of the audit: the gate named
+    /// eleven lenses and not one of them enabled tracking, segmentation or
+    /// beauty, which are the per-frame paths most likely to allocate.
+    face: bool = false,
+    hands: bool = false,
+    segmentation: bool = false,
+    beauty: bool = false,
+};
 
 /// Every per-frame path Branch 5 moved onto persistent staging, each named so
 /// a regression points at the exact conversion that leaked back an allocation.
@@ -16330,6 +16832,14 @@ const alloc_call_scenarios = [_]AllocCallScenario{
     .{ .name = "hair solver", .dir = ".lens-packages/hair-sim", .depth = false },
     .{ .name = "morph mesh", .dir = ".lens-packages/morph-blend", .depth = false },
     .{ .name = "depth submit", .dir = ".lens-packages/dof-blur", .depth = true },
+    // The rails the gate used to skip entirely. Each runs its inference every
+    // frame on the steady window, so a tensor or a result buffer reallocated per
+    // frame fails here rather than on a device.
+    .{ .name = "face tracking", .dir = ".lens-packages/studio-full", .depth = false, .face = true },
+    .{ .name = "hand tracking", .dir = ".lens-packages/studio-full", .depth = false, .hands = true },
+    .{ .name = "segmentation", .dir = ".lens-packages/studio-full", .depth = false, .segmentation = true },
+    .{ .name = "beauty chain", .dir = ".lens-packages/beauty-baseline", .depth = false, .beauty = true },
+    .{ .name = "every rail at once", .dir = ".lens-packages/studio-full", .depth = true, .face = true, .hands = true, .segmentation = true, .beauty = true },
 };
 
 /// The steady-window allocation-CALL gate: renders each converted per-frame
@@ -16347,6 +16857,29 @@ fn proveScenarioAllocFree(gpa: std.mem.Allocator, engine: *abi.Engine, counter: 
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
     defer settle(engine);
+    // Every rail stands up before activation, the order renderOnceWith uses: a
+    // chain enabled afterward misses the lens's own default effect values.
+    if (sc.face or sc.hands) {
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (sc.face and abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return error.EnableFaceTrackingFailed;
+        if (sc.hands) {
+            const hand_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, hand_bundle_path, gpa, .limited(16 << 20));
+            defer gpa.free(hand_bytes);
+            if (abi.goss_session_enable_hand_tracking(session, hand_bytes.ptr, hand_bytes.len, 2) != .ok) return error.EnableHandTrackingFailed;
+        }
+    }
+    if (sc.segmentation) {
+        const segmentation_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, single_class_model_path, gpa, .limited(16 << 20));
+        defer gpa.free(segmentation_bytes);
+        if (abi.goss_session_enable_segmentation(session, segmentation_bytes.ptr, segmentation_bytes.len, 2) != .ok) return error.EnableSegmentationFailed;
+    }
+    if (sc.beauty) {
+        switch (abi.goss_session_enable_beauty(session, beauty_resource_path)) {
+            .ok, .unsupported => {},
+            else => return error.EnableBeautyFailed,
+        }
+    }
     if (abi.goss_session_activate_lens_from_directory(session, sc.dir.ptr, sc.dir.len) != .ok) {
         std.debug.print("conformance: FAIL alloc-call scenario {s} lens activation\n", .{sc.name});
         return false;
@@ -16369,10 +16902,15 @@ fn proveScenarioAllocFree(gpa: std.mem.Allocator, engine: *abi.Engine, counter: 
     }
 
     // Warm-up lets every persistent buffer grow to its largest frame; the
-    // steady window past it must touch the allocator zero times.
+    // steady window past it must touch either allocator zero times. The
+    // bgfx counter is the half the zig gate cannot see: a per-frame
+    // bgfx_copy or bgfx_alloc nets to zero on the zig heap and still churns
+    // the vendor one.
     const total_frames: usize = 90;
     const warmup: usize = 45;
     var start_calls: usize = 0;
+    var start_bgfx_calls: usize = 0;
+    var start_bgfx_bytes: usize = 0;
     for (0..total_frames) |frame| {
         const desc: abi.FrameDesc = .{
             .width = planes.width,
@@ -16389,14 +16927,23 @@ fn proveScenarioAllocFree(gpa: std.mem.Allocator, engine: *abi.Engine, counter: 
         }
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
-        if (frame == warmup) start_calls = counter.calls();
+        if (frame == warmup) {
+            start_calls = counter.calls();
+            start_bgfx_calls = goss_bgfx_alloc_calls();
+            start_bgfx_bytes = goss_bgfx_alloc_bytes();
+            goss_bgfx_reset_sites();
+        }
     }
     const steady = counter.calls() - start_calls;
     if (steady != 0) {
-        std.debug.print("conformance: FAIL {s} made {d} allocation calls over {d} steady frames - per-frame churn\n", .{ sc.name, steady, total_frames - warmup });
+        std.debug.print("conformance: FAIL {s} made {d} zig allocation calls over {d} steady frames - per-frame churn\n", .{ sc.name, steady, total_frames - warmup });
         return false;
     }
-    std.debug.print("conformance: PROOF {s} holds zero allocation calls over {d} steady frames\n", .{ sc.name, total_frames - warmup });
+    const steady_frames = total_frames - warmup;
+    const steady_bgfx = goss_bgfx_alloc_calls() - start_bgfx_calls;
+    const steady_bgfx_bytes = goss_bgfx_alloc_bytes() - start_bgfx_bytes;
+    if (!bgfxFrameAllocationsAllowed(sc.name, steady_bgfx, steady_bgfx_bytes, steady_frames)) return false;
+    std.debug.print("conformance: PROOF {s} holds zero zig allocation calls over {d} steady frames, and its bgfx traffic is only the vendor's own two unavoidable sites ({d} calls, {d} bytes per frame)\n", .{ sc.name, steady_frames, steady_bgfx / steady_frames, steady_bgfx_bytes / steady_frames });
     return true;
 }
 
@@ -21324,22 +21871,32 @@ fn watchHold(name: [*:0]const u8) void {
 const renderer_cycles: usize = 64;
 
 /// Frames each cycle renders, how many of them warm the renderer before the
-/// measure starts, and how much dearer a later renderer's cheapest frame may
-/// be than the renderer before it. A renderer brought up after another was
-/// destroyed must cost what that one cost.
+/// measure starts, and how much dearer the later renderers may be than the
+/// earlier ones. A renderer brought up after another was destroyed must cost
+/// what that one cost.
 const lifecycle_frames: usize = 12;
 const lifecycle_warm_frames: usize = 4;
 const lifecycle_cost_slack: u64 = 3;
+
+/// The median of a run of costs. The bug this proof hunts is a renderer that
+/// gets dearer cycle over cycle, so the halves are compared by median: one
+/// slow cycle on a host with no hardware renderer moves a single sample by
+/// twenty times and moves a median by nothing.
+fn medianOf(values: []u64) u64 {
+    if (values.len == 0) return 0;
+    std.mem.sortUnstable(u64, values, {}, std.sort.asc(u64));
+    return values[values.len / 2];
+}
 
 /// Create engine, bring up a renderer, draw, destroy - over and over in one
 /// process, each cycle through a counting allocator whose live bytes must come
 /// back to where they started. The headless proof cycles sessions over one
 /// engine and never makes a renderer, so nothing held this.
 fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool {
+    var costs: [renderer_cycles]u64 = @splat(0);
     var settled: usize = 0;
     var first_live: usize = 0;
     var first_frame_us: u64 = 0;
-    var settled_frame_us: u64 = 0;
     var worst_frame_us: u64 = 0;
     var cycle: usize = 0;
     while (cycle < renderer_cycles) : (cycle += 1) {
@@ -21393,17 +21950,8 @@ fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool 
         // renderer 1 is the baseline the rest are held to, the same cycle the
         // leak check below settles on.
         if (cycle == 0) first_frame_us = per_frame_us;
-        if (cycle == 1) settled_frame_us = per_frame_us;
         if (cycle > 0 and per_frame_us > worst_frame_us) worst_frame_us = per_frame_us;
-        if (cycle > 1 and per_frame_us > @max(settled_frame_us * lifecycle_cost_slack, 2000)) {
-            std.debug.print(
-                "conformance: FAIL renderer lifecycle - cycle {d} costs {d}us a frame against renderer 1's {d}us\n",
-                .{ cycle, per_frame_us, settled_frame_us },
-            );
-            abi.destroySession(session);
-            abi.destroyEngine(engine);
-            return false;
-        }
+        costs[cycle] = per_frame_us;
         abi.destroySession(session);
         abi.destroyEngine(engine);
 
@@ -21425,9 +21973,26 @@ fn proveRendererLifecycle(gpa: std.mem.Allocator, window: ?*c.GLFWwindow) !bool 
             }
         }
     }
+    // Cycle 0 pays the process-wide warmup a first renderer carries, so the
+    // trend is read over the cycles after it.
+    const settled_costs = costs[1..];
+    const half = settled_costs.len / 2;
+    var early: [renderer_cycles]u64 = undefined;
+    var late: [renderer_cycles]u64 = undefined;
+    @memcpy(early[0..half], settled_costs[0..half]);
+    @memcpy(late[0 .. settled_costs.len - half], settled_costs[half..]);
+    const early_median = medianOf(early[0..half]);
+    const late_median = medianOf(late[0 .. settled_costs.len - half]);
+    if (late_median > @max(early_median * lifecycle_cost_slack, 2000)) {
+        std.debug.print(
+            "conformance: FAIL renderer lifecycle - the later renderers cost {d}us a frame against the earlier ones' {d}us\n",
+            .{ late_median, early_median },
+        );
+        return false;
+    }
     std.debug.print(
-        "conformance: PROOF {d} engine-and-renderer cycles in one process, nothing kept, and every renderer made after a destroy renders as fast as the one before it (worst {d}us against renderer 1's {d}us a frame, first renderer {d}us)\n",
-        .{ renderer_cycles, worst_frame_us, settled_frame_us, first_frame_us },
+        "conformance: PROOF {d} engine-and-renderer cycles in one process, nothing kept, and the renderers made after a destroy stay as fast as the ones before them (later {d}us against earlier {d}us a frame, worst {d}us, first renderer {d}us)\n",
+        .{ renderer_cycles, late_median, early_median, worst_frame_us, first_frame_us },
     );
     return true;
 }
@@ -22300,5 +22865,13 @@ pub fn main(init_args: std.process.Init) !u8 {
     watchHold("peak bounded capture");
     if (!try proveSecondLifecycle(gpa, engine, &frame_counter)) return 1;
     watchHold("second lifecycle");
+    if (!try proveDegradationActuates(gpa, engine)) return 1;
+    watchHold("degradation actuates");
+    if (!try proveLensTargetsRelease(gpa, engine)) return 1;
+    watchHold("lens targets release");
+    if (!try provePoolServesScratchTargets(gpa, engine)) return 1;
+    if (!try proveOptionalNodeDeclaresBestEffort(gpa, engine)) return 1;
+    watchHold("optional node declares best effort");
+    watchHold("pool serves scratch targets");
     return 0;
 }

@@ -430,6 +430,72 @@ extension GossSession {
         }
     }
 
+    /// One lens node that is not doing what its manifest asked.
+    public struct GossNodeReport: Sendable {
+        /// The node's manifest id, empty when the active lens no longer carries it.
+        public let id: String
+        public let nodeIndex: UInt32
+        public let state: GossNodeState
+        public let reason: GossNodeReason
+    }
+
+    public enum GossNodeState: UInt32, Sendable {
+        case ready = 0, degraded = 1, failed = 2
+    }
+
+    public enum GossNodeReason: UInt32, Sendable {
+        case none = 0, outOfMemory = 1, assetMissing = 2, assetMalformed = 3
+        case assetTooLarge = 4, shaderMissing = 5, shaderLinkFailed = 6
+        case modelRejected = 7, modelUnsupported = 8, capabilityUnavailable = 9
+        case constraintFailed = 10
+    }
+
+    /// How many nodes of the active lens are not ready, beside how many
+    /// diagnostics could not be recorded at all. A zero count with a non-zero
+    /// lost count means the lens degraded in ways the session could not write
+    /// down, which is not the same as a lens that is fine.
+    public func nodeReportCount() throws -> (count: UInt32, lost: UInt32) {
+        var count: UInt32 = 0
+        var lost: UInt32 = 0
+        try checked(goss_session_node_report_count(handle, &count, &lost))
+        return (count, lost)
+    }
+
+    /// One node's diagnostic by position in the report list, with its manifest id
+    /// resolved when the lens still carries the node.
+    public func nodeReport(at index: UInt32) throws -> GossNodeReport {
+        var raw = goss_node_report()
+        try checked(goss_session_node_report_at(handle, index, &raw))
+        var length = 0
+        var id = ""
+        if goss_session_node_report_id(handle, index, nil, 0, &length) == GOSS_OK, length > 0 {
+            var bytes = [UInt8](repeating: 0, count: length)
+            if goss_session_node_report_id(handle, index, &bytes, length, &length) == GOSS_OK {
+                id = String(decoding: bytes.prefix(length), as: UTF8.self)
+            }
+        }
+        return GossNodeReport(
+            id: id,
+            nodeIndex: raw.node_index,
+            state: GossNodeState(rawValue: raw.state) ?? .failed,
+            reason: GossNodeReason(rawValue: raw.reason) ?? .none
+        )
+    }
+
+    /// Every node of the active lens that is not ready, the call a host wants
+    /// after activating a lens it did not author.
+    public func nodeReports() throws -> [GossNodeReport] {
+        let (count, _) = try nodeReportCount()
+        var out: [GossNodeReport] = []
+        out.reserveCapacity(Int(count))
+        var at: UInt32 = 0
+        while at < count {
+            out.append(try nodeReport(at: at))
+            at += 1
+        }
+        return out
+    }
+
     /// Enables or disables on-device dubbing: when on, a dub-bound audio.infer
     /// node synthesizes its decoded caption or translation to speech and plays it
     /// into the lens mixer. Off by default; a host turns it on for a voice-over.
