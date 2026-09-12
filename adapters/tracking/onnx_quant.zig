@@ -211,9 +211,9 @@ fn qLinearGlobalAveragePool(ra: std.mem.Allocator, node: *const Node, table: *Ta
     if (x.dims.len != 4) return error.TensorShapeMismatch;
     if (x_scale.data.len == 0 or y_scale.data.len == 0 or y_scale.data[0] == 0) return error.TensorShapeMismatch;
 
-    const batch: usize = @intCast(@max(x.dims[0], 1));
-    const channels: usize = @intCast(@max(x.dims[1], 1));
-    const plane: usize = @intCast(@max(x.dims[2], 1) * @max(x.dims[3], 1));
+    const batch: usize = onnx.extent(x, 0);
+    const channels: usize = onnx.extent(x, 1);
+    const plane: usize = @intCast(@as(i64, @intCast(onnx.extent(x, 2))) * @as(i64, @intCast(onnx.extent(x, 3))));
     const xz = scalarAt(x_zero, 0, 0);
     const yz = scalarAt(y_zero, 0, 0);
     const want: DType = if (y_zero) |z| z.dtype else .u8;
@@ -244,10 +244,10 @@ fn qLinearMatMul(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!
     const y_zero = try optional(node, table, 7);
 
     if (a.dims.len < 2 or b.dims.len < 2) return error.TensorShapeMismatch;
-    const m: usize = @intCast(@max(a.dims[a.dims.len - 2], 1));
-    const k: usize = @intCast(@max(a.dims[a.dims.len - 1], 1));
-    const n: usize = @intCast(@max(b.dims[b.dims.len - 1], 1));
-    if (@as(usize, @intCast(@max(b.dims[b.dims.len - 2], 1))) != k) return error.TensorShapeMismatch;
+    const m: usize = onnx.extent(a, a.dims.len - 2);
+    const k: usize = onnx.extent(a, a.dims.len - 1);
+    const n: usize = onnx.extent(b, b.dims.len - 1);
+    if (@as(usize, onnx.extent(b, b.dims.len - 2)) != k) return error.TensorShapeMismatch;
 
     var shape = ra.dupe(i64, a.dims) catch return error.OutOfMemory;
     shape[shape.len - 1] = @intCast(n);
@@ -313,13 +313,13 @@ fn geometryOf(node: *const Node, x: Tensor, w: Tensor) Error!ConvGeometry {
     const group: usize = @intCast(@max(node.attrInt("group", 1), 1));
 
     var g: ConvGeometry = .{
-        .batch = @intCast(@max(x.dims[0], 1)),
-        .in_channels = @intCast(@max(x.dims[1], 1)),
-        .in_h = @intCast(@max(x.dims[2], 1)),
-        .in_w = @intCast(@max(x.dims[3], 1)),
-        .out_channels = @intCast(@max(w.dims[0], 1)),
-        .kernel_h = @intCast(@max(w.dims[2], 1)),
-        .kernel_w = @intCast(@max(w.dims[3], 1)),
+        .batch = onnx.extent(x, 0),
+        .in_channels = onnx.extent(x, 1),
+        .in_h = onnx.extent(x, 2),
+        .in_w = onnx.extent(x, 3),
+        .out_channels = onnx.extent(w, 0),
+        .kernel_h = onnx.extent(w, 2),
+        .kernel_w = onnx.extent(w, 3),
         .out_h = 0,
         .out_w = 0,
         .stride_h = if (strides.len > 0) @intCast(@max(strides[0], 1)) else 1,

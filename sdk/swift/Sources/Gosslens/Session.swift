@@ -371,7 +371,11 @@ public final class GossSession: @unchecked Sendable {
     /// carries its own tag, version and byte length, so a consumer built against
     /// an older schema steps over what it does not know. Sized in one retry
     /// rather than guessed at.
-    public func perceptionSnapshot(select: UInt32 = 0xFFF) throws -> [UInt8] {
+    /// Every section this build writes, asked of the engine rather than assumed: a
+    /// hand-written mask excluded the embedding section the day it was added.
+    public static var selectAll: UInt32 { goss_perception_select_all() }
+
+    public func perceptionSnapshot(select: UInt32 = GossSession.selectAll) throws -> [UInt8] {
         var needed = 0
         var probe: [UInt8] = []
         let first = goss_session_perception_snapshot(handle, select, nil, 0, &needed)
@@ -386,7 +390,7 @@ public final class GossSession: @unchecked Sendable {
     }
 
     /// The same record as compact JSON, for a gateway that speaks it.
-    public func perceptionJson(select: UInt32 = 0xFFF) throws -> String {
+    public func perceptionJson(select: UInt32 = GossSession.selectAll) throws -> String {
         var needed = 0
         let first = goss_session_perception_json(handle, select, nil, 0, &needed)
         if first != GOSS_OK && first != GOSS_AGAIN { try checked(first) }
@@ -521,6 +525,36 @@ public final class GossSession: @unchecked Sendable {
             try checked(goss_session_memory_save(handle, buffer.baseAddress, needed, &needed))
         }
         return out
+    }
+
+    /// The memory sealed under a host key. The nonce is yours: reusing one under
+    /// the same key breaks the cipher, and only you know what you have written.
+    public func memorySaveSealed(key: [UInt8], nonce: [UInt8]) throws -> [UInt8] {
+        var needed = 0
+        try key.withUnsafeBufferPointer { k in
+            try nonce.withUnsafeBufferPointer { n in
+                _ = goss_session_memory_save_sealed(handle, k.baseAddress, n.baseAddress, nil, 0, &needed)
+                return
+            }
+        }
+        guard needed > 0 else { return [] }
+        var out = [UInt8](repeating: 0, count: needed)
+        try key.withUnsafeBufferPointer { k in
+            try nonce.withUnsafeBufferPointer { n in
+                try out.withUnsafeMutableBufferPointer { buffer in
+                    try checked(goss_session_memory_save_sealed(handle, k.baseAddress, n.baseAddress, buffer.baseAddress, needed, &needed))
+                }
+            }
+        }
+        return out
+    }
+
+    public func memoryLoadSealed(key: [UInt8], bytes: [UInt8]) throws {
+        try key.withUnsafeBufferPointer { k in
+            try bytes.withUnsafeBufferPointer { b in
+                try checked(goss_session_memory_load_sealed(handle, k.baseAddress, b.baseAddress, bytes.count))
+            }
+        }
     }
 
     public func memoryLoad(_ bytes: [UInt8]) throws {

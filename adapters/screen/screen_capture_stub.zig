@@ -36,6 +36,19 @@ pub const Surface = struct {
 
 pub const Read = enum { frame, unchanged, failed };
 
+/// The consent entries the platform that has them calls. Here they take the
+/// call and change nothing, so the JNI layer compiles against one seam on every
+/// target rather than one per platform.
+pub fn setGranted(width: f32, height: f32, density_scale: f32, label: []const u8) void {
+    _ = .{ width, height, density_scale, label };
+}
+
+pub fn clearGranted() void {}
+
+pub fn offerFrame(pixels: []const u8, width: u32, height: u32, stride: u32, timestamp_us: i64) void {
+    _ = .{ pixels, width, height, stride, timestamp_us };
+}
+
 pub fn enumerate(out: []CSurface) usize {
     _ = out;
     return 0;

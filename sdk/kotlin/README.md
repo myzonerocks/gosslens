@@ -498,8 +498,8 @@ remembers, and the screen it is looking at.
 
 ```kotlin
 // What the engine sees, as one record and as JSON.
-val record = session.perceptionSnapshot(GossSelect.ALL)
-val json = session.perceptionJson(GossSelect.ALL)
+val record = session.perceptionSnapshot(session.selectAll(), buffer)
+val json = session.perceptionJson(session.selectAll(), buffer)
 
 // What the frame says, once the text rail is on.
 session.enableText(detectorBytes, recognizerBytes, keysBytes)
@@ -509,6 +509,11 @@ session.readings().forEach { println("${it.text} ${it.trackId}") }
 session.memoryOpen(512)
 session.remember(1L, embedding)
 session.memorySearch(query, 5).forEach { println("${it.id} ${it.score}") }
+
+// And sealed under a host key. The nonce is yours: reusing one under the same key
+// breaks the cipher.
+val sealed = session.memorySaveSealed(key, nonce)
+session.memoryLoadSealed(key, sealed)
 
 // A screen, after MediaProjection consent the Activity collects.
 GossScreenCapture.grant(widthPx, heightPx, density, "Phone display")

@@ -54,7 +54,7 @@ fn runIf(ra: std.mem.Allocator, node: *const Node, table: *Table, depth: u8) Err
     const taken = if (cond.data[0] != 0) try subgraphOf(node, "then_branch") else try subgraphOf(node, "else_branch");
 
     var inner = try bodyTable(ra, table, taken);
-    try onnx.runNodes(ra, taken.nodes, &inner, depth + 1);
+    try onnx.runNodes(ra, taken.nodes, &inner, depth + 1, taken.output_names);
     if (taken.output_names.len < node.outputs.len) return error.TensorShapeMismatch;
     for (node.outputs, 0..) |out_name, i| {
         if (out_name.len == 0) continue;
@@ -111,7 +111,7 @@ fn runLoop(ra: std.mem.Allocator, node: *const Node, table: *Table, depth: u8) E
         inner.put(ra, body.input_names[1], cond_t) catch return error.OutOfMemory;
         for (0..carried) |i| inner.put(ra, body.input_names[2 + i], state[i]) catch return error.OutOfMemory;
 
-        try onnx.runNodes(ra, body.nodes, &inner, depth + 1);
+        try onnx.runNodes(ra, body.nodes, &inner, depth + 1, body.output_names);
 
         const next_cond = inner.get(body.output_names[0]) orelse return error.InvokeFailed;
         keep_going = next_cond.data.len != 0 and next_cond.data[0] != 0;
@@ -187,7 +187,7 @@ fn runScan(ra: std.mem.Allocator, node: *const Node, table: *Table, depth: u8) E
             };
             inner.put(ra, body.input_names[carried + i], slice) catch return error.OutOfMemory;
         }
-        try onnx.runNodes(ra, body.nodes, &inner, depth + 1);
+        try onnx.runNodes(ra, body.nodes, &inner, depth + 1, body.output_names);
         for (0..carried) |i| state[i] = inner.get(body.output_names[i]) orelse return error.InvokeFailed;
         for (0..scan_outputs) |i| {
             const slice = inner.get(body.output_names[carried + i]) orelse return error.InvokeFailed;

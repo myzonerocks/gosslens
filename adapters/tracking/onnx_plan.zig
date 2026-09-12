@@ -48,19 +48,88 @@ pub fn isSupported(op: []const u8) bool {
     return false;
 }
 
+/// Every node in a graph, the bodies its control-flow nodes carry included. A
+/// node names only its own inputs and op, so reading the top level alone misses
+/// an operator a body needs and a value a body captures. Bounded rather than
+/// recursive, because the nesting is untrusted input.
+pub const Walk = struct {
+    /// Deep enough for any real graph: an If pushes both branches, so this holds
+    /// eight nested control-flow nodes, twice the depth the executor allows.
+    const max_lists = 16;
+
+    lists: [max_lists][]const Node = undefined,
+    cursors: [max_lists]usize = @splat(0),
+    depth: usize = 0,
+    /// Set when a model nested past what this holds. A caller that must be exact
+    /// reads it and refuses rather than reporting a partial answer as complete.
+    overflowed: bool = false,
+
+    pub fn init(nodes: []const Node) Walk {
+        var w: Walk = .{};
+        w.lists[0] = nodes;
+        w.cursors[0] = 0;
+        w.depth = 1;
+        return w;
+    }
+
+    pub fn next(w: *Walk) ?*const Node {
+        while (w.depth > 0) {
+            const at = w.depth - 1;
+            if (w.cursors[at] >= w.lists[at].len) {
+                w.depth -= 1;
+                continue;
+            }
+            const node = &w.lists[at][w.cursors[at]];
+            w.cursors[at] += 1;
+            for (node.attrs) |*attr| {
+                const body = attr.g orelse continue;
+                if (w.depth >= max_lists) {
+                    w.overflowed = true;
+                    break;
+                }
+                w.lists[w.depth] = body.nodes;
+                w.cursors[w.depth] = 0;
+                w.depth += 1;
+            }
+            return node;
+        }
+        return null;
+    }
+};
+
 /// Writes the operators a model needs that this engine does not implement, one
 /// per line, and answers how many bytes the full answer takes. A caller with a
 /// short buffer learns the size rather than a truncated list it cannot trust.
+/// Every node a graph runs, the bodies included. The frame buffer's bookkeeping
+/// is sized from this rather than from the top level, because a graph whose work
+/// sits inside a loop has a handful of nodes and thousands of allocations.
+pub fn nodeCount(nodes: []const Node) usize {
+    var walk = Walk.init(nodes);
+    var n: usize = 0;
+    while (walk.next()) |_| n += 1;
+    return n;
+}
+
 pub fn missingOps(nodes: []const Node, out: []u8) usize {
     var written: usize = 0;
     var needed: usize = 0;
-    for (nodes, 0..) |node, i| {
+    // Ops already named. A graph needing more distinct operators than this build
+    // lacks is a graph nobody runs, and past the bound a repeat only makes the
+    // reported size larger than it had to be.
+    var seen: [64][]const u8 = undefined;
+    var seen_count: usize = 0;
+    var walk = Walk.init(nodes);
+    while (walk.next()) |node| {
         if (isSupported(node.op_type)) continue;
         var already = false;
-        for (nodes[0..i]) |prior| {
-            if (std.mem.eql(u8, prior.op_type, node.op_type)) already = true;
+        for (seen[0..seen_count]) |prior| {
+            if (std.mem.eql(u8, prior, node.op_type)) already = true;
         }
         if (already) continue;
+        if (seen_count < seen.len) {
+            seen[seen_count] = node.op_type;
+            seen_count += 1;
+        }
         const line_len = node.op_type.len + 1;
         needed += line_len;
         if (written + line_len <= out.len) {
@@ -82,10 +151,16 @@ pub const Lifetimes = struct {
     pub fn build(a: std.mem.Allocator, nodes: []const Node, outputs: []const []const u8) Error!Lifetimes {
         var lt: Lifetimes = .{};
         lt.last_use.ensureTotalCapacity(a, @intCast(nodes.len * 4 + outputs.len + 4)) catch return error.OutOfMemory;
-        for (nodes, 0..) |node, i| {
-            for (node.inputs) |name| {
-                if (name.len == 0) continue;
-                lt.last_use.put(a, name, @intCast(i)) catch return error.OutOfMemory;
+        for (0..nodes.len) |i| {
+            // The node's bodies read through the same walk: a value a branch
+            // captures is last read by the node carrying the branch, so its
+            // buffer cannot be handed back before that node has run.
+            var walk = Walk.init(nodes[i .. i + 1]);
+            while (walk.next()) |node| {
+                for (node.inputs) |name| {
+                    if (name.len == 0) continue;
+                    lt.last_use.put(a, name, @intCast(i)) catch return error.OutOfMemory;
+                }
             }
         }
         for (outputs) |name| lt.last_use.put(a, name, std.math.maxInt(u32)) catch return error.OutOfMemory;
@@ -184,10 +259,18 @@ pub const Pool = struct {
         return p.buffer.ptr + p.blocks[at].offset;
     }
 
+    /// The block holding a pointer. Binary, because the list is kept sorted by
+    /// offset and a loop body frees thousands of tensors per trip: a scan here
+    /// made the cost of one trip quadratic in the tensors it produced.
     fn indexOf(p: *Pool, ptr: [*]u8) ?usize {
         const offset = @intFromPtr(ptr) - @intFromPtr(p.buffer.ptr);
-        for (0..p.used) |i| {
-            if (p.blocks[i].offset == offset and !p.blocks[i].free) return i;
+        var low: usize = 0;
+        var high: usize = p.used;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const at = p.blocks[mid].offset;
+            if (at == offset) return if (p.blocks[mid].free) null else mid;
+            if (at < offset) low = mid + 1 else high = mid;
         }
         return null;
     }
@@ -255,8 +338,14 @@ pub fn eliminateDead(a: std.mem.Allocator, nodes: []const Node, outputs: []const
         const at = producedBy(nodes, name) orelse continue;
         if (live[at]) continue;
         live[at] = true;
-        for (nodes[at].inputs) |i| {
-            if (i.len != 0) wanted.append(a, i) catch return error.OutOfMemory;
+        // Bodies included: a tensor a branch captures is named nowhere at the
+        // top level, and without this its producer reads as dead and is deleted,
+        // so the body asks at run time for a name nothing holds.
+        var walk = Walk.init(nodes[at .. at + 1]);
+        while (walk.next()) |node| {
+            for (node.inputs) |i| {
+                if (i.len != 0) wanted.append(a, i) catch return error.OutOfMemory;
+            }
         }
     }
 
@@ -401,7 +490,7 @@ pub fn foldConstants(
             if (name.len == 0) continue;
             scratch.put(a, name, initializers.get(name).?) catch return error.OutOfMemory;
         }
-        onnx.runNodes(a, nodes[at .. at + 1], &scratch, 0) catch {
+        onnx.runNodes(a, nodes[at .. at + 1], &scratch, 0, node.outputs) catch {
             kept.append(a, node) catch return error.OutOfMemory;
             continue;
         };

@@ -11,9 +11,12 @@ const core_mod = @import("ml_infer_core");
 
 pub const supported = core_mod.supported;
 pub const Norm = ml_tensor.Norm;
+pub const Bounds = ml_tensor.Bounds;
+pub const Engine = core_mod.Engine;
 pub const CreateError = core_mod.CreateError;
 pub const Core = core_mod.Core;
 pub const max_outputs = core_mod.max_outputs;
+pub const missingOps = core_mod.missingOps;
 
 pub const AudioInfer = core_mod.AudioCore;
 
@@ -144,6 +147,14 @@ pub fn layoutIsNchw(ml: *MlInfer) bool {
 
 pub fn copyOutput(ml: *MlInfer, tensor: u32, dst: []f32) bool {
     return ml.core.copyOutput(tensor, dst);
+}
+
+pub fn copyEmbedding(ml: *MlInfer, tensor: u32, dst: []f32) usize {
+    if (!ml.core.outputIsVector(tensor)) return 0;
+    const src = ml.core.outputSlice(tensor);
+    const n = @min(src.len, dst.len);
+    @memcpy(dst[0..n], src[0..n]);
+    return n;
 }
 
 pub fn outputCount(ml: *MlInfer) u32 {

@@ -180,6 +180,23 @@ const banned_pr_body_headers = [_][]const u8{
     "how tested",  "verification",
 };
 
+const Seam = struct {
+    module: []const u8,
+    real: []const u8,
+    substitutes: []const []const u8,
+};
+
+const seam_families = [_]Seam{
+    .{ .module = "ml_infer", .real = "adapters/tracking/ml_infer.zig", .substitutes = &.{ "adapters/tracking/ml_infer_sync.zig", "adapters/tracking/ml_infer_stub.zig" } },
+    .{ .module = "render", .real = "adapters/bgfx/render.zig", .substitutes = &.{"adapters/bgfx/render_stub.zig"} },
+    .{ .module = "tracking", .real = "adapters/tracking/tracking.zig", .substitutes = &.{"adapters/tracking/tracking_stub.zig"} },
+    .{ .module = "screen_capture", .real = "adapters/screen/screen_capture.zig", .substitutes = &.{"adapters/screen/screen_capture_stub.zig"} },
+    .{ .module = "physics", .real = "adapters/physics/physics.zig", .substitutes = &.{"adapters/physics/physics_stub.zig"} },
+    .{ .module = "media_video", .real = "adapters/media/video.zig", .substitutes = &.{"adapters/media/video_stub.zig"} },
+    .{ .module = "image", .real = "adapters/image/image.zig", .substitutes = &.{"adapters/image/image_stub.zig"} },
+    .{ .module = "audio_playback", .real = "adapters/audio/audio_playback.zig", .substitutes = &.{"adapters/audio/audio_playback_stub.zig"} },
+};
+
 const Gate = struct {
     arena: Allocator,
     io: Io,
@@ -761,6 +778,38 @@ const Gate = struct {
 
     // W9 mechanical check: a vendor call whose return encodes failure, ignored
     // with no reason. Discarding one is allowed when the line says why.
+    // A module swapped per target is only a seam if every substitute answers
+    // what the tree asks of it. The wasm build broke on four names the real
+    // adapter exported and its synchronous twin did not, so the asking side is
+    // what decides: a name used through the module, absent from a substitute.
+    fn checkSeamParity(g: *Gate) !void {
+        const paths = try g.trackedPaths();
+        for (seam_families) |seam| {
+            var used: std.ArrayList([]const u8) = .empty;
+            for (paths) |path| {
+                if (!std.mem.endsWith(u8, path, ".zig")) continue;
+                if (std.mem.eql(u8, path, seam.real)) continue;
+                if (std.mem.startsWith(u8, path, ".vendor/")) continue;
+                var is_substitute = false;
+                for (seam.substitutes) |sub| {
+                    if (std.mem.eql(u8, path, sub)) is_substitute = true;
+                }
+                if (is_substitute) continue;
+                const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+                const binding = importBinding(content, seam.module) orelse continue;
+                try collectMemberUses(g, content, binding, &used);
+            }
+            if (used.items.len == 0) continue;
+            for (seam.substitutes) |sub| {
+                const content = Io.Dir.cwd().readFileAlloc(g.io, sub, g.arena, .limited(max_file_scan_bytes)) catch continue;
+                for (used.items) |name| {
+                    if (declaresPublic(content, name)) continue;
+                    try g.flag("seam-parity: '{s}' has no pub '{s}', and the tree reaches for '{s}.{s}'; a substituted module answers every name the real one does", .{ sub, name, seam.module, name });
+                }
+            }
+        }
+    }
+
     fn checkIgnoredVendorResults(g: *Gate, paths: []const []const u8) !void {
         for (paths) |path| {
             if (!std.mem.endsWith(u8, path, ".zig")) continue;
@@ -1020,6 +1069,101 @@ fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
     return null;
 }
 
+/// The local name a file binds a module to, so `ml.Bounds` is found whether the
+/// file wrote `const ml_infer = @import("ml_infer")` or shortened it.
+fn importBinding(content: []const u8, module: []const u8) ?[]const u8 {
+    var needle_buf: [128]u8 = undefined;
+    const needle = std.fmt.bufPrint(&needle_buf, "@import(\"{s}\")", .{module}) catch return null;
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, content, search, needle)) |at| {
+        search = at + needle.len;
+        var line_start = at;
+        while (line_start > 0 and content[line_start - 1] != '\n') line_start -= 1;
+        const line = content[line_start..at];
+        const eq = std.mem.lastIndexOfScalar(u8, line, '=') orelse continue;
+        var name_end = eq;
+        while (name_end > 0 and (line[name_end - 1] == ' ' or line[name_end - 1] == '\t')) name_end -= 1;
+        var name_start = name_end;
+        while (name_start > 0 and isIdentChar(line[name_start - 1])) name_start -= 1;
+        if (name_start == name_end) continue;
+        return line[name_start..name_end];
+    }
+    return null;
+}
+
+/// Every `<binding>.<name>` the file's code reaches for, deduplicated. Comments
+/// and string literals are cut first: a doc comment naming a node type and an
+/// import path both read as uses otherwise, and neither is one.
+fn collectMemberUses(g: *Gate, content: []const u8, binding: []const u8, out: *std.ArrayList([]const u8)) !void {
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |raw| {
+        const line = try codeOf(g.arena, raw);
+        var search: usize = 0;
+        while (std.mem.indexOfPos(u8, line, search, binding)) |at| {
+            search = at + binding.len;
+            if (at > 0 and isIdentChar(line[at - 1])) continue;
+            const after = at + binding.len;
+            if (after >= line.len or line[after] != '.') continue;
+            var end = after + 1;
+            while (end < line.len and isIdentChar(line[end])) end += 1;
+            if (end == after + 1) continue;
+            const name = line[after + 1 .. end];
+            var seen = false;
+            for (out.items) |have| {
+                if (std.mem.eql(u8, have, name)) seen = true;
+            }
+            if (!seen) try out.append(g.arena, name);
+        }
+    }
+}
+
+/// A line with its comment dropped and its string literals blanked, so only code
+/// is read: a doc comment naming a node type and an import path both look like
+/// uses otherwise, and neither is one.
+fn codeOf(arena: Allocator, line: []const u8) ![]const u8 {
+    const out = try arena.alloc(u8, line.len);
+    var i: usize = 0;
+    var in_string = false;
+    while (i < line.len) : (i += 1) {
+        if (in_string) {
+            out[i] = ' ';
+            if (line[i] == '\\' and i + 1 < line.len) {
+                i += 1;
+                out[i] = ' ';
+                continue;
+            }
+            if (line[i] == '"') in_string = false;
+            continue;
+        }
+        if (line[i] == '"') {
+            in_string = true;
+            out[i] = ' ';
+            continue;
+        }
+        if (line[i] == '/' and i + 1 < line.len and line[i + 1] == '/') return out[0..i];
+        out[i] = line[i];
+    }
+    return out;
+}
+
+/// Whether a file declares a name publicly at file scope. The substitutes are
+/// flat by design, so a top-level `pub const`, `pub fn` or `pub var` is the
+/// whole question.
+fn declaresPublic(content: []const u8, name: []const u8) bool {
+    for ([_][]const u8{ "pub const ", "pub fn ", "pub var ", "pub threadlocal var " }) |prefix| {
+        var search: usize = 0;
+        while (std.mem.indexOfPos(u8, content, search, prefix)) |at| {
+            search = at + prefix.len;
+            if (at != 0 and content[at - 1] != '\n') continue;
+            const rest = content[at + prefix.len ..];
+            if (!std.mem.startsWith(u8, rest, name)) continue;
+            if (rest.len > name.len and isIdentChar(rest[name.len])) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
 fn isIdentChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
@@ -1049,6 +1193,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkOwnershipTransfers(paths);
         try g.checkSwallowedFailures(paths);
         try g.checkIgnoredVendorResults(paths);
+        try g.checkSeamParity();
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
@@ -1062,6 +1207,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkOwnershipTransfers(paths);
         try g.checkSwallowedFailures(paths);
         try g.checkIgnoredVendorResults(paths);
+        try g.checkSeamParity();
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});

@@ -183,6 +183,8 @@ object Gosslens {
     internal external fun nativeCloseClip(session: Long, clip: Int): Int
     internal external fun nativeClipStep(session: Long, clip: Int, frames: Int): Int
     internal external fun nativeMediaCapabilities(engine: Long, out: ByteBuffer): Int
+    internal external fun nativePerceptionSelectAll(): Int
+
     internal external fun nativePerceptionSnapshot(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
     internal external fun nativePerceptionJson(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
     internal external fun nativePollEvents(session: Long, out: ByteBuffer, capacity: Int, dropped: ByteBuffer): Int
@@ -257,6 +259,10 @@ object Gosslens {
     internal external fun nativeMemoryStats(session: Long): Long
 
     internal external fun nativeMemorySave(session: Long, out: ByteBuffer, capacity: Int): Int
+
+    internal external fun nativeMemorySaveSealed(session: Long, key: ByteBuffer, nonce: ByteBuffer, out: ByteBuffer, capacity: Int): Int
+
+    internal external fun nativeMemoryLoadSealed(session: Long, key: ByteBuffer, bytes: ByteBuffer, len: Int): Int
 
     internal external fun nativeMemoryLoad(session: Long, bytes: ByteBuffer, len: Int): Int
 
@@ -987,6 +993,157 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
      * buffer. Returns the bytes written, or the size needed when the buffer is
      * short, so a caller sizes once. Negative on a real failure.
      */
+    /// Every section this build writes, asked of the engine rather than written by
+    /// hand: a hand-written mask excluded the embedding section the day it landed.
+    fun selectAll(): Int = Gosslens.nativePerceptionSelectAll()
+
+    /**
+     * Turns on the text rail. A detector alone finds where the text is; pass a
+     * recogniser and its dictionary to get strings back.
+     */
+    fun enableText(detector: ByteArray, recognizer: ByteArray = ByteArray(0), dictionary: ByteArray = ByteArray(0), detectSide: Int = 320): Boolean {
+        val det = ByteBuffer.allocateDirect(detector.size).put(detector)
+        val rec = if (recognizer.isEmpty()) null else ByteBuffer.allocateDirect(recognizer.size).put(recognizer)
+        val dict = if (dictionary.isEmpty()) null else ByteBuffer.allocateDirect(dictionary.size).put(dictionary)
+        return Gosslens.nativeEnableText(det, detector.size, rec, recognizer.size, dict, dictionary.size, detectSide) == 0
+    }
+
+    fun disableText(): Boolean = Gosslens.nativeDisableText(handle) == 0
+
+    /** Live count in the low word and refused in the high, from one crossing. */
+    fun textCount(): Pair<Int, Int> {
+        val packed = Gosslens.nativeTextCount(handle)
+        return Pair((packed and 0xFFFFFFFFL).toInt(), (packed ushr 32).toInt())
+    }
+
+    /** Everything the frame says, each reading with its quadrilateral and string. */
+    fun readings(): List<GossReading> {
+        val (live, _) = textCount()
+        if (live <= 0) return emptyList()
+        val entry = ByteBuffer.allocateDirect(80).order(ByteOrder.LITTLE_ENDIAN)
+        val out = ArrayList<GossReading>(live)
+        for (index in 0 until live) {
+            entry.clear()
+            if (Gosslens.nativeTextAt(handle, index, entry) != 0) continue
+            val quad = FloatArray(8) { entry.getFloat(it * 4) }
+            val textLen = entry.getInt(60)
+            var text = ""
+            if (textLen > 0) {
+                val buffer = ByteBuffer.allocateDirect(textLen)
+                if (Gosslens.nativeTextString(handle, index, buffer, textLen) == textLen) {
+                    val bytes = ByteArray(textLen)
+                    buffer.get(bytes)
+                    text = String(bytes)
+                }
+            }
+            out.add(
+                GossReading(
+                    text = text,
+                    quad = quad,
+                    confidence = entry.getFloat(32),
+                    origin = entry.getInt(36),
+                    script = entry.getInt(40),
+                    direction = entry.getInt(44),
+                    trackId = entry.getInt(48),
+                    line = entry.getInt(52),
+                    paragraph = entry.getInt(56),
+                ),
+            )
+        }
+        return out
+    }
+
+    /** Opens the memory plane at a fixed embedding width under a caller-set bound. */
+    fun memoryOpen(dim: Int, maxEntries: Int = 4096): Boolean =
+        Gosslens.nativeMemoryOpen(handle, dim, maxEntries) == 0
+
+    fun memoryClose(): Boolean = Gosslens.nativeMemoryClose(handle) == 0
+
+    /**
+     * The memory sealed under a host key. The nonce is yours: reusing one under the
+     * same key breaks the cipher, and only you know what you have written.
+     */
+    fun memorySaveSealed(key: ByteArray, nonce: ByteArray): ByteArray {
+        val keyBuffer = ByteBuffer.allocateDirect(key.size).put(key)
+        val nonceBuffer = ByteBuffer.allocateDirect(nonce.size).put(nonce)
+        val empty = ByteBuffer.allocateDirect(1)
+        val needed = Gosslens.nativeMemorySaveSealed(handle, keyBuffer, nonceBuffer, empty, 0)
+        if (needed <= 0) return ByteArray(0)
+        val out = ByteBuffer.allocateDirect(needed)
+        if (Gosslens.nativeMemorySaveSealed(handle, keyBuffer, nonceBuffer, out, needed) != needed) return ByteArray(0)
+        val bytes = ByteArray(needed)
+        out.get(bytes)
+        return bytes
+    }
+
+    /** Reads a sealed memory back, refusing a wrong key or a changed byte. */
+    fun memoryLoadSealed(key: ByteArray, bytes: ByteArray): Boolean {
+        val keyBuffer = ByteBuffer.allocateDirect(key.size).put(key)
+        val data = ByteBuffer.allocateDirect(bytes.size).put(bytes)
+        return Gosslens.nativeMemoryLoadSealed(handle, keyBuffer, data, bytes.size) == 0
+    }
+
+    /** Remembers one embedding; the same id replaces rather than duplicating. */
+    fun remember(id: Long, embedding: FloatArray): Boolean {
+        val buffer = ByteBuffer.allocateDirect(embedding.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+        embedding.forEach { buffer.putFloat(it) }
+        return Gosslens.nativeMemoryRemember(handle, id, buffer, embedding.size) == 0
+    }
+
+    fun forget(id: Long): Boolean = Gosslens.nativeMemoryForget(handle, id) == 0
+
+    /** The nearest remembered embeddings, fewer than k on a smaller memory. */
+    fun memorySearch(query: FloatArray, k: Int = 8): List<GossMemoryMatch> {
+        val queryBuffer = ByteBuffer.allocateDirect(query.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+        query.forEach { queryBuffer.putFloat(it) }
+        val out = ByteBuffer.allocateDirect(k * 12).order(ByteOrder.LITTLE_ENDIAN)
+        val count = Gosslens.nativeMemorySearch(handle, queryBuffer, query.size, k, out)
+        if (count <= 0) return emptyList()
+        return (0 until count).map { GossMemoryMatch(out.getLong(it * 12), out.getFloat(it * 12 + 8)) }
+    }
+
+    /** What the memory holds, and what it costs. */
+    fun memoryStats(): Pair<Int, Long> {
+        val packed = Gosslens.nativeMemoryStats(handle)
+        return Pair((packed and 0xFFFFFFFFL).toInt(), packed ushr 32)
+    }
+
+    /**
+     * Narrows what this session answers. A read out of scope is dropped from the
+     * record rather than failing; a verb out of scope is refused.
+     */
+    fun setScope(sections: Int, verbs: Int): Boolean =
+        Gosslens.nativeSetScope(handle, sections, verbs) == 0
+
+    fun scope(): Pair<Int, Int> {
+        val packed = Gosslens.nativeScope(handle)
+        return Pair((packed and 0xFFFFFFFFL).toInt(), (packed ushr 32).toInt())
+    }
+
+    /** Opens a screen as a source, after MediaProjection consent is granted. */
+    fun openScreen(surfaceId: Long, scale: Float = 0f): Int =
+        Gosslens.nativeOpenScreen(handle, surfaceId, scale)
+
+    fun closeScreen(screen: Int): Boolean = Gosslens.nativeCloseScreen(handle, screen) == 0
+
+    /** Submits the newest frame. False when the screen has not changed. */
+    fun stepScreen(screen: Int, source: String = ""): Boolean {
+        val bytes = source.toByteArray()
+        val buffer = if (bytes.isEmpty()) null else ByteBuffer.allocateDirect(bytes.size).put(bytes)
+        return Gosslens.nativeStepScreen(handle, screen, buffer, bytes.size) == 0
+    }
+
+    /** Where a normalized point lands: logical points, backing pixels, desktop. */
+    fun screenPoint(screen: Int, x: Float, y: Float): Triple<FloatArray, FloatArray, FloatArray>? {
+        val out = ByteBuffer.allocateDirect(24).order(ByteOrder.LITTLE_ENDIAN)
+        if (Gosslens.nativeScreenPoint(handle, screen, x, y, out) != 0) return null
+        return Triple(
+            floatArrayOf(out.getFloat(0), out.getFloat(4)),
+            floatArrayOf(out.getFloat(8), out.getFloat(12)),
+            floatArrayOf(out.getFloat(16), out.getFloat(20)),
+        )
+    }
+
     fun perceptionSnapshot(select: Int, out: ByteBuffer): Int =
         Gosslens.nativePerceptionSnapshot(handle, select, out, out.capacity())
 

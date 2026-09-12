@@ -28,11 +28,15 @@ Point a client at the binary:
 | tool | what it is for |
 | --- | --- |
 | `open_clip` | Opens a video file as a source. The graph cannot tell a clip from a camera, so everything below works on it. |
+| `open_screen` | Opens a display or a window as a source. Where permission has not been granted it says no surface is available rather than failing. |
+| `screen_point` | Where a normalized point lands on the captured surface: logical points, backing pixels, and the desktop. |
 | `read_perception` | What the engine sees, as one record: the frame, the faces, hands and bodies, what it says, and the engine's own state. |
 | `read_text` | Every recognised region, with its quadrilateral, its confidence and a track id that survives a frame. |
 | `annotate` | Draw back into the frame. Addressed by id, so moving one every frame leaks nothing, and carrying a lifetime. |
 | `remember` | Put an embedding into the memory plane. The same id replaces rather than duplicating. |
 | `search_memory` | The nearest remembered embeddings, fewer than asked on a smaller memory rather than padded. |
+| `open_screen` | Opens a shared screen or window as a source, and answers its logical size, scale and desktop origin. |
+| `screen_point` | Where a point in the frame lands: in the surface's logical coordinates, in its pixels, and on the desktop. |
 | `model_support` | Which operators a model needs that this build lacks, so a failure is a list rather than the word unsupported. |
 | `engine_report` | The renderer backend, the pool high-water marks, frames drawn, and how far the engine has degraded. |
 
@@ -43,5 +47,8 @@ same C ABI the Swift, Kotlin and TypeScript SDKs use, and a session's
 [scope](API.md) governs what it will answer: a read out of scope is dropped from
 the record, and a verb out of scope is refused.
 
-A tool called before a session is attached says so rather than returning an empty
-answer a model would read as a fact.
+The engine and its session are made on the first call that needs them, so a
+client that only lists tools brings up no renderer. A tool whose precondition is
+missing says which one it is, rather than returning an empty answer a model would
+read as a fact: no surface has been granted, no frame has been submitted, the
+text rail is not enabled on this session.

@@ -353,6 +353,12 @@ test "selection answers for every tag it knows and refuses one it does not" {
     try t.expect(only_faces.wants(.faces));
     try t.expect(!only_faces.wants(.hands));
     try t.expect(Select.all.wants(.engine));
+    // Every named section, not a list somebody remembered to extend: a mask that
+    // missed one is exactly how the embedding section went unread for a wave.
+    inline for (comptime std.meta.fieldNames(Tag)) |name| {
+        if (comptime std.mem.eql(u8, name, "_")) continue;
+        try t.expect(Select.all.wants(@field(Tag, name)));
+    }
     try t.expect(!Select.all.wants(@enumFromInt(9999)));
 }
 

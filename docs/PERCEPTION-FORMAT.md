@@ -67,6 +67,10 @@ A caller passes a bitmask in the section order above, bit zero being `frame`. A
 snapshot is read every frame by a consumer that usually wants two sections, and
 writing all thirteen to be ignored is the cost selection avoids.
 
+Ask for the all-sections mask rather than writing one: `goss_perception_select_all`
+answers it from the engine's own section list. A mask typed by hand goes stale the
+moment a section is added, and it did.
+
 ## Scope
 
 A host narrows what a session will answer, once, with two words: the sections a

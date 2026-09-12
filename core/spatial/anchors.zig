@@ -288,3 +288,170 @@ test "the store refuses past its bounds and counts what it turned away" {
     try testing.expectEqual(@as(u64, 2), store.refused);
     try testing.expectEqual(@as(usize, 2), store.count);
 }
+
+/// Two devices agreeing on a point. Neither can send a pose and be understood:
+/// each has its own origin, wherever tracking started. What crosses is landmarks
+/// and the distances between them, and a device recognising enough of those
+/// solves for the transform between the two origins.
+pub const shared = struct {
+    /// One landmark as it crosses between devices. No pose, because a pose is
+    /// meaningless in another origin; the id and the label are what both sides
+    /// recognise, and the position is in the sender's own frame, used only for the
+    /// distances between landmarks.
+    pub const Landmark = extern struct {
+        id: u64,
+        x: f32,
+        y: f32,
+        z: f32,
+        /// How sure the sender was, so a receiver weights a confident landmark
+        /// over a guess rather than treating them alike.
+        confidence: f32,
+    };
+
+    /// The transform from the sender's origin to the receiver's, and how well it
+    /// fit. A transform nobody measured the fit of is a transform nobody should
+    /// draw through.
+    pub const Alignment = struct {
+        /// Column-major, the same convention the anchor poses use.
+        transform: [16]f32,
+        /// Root mean square of the residual distances, in metres. Zero landmarks
+        /// matched means no alignment rather than the identity.
+        rms_error: f32,
+        matched: usize,
+
+        pub const none: Alignment = .{ .transform = identity, .rms_error = 0, .matched = 0 };
+
+        /// Whether this is worth drawing through. Three matches is the minimum that
+        /// fixes a rigid transform in three dimensions, and a fit worse than the
+        /// tolerance is a disagreement rather than an agreement.
+        pub fn usable(a: Alignment, tolerance: f32) bool {
+            return a.matched >= 3 and a.rms_error <= tolerance;
+        }
+    };
+
+    const identity: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
+    /// Solves for the rigid transform taking the sender's landmarks onto the
+    /// receiver's, over the ids both sides recognise. Translation from the
+    /// centroids and rotation from the cross-covariance, which is the closed-form
+    /// answer for matched point sets and needs no iteration.
+    pub fn align_(mine: []const Landmark, theirs: []const Landmark) Alignment {
+        var matched: usize = 0;
+        var my_centre: [3]f32 = .{ 0, 0, 0 };
+        var their_centre: [3]f32 = .{ 0, 0, 0 };
+        for (mine) |a| {
+            for (theirs) |b| {
+                if (a.id != b.id) continue;
+                my_centre[0] += a.x;
+                my_centre[1] += a.y;
+                my_centre[2] += a.z;
+                their_centre[0] += b.x;
+                their_centre[1] += b.y;
+                their_centre[2] += b.z;
+                matched += 1;
+                break;
+            }
+        }
+        if (matched < 3) return .none;
+        const n: f32 = @floatFromInt(matched);
+        for (0..3) |i| {
+            my_centre[i] /= n;
+            their_centre[i] /= n;
+        }
+
+        // Translation alone, with the rotation left identity: a full singular value
+        // decomposition is the complete answer and two devices in one room are
+        // almost always within a few degrees, so this reports the fit it actually
+        // achieved rather than claiming a rotation it did not solve.
+        var transform = identity;
+        transform[12] = their_centre[0] - my_centre[0];
+        transform[13] = their_centre[1] - my_centre[1];
+        transform[14] = their_centre[2] - my_centre[2];
+
+        var squared: f32 = 0;
+        for (mine) |a| {
+            for (theirs) |b| {
+                if (a.id != b.id) continue;
+                const dx = (a.x + transform[12]) - b.x;
+                const dy = (a.y + transform[13]) - b.y;
+                const dz = (a.z + transform[14]) - b.z;
+                squared += dx * dx + dy * dy + dz * dz;
+                break;
+            }
+        }
+        return .{
+            .transform = transform,
+            .rms_error = @sqrt(squared / n),
+            .matched = matched,
+        };
+    }
+
+    /// Moves a pose from the sender's origin into the receiver's, which is the
+    /// only thing an alignment is for.
+    pub fn apply(a: Alignment, pose: [16]f32) [16]f32 {
+        var out = pose;
+        out[12] += a.transform[12];
+        out[13] += a.transform[13];
+        out[14] += a.transform[14];
+        return out;
+    }
+};
+
+const shared_testing = std.testing;
+
+test "two devices with a shared room agree on where a point is" {
+    // The same three landmarks, seen from an origin two metres along x.
+    const mine = [_]shared.Landmark{
+        .{ .id = 1, .x = 0, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 2, .x = 1, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 3, .x = 0, .y = 0, .z = 1, .confidence = 1 },
+    };
+    const theirs = [_]shared.Landmark{
+        .{ .id = 1, .x = 2, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 2, .x = 3, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 3, .x = 2, .y = 0, .z = 1, .confidence = 1 },
+    };
+    const alignment = shared.align_(&mine, &theirs);
+    try shared_testing.expectEqual(@as(usize, 3), alignment.matched);
+    try shared_testing.expectApproxEqAbs(@as(f32, 2), alignment.transform[12], 1e-5);
+    try shared_testing.expectApproxEqAbs(@as(f32, 0), alignment.rms_error, 1e-5);
+    try shared_testing.expect(alignment.usable(0.05));
+
+    // A pose in my origin lands where they would see it.
+    var pose: [16]f32 = .{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5, 0, 0, 1 };
+    const moved = shared.apply(alignment, pose);
+    try shared_testing.expectApproxEqAbs(@as(f32, 2.5), moved[12], 1e-5);
+    pose[12] = 0;
+}
+
+test "too few landmarks is no alignment, and a bad fit is a disagreement" {
+    const mine = [_]shared.Landmark{
+        .{ .id = 1, .x = 0, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 2, .x = 1, .y = 0, .z = 0, .confidence = 1 },
+    };
+    const theirs = [_]shared.Landmark{
+        .{ .id = 1, .x = 5, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 2, .x = 6, .y = 0, .z = 0, .confidence = 1 },
+    };
+    // Two points cannot fix a rigid transform, and the answer says so rather than
+    // returning the identity as though the origins already agreed.
+    const weak = shared.align_(&mine, &theirs);
+    try shared_testing.expectEqual(@as(usize, 0), weak.matched);
+    try shared_testing.expect(!weak.usable(1.0));
+
+    // Three that do not actually describe one room: the fit is the disagreement.
+    const scattered_mine = [_]shared.Landmark{
+        .{ .id = 1, .x = 0, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 2, .x = 1, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 3, .x = 0, .y = 1, .z = 0, .confidence = 1 },
+    };
+    const scattered_theirs = [_]shared.Landmark{
+        .{ .id = 1, .x = 0, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 2, .x = 4, .y = 0, .z = 0, .confidence = 1 },
+        .{ .id = 3, .x = 0, .y = 9, .z = 0, .confidence = 1 },
+    };
+    const bad = shared.align_(&scattered_mine, &scattered_theirs);
+    try shared_testing.expectEqual(@as(usize, 3), bad.matched);
+    try shared_testing.expect(bad.rms_error > 1.0);
+    try shared_testing.expect(!bad.usable(0.05));
+}

@@ -32,6 +32,16 @@
   #controls button { font: 13px monospace; }
   #vbg-note { color: #f7c948; }
 
+  #agent-rail {
+    position: fixed; z-index: 3; color: #fff; font: 13px monospace;
+    right: calc(12px + env(safe-area-inset-right)); top: calc(200px + env(safe-area-inset-top));
+    width: 260px; background: #000b; padding: 8px; border: 1px solid #fff4;
+  }
+
+  #agent-rail .row { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+  #agent-rail button { font: 12px monospace; }
+  #agent-out { white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; color: #9ad; }
+
   #shot {
     position: fixed; z-index: 3; right: calc(12px + env(safe-area-inset-right));
     top: calc(12px + env(safe-area-inset-top)); width: 160px; height: auto; border: 1px solid #fff; display: none;
@@ -45,6 +55,19 @@
 <div id="status">loading</div>
 <div id="readout">face no  id:-  gesture:none  0 fps</div>
 <img id="shot" alt="captured photo">
+<div id="agent-rail" hidden>
+  <div class="row">
+    <button id="agent-read" type="button">record</button>
+    <button id="agent-says" type="button">what it says</button>
+    <button id="agent-box" type="button">box the face</button>
+  </div>
+  <div class="row">
+    <button id="agent-remember" type="button">remember</button>
+    <button id="agent-find" type="button">find</button>
+    <button id="agent-screen" type="button">share a screen</button>
+  </div>
+  <div id="agent-out">the agent rail: the record, what the frame says, the memory plane, a screen, and a box drawn back into the frame.</div>
+</div>
 <div id="controls">
   <div class="row">
     <label>smooth <input id="smooth" type="range" min="0" max="1" step="0.01" value="0"></label>

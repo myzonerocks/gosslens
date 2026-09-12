@@ -3233,7 +3233,13 @@ export class GossSession {
   /// One versioned record of what the engine currently sees. Every section
   /// carries its own tag, version and byte length, so a consumer built against an
   /// older schema steps over what it does not know. Sized in one retry.
-  perceptionSnapshot(select = 0xfff): Uint8Array | null {
+  /// Every section this build writes, asked of the engine rather than assumed: a
+  /// hand-written mask excluded the embedding section the day it was added.
+  selectAll(): number {
+    return this.mod.ccall("goss_perception_select_all", "number", [], []) as number;
+  }
+
+  perceptionSnapshot(select = this.selectAll()): Uint8Array | null {
     const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
     try {
       this.mod.ccall("goss_session_perception_snapshot", "number", ["number", "number", "number", "number", "number"], [this.handle, select, 0, 0, lenPtr]);
@@ -3254,7 +3260,7 @@ export class GossSession {
   }
 
   /// The same record as compact JSON, for a gateway that speaks it.
-  perceptionJson(select = 0xfff): string | null {
+  perceptionJson(select = this.selectAll()): string | null {
     const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
     try {
       this.mod.ccall("goss_session_perception_json", "number", ["number", "number", "number", "number", "number"], [this.handle, select, 0, 0, lenPtr]);
@@ -3414,6 +3420,45 @@ export class GossSession {
       }
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+    }
+  }
+
+  /// The memory sealed under a host key. The nonce is yours: reusing one under
+  /// the same key breaks the cipher.
+  memorySaveSealed(key: Uint8Array, nonce: Uint8Array): Uint8Array {
+    const keyPtr = this.mod.ccall("goss_alloc", "number", ["number"], [key.length]) as number;
+    const noncePtr = this.mod.ccall("goss_alloc", "number", ["number"], [nonce.length]) as number;
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      this.mod.HEAPU8.set(key, keyPtr);
+      this.mod.HEAPU8.set(nonce, noncePtr);
+      this.mod.ccall("goss_session_memory_save_sealed", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, keyPtr, noncePtr, 0, 0, lenPtr]);
+      const needed = this.mod.HEAPU32[lenPtr >> 2];
+      if (needed === 0) return new Uint8Array(0);
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [needed]) as number;
+      try {
+        if (this.mod.ccall("goss_session_memory_save_sealed", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, keyPtr, noncePtr, ptr, needed, lenPtr]) !== GOSS_OK) return new Uint8Array(0);
+        return new Uint8Array(this.mod.HEAPU8.subarray(ptr, ptr + needed));
+      } finally {
+        this.mod.ccall("goss_free", null, ["number", "number"], [ptr, needed]);
+      }
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [keyPtr, key.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [noncePtr, nonce.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 8]);
+    }
+  }
+
+  memoryLoadSealed(key: Uint8Array, bytes: Uint8Array): boolean {
+    const keyPtr = this.mod.ccall("goss_alloc", "number", ["number"], [key.length]) as number;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    try {
+      this.mod.HEAPU8.set(key, keyPtr);
+      this.mod.HEAPU8.set(bytes, ptr);
+      return this.mod.ccall("goss_session_memory_load_sealed", "number", ["number", "number", "number", "number"], [this.handle, keyPtr, ptr, bytes.length]) === GOSS_OK;
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [keyPtr, key.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
     }
   }
 

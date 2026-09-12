@@ -231,7 +231,9 @@ What an agent needs sits on the same seams, not beside them.
   read and the verbs it may act with. A read out of scope is dropped from the
   record; a verb out of scope is refused.
 - **The MCP server** (`tools/mcp/`) is one static binary over the same C ABI,
-  speaking JSON-RPC on stdio, so the whole rail is tools a model can call.
+  speaking JSON-RPC on stdio, so the whole rail is tools a model can call. The
+  engine and its session come up on the first call that needs one, and
+  `zig build mcp-proof` drives the built binary the way a client does.
 
 ## Dependency licenses
 

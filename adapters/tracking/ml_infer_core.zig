@@ -151,7 +151,18 @@ pub const Core = struct {
         // manifest's input_width is what says which size to run it at, and it
         // was parsed and thrown away until now.
         if (bounds.requested_input_side > 0 and engine.inputNeedsShape(0)) {
-            engine.resizeInput(0, &[_]i64{ 1, 3, bounds.requested_input_side, bounds.requested_input_side }) catch return error.InvalidModel;
+            // The declared layout decides where the side goes. A detector
+            // exported from TensorFlow is NHWC, and resizing it as NCHW hands
+            // every kernel a shape its weights do not match.
+            var declared_buf: [8]i32 = undefined;
+            const declared = engine.inputDims(0, &declared_buf) catch return error.InvalidModel;
+            const side: i64 = bounds.requested_input_side;
+            const nhwc = declared.len == 4 and declared[3] == 3;
+            if (nhwc) {
+                engine.resizeInput(0, &[_]i64{ 1, side, side, 3 }) catch return error.InvalidModel;
+            } else {
+                engine.resizeInput(0, &[_]i64{ 1, 3, side, side }) catch return error.InvalidModel;
+            }
         }
         var in_dims_buf: [8]i32 = undefined;
         const in_dims = engine.inputDims(0, &in_dims_buf) catch return error.InvalidModel;

@@ -26,6 +26,20 @@ const tools = [_]Tool{
         ,
     },
     .{
+        .name = "open_screen",
+        .description = "Open a display or a window as a source. Where the platform has not granted permission this answers that no surface is available, rather than an error; the host prompts.",
+        .schema =
+        \\{"type":"object","properties":{"surface_id":{"type":"integer","description":"From the engine's surface list; omit for the first display."},"scale":{"type":"number","description":"Zero takes the surface's own scale."}}}
+        ,
+    },
+    .{
+        .name = "screen_point",
+        .description = "Where a normalized point lands on the captured surface: its logical points, its backing pixels, and the desktop. The scale factor is the difference between pressing a button and pressing what sits at half its place.",
+        .schema =
+        \\{"type":"object","properties":{"screen":{"type":"integer"},"x":{"type":"number"},"y":{"type":"number"}},"required":["screen","x","y"]}
+        ,
+    },
+    .{
         .name = "read_perception",
         .description = "What the engine currently sees, as one record: the frame's geometry and timing, the faces, hands and bodies it found, what the frame says, and the engine's own state.",
         .schema =
@@ -58,6 +72,20 @@ const tools = [_]Tool{
         .description = "The nearest remembered embeddings to a query, fewer than asked on a smaller memory rather than padded.",
         .schema =
         \\{"type":"object","properties":{"embedding":{"type":"array","items":{"type":"number"}},"k":{"type":"integer","default":8}},"required":["embedding"]}
+        ,
+    },
+    .{
+        .name = "open_screen",
+        .description = "Open a shared screen or window as a source of frames. Answers the surface's logical size and scale, which is what turns a point in the frame into a point on the desktop.",
+        .schema =
+        \\{"type":"object","properties":{"surface_id":{"type":"integer","description":"A surface the host has granted; omit for the first one."}}}
+        ,
+    },
+    .{
+        .name = "screen_point",
+        .description = "Where a point in the frame lands on the screen: in the surface's logical coordinates, in its pixels, and on the desktop.",
+        .schema =
+        \\{"type":"object","properties":{"screen":{"type":"integer","default":0},"x":{"type":"number"},"y":{"type":"number"}},"required":["x","y"]}
         ,
     },
     .{

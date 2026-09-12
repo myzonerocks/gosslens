@@ -11,6 +11,9 @@ A release moves that section under its tag with the date, and the release notes 
 
 - An MCP server ships in the repository: one static binary speaking JSON-RPC on stdio over the
   same C ABI every SDK uses, so the session is tools a model can call with no runtime to install.
+  Ten tools answer from the engine, including opening a shared screen and turning a point in the
+  frame into a point on the desktop; the engine and its session come up on the first call that
+  needs one, and a tool whose precondition is missing names that one precondition.
 
 - Media is a contract the core owns. A clip is a source the graph cannot tell from a camera, with
   seek, presentation timestamps and audio; the portable codecs are pinned with their licences; and
@@ -44,6 +47,17 @@ A release moves that section under its tag with the date, and the release notes 
   selection that measures novelty against what is already remembered, and a versioned file that
   answers the same queries after a round trip.
 
+- The memory seals under a host key: an index of embeddings is a record of what a camera saw, so a
+  file lifted off the device is bytes rather than a diary, and a wrong key, a changed byte or a
+  relabelled file each fail rather than producing plausible plaintext.
+
+- Two devices agree on a point by exchanging landmark ids and positions in each sender's own frame,
+  never a pose, because a pose is meaningless in another origin. The alignment reports the fit it
+  achieved and refuses fewer than three matches.
+
+- `goss_perception_select_all` answers which snapshot sections this build writes. Every SDK had been
+  defaulting to a mask typed by hand, which excluded the embedding section from the day it landed.
+
 - Spatial queries answer in metres with their uncertainty attached, plane semantics are named
   channels rather than an opaque number, and anchors survive a session with their purpose and
   label but not with a confidence nothing has re-earned.
@@ -54,6 +68,15 @@ A release moves that section under its tag with the date, and the release notes 
 
 - The perception format is written down (`docs/PERCEPTION-FORMAT.md`) so a consumer implements
   against it without reading the engine, and a baseline gate holds the layout still.
+
+- A tensor holding nothing flows through every operator instead of overrunning it. A zero extent
+  was read as one in ninety-six places, so a detector that selected nothing read off the end of an
+  empty buffer, and a graph with control flow lost the values its body captured: the optimizer saw
+  them as unused and deleted them. Both are gone, and every node now checks the tensors it wrote
+  whichever path it took.
+
+- A module the build swaps per target now answers every name the tree asks of the real one, held
+  there by a gate rather than by a compile on the one target that happened to be built.
 
 - A changelog, covering every release from the first, and the release notes are the section it
   cuts, so a reader of the release and a reader of `main` see the same words. The gate refuses a

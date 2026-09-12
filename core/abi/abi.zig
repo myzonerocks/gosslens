@@ -374,6 +374,9 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_session_close_screen(goss_session *session, uint32_t screen)",
     "goss_status goss_session_step_screen(goss_session *session, uint32_t screen, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_screen_point(goss_session *session, uint32_t screen, float x, float y, float *out_logical, float *out_pixel, float *out_desktop)",
+    "goss_status goss_session_memory_save_sealed(goss_session *session, const uint8_t *key, const uint8_t *nonce, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_memory_load_sealed(goss_session *session, const uint8_t *key, const uint8_t *bytes, size_t len)",
+    "uint32_t goss_perception_select_all(void)",
 };
 
 // The minor advances from the surface, never by hand: a new op lengthens
@@ -10490,6 +10493,56 @@ pub export fn goss_session_memory_save(session: ?*Session, out: ?[*]u8, capacity
     len_out.* = needed;
     if (needed > capacity) return .again;
     return .ok;
+}
+
+/// Every snapshot section this build writes, as the mask a caller passes to ask
+/// for all of them. A hand-written one goes stale the moment a section is added,
+/// which is how the embedding section came to be excluded from every SDK.
+pub export fn goss_perception_select_all() u32 {
+    return @bitCast(perception.Select.all);
+}
+
+/// Writes the memory sealed under a host key. An index of embeddings records what
+/// a camera saw, so a file lifted off the device should be bytes rather than a
+/// diary. The nonce is the caller's: one reused under a key breaks the cipher.
+pub export fn goss_session_memory_save_sealed(session: ?*Session, key: ?*const [32]u8, nonce: ?*const [12]u8, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const k = key orelse return .invalid_argument;
+    const n = nonce orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const index = s.memory_index orelse return .again;
+
+    const gpa = s.engine.gpa;
+    const plain_len = memory_plane.hnsw.save(index, &.{});
+    const needed = memory_plane.sealed.sealedSize(plain_len);
+    len_out.* = needed;
+    if (needed > capacity) return .again;
+    const buffer = out orelse return .invalid_argument;
+
+    const plain = gpa.alloc(u8, plain_len) catch return .out_of_memory;
+    defer gpa.free(plain);
+    if (memory_plane.hnsw.save(index, plain) != plain_len) return .invalid_argument;
+    _ = memory_plane.sealed.seal(k.*, n.*, .index, plain, buffer[0..capacity]) catch return .out_of_memory;
+    return .ok;
+}
+
+/// Reads a sealed memory back. A wrong key, a changed byte, a file sealed as
+/// something else or a truncated write each fail here rather than producing
+/// plausible plaintext the index would then answer queries from.
+pub export fn goss_session_memory_load_sealed(session: ?*Session, key: ?*const [32]u8, bytes: ?[*]const u8, len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const k = key orelse return .invalid_argument;
+    const data = bytes orelse return .invalid_argument;
+    if (len == 0) return .invalid_argument;
+
+    const gpa = s.engine.gpa;
+    const plain = gpa.alloc(u8, len) catch return .out_of_memory;
+    defer gpa.free(plain);
+    const plain_len = memory_plane.sealed.open(k.*, .index, data[0..len], plain) catch |err| return switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        else => .invalid_argument,
+    };
+    return goss_session_memory_load(session, plain.ptr, plain_len);
 }
 
 pub export fn goss_session_memory_load(session: ?*Session, bytes: ?[*]const u8, len: usize) Status {

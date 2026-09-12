@@ -113,9 +113,16 @@ engine's own model rail. A memory plane that remembers what was worth keeping an
 finds it again. Scope, so a host decides what a caller may see and do. An MCP
 server, so the whole of it is tools a model can call.
 
-Still open: the platform screen-capture backends, the sealed index behind the
-host's key wired through the session, shared anchors across two devices, and the
-perception formats tracked as a forkable specification rather than only as code.
+Screens are a source on all three platforms, the perception format is published
+for forking, and anchors persist with their labels.
+
+Two devices agree on a point by exchanging landmark ids and positions in each
+sender's own frame, never a pose: a pose is meaningless in another origin. The
+alignment reports the fit it achieved and refuses fewer than three matches.
+
+Still open: a screen capture proven on physical Android hardware rather than on a
+host, and a rotation in the shared-anchor solve, which reports translation only
+rather than claiming a rotation it did not compute.
 
 ## Always on
 

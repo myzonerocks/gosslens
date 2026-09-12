@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 159u
+#define GOSS_ABI_MINOR 162u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -935,6 +935,17 @@ goss_status goss_session_close_screen(goss_session *session, uint32_t screen);
 /* GOSS_AGAIN means the screen has not changed since the last step. */
 goss_status goss_session_step_screen(goss_session *session, uint32_t screen, const uint8_t *name, size_t name_len);
 goss_status goss_session_screen_point(goss_session *session, uint32_t screen, float x, float y, float *out_logical, float *out_pixel, float *out_desktop);
+
+/* The memory sealed under a host key: an index of embeddings is a record of what a
+   camera saw, so a file lifted off the device should be bytes rather than a diary.
+   The nonce is the caller's, because a nonce reused under one key breaks the
+   cipher. GOSS_AGAIN with out_len set means the buffer was too short. */
+goss_status goss_session_memory_save_sealed(goss_session *session, const uint8_t *key, const uint8_t *nonce, uint8_t *out, size_t capacity, size_t *out_len);
+goss_status goss_session_memory_load_sealed(goss_session *session, const uint8_t *key, const uint8_t *bytes, size_t len);
+
+/* Every snapshot section this build writes. A hand-written mask goes stale the
+   moment a section is added, so ask rather than assume. */
+uint32_t goss_perception_select_all(void);
 
 goss_status goss_engine_read_report(goss_engine *engine, goss_engine_report *out_report);
 

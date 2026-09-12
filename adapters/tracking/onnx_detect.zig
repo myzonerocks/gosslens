@@ -54,9 +54,9 @@ fn argExtreme(ra: std.mem.Allocator, node: *const Node, table: *Table, want_max:
     const keepdims = node.attrInt("keepdims", 1) != 0;
     const last_index = node.attrInt("select_last_index", 0) != 0;
 
-    const along: usize = @intCast(@max(x.dims[ax], 1));
+    const along: usize = onnx.extent(x, ax);
     var inner: usize = 1;
-    for (ax + 1..rank) |d| inner *= @intCast(@max(x.dims[d], 1));
+    for (ax + 1..rank) |d| inner *= onnx.extent(x, d);
     const outer = if (along * inner == 0) 0 else x.data.len / (along * inner);
 
     var shape_buf: [8]i64 = undefined;
@@ -68,7 +68,7 @@ fn argExtreme(ra: std.mem.Allocator, node: *const Node, table: *Table, want_max:
                 w += 1;
             }
         } else {
-            shape_buf[w] = @max(x.dims[d], 1);
+            shape_buf[w] = @as(i64, @intCast(onnx.extent(x, d)));
             w += 1;
         }
     }
@@ -106,7 +106,7 @@ fn topK(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!void {
     const largest = node.attrInt("largest", 1) != 0;
     const sorted = node.attrInt("sorted", 1) != 0;
 
-    const along: usize = @intCast(@max(x.dims[ax], 1));
+    const along: usize = onnx.extent(x, ax);
     var k: usize = along;
     if (node.inputs.len > 1 and node.inputs[1].len != 0) {
         const kt = try get(table, node.inputs[1]);
@@ -117,7 +117,7 @@ fn topK(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!void {
     }
 
     var inner: usize = 1;
-    for (ax + 1..rank) |d| inner *= @intCast(@max(x.dims[d], 1));
+    for (ax + 1..rank) |d| inner *= onnx.extent(x, d);
     const outer = if (along * inner == 0) 0 else x.data.len / (along * inner);
 
     var shape = ra.dupe(i64, x.dims) catch return error.OutOfMemory;
@@ -197,9 +197,9 @@ fn nonMaxSuppression(ra: std.mem.Allocator, node: *const Node, table: *Table) Er
     const boxes = try in(table, node, 0);
     const scores = try in(table, node, 1);
     if (boxes.dims.len != 3 or scores.dims.len != 3) return error.TensorShapeMismatch;
-    const batches: usize = @intCast(@max(boxes.dims[0], 1));
-    const count: usize = @intCast(@max(boxes.dims[1], 1));
-    const classes: usize = @intCast(@max(scores.dims[1], 1));
+    const batches: usize = onnx.extent(boxes, 0);
+    const count: usize = onnx.extent(boxes, 1);
+    const classes: usize = onnx.extent(scores, 1);
     const centred = node.attrInt("center_point_box", 0) != 0;
 
     var max_per_class: usize = count;
@@ -277,17 +277,17 @@ fn roiAlign(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tenso
     else
         true;
 
-    const channels: usize = @intCast(@max(x.dims[1], 1));
-    const h: usize = @intCast(@max(x.dims[2], 1));
-    const w: usize = @intCast(@max(x.dims[3], 1));
-    const n: usize = @intCast(@max(rois.dims[0], 1));
+    const channels: usize = onnx.extent(x, 1);
+    const h: usize = onnx.extent(x, 2);
+    const w: usize = onnx.extent(x, 3);
+    const n: usize = onnx.extent(rois, 0);
 
     const shape = ra.dupe(i64, &[_]i64{ @intCast(n), @intCast(channels), @intCast(out_h), @intCast(out_w) }) catch return error.OutOfMemory;
     const out = try newTensor(ra, shape);
 
     for (0..n) |r| {
         const bi_raw = intAt(batch_indices, @min(r, batch_indices.data.len -| 1));
-        if (bi_raw < 0 or bi_raw >= @as(i64, @intCast(@max(x.dims[0], 1)))) return error.TensorShapeMismatch;
+        if (bi_raw < 0 or bi_raw >= @as(i64, @intCast(onnx.extent(x, 0)))) return error.TensorShapeMismatch;
         const bi: usize = @intCast(bi_raw);
         const offset: f32 = if (half_pixel) 0.5 else 0;
         const x0 = rois.data[r * 4 + 0] * spatial_scale - offset;

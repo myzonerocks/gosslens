@@ -461,8 +461,8 @@ remembers, and the screen it is looking at.
 
 ```swift
 // What the engine sees, as one record and as JSON.
-let record = try session.perceptionSnapshot(.all)
-let json = try session.perceptionJson(.all)
+let record = try session.perceptionSnapshot()
+let json = try session.perceptionJson()
 
 // What the frame says, once the text rail is on.
 try session.enableText(detector: detectorBytes, recognizer: recognizerBytes, dictionary: keysBytes)
@@ -474,6 +474,11 @@ for reading in try session.readings() {
 try session.memoryOpen(dim: 512)
 try session.remember(id: 1, embedding: embedding)
 for match in try session.memorySearch(query, k: 5) { print(match.id, match.score) }
+
+// And sealed under a host key, because an index of embeddings is a record of
+// what a camera saw. The nonce is yours: reusing one under the same key breaks it.
+let sealedBytes = try session.memorySaveSealed(key: key, nonce: nonce)
+try session.memoryLoadSealed(key: key, bytes: sealedBytes)
 
 // A screen as a source, and where a point an agent sent lands.
 let surfaces = try engine.screens()

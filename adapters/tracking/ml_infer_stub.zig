@@ -11,6 +11,15 @@ pub const supported = false;
 pub const Norm = ml_tensor.Norm;
 pub const Bounds = ml_tensor.Bounds;
 
+/// No core on this target either. The type exists so a caller that names it
+/// still compiles, and every entry on it refuses the same way create does.
+pub const Core = struct {
+    pub fn init(gpa: std.mem.Allocator, model_bytes: []const u8, bounds: ml_tensor.Bounds, threads: i32, norm: ml_tensor.Norm, aux_rgba: ?[]const u8, aux_width: u32, aux_height: u32, temporal: bool) CreateError!*Core {
+        _ = .{ gpa, model_bytes, bounds, threads, norm, aux_rgba, aux_width, aux_height, temporal };
+        return error.Unsupported;
+    }
+};
+
 /// No model rail on this target, so an engine cannot be made. A caller learns
 /// that from the error rather than from a worker that never publishes.
 pub const Engine = struct {

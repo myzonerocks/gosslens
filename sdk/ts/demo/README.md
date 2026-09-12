@@ -8,8 +8,10 @@
 > from the checkout so it always matches the SDK source.
 
 A browser page with a live camera preview, real-time face tracking, the six
-beauty sliders, post-effect filter lenses, a photo capture, and a virtual
-background driven by the selfie segmenter. It runs the wasm core through a
+beauty sliders, post-effect filter lenses, a photo capture, a virtual
+background driven by the selfie segmenter, and the agent rail: the record, the
+readings, the memory plane, a screen, and an annotation drawn back into the
+frame. It runs the wasm core through a
 real bgfx renderer (WebGPU when the browser has a working adapter, WebGL2
 otherwise). No framework, no bundler beyond a single `bun build`.
 
@@ -30,6 +32,10 @@ whatever is in `src/` is exactly what the demo runs.
   background from the person mask. With no segmenter model present the toggle
   disables itself with a short note.
 - Capture Photo: writes the composited frame to a PNG and shows it.
+- The agent rail, top right: the perception record as JSON, what the frame says,
+  a face remembered into the memory plane and found again by nearest match, a
+  shared screen with the desktop coordinate its centre lands on, and a box the
+  engine draws back into the frame for a bounded number of frames.
 
 ## One-time setup
 

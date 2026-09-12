@@ -474,8 +474,8 @@ remembers, and the screen it is looking at.
 
 ```ts
 // What the engine sees, as one record and as JSON.
-const record = session.perceptionSnapshot(GossSelect.All);
-const json = session.perceptionJson(GossSelect.All);
+const record = session.perceptionSnapshot();
+const json = session.perceptionJson();
 
 // What the frame says, once the text rail is on.
 session.enableText(detectorBytes, recognizerBytes, keysBytes);
@@ -487,6 +487,11 @@ for (const reading of session.readings()) {
 session.memoryOpen(512);
 session.remember(1, embedding);
 for (const match of session.memorySearch(query, 5)) console.log(match.id, match.score);
+
+// And sealed under a host key. The nonce is yours: reusing one under the same key
+// breaks the cipher.
+const sealed = session.memorySaveSealed(key, nonce);
+session.memoryLoadSealed(key, sealed);
 
 // A screen, through the browser's own picker and consent.
 const share = await shareScreen();

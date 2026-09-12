@@ -1,5 +1,6 @@
 import { GOSS_SEGMENTATION_MASK_SIDE, GossAudioOutput, GossFaceRegion, GossPreviewSession, pickEngineUrl } from "../src/index.ts";
 import { GOSS_FACE_LANDMARK_COUNT } from "../src/tracking.ts";
+import { attachAgentRail } from "./agent-rail.ts";
 
 const status = document.getElementById("status")!;
 const canvas = document.getElementById("preview") as HTMLCanvasElement;
@@ -211,13 +212,15 @@ function drawOverlay(reply: TrackingReply, frameWidth: number, frameHeight: numb
 // first pointerdown that stands the worklet up lives in run(), so a declaration
 // inside either one leaves the other writing or reading a name it cannot see.
 let audioOutput: GossAudioOutput | null = null;
+// Module scope for the same reason: the tracking loop writes the newest reply
+// and the agent rail in run() reads it, so neither can own the declaration.
+let lastReply: TrackingReply | null = null;
 
 async function startTracking(preview: GossPreviewSession): Promise<void> {
   const link = await TrackerLink.create();
   const scratch = document.createElement("canvas");
   const ctx = scratch.getContext("2d", { willReadFrequently: true })!;
   let trackingAnnounced = false;
-  let lastReply: TrackingReply | null = null;
 
   // One analysis frame in flight at a time, always the newest; the live
   // loop samples the camera element at analysis size.
@@ -421,6 +424,12 @@ async function run(): Promise<void> {
     { once: true },
   );
   await preview.start();
+  // The rail reads the newest landmarks rather than holding them, so nothing in
+  // it goes stale behind the render loop.
+  attachAgentRail({
+    session: preview.session,
+    landmarks: () => (lastReply && lastReply.presence >= 0.5 && lastReply.landmarkCount > 0 ? lastReply.landmarks : null),
+  });
   // Persisted across reloads: a camera that hands the browser
   // pre-rotated frames does so every time, not just this once. Default
   // true on a device that's never recorded a choice - this demo's own

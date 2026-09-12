@@ -522,6 +522,43 @@ export fn Java_com_gosslens_Gosslens_nativeMemorySave(env: *JniEnv, cls: jobject
     return @intCast(written);
 }
 
+/// Every snapshot section this build writes, so a caller passes the engine's own
+/// answer rather than a mask it wrote by hand.
+export fn Java_com_gosslens_Gosslens_nativePerceptionSelectAll(env: *JniEnv, cls: jobject) i32 {
+    _ = env;
+    _ = cls;
+    return @bitCast(abi.goss_perception_select_all());
+}
+
+/// The memory sealed under a host key. The key and the nonce arrive in direct
+/// buffers so neither is copied into a Java array on the way.
+export fn Java_com_gosslens_Gosslens_nativeMemorySaveSealed(env: *JniEnv, cls: jobject, session: i64, key: jobject, nonce: jobject, out_buffer: jobject, capacity: i32) i32 {
+    _ = cls;
+    if (capacity < 0) return -1;
+    const key_bytes = getDirectBufferAddress(env, key) orelse return -1;
+    const nonce_bytes = getDirectBufferAddress(env, nonce) orelse return -1;
+    const out_bytes = if (capacity == 0) null else getDirectBufferAddress(env, out_buffer);
+    var written: usize = 0;
+    const status = abi.goss_session_memory_save_sealed(
+        sessionFromHandle(session),
+        @ptrCast(key_bytes),
+        @ptrCast(nonce_bytes),
+        out_bytes,
+        @intCast(capacity),
+        &written,
+    );
+    if (status != .ok and status != .again) return -1;
+    return @intCast(written);
+}
+
+export fn Java_com_gosslens_Gosslens_nativeMemoryLoadSealed(env: *JniEnv, cls: jobject, session: i64, key: jobject, bytes: jobject, len: i32) i32 {
+    _ = cls;
+    if (len <= 0) return @intFromEnum(abi.Status.invalid_argument);
+    const key_bytes = getDirectBufferAddress(env, key) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const data = getDirectBufferAddress(env, bytes) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_memory_load_sealed(sessionFromHandle(session), @ptrCast(key_bytes), data, @intCast(len)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeMemoryLoad(env: *JniEnv, cls: jobject, session: i64, bytes: jobject, len: i32) i32 {
     _ = cls;
     if (len <= 0) return @intFromEnum(abi.Status.invalid_argument);

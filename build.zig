@@ -611,6 +611,23 @@ pub fn build(b: *std.Build) void {
         const run_mcp = b.addRunArtifact(mcp);
         b.step("mcp", "Run the MCP server on stdio").dependOn(&run_mcp.step);
 
+        // The protocol tests cannot see whether a tool does anything, so the
+        // proof runs the built server the way a client does and checks that an
+        // embedding put in through it comes back out.
+        const mcp_proof = b.addExecutable(.{
+            .name = "mcp-proof",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/mcp_proof.zig"),
+                .target = target,
+                .optimize = .Debug,
+            }),
+        });
+        const run_mcp_proof = b.addRunArtifact(mcp_proof);
+        run_mcp_proof.setCwd(b.path("."));
+        run_mcp_proof.addArtifactArg(mcp);
+        b.step("mcp-proof", "Drive the built MCP server over stdio and check every tool answers").dependOn(&run_mcp_proof.step);
+        ci_step.dependOn(&run_mcp_proof.step);
+
         const mcp_tests = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("tools/mcp/server.zig"),
             .target = target,

@@ -244,6 +244,12 @@ pub const Engine = struct {
     /// is how a caller sees a regression rather than guessing at one.
     optimization: plan.Optimization = .{},
     pool_growths: u32 = 0,
+    /// Where the last failed run failed. A model that will not run is a bug
+    /// report, and `TensorMissing` on its own names neither the node nor the
+    /// tensor, which is a whole afternoon of bisecting a graph by hand.
+    failed_node: usize = 0,
+    failed_op: []const u8 = "",
+    failed_input: []const u8 = "",
     /// The tensor table the last invoke produced, holding every output until
     /// the next invoke resets the run arena, the same lifetime the TFLite path
     /// gives its output slices.
@@ -342,7 +348,7 @@ pub const Engine = struct {
         // what every frame after this actually needs.
         const upper_bound = @max(engine.run_arena.queryCapacity(), 4096);
         engine.pool_words = engine.gpa.alloc(u64, upper_bound / 8 + 1) catch return error.OutOfMemory;
-        engine.pool_blocks = engine.gpa.alloc(plan.Pool.Block, engine.nodes.len * 8 + 64) catch return error.OutOfMemory;
+        engine.pool_blocks = engine.gpa.alloc(plan.Pool.Block, plan.nodeCount(engine.nodes) * 8 + 64) catch return error.OutOfMemory;
         engine.pool = plan.Pool.init(std.mem.sliceAsBytes(engine.pool_words), engine.pool_blocks);
         _ = engine.run_arena.reset(.free_all);
         engine.result_table = .empty;
@@ -474,7 +480,19 @@ pub const Engine = struct {
         for (engine.inputs) |slot| table.putAssumeCapacity(slot.name, .{ .dims = slot.dims, .data = slot.data });
 
         for (engine.nodes, 0..) |*node, i| {
-            try runNode(ra, node, &table);
+            runNode(ra, node, &table) catch |err| {
+                engine.failed_node = i;
+                engine.failed_op = node.op_type;
+                engine.failed_input = "";
+                for (node.inputs) |name| {
+                    if (name.len == 0) continue;
+                    if (table.get(name) == null) {
+                        engine.failed_input = name;
+                        break;
+                    }
+                }
+                return err;
+            };
             if (frame == null) continue;
             for (node.inputs) |name| {
                 if (name.len == 0) continue;
@@ -912,13 +930,68 @@ pub fn missingOps(gpa: std.mem.Allocator, model_bytes: []const u8, out: []u8) Er
 /// Runs a node list against a table the caller owns, which is what a subgraph
 /// body is. Depth is passed down and checked, per the rule that recursion never
 /// follows untrusted structure.
-pub fn runNodes(ra: std.mem.Allocator, nodes: []const Node, table: *std.StringHashMapUnmanaged(Tensor), depth: u8) Error!void {
+pub fn runNodes(ra: std.mem.Allocator, nodes: []const Node, table: *std.StringHashMapUnmanaged(Tensor), depth: u8, keep: []const []const u8) Error!void {
     if (depth > max_control_depth) return error.ModelRejected;
-    for (nodes) |*n| try runNodeAt(ra, n, table, depth);
+    // A value this list produced goes back to the allocator as its last reader
+    // passes, the same rule the top-level walk follows. Without it every tensor
+    // a body makes lives until the body ends, and a five-thousand-node loop body
+    // needs all five thousand at once.
+    var last: std.StringHashMapUnmanaged(u32) = .empty;
+    var mine: std.StringHashMapUnmanaged(void) = .empty;
+    const reclaim = nodes.len > 1;
+    // Back to the allocator on the way out: a loop body runs this once per trip,
+    // so two maps kept per trip would cost more than the tensors they free.
+    defer if (reclaim) {
+        last.deinit(ra);
+        mine.deinit(ra);
+    };
+    if (reclaim) {
+        last.ensureTotalCapacity(ra, @intCast(nodes.len * 4 + 8)) catch return error.OutOfMemory;
+        mine.ensureTotalCapacity(ra, @intCast(nodes.len * 2 + 8)) catch return error.OutOfMemory;
+        for (nodes, 0..) |*n, i| {
+            var walk = plan.Walk.init(nodes[i .. i + 1]);
+            while (walk.next()) |inner| {
+                for (inner.inputs) |name| {
+                    if (name.len == 0) continue;
+                    last.putAssumeCapacity(name, @intCast(i));
+                }
+            }
+            for (n.outputs) |name| {
+                if (name.len == 0) continue;
+                mine.putAssumeCapacity(name, {});
+            }
+        }
+        // What the caller reads after this returns never dies here.
+        for (keep) |name| last.putAssumeCapacity(name, std.math.maxInt(u32));
+    }
+
+    for (nodes, 0..) |*n, i| {
+        try runNodeAt(ra, n, table, depth);
+        if (!reclaim) continue;
+        for (n.inputs) |name| {
+            if (name.len == 0) continue;
+            // Only what this list made: the caller's tensors are the caller's.
+            if (!mine.contains(name)) continue;
+            const at = last.get(name) orelse continue;
+            if (at != i) continue;
+            const dead = table.get(name) orelse continue;
+            _ = table.remove(name);
+            ra.free(std.mem.sliceAsBytes(dead.data));
+        }
+    }
 }
 
 pub const max_control_depth: u8 = 4;
 pub const max_loop_iterations: usize = 4096;
+
+/// The elements a tensor holds along one dim. A zero extent is zero, not one:
+/// reading a legitimately empty tensor (a detector that selected nothing) as if
+/// it held a single element walks off the end, and in a release build that is a
+/// crash rather than a refusal.
+pub fn extent(t: Tensor, d: usize) usize {
+    if (d >= t.dims.len) return 1;
+    return @intCast(@max(t.dims[d], 0));
+}
 
 pub fn get(table: *const std.StringHashMapUnmanaged(Tensor), name: []const u8) Error!Tensor {
     return table.get(name) orelse error.TensorMissing;
@@ -961,11 +1034,15 @@ fn runNode(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUn
 
 fn runNodeAt(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnmanaged(Tensor), depth: u8) Error!void {
     // Ops with several outputs write the table themselves; everything else
-    // lands its single output here.
-    if (eq(node.op_type, "Split")) return split(ra, node, table);
-    if (try detect.dispatchMulti(ra, node, table)) return;
-    if (try quant.dispatchMulti(ra, node, table)) return;
-    if (try control.dispatchMulti(ra, node, table, depth)) return;
+    // lands its single output here. Either way the invariant below holds before
+    // the next node reads any of it.
+    if (eq(node.op_type, "Split")) {
+        try split(ra, node, table);
+        return checkOutputs(node, table);
+    }
+    if (try detect.dispatchMulti(ra, node, table)) return checkOutputs(node, table);
+    if (try quant.dispatchMulti(ra, node, table)) return checkOutputs(node, table);
+    if (try control.dispatchMulti(ra, node, table, depth)) return checkOutputs(node, table);
     const out = try dispatch(ra, node, table);
     if (node.outputs.len == 0) return error.InvokeFailed;
     // A tensor's dims and its data must agree. Every crash this engine has had
@@ -974,6 +1051,18 @@ fn runNodeAt(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMap
     // and a violation is a refusal instead of a read off the end.
     if (out.elemCount() != out.data.len) return error.TensorShapeMismatch;
     table.put(ra, node.outputs[0], out) catch return error.OutOfMemory;
+}
+
+/// The same invariant for an op that writes its own outputs. A multi-output op
+/// bypassed the single check below it, so a kernel that disagreed with its own
+/// dims handed the next one a short buffer and the read went off the end: a
+/// crash rather than a refusal, which is the one outcome a sandbox may not have.
+fn checkOutputs(node: *const Node, table: *const std.StringHashMapUnmanaged(Tensor)) Error!void {
+    for (node.outputs) |name| {
+        if (name.len == 0) continue;
+        const t = table.get(name) orelse continue;
+        if (t.elemCount() != t.data.len) return error.TensorShapeMismatch;
+    }
 }
 
 fn dispatch(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnmanaged(Tensor)) Error!Tensor {
@@ -1280,12 +1369,12 @@ pub fn matmul(ra: std.mem.Allocator, a: Tensor, b: Tensor) Error!Tensor {
     if (a_dims.len > 8 or b_dims.len > 8) return error.TensorShapeMismatch;
     if (a_promoted) {
         a_dims[0] = 1;
-        a_dims[1] = @max(a.dims[0], 1);
+        a_dims[1] = @as(i64, @intCast(extent(a, 0)));
     } else for (a_dims, a.dims) |*d, s| {
         d.* = @max(s, 1);
     }
     if (b_promoted) {
-        b_dims[0] = @max(b.dims[0], 1);
+        b_dims[0] = @as(i64, @intCast(extent(b, 0)));
         b_dims[1] = 1;
     } else for (b_dims, b.dims) |*d, s| {
         d.* = @max(s, 1);
@@ -1637,9 +1726,9 @@ fn concat(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnm
 
     // outer product of dims before the axis, inner of dims after.
     var outer: usize = 1;
-    for (0..ax) |d| outer *= @intCast(@max(first.dims[d], 1));
+    for (0..ax) |d| outer *= extent(first, d);
     var inner: usize = 1;
-    for (ax + 1..rank) |d| inner *= @intCast(@max(first.dims[d], 1));
+    for (ax + 1..rank) |d| inner *= extent(first, d);
     const out_axis: usize = @intCast(out_dim);
 
     var written_axis: usize = 0;
@@ -1696,9 +1785,9 @@ fn flatten(ra: std.mem.Allocator, x: Tensor, axis_in: i64) Error!Tensor {
     if (axis < 0 or axis > @as(i64, @intCast(x.dims.len))) return error.TensorShapeMismatch;
     const ax: usize = @intCast(axis);
     var rows: usize = 1;
-    for (0..ax) |d| rows = std.math.mul(usize, rows, @intCast(@max(x.dims[d], 1))) catch return error.TensorShapeMismatch;
+    for (0..ax) |d| rows = std.math.mul(usize, rows, extent(x, d)) catch return error.TensorShapeMismatch;
     var cols: usize = 1;
-    for (ax..x.dims.len) |d| cols = std.math.mul(usize, cols, @intCast(@max(x.dims[d], 1))) catch return error.TensorShapeMismatch;
+    for (ax..x.dims.len) |d| cols = std.math.mul(usize, cols, extent(x, d)) catch return error.TensorShapeMismatch;
     const out: Tensor = .{ .dims = ra.dupe(i64, &.{ @intCast(rows), @intCast(cols) }) catch return error.OutOfMemory, .data = ra.alloc(f32, x.data.len) catch return error.OutOfMemory };
     @memcpy(out.data, x.data);
     return out;
@@ -1724,7 +1813,7 @@ fn transpose(ra: std.mem.Allocator, node: *const Node, x: Tensor) Error!Tensor {
     while (d > 0) {
         d -= 1;
         src_strides[d] = acc;
-        acc *= @intCast(@max(x.dims[d], 1));
+        acc *= extent(x, d);
     }
 
     const idx = ra.alloc(usize, rank) catch return error.OutOfMemory;
@@ -1745,10 +1834,10 @@ pub fn softmax(ra: std.mem.Allocator, x: Tensor, axis_in: i64) Error!Tensor {
     const out = try newTensor(ra, x.dims);
 
     var outer: usize = 1;
-    for (0..ax) |d| outer *= @intCast(@max(x.dims[d], 1));
-    const along: usize = @intCast(@max(x.dims[ax], 1));
+    for (0..ax) |d| outer *= extent(x, d);
+    const along: usize = extent(x, ax);
     var inner: usize = 1;
-    for (ax + 1..x.dims.len) |d| inner *= @intCast(@max(x.dims[d], 1));
+    for (ax + 1..x.dims.len) |d| inner *= extent(x, d);
 
     // The last axis is the usual one, and there the row is contiguous, so the
     // whole pass runs vectorized. Any other axis strides and takes the general
@@ -2018,10 +2107,10 @@ fn gather(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnm
     const out = try newTensor(ra, shape);
 
     var outer: usize = 1;
-    for (0..ax) |d| outer *= @intCast(@max(x.dims[d], 1));
-    const along: usize = @intCast(@max(x.dims[ax], 1));
+    for (0..ax) |d| outer *= extent(x, d);
+    const along: usize = extent(x, ax);
     var inner: usize = 1;
-    for (ax + 1..rank) |d| inner *= @intCast(@max(x.dims[d], 1));
+    for (ax + 1..rank) |d| inner *= extent(x, d);
     const picks = if (indices.dims.len == 0) 1 else indices.data.len;
 
     for (0..outer) |o| {
@@ -2184,7 +2273,7 @@ fn sliceOp(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUn
     while (d > 0) {
         d -= 1;
         src_strides[d] = acc;
-        acc *= @intCast(@max(x.dims[d], 1));
+        acc *= extent(x, d);
     }
     var idx: [8]usize = @splat(0);
     for (out.data) |*o| {
@@ -2235,7 +2324,7 @@ fn pad(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnmana
     while (d > 0) {
         d -= 1;
         src_strides[d] = acc;
-        acc *= @intCast(@max(x.dims[d], 1));
+        acc *= extent(x, d);
     }
     var idx: [8]usize = @splat(0);
     for (out.data) |*o| {
@@ -2271,7 +2360,7 @@ fn split(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnma
     const parts = node.outputs.len;
     if (parts == 0 or parts > 8) return error.TensorShapeMismatch;
 
-    const along: usize = @intCast(@max(x.dims[ax], 1));
+    const along: usize = extent(x, ax);
     var sizes_buf: [8]usize = undefined;
     const split_attr = node.attrInts("split");
     if (split_attr.len == parts) {
@@ -2296,9 +2385,9 @@ fn split(ra: std.mem.Allocator, node: *const Node, table: *std.StringHashMapUnma
     if (total != along) return error.TensorShapeMismatch;
 
     var outer: usize = 1;
-    for (0..ax) |d| outer *= @intCast(@max(x.dims[d], 1));
+    for (0..ax) |d| outer *= extent(x, d);
     var inner: usize = 1;
-    for (ax + 1..rank) |d| inner *= @intCast(@max(x.dims[d], 1));
+    for (ax + 1..rank) |d| inner *= extent(x, d);
 
     var offset: usize = 0;
     for (0..parts) |p| {
@@ -3388,6 +3477,90 @@ test "onnx fuses batch normalization into the convolution before it" {
     try engine.writeInput(0, std.mem.sliceAsBytes(&[_]f32{ 1, 2 }));
     try engine.invoke();
     try testing.expectEqualSlices(f32, &.{ 7, 13 }, try engine.outputFloats(0));
+}
+
+test "no operator reads off the end of an empty tensor" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // A detector that selected nothing hands the next op a tensor with a zero
+    // extent, which is normal and not an error. Reading one element from it
+    // because a dim of zero was taken for one is a read off the end, and in a
+    // release build that is a crash rather than a refusal.
+    for (plan.supported_ops) |op| {
+        var table: std.StringHashMapUnmanaged(Tensor) = .empty;
+        const empty = Tensor{ .dims = try a.dupe(i64, &.{ 0, 4 }), .data = try a.alloc(f32, 0) };
+        var indices = Tensor{ .dims = try a.dupe(i64, &.{0}), .data = try a.alloc(f32, 0) };
+        indices.dtype = .i64;
+        var shape = Tensor{ .dims = try a.dupe(i64, &.{2}), .data = try a.dupe(f32, &.{ 0, 4 }) };
+        shape.dtype = .i64;
+        try table.put(a, "x", empty);
+        try table.put(a, "i", indices);
+        try table.put(a, "s", shape);
+
+        const node = Node{
+            .op_type = op,
+            .inputs = &.{ "x", "i", "s" },
+            .outputs = &.{ "y", "y1", "y2" },
+            .attrs = &.{
+                .{ .name = "axis", .i = 0 },
+                .{ .name = "to", .i = 1 },
+                .{ .name = "k", .i = 0 },
+                .{ .name = "perm", .ints = &.{ 1, 0 } },
+                .{ .name = "kernel_shape", .ints = &.{ 1, 1 } },
+            },
+        };
+        // A refusal is an answer. What is checked is that control comes back at
+        // all, and that anything written holds what its dims claim.
+        runNode(a, &node, &table) catch continue;
+        for (node.outputs) |name| {
+            const t = table.get(name) orelse continue;
+            try testing.expectEqual(t.elemCount(), t.data.len);
+        }
+    }
+}
+
+test "a value a loop body captures is live, and the operators inside it are reported" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The shape that broke a real detector: the body reads "captured", which the
+    // Loop node itself does not name, so everything reading the top level alone
+    // saw the Mul that produces it as dead and deleted it.
+    const body = Subgraph{
+        .nodes = &.{
+            .{ .op_type = "Gather", .inputs = &.{ "captured", "idx" }, .outputs = &.{"picked"}, .attrs = &.{} },
+            .{ .op_type = "SpaceToBatch", .inputs = &.{"picked"}, .outputs = &.{"cond_out"}, .attrs = &.{} },
+        },
+        .initializers = &.{},
+        .input_names = &.{ "i", "cond", "idx" },
+        .output_names = &.{ "cond_out", "picked" },
+    };
+    const nodes = [_]Node{
+        .{ .op_type = "Mul", .inputs = &.{ "x", "x" }, .outputs = &.{"captured"}, .attrs = &.{} },
+        .{ .op_type = "Loop", .inputs = &.{ "trips", "go", "seed" }, .outputs = &.{"out"}, .attrs = &.{
+            .{ .name = "body", .g = &body },
+        } },
+    };
+
+    var stats: plan.Optimization = .{};
+    const kept = try plan.eliminateDead(a, &nodes, &.{"out"}, &stats);
+    try testing.expectEqual(@as(usize, 2), kept.len);
+    try testing.expectEqualStrings("Mul", kept[0].op_type);
+    try testing.expectEqual(@as(u32, 0), stats.eliminated);
+
+    // The captured value's last reader is the node carrying the body, so its
+    // buffer cannot be handed back before the loop has run.
+    var lifetimes = try plan.Lifetimes.build(a, &nodes, &.{"out"});
+    try testing.expect(!lifetimes.diesAfter("captured", 0));
+    try testing.expect(lifetimes.diesAfter("captured", 1));
+
+    // An operator only a body needs is an operator the report must name.
+    var buf: [64]u8 = undefined;
+    const needed = plan.missingOps(&nodes, &buf);
+    try testing.expectEqualStrings("SpaceToBatch\n", buf[0..needed]);
 }
 
 test "onnx names the operators a model needs and this engine lacks" {

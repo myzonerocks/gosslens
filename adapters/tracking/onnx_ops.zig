@@ -359,7 +359,7 @@ fn reduce(ra: std.mem.Allocator, node: *const Node, table: *Table, kind: ReduceK
                 out_rank += 1;
             }
         } else {
-            out_shape_buf[out_rank] = @max(x.dims[d], 1);
+            out_shape_buf[out_rank] = @as(i64, @intCast(onnx.extent(x, d)));
             out_rank += 1;
         }
     }
@@ -398,7 +398,7 @@ fn reduce(ra: std.mem.Allocator, node: *const Node, table: *Table, kind: ReduceK
 
     var idx: [8]usize = @splat(0);
     var reduced_elems: usize = 1;
-    for (axes) |a| reduced_elems *= @intCast(@max(x.dims[a], 1));
+    for (axes) |a| reduced_elems *= onnx.extent(x, a);
 
     for (x.data) |v| {
         var o: usize = 0;
@@ -440,7 +440,7 @@ fn layerNorm(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tens
     const epsilon = node.attrFloat("epsilon", 1e-5);
 
     var inner: usize = 1;
-    for (axis..rank) |d| inner *= @intCast(@max(x.dims[d], 1));
+    for (axis..rank) |d| inner *= onnx.extent(x, d);
     if (inner == 0) return error.TensorShapeMismatch;
     const outer = x.data.len / inner;
     if (scale.data.len != inner) return error.TensorShapeMismatch;
@@ -550,7 +550,7 @@ fn tile(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tensor {
     for (0..rank) |d| {
         const r = intAt(reps, d);
         if (r < 0) return error.TensorShapeMismatch;
-        shape_buf[d] = @max(x.dims[d], 1) * r;
+        shape_buf[d] = @as(i64, @intCast(onnx.extent(x, d))) * r;
     }
     const shape = ra.dupe(i64, shape_buf[0..rank]) catch return error.OutOfMemory;
     var out = try newTensor(ra, shape);
@@ -561,12 +561,12 @@ fn tile(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tensor {
     while (d > 0) {
         d -= 1;
         strides[d] = acc;
-        acc *= @intCast(@max(x.dims[d], 1));
+        acc *= onnx.extent(x, d);
     }
     var idx: [8]usize = @splat(0);
     for (out.data) |*o| {
         var ox: usize = 0;
-        for (0..rank) |dd| ox += (idx[dd] % @as(usize, @intCast(@max(x.dims[dd], 1)))) * strides[dd];
+        for (0..rank) |dd| ox += (idx[dd] % @as(usize, onnx.extent(x, dd))) * strides[dd];
         o.* = x.data[ox];
         incrementIndex(idx[0..rank], shape);
     }
@@ -583,9 +583,9 @@ fn cumSum(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tensor 
     const reverse = node.attrInt("reverse", 0) != 0;
 
     const out = try newTensor(ra, ra.dupe(i64, x.dims) catch return error.OutOfMemory);
-    const along: usize = @intCast(@max(x.dims[ax], 1));
+    const along: usize = onnx.extent(x, ax);
     var inner: usize = 1;
-    for (ax + 1..rank) |d| inner *= @intCast(@max(x.dims[d], 1));
+    for (ax + 1..rank) |d| inner *= onnx.extent(x, d);
     const outer = if (along * inner == 0) 0 else x.data.len / (along * inner);
 
     for (0..outer) |o| {
@@ -642,8 +642,8 @@ fn trilu(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tensor {
         if (kt.data.len != 0) k = intAt(kt, 0);
     }
     const out = try onnx.copyTensor(ra, x);
-    const cols: usize = @intCast(@max(x.dims[rank - 1], 1));
-    const rows: usize = @intCast(@max(x.dims[rank - 2], 1));
+    const cols: usize = onnx.extent(x, rank - 1);
+    const rows: usize = onnx.extent(x, rank - 2);
     const batches = if (rows * cols == 0) 0 else x.data.len / (rows * cols);
     for (0..batches) |b| {
         for (0..rows) |r| {
@@ -676,7 +676,7 @@ fn oneHot(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tensor 
         if (d == insert) {
             shape_buf[w] = @intCast(depth);
         } else {
-            shape_buf[w] = @max(indices.dims[if (d > insert) d - 1 else d], 1);
+            shape_buf[w] = @as(i64, @intCast(onnx.extent(indices, if (d > insert) d - 1 else d)));
         }
         w += 1;
     }
@@ -686,7 +686,7 @@ fn oneHot(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tensor 
     @memset(out.data, values.data[0]);
 
     var inner: usize = 1;
-    for (insert..rank) |d| inner *= @intCast(@max(indices.dims[d], 1));
+    for (insert..rank) |d| inner *= onnx.extent(indices, d);
     const outer = if (inner == 0) 0 else indices.data.len / inner;
     for (0..outer) |o| {
         for (0..inner) |i| {
@@ -744,7 +744,7 @@ fn compress(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tenso
     }
     const rank = x.dims.len;
     const ax = try normAxis(node.attrInt("axis", 0), rank);
-    const along: usize = @intCast(@max(x.dims[ax], 1));
+    const along: usize = onnx.extent(x, ax);
     var kept: usize = 0;
     for (cond.data, 0..) |c, i| {
         if (c != 0 and i < along) kept += 1;
@@ -754,7 +754,7 @@ fn compress(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tenso
     var out = try newTensor(ra, shape);
     out.dtype = x.dtype;
     var inner: usize = 1;
-    for (ax + 1..rank) |d| inner *= @intCast(@max(x.dims[d], 1));
+    for (ax + 1..rank) |d| inner *= onnx.extent(x, d);
     const outer = if (along * inner == 0) 0 else x.data.len / (along * inner);
     for (0..outer) |o| {
         var w: usize = 0;
@@ -778,27 +778,27 @@ fn gatherND(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tenso
     const dr = data.dims.len;
     const ir = indices.dims.len;
     if (ir == 0 or batch_dims >= dr or batch_dims >= ir) return error.TensorShapeMismatch;
-    const index_depth: usize = @intCast(@max(indices.dims[ir - 1], 1));
+    const index_depth: usize = onnx.extent(indices, ir - 1);
     if (batch_dims + index_depth > dr) return error.TensorShapeMismatch;
 
     var batch: usize = 1;
-    for (0..batch_dims) |d| batch *= @intCast(@max(data.dims[d], 1));
+    for (0..batch_dims) |d| batch *= onnx.extent(data, d);
     var slice_elems: usize = 1;
-    for (batch_dims + index_depth..dr) |d| slice_elems *= @intCast(@max(data.dims[d], 1));
+    for (batch_dims + index_depth..dr) |d| slice_elems *= onnx.extent(data, d);
 
     var tuples: usize = 1;
-    for (batch_dims..ir - 1) |d| tuples *= @intCast(@max(indices.dims[d], 1));
+    for (batch_dims..ir - 1) |d| tuples *= onnx.extent(indices, d);
 
     var shape_buf: [8]i64 = undefined;
     var w: usize = 0;
     for (0..ir - 1) |d| {
         if (w >= shape_buf.len) return error.TensorShapeMismatch;
-        shape_buf[w] = @max(indices.dims[d], 1);
+        shape_buf[w] = @as(i64, @intCast(onnx.extent(indices, d)));
         w += 1;
     }
     for (batch_dims + index_depth..dr) |d| {
         if (w >= shape_buf.len) return error.TensorShapeMismatch;
-        shape_buf[w] = @max(data.dims[d], 1);
+        shape_buf[w] = @as(i64, @intCast(onnx.extent(data, d)));
         w += 1;
     }
     const shape = ra.dupe(i64, shape_buf[0..w]) catch return error.OutOfMemory;
@@ -813,7 +813,7 @@ fn gatherND(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tenso
     while (d > batch_dims) {
         d -= 1;
         strides[d - batch_dims] = acc;
-        acc *= @intCast(@max(data.dims[d], 1));
+        acc *= onnx.extent(data, d);
     }
     const batch_stride = acc;
 
@@ -823,7 +823,7 @@ fn gatherND(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tenso
             var ok = true;
             for (0..index_depth) |k| {
                 var v = intAt(indices, (b * tuples + t) * index_depth + k);
-                const extent: i64 = @max(data.dims[batch_dims + k], 1);
+                const extent: i64 = @as(i64, @intCast(onnx.extent(data, batch_dims + k)));
                 if (v < 0) v += extent;
                 if (v < 0 or v >= extent) {
                     ok = false;
@@ -850,16 +850,16 @@ fn scatterND(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tens
     const dr = data.dims.len;
     const ir = indices.dims.len;
     if (ir == 0) return error.TensorShapeMismatch;
-    const index_depth: usize = @intCast(@max(indices.dims[ir - 1], 1));
+    const index_depth: usize = onnx.extent(indices, ir - 1);
     if (index_depth > dr) return error.TensorShapeMismatch;
 
     const reduction = if (node.attr("reduction")) |a| a.s else "";
     const out = try onnx.copyTensor(ra, data);
 
     var slice_elems: usize = 1;
-    for (index_depth..dr) |d| slice_elems *= @intCast(@max(data.dims[d], 1));
+    for (index_depth..dr) |d| slice_elems *= onnx.extent(data, d);
     var tuples: usize = 1;
-    for (0..ir - 1) |d| tuples *= @intCast(@max(indices.dims[d], 1));
+    for (0..ir - 1) |d| tuples *= onnx.extent(indices, d);
     if (updates.data.len < tuples * slice_elems) return error.TensorShapeMismatch;
 
     var strides: [8]usize = @splat(0);
@@ -868,7 +868,7 @@ fn scatterND(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tens
     while (d > 0) {
         d -= 1;
         strides[d] = acc;
-        acc *= @intCast(@max(data.dims[d], 1));
+        acc *= onnx.extent(data, d);
     }
 
     for (0..tuples) |t| {
@@ -876,7 +876,7 @@ fn scatterND(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tens
         var ok = true;
         for (0..index_depth) |k| {
             var v = intAt(indices, t * index_depth + k);
-            const extent: i64 = @max(data.dims[k], 1);
+            const extent: i64 = @as(i64, @intCast(onnx.extent(data, k)));
             if (v < 0) v += extent;
             if (v < 0 or v >= extent) {
                 ok = false;
@@ -923,7 +923,7 @@ fn gatherElements(ra: std.mem.Allocator, node: *const Node, table: *Table) Error
     out.dtype = data.dtype;
     var strides: [8]usize = @splat(0);
     elementStrides(data.dims, strides[0..rank]);
-    const extent: i64 = @max(data.dims[ax], 1);
+    const extent: i64 = @as(i64, @intCast(onnx.extent(data, ax)));
 
     var idx: [8]usize = @splat(0);
     for (out.data, 0..) |*o, i| {
@@ -951,7 +951,7 @@ fn scatterElements(ra: std.mem.Allocator, node: *const Node, table: *Table) Erro
     const out = try onnx.copyTensor(ra, data);
     var strides: [8]usize = @splat(0);
     elementStrides(data.dims, strides[0..rank]);
-    const extent: i64 = @max(data.dims[ax], 1);
+    const extent: i64 = @as(i64, @intCast(onnx.extent(data, ax)));
 
     var idx: [8]usize = @splat(0);
     for (0..indices.data.len) |i| {
@@ -1193,16 +1193,16 @@ fn matMulInteger(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!
     const b_zero_t: ?Tensor = if (node.inputs.len > 3 and node.inputs[3].len != 0) try get(table, node.inputs[3]) else null;
 
     if (a.dims.len < 2 or b.dims.len < 2) return error.TensorShapeMismatch;
-    const m: usize = @intCast(@max(a.dims[a.dims.len - 2], 1));
-    const k: usize = @intCast(@max(a.dims[a.dims.len - 1], 1));
-    const kb: usize = @intCast(@max(b.dims[b.dims.len - 2], 1));
-    const n: usize = @intCast(@max(b.dims[b.dims.len - 1], 1));
+    const m: usize = onnx.extent(a, a.dims.len - 2);
+    const k: usize = onnx.extent(a, a.dims.len - 1);
+    const kb: usize = onnx.extent(b, b.dims.len - 2);
+    const n: usize = onnx.extent(b, b.dims.len - 1);
     if (k != kb) return error.TensorShapeMismatch;
 
     var shape_buf: [8]i64 = undefined;
     const rank = a.dims.len;
     if (rank > 8) return error.TensorShapeMismatch;
-    for (0..rank) |d| shape_buf[d] = @max(a.dims[d], 1);
+    for (0..rank) |d| shape_buf[d] = @as(i64, @intCast(onnx.extent(a, d)));
     shape_buf[rank - 1] = @intCast(n);
     const shape = ra.dupe(i64, shape_buf[0..rank]) catch return error.OutOfMemory;
     var out = try newTensor(ra, shape);
@@ -1288,10 +1288,10 @@ fn prelu(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Tensor {
         return out;
     }
     if (x.dims.len < 2) return error.TensorShapeMismatch;
-    const channels: usize = @intCast(@max(x.dims[1], 1));
+    const channels: usize = onnx.extent(x, 1);
     if (slope.data.len != channels) return error.TensorShapeMismatch;
     var plane: usize = 1;
-    for (2..x.dims.len) |d| plane *= @intCast(@max(x.dims[d], 1));
+    for (2..x.dims.len) |d| plane *= onnx.extent(x, d);
     const batch = if (channels * plane == 0) 0 else x.data.len / (channels * plane);
     for (0..batch) |b| {
         for (0..channels) |c| {
@@ -1312,10 +1312,10 @@ fn depthToSpace(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!T
     if (bs == 0) return error.TensorShapeMismatch;
     const crd = if (node.attr("mode")) |a| std.mem.eql(u8, a.s, "CRD") else false;
 
-    const n: usize = @intCast(@max(x.dims[0], 1));
-    const c: usize = @intCast(@max(x.dims[1], 1));
-    const h: usize = @intCast(@max(x.dims[2], 1));
-    const w: usize = @intCast(@max(x.dims[3], 1));
+    const n: usize = onnx.extent(x, 0);
+    const c: usize = onnx.extent(x, 1);
+    const h: usize = onnx.extent(x, 2);
+    const w: usize = onnx.extent(x, 3);
     if (c % (bs * bs) != 0) return error.TensorShapeMismatch;
     const oc = c / (bs * bs);
 
@@ -1346,10 +1346,10 @@ fn spaceToDepth(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!T
     if (x.dims.len != 4) return error.TensorShapeMismatch;
     const bs: usize = @intCast(@max(node.attrInt("blocksize", 0), 0));
     if (bs == 0) return error.TensorShapeMismatch;
-    const n: usize = @intCast(@max(x.dims[0], 1));
-    const c: usize = @intCast(@max(x.dims[1], 1));
-    const h: usize = @intCast(@max(x.dims[2], 1));
-    const w: usize = @intCast(@max(x.dims[3], 1));
+    const n: usize = onnx.extent(x, 0);
+    const c: usize = onnx.extent(x, 1);
+    const h: usize = onnx.extent(x, 2);
+    const w: usize = onnx.extent(x, 3);
     if (h % bs != 0 or w % bs != 0) return error.TensorShapeMismatch;
     const oh = h / bs;
     const ow = w / bs;
@@ -1414,12 +1414,12 @@ fn gridSample(ra: std.mem.Allocator, node: *const Node, table: *Table) Error!Ten
     const padding: u2 = if (std.mem.eql(u8, pad_str, "border")) 1 else if (std.mem.eql(u8, pad_str, "reflection")) 2 else 0;
     const align_corners = node.attrInt("align_corners", 0) != 0;
 
-    const n: usize = @intCast(@max(x.dims[0], 1));
-    const c: usize = @intCast(@max(x.dims[1], 1));
-    const h: usize = @intCast(@max(x.dims[2], 1));
-    const w: usize = @intCast(@max(x.dims[3], 1));
-    const oh: usize = @intCast(@max(grid.dims[1], 1));
-    const ow: usize = @intCast(@max(grid.dims[2], 1));
+    const n: usize = onnx.extent(x, 0);
+    const c: usize = onnx.extent(x, 1);
+    const h: usize = onnx.extent(x, 2);
+    const w: usize = onnx.extent(x, 3);
+    const oh: usize = onnx.extent(grid, 1);
+    const ow: usize = onnx.extent(grid, 2);
 
     const shape = ra.dupe(i64, &[_]i64{ @intCast(n), @intCast(c), @intCast(oh), @intCast(ow) }) catch return error.OutOfMemory;
     const out = try newTensor(ra, shape);
