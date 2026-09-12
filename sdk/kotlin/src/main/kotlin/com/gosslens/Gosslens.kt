@@ -35,6 +35,19 @@ data class MediaCapabilities(
     val zeroCopy: Boolean,
 )
 
+/** One thing that happened. What a and b mean is per kind. */
+data class GossEvent(
+    val kind: Int,
+    val sequence: Long,
+    val timestampUs: Long,
+    val a: Int,
+    val b: Int,
+    val value: Float,
+)
+
+/** A drained batch, with what was missed since the last drain. */
+data class EventBatch(val events: List<GossEvent>, val dropped: Long)
+
 /** What an opened clip is and where it is. */
 data class ClipInfo(
     val width: Int,
@@ -132,6 +145,7 @@ object Gosslens {
     internal external fun nativeMediaCapabilities(engine: Long, out: ByteBuffer): Int
     internal external fun nativePerceptionSnapshot(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
     internal external fun nativePerceptionJson(session: Long, select: Int, out: ByteBuffer, capacity: Int): Int
+    internal external fun nativePollEvents(session: Long, out: ByteBuffer, capacity: Int, dropped: ByteBuffer): Int
     internal external fun nativeRecordingPause(engine: Long): Int
     internal external fun nativeRecordingResume(engine: Long): Int
     internal external fun nativeReportInterruption(session: Long, kind: Int): Int
@@ -880,6 +894,35 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
     /** The same record as compact JSON. Same size-once contract. */
     fun perceptionJson(select: Int, out: ByteBuffer): Int =
         Gosslens.nativePerceptionJson(handle, select, out, out.capacity())
+
+    /**
+     * Drains the session's event ring in order. dropped says whether anything was
+     * missed since the last drain, and is cleared by the read.
+     */
+    fun pollEvents(capacity: Int = 64): EventBatch {
+        // kind u32 at 0, sequence u64 at 8, timestamp i64 at 16, a u32 at 24,
+        // b u32 at 28, value f32 at 32; forty bytes with the tail padding.
+        val stride = 40
+        val buf = ByteBuffer.allocateDirect(capacity * stride).order(ByteOrder.nativeOrder())
+        val droppedBuf = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+        val n = Gosslens.nativePollEvents(handle, buf, capacity, droppedBuf)
+        if (n < 0) return EventBatch(emptyList(), 0)
+        val out = ArrayList<GossEvent>(n)
+        for (i in 0 until n) {
+            val base = i * stride
+            out.add(
+                GossEvent(
+                    buf.getInt(base),
+                    buf.getLong(base + 8),
+                    buf.getLong(base + 16),
+                    buf.getInt(base + 24),
+                    buf.getInt(base + 28),
+                    buf.getFloat(base + 32),
+                ),
+            )
+        }
+        return EventBatch(out, droppedBuf.getLong(0))
+    }
 
     /** Forward decodes; backward seeks and decodes. */
     fun clipStep(clip: Int, frames: Int): Boolean = Gosslens.nativeClipStep(handle, clip, frames) == 0

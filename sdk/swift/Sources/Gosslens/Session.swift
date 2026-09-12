@@ -399,6 +399,19 @@ public final class GossSession: @unchecked Sendable {
         return String(decoding: buffer[0..<written], as: UTF8.self)
     }
 
+    /// Drains the session's event ring in order. `dropped` says whether anything
+    /// was missed since the last drain, and is cleared by the read, so a caller
+    /// sees each drop once rather than the same number for ever.
+    public func pollEvents(capacity: Int = 64) throws -> (events: [GossEvent], dropped: UInt64) {
+        var raw = [goss_event](repeating: goss_event(), count: capacity)
+        var count: UInt32 = 0
+        var dropped: UInt64 = 0
+        try raw.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_poll_events(handle, buffer.baseAddress, UInt32(capacity), &count, &dropped))
+        }
+        return (raw.prefix(Int(count)).map(GossEvent.init), dropped)
+    }
+
     // MARK: - Beauty
 
     public func enableBeauty(resourceDir: String) throws {

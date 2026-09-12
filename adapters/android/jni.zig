@@ -1221,6 +1221,20 @@ export fn Java_com_gosslens_Gosslens_nativePerceptionSnapshot(env: *JniEnv, cls:
     return @intCast(@min(written, @as(usize, std.math.maxInt(i32))));
 }
 
+/// Events into a direct buffer as their raw structs, returning the count, with the
+/// drop count written into the first eight bytes of a second buffer.
+export fn Java_com_gosslens_Gosslens_nativePollEvents(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, capacity: i32, dropped_buffer: jobject) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;
+    const dropped_bytes = getDirectBufferAddress(env, dropped_buffer) orelse return -1;
+    var count: u32 = 0;
+    var dropped: u64 = 0;
+    const out: [*]abi.Event = @ptrCast(@alignCast(out_bytes));
+    if (abi.goss_session_poll_events(sessionFromHandle(session), out, @intCast(@max(capacity, 0)), &count, &dropped) != .ok) return -1;
+    @memcpy(dropped_bytes[0..8], std.mem.asBytes(&dropped));
+    return @intCast(count);
+}
+
 export fn Java_com_gosslens_Gosslens_nativePerceptionJson(env: *JniEnv, cls: jobject, session: i64, select: i32, out_buffer: jobject, capacity: i32) i32 {
     _ = cls;
     const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;

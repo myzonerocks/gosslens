@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 128u
+#define GOSS_ABI_MINOR 129u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -1126,6 +1126,65 @@ goss_status goss_session_perception_snapshot(goss_session *session, uint32_t sel
  * session, so the two cannot drift. A section this build cannot name is reported
  * with its tag and byte length rather than dropped. */
 goss_status goss_session_perception_json(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len);
+
+/* What happened. Numbers are frozen once shipped: a consumer switches on these. */
+typedef enum goss_event_kind {
+    GOSS_EVENT_FACE_APPEARED = 1,
+    GOSS_EVENT_FACE_LOST = 2,
+    GOSS_EVENT_FACE_COUNT_CHANGED = 3,
+    GOSS_EVENT_HAND_APPEARED = 4,
+    GOSS_EVENT_HAND_LOST = 5,
+    GOSS_EVENT_GESTURE_RECOGNISED = 6,
+    GOSS_EVENT_BODY_APPEARED = 7,
+    GOSS_EVENT_BODY_LOST = 8,
+    GOSS_EVENT_ACTION_RECOGNISED = 9,
+    GOSS_EVENT_TRACKING_STATE_CHANGED = 10,
+    GOSS_EVENT_PLANE_ADDED = 11,
+    GOSS_EVENT_PLANE_UPDATED = 12,
+    GOSS_EVENT_ANCHOR_ADDED = 13,
+    GOSS_EVENT_ANCHOR_LOST = 14,
+    GOSS_EVENT_WORLD_MESH_UPDATED = 15,
+    GOSS_EVENT_DETECTION_APPEARED = 16,
+    GOSS_EVENT_DETECTION_LOST = 17,
+    GOSS_EVENT_LABEL_CHANGED = 18,
+    GOSS_EVENT_TEXT_APPEARED = 19,
+    GOSS_EVENT_TEXT_CHANGED = 20,
+    GOSS_EVENT_SEGMENTATION_CLASS_APPEARED = 21,
+    GOSS_EVENT_AUDIO_BEAT = 22,
+    GOSS_EVENT_VOICE_ACTIVITY_STARTED = 23,
+    GOSS_EVENT_VOICE_ACTIVITY_ENDED = 24,
+    GOSS_EVENT_LENS_ACTIVATED = 25,
+    GOSS_EVENT_LENS_NODE_DEGRADED = 26,
+    GOSS_EVENT_LENS_NODE_FAILED = 27,
+    GOSS_EVENT_PARAMETER_CHANGED = 28,
+    GOSS_EVENT_TRIGGER_FIRED = 29,
+    GOSS_EVENT_DEGRADE_LEVEL_CHANGED = 30,
+    GOSS_EVENT_POOL_EXHAUSTED = 31,
+    GOSS_EVENT_RECORDING_STARTED = 32,
+    GOSS_EVENT_RECORDING_PAUSED = 33,
+    GOSS_EVENT_RECORDING_RESUMED = 34,
+    GOSS_EVENT_RECORDING_STOPPED = 35,
+    GOSS_EVENT_INTERRUPTION = 36,
+    GOSS_EVENT_FRAME_DROPPED = 37,
+    GOSS_EVENT_BUDGET_EXCEEDED = 38,
+    GOSS_EVENT_THERMAL_CHANGED = 39,
+} goss_event_kind;
+
+/* One thing that happened. Plain data and fixed size: an event carrying a pointer
+ * would outlive what it points at. What a and b mean is per kind. */
+typedef struct goss_event {
+    uint32_t kind;
+    uint64_t sequence;   /* monotonic per session, so a gap is visible */
+    int64_t timestamp_us;
+    uint32_t a;
+    uint32_t b;
+    float value;
+} goss_event;
+
+/* Any thread. Drains the session's bounded event ring in order. out_dropped says
+ * whether anything was missed since the last drain and is cleared by the read, so
+ * a consumer sees each drop once rather than the same number for ever. */
+goss_status goss_session_poll_events(goss_session *session, goss_event *out, uint32_t capacity, uint32_t *out_count, uint64_t *out_dropped);
 
 /* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
  * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,

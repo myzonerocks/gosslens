@@ -20,6 +20,41 @@ export interface GossMediaCapabilities {
   zeroCopy: boolean;
 }
 
+/// One thing that happened. What a and b mean is per kind.
+export interface GossEvent {
+  kind: number;
+  sequence: number;
+  timestampUs: number;
+  a: number;
+  b: number;
+  value: number;
+}
+
+/// The event kinds, mirroring goss_event_kind.
+export const enum GossEventKind {
+  FaceAppeared = 1,
+  FaceLost = 2,
+  FaceCountChanged = 3,
+  HandAppeared = 4,
+  HandLost = 5,
+  GestureRecognised = 6,
+  BodyAppeared = 7,
+  BodyLost = 8,
+  ActionRecognised = 9,
+  TrackingStateChanged = 10,
+  AudioBeat = 22,
+  LensActivated = 25,
+  LensNodeDegraded = 26,
+  LensNodeFailed = 27,
+  DegradeLevelChanged = 30,
+  PoolExhausted = 31,
+  RecordingStarted = 32,
+  RecordingPaused = 33,
+  RecordingResumed = 34,
+  RecordingStopped = 35,
+  Interruption = 36,
+}
+
 /// What interrupted a recording, as the page saw it.
 export const enum GossInterruption {
   Pause = 0,
@@ -3096,6 +3131,42 @@ export class GossSession {
       }
     } finally {
       this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+    }
+  }
+
+  /// Drains the session's event ring in order. `dropped` says whether anything
+  /// was missed since the last drain, and is cleared by the read.
+  pollEvents(capacity = 64): { events: GossEvent[]; dropped: number } {
+    // kind u32 at 0, sequence u64 at 8, timestamp i64 at 16, a u32 at 24,
+    // b u32 at 28, value f32 at 32; forty bytes with the tail padding.
+    const stride = 40;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [capacity * stride]) as number;
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    const droppedPtr = this.mod.ccall("goss_alloc", "number", ["number"], [8]) as number;
+    try {
+      if (this.mod.ccall("goss_session_poll_events", "number", ["number", "number", "number", "number", "number"], [this.handle, ptr, capacity, countPtr, droppedPtr]) !== GOSS_OK) {
+        return { events: [], dropped: 0 };
+      }
+      const n = this.mod.HEAPU32[countPtr >> 2];
+      const events: GossEvent[] = [];
+      for (let i = 0; i < n; i += 1) {
+        const base = ptr + i * stride;
+        events.push({
+          kind: this.mod.HEAPU32[base >> 2],
+          // The low word of the sequence is the whole count at any rate a session
+          // reaches, and reading it avoids a BigInt in the hot drain.
+          sequence: this.mod.HEAPU32[(base + 8) >> 2],
+          timestampUs: this.mod.HEAPU32[(base + 16) >> 2],
+          a: this.mod.HEAPU32[(base + 24) >> 2],
+          b: this.mod.HEAPU32[(base + 28) >> 2],
+          value: this.mod.HEAPF32[(base + 32) >> 2],
+        });
+      }
+      return { events, dropped: this.mod.HEAPU32[droppedPtr >> 2] };
+    } finally {
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, capacity * stride]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [droppedPtr, 8]);
     }
   }
 

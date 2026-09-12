@@ -5,6 +5,7 @@
 
 pub const snapshot = @import("snapshot.zig");
 pub const json = @import("json.zig");
+pub const events = @import("events.zig");
 
 pub const schema_version = snapshot.schema_version;
 pub const Tag = snapshot.Tag;
@@ -12,6 +13,10 @@ pub const Select = snapshot.Select;
 pub const Writer = snapshot.Writer;
 pub const Reader = snapshot.Reader;
 pub const Section = snapshot.Section;
+
+pub const Event = events.Event;
+pub const EventKind = events.Kind;
+pub const EventRing = events.Ring;
 
 test {
     @import("std").testing.refAllDecls(@This());

@@ -27,6 +27,11 @@ pub const media = @import("media");
 const perception_mod = @import("perception");
 const perception = perception_mod.snapshot;
 const perception_json = perception_mod.json;
+const perception_events = perception_mod.events;
+
+/// Events a session holds before a drainer must catch up. Bounded so a consumer
+/// that stops draining cannot grow the engine; overflow is counted and reported.
+const default_event_capacity: usize = 256;
 const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
@@ -297,6 +302,7 @@ pub const abi_functions = [_][]const u8{
     "goss_status goss_engine_media_capabilities(goss_engine *engine, goss_media_capabilities *out_caps)",
     "goss_status goss_session_perception_snapshot(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)",
     "goss_status goss_session_perception_json(goss_session *session, uint32_t select, uint8_t *out, size_t capacity, size_t *out_len)",
+    "goss_status goss_session_poll_events(goss_session *session, goss_event *out, uint32_t capacity, uint32_t *out_count, uint64_t *out_dropped)",
     "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
     "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
     "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
@@ -404,6 +410,18 @@ pub const MediaCapabilities = extern struct {
     hdr: u32,
     /// 1 when the backend takes a platform texture or buffer with no copy.
     zero_copy: u32,
+};
+
+/// One thing that happened, drained from the session's bounded ring. Plain data
+/// and fixed size, because an event carrying a pointer would outlive what it
+/// points at.
+pub const Event = extern struct {
+    kind: u32,
+    sequence: u64,
+    timestamp_us: i64,
+    a: u32,
+    b: u32,
+    value: f32,
 };
 
 pub const Status = enum(c_int) {
@@ -1285,6 +1303,11 @@ pub const Session = struct {
     /// The binary record the json projection reads, grown once and reused so a
     /// poll every frame allocates nothing after the first.
     perception_scratch: []u8 = &.{},
+    /// The event ring and its slots. Bounded at session create and never grown:
+    /// growing under a consumer that stopped draining is the leak the bound
+    /// exists to prevent.
+    event_slots: []perception_events.Event = &.{},
+    events: perception_events.Ring = .{ .slots = &.{} },
     script_inited: bool = false,
     /// Script handlers that threw, counted so a faulting script is visible.
     script_faults: u32 = 0,
@@ -5257,6 +5280,12 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
         .camera_node = undefined,
     };
     errdefer session.lens_graph.deinit();
+    // The event ring's slots, allocated once at create so publishing on the frame
+    // path never allocates. A fixed default rather than a configurable one for
+    // now: the number is here in one place when a host needs to change it.
+    session.event_slots = try engine.gpa.alloc(perception_events.Event, default_event_capacity);
+    errdefer engine.gpa.free(session.event_slots);
+    session.events = perception_events.Ring.init(session.event_slots);
     session.camera_node = session.lens_graph.addNode(.{
         .role = .source,
         .outputs = &.{.{ .kind = .texture }},
@@ -5285,6 +5314,7 @@ pub fn destroySession(session: *Session) void {
     }
     session.clips.deinit(session.engine.gpa);
     if (session.perception_scratch.len != 0) session.engine.gpa.free(session.perception_scratch);
+    if (session.event_slots.len != 0) session.engine.gpa.free(session.event_slots);
     destroySounds(session);
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
@@ -6479,6 +6509,7 @@ pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, 
     e.recording_clips = 1;
     e.recording_interruptions = 0;
     e.recording_capture_last_us = 0;
+    emit(s, .recording_started, width, height, 0);
     return .ok;
 }
 
@@ -6499,6 +6530,7 @@ pub export fn goss_engine_recording_pause(engine: ?*Engine) Status {
     };
     e.recording_clips += 1;
     e.recording_interruptions += 1;
+    if (e.recording_session) |rs| emit(rs, .recording_paused, e.recording_clips, 0, 0);
     return .ok;
 }
 
@@ -6507,6 +6539,7 @@ pub export fn goss_engine_recording_resume(engine: ?*Engine) Status {
     const e = engine orelse return .invalid_argument;
     if (e.recording == null) return .invalid_argument;
     e.recording_clock.resume_(e.recording_capture_last_us) catch return .invalid_argument;
+    if (e.recording_session) |rs| emit(rs, .recording_resumed, e.recording_clips, 0, 0);
     return .ok;
 }
 
@@ -6528,6 +6561,7 @@ pub export fn goss_session_report_interruption(session: ?*Session, kind: c_int) 
     e.recording_clock.note(which, e.recording_capture_last_us);
     e.recording_interruptions += 1;
     if (which == .pause) e.recording_clips += 1;
+    emit(s, .interruption, @intFromEnum(which), e.recording_interruptions, 0);
     return .ok;
 }
 
@@ -6553,6 +6587,7 @@ pub export fn goss_engine_recording_read_report(engine: ?*Engine, out_report: ?*
 pub export fn goss_engine_recording_stop(engine: ?*Engine) Status {
     const e = engine orelse return .invalid_argument;
     if (e.recording == null) return .invalid_argument;
+    if (e.recording_session) |rs| emit(rs, .recording_stopped, e.recording_clips, 0, 0);
     return if (finishRecording(e)) .ok else .invalid_argument;
 }
 
@@ -6581,7 +6616,11 @@ pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f
     const data = samples orelse return .invalid_argument;
     if (frame_count == 0 or sample_rate == 0 or channels == 0 or channels > 8) return .invalid_argument;
     const slice = data[0 .. @as(usize, frame_count) * channels];
+    const beat_before = s.audio.beat;
     s.audio.feed(slice, channels);
+    // The onset pulse, published rather than left for a poller to catch between
+    // frames: a beat lasts one hop and a poll at frame rate misses most of them.
+    if (s.audio.beat and !beat_before) emit(s, .audio_beat, 0, 0, s.audio.level);
     s.audio_engine_fed = true;
     s.audio_timestamp_us = timestamp_us;
 
@@ -8368,6 +8407,21 @@ pub export fn goss_session_perception_snapshot(session: ?*Session, select: u32, 
 /// The same record as JSON, for the agent gateways that speak it. Projected from
 /// the binary form rather than written a second time from the session: one
 /// producer of the facts and one projection of it, so the two cannot drift.
+/// Drains the session's event ring in order. The drop count says whether anything
+/// was missed since the last drain, and is cleared by the read, so a consumer sees
+/// each drop once rather than the same number for ever.
+pub export fn goss_session_poll_events(session: ?*Session, out: ?[*]Event, capacity: u32, out_count: ?*u32, out_dropped: ?*u64) Status {
+    const s = session orelse return .invalid_argument;
+    const count_out = out_count orelse return .invalid_argument;
+    const dropped_out = out_dropped orelse return .invalid_argument;
+    const buffer: []perception_events.Event = if (out) |p| @as([*]perception_events.Event, @ptrCast(p))[0..capacity] else &.{};
+    var dropped: u64 = 0;
+    const n = s.events.drain(buffer, &dropped);
+    count_out.* = @intCast(n);
+    dropped_out.* = dropped;
+    return .ok;
+}
+
 pub export fn goss_session_perception_json(session: ?*Session, select: u32, out: ?[*]u8, capacity: usize, out_len: ?*usize) Status {
     const s = session orelse return .invalid_argument;
     const len_out = out_len orelse return .invalid_argument;
@@ -8505,6 +8559,7 @@ fn takeScratch(s: *Session, slot: *?render.Renderer.OffscreenTarget, width: u16,
     if (slot.* != null) return {};
     slot.* = acquireScratchTarget(s.engine, width, height) orelse {
         s.resource_pressure = true;
+        emit(s, .pool_exhausted, width, height, 0);
         return null;
     };
     return {};
@@ -8639,6 +8694,7 @@ fn noteNode(s: *Session, graph_index: graph.NodeIndex, state: NodeState, reason:
         }
         return;
     }
+    emit(s, if (state == .failed) .lens_node_failed else .lens_node_degraded, index, @intFromEnum(reason), 0);
     s.node_reports.append(s.engine.gpa, .{
         .node_index = index,
         .state = @intFromEnum(state),
@@ -8659,6 +8715,14 @@ fn activationStatus(s: *Session) Status {
         if (report.state == @intFromEnum(NodeState.failed)) return .lens_node_failed;
     }
     return .ok;
+}
+
+/// Publishes one event onto the session's ring. A ring nobody publishes to is the
+/// same vacuous mechanism as a counter nobody reads, so every state change the
+/// event kinds name goes through here.
+fn emit(s: *Session, kind: perception_events.Kind, a: u32, b: u32, value: f32) void {
+    const at = if (s.current) |cur| cur.desc.timestamp_us else 0;
+    s.events.publish(kind, at, a, b, value);
 }
 
 /// A resource a node cannot draw without. A node the lens marked optional
@@ -8719,8 +8783,9 @@ pub export fn goss_session_report_frame(session: ?*Session, frame_time_us: u32, 
         .frame_time_us = frame_time_us,
         .thermal = thermalFromC(thermal),
         .resource_pressure = pressure,
-    }) != null) {
+    })) |moved| {
         s.degrade_transitions +|= 1;
+        emit(s, .degrade_level_changed, @intFromEnum(moved.from), @intFromEnum(moved.to), 0);
     }
     return @intFromEnum(s.controller.level);
 }
@@ -9091,6 +9156,12 @@ pub export fn goss_session_submit_faces(session: ?*Session, faces: ?[*]const fac
         if (f.landmark_count_out == 0 or f.presence < 0.5) continue;
         s.face_results[kept] = f;
         kept += 1;
+    }
+    // A face arriving or leaving is what an agent watches for, so the count
+    // changing is an event rather than something a poller has to notice.
+    if (kept != s.face_count) {
+        emit(s, .face_count_changed, s.face_count, kept, 0);
+        if (kept > s.face_count) emit(s, .face_appeared, kept, 0, 0) else emit(s, .face_lost, kept, 0, 0);
     }
     s.face_count = kept;
     return .ok;
@@ -11977,6 +12048,7 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // shaders, textures and models all failed to load looked activated. It is
     // recorded against the lens now, and read back through the node reports.
     createLensResources(s, gpa, "") catch |err| noteLensResourceFailure(s, err);
+    emit(s, .lens_activated, @intCast(s.chain_order.len), 0, 0);
     return activationStatus(s);
 }
 
@@ -16096,6 +16168,7 @@ pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bund
         error.Unsupported => .unsupported,
         else => .invalid_argument,
     };
+    emit(s, .lens_activated, @intCast(s.chain_order.len), 0, 0);
     return activationStatus(s);
 }
 

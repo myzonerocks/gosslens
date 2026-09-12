@@ -181,3 +181,43 @@ extension GossEngine {
         return GossMediaCapabilities(raw)
     }
 }
+
+/// One thing that happened. What `a` and `b` mean is per kind.
+public struct GossEvent: Sendable {
+    public var kind: GossEventKind
+    public var sequence: UInt64
+    public var timestampUs: Int64
+    public var a: UInt32
+    public var b: UInt32
+    public var value: Float
+
+    init(_ raw: goss_event) {
+        kind = GossEventKind(rawValue: raw.kind) ?? .unknown
+        sequence = raw.sequence
+        timestampUs = raw.timestamp_us
+        a = raw.a
+        b = raw.b
+        value = raw.value
+    }
+}
+
+/// The event kinds, mirroring goss_event_kind. An unknown number from a newer
+/// engine reads as `.unknown` rather than failing the drain.
+public enum GossEventKind: UInt32, Sendable {
+    case unknown = 0
+    case faceAppeared = 1, faceLost = 2, faceCountChanged = 3
+    case handAppeared = 4, handLost = 5, gestureRecognised = 6
+    case bodyAppeared = 7, bodyLost = 8, actionRecognised = 9
+    case trackingStateChanged = 10
+    case planeAdded = 11, planeUpdated = 12, anchorAdded = 13, anchorLost = 14
+    case worldMeshUpdated = 15
+    case detectionAppeared = 16, detectionLost = 17, labelChanged = 18
+    case textAppeared = 19, textChanged = 20
+    case segmentationClassAppeared = 21
+    case audioBeat = 22, voiceActivityStarted = 23, voiceActivityEnded = 24
+    case lensActivated = 25, lensNodeDegraded = 26, lensNodeFailed = 27
+    case parameterChanged = 28, triggerFired = 29
+    case degradeLevelChanged = 30, poolExhausted = 31
+    case recordingStarted = 32, recordingPaused = 33, recordingResumed = 34, recordingStopped = 35
+    case interruption = 36, frameDropped = 37, budgetExceeded = 38, thermalChanged = 39
+}
